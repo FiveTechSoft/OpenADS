@@ -2611,6 +2611,12 @@ static const std::string& trigger_sql_body(const openads::engine::DataDict::Trig
 //   __old.fieldname         — value of the old record's field (UPDATE/DELETE)
 // All other statements are executed via AdsExecuteSQLDirect after substitution.
 
+// These trigger helpers return std::string / std::vector / UDTs. They live
+// inside the file-level `extern "C"` block but are never ABI exports, so give
+// them C++ linkage — otherwise MSVC raises C4190 (C-linkage function returning
+// a UDT), which is fatal under /WX on x86. (Issue: MSVC x86 build error.)
+extern "C++" {
+
 // Type alias to avoid MSVC C2562 when returning std::map<> from a function
 // inside an extern "C" / anonymous-namespace block.
 using TrigFieldMap_ = std::map<std::string, std::string>;
@@ -2984,6 +2990,8 @@ static TrigError_ trig_execute_body_(
     }
     return TrigError_{};
 }
+
+}  // extern "C++" — trigger helpers
 
 // fire_triggers_ — fire all enabled, matching triggers for a given event + timing.
 // timing: 1=BEFORE  2=INSTEAD_OF  4=AFTER
@@ -5528,7 +5536,10 @@ UNSIGNED32 AdsDDGetTriggerProperty(ADSHANDLE hConn, UNSIGNED8* pucName,
     auto put_u32 = [&](std::uint32_t v) -> UNSIGNED32 {
         if (pBuf != nullptr && cap >= 4) {
             auto* b = static_cast<std::uint8_t*>(pBuf);
-            b[0]=v&0xFF; b[1]=(v>>8)&0xFF; b[2]=(v>>16)&0xFF; b[3]=(v>>24)&0xFF;
+            b[0]=static_cast<std::uint8_t>(v&0xFF);
+            b[1]=static_cast<std::uint8_t>((v>>8)&0xFF);
+            b[2]=static_cast<std::uint8_t>((v>>16)&0xFF);
+            b[3]=static_cast<std::uint8_t>((v>>24)&0xFF);
         }
         *pusLen = 4; return ok();
     };
@@ -6038,7 +6049,10 @@ UNSIGNED32 AdsDDGetRefIntegrityProperty(ADSHANDLE hConn, UNSIGNED8* pucName,
     auto put_u32 = [&](std::uint32_t v) -> UNSIGNED32 {
         if (pBuf != nullptr && cap >= 4) {
             auto* b = static_cast<std::uint8_t*>(pBuf);
-            b[0]=v&0xFF; b[1]=(v>>8)&0xFF; b[2]=(v>>16)&0xFF; b[3]=(v>>24)&0xFF;
+            b[0]=static_cast<std::uint8_t>(v&0xFF);
+            b[1]=static_cast<std::uint8_t>((v>>8)&0xFF);
+            b[2]=static_cast<std::uint8_t>((v>>16)&0xFF);
+            b[3]=static_cast<std::uint8_t>((v>>24)&0xFF);
         }
         *pusLen = 4; return ok();
     };
