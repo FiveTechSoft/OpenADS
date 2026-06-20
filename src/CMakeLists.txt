@@ -58,6 +58,15 @@ add_library(openads_core STATIC
     network/mg_wire.cpp
 )
 
+if(OPENADS_WITH_MARIADB)
+    target_sources(openads_core PRIVATE
+        sql_backend/sql_common.cpp
+        sql_backend/maria_uri.cpp
+        sql_backend/maria_backend.cpp
+        sql_backend/maria_connection.cpp
+    )
+endif()
+
 if(WIN32)
     target_sources(openads_core PRIVATE
         platform/file_win32.cpp
@@ -96,6 +105,11 @@ if(OPENADS_WITH_TLS)
     target_compile_definitions(openads_core PUBLIC OPENADS_WITH_TLS=1)
     target_link_libraries(openads_core PRIVATE
         MbedTLS::mbedtls MbedTLS::mbedx509 MbedTLS::mbedcrypto)
+endif()
+
+if(OPENADS_WITH_MARIADB)
+    target_compile_definitions(openads_core PUBLIC OPENADS_WITH_MARIADB=1)
+    target_link_libraries(openads_core PUBLIC openads_libmariadb)
 endif()
 
 # ----------------------------------------------------------------------

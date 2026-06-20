@@ -142,6 +142,13 @@ add_executable(openads_unit_tests
     unit/abi_sql_dd_sql_test.cpp
 )
 
+if(OPENADS_WITH_MARIADB)
+    target_sources(openads_unit_tests PRIVATE
+        unit/abi_plus_mariadb_read_test.cpp
+        unit/abi_plus_mariadb_seek_test.cpp
+    )
+endif()
+
 # M11.4 — side DLL with stored procedures used by abi_aep_test.
 add_library(openads_test_aep_proc SHARED
     fixtures/test_aep_proc.cpp

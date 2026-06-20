@@ -20,7 +20,11 @@ enum class HandleKind {
     // M12.16 — remote (TCP) index handle. Wraps a server-side
     // index id; ABI calls (AdsSeek, AdsCloseIndex, …) route the
     // hIndex through the wire instead of a local IIndex.
-    RemoteIndex      = 8
+    RemoteIndex      = 8,
+    // Optional SQL backend (mariadb:// …).
+    MariaConnection = 9,
+    MariaTable      = 10,
+    MariaIndex      = 11
 };
 
 using Handle = std::uint64_t;

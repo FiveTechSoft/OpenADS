@@ -68,6 +68,9 @@ option(OPENADS_WITH_TLS "Enable TLS transport (vendors mbedtls 3.6 LTS via Fetch
 # and nlohmann/json (MIT) at configure time via FetchContent.
 option(OPENADS_WITH_HTTP "Enable embedded HTTP web console (Studio) in openads_serverd / ace64.dll" ON)
 
+# Optional MariaDB table driver (mariadb-connector-c). OFF by default.
+option(OPENADS_WITH_MARIADB "Enable MariaDB-backed table driver (libmariadb)" OFF)
+
 # Pull in mbedtls FIRST so our strict /WX -Werror flags don't bleed
 # into the upstream sources (C4200 zero-sized arrays etc). Each
 # OpenADS target adds the strict flags target-locally below via
@@ -124,6 +127,59 @@ if(OPENADS_WITH_HTTP)
     set(JSON_BuildTests OFF CACHE INTERNAL "")
     FetchContent_MakeAvailable(cpp_httplib nlohmann_json)
     message(STATUS "OpenADS: HTTP web console enabled (cpp-httplib + nlohmann/json)")
+endif()
+
+if(OPENADS_WITH_MARIADB)
+    set(_openads_maria_linked FALSE)
+    set(OPENADS_LIBMARIADB_INCLUDE "" CACHE PATH "Directory containing mysql.h")
+    set(OPENADS_LIBMARIADB_LIBRARY "" CACHE FILEPATH "libmariadb import library (.lib/.a)")
+    if(OPENADS_LIBMARIADB_INCLUDE AND OPENADS_LIBMARIADB_LIBRARY)
+        set(_openads_maria_inc "${OPENADS_LIBMARIADB_INCLUDE}")
+        set(_openads_maria_lib "${OPENADS_LIBMARIADB_LIBRARY}")
+    endif()
+    if(NOT _openads_maria_lib)
+        if(DEFINED ENV{OPENADS_LIBMARIADB_LIBRARY})
+            set(_openads_maria_lib "$ENV{OPENADS_LIBMARIADB_LIBRARY}")
+        endif()
+        if(DEFINED ENV{OPENADS_LIBMARIADB_INCLUDE})
+            set(_openads_maria_inc "$ENV{OPENADS_LIBMARIADB_INCLUDE}")
+        endif()
+    endif()
+    if(NOT _openads_maria_lib OR NOT _openads_maria_inc)
+        if(DEFINED ENV{OPENADS_TOOLCHAIN_ROOT})
+            set(_openads_toolchain_root "$ENV{OPENADS_TOOLCHAIN_ROOT}")
+        elseif(DEFINED OPENADS_TOOLCHAIN_ROOT)
+            set(_openads_toolchain_root "${OPENADS_TOOLCHAIN_ROOT}")
+        endif()
+        if(_openads_toolchain_root)
+            if(NOT _openads_maria_inc)
+                find_path(_openads_maria_inc mysql.h
+                    PATHS "${_openads_toolchain_root}/mariadb/include"
+                    NO_DEFAULT_PATH)
+            endif()
+            if(NOT _openads_maria_lib)
+                if(CMAKE_SIZEOF_VOID_P EQUAL 4)
+                    find_library(_openads_maria_lib NAMES libmariadb
+                        PATHS "${_openads_toolchain_root}/mariadb/lib"
+                        NO_DEFAULT_PATH)
+                else()
+                    find_library(_openads_maria_lib NAMES libmariadb64 libmariadb
+                        PATHS "${_openads_toolchain_root}/mariadb/lib"
+                        NO_DEFAULT_PATH)
+                endif()
+            endif()
+        endif()
+    endif()
+    if(_openads_maria_inc AND _openads_maria_lib)
+        add_library(openads_libmariadb INTERFACE)
+        target_include_directories(openads_libmariadb INTERFACE "${_openads_maria_inc}")
+        target_link_libraries(openads_libmariadb INTERFACE "${_openads_maria_lib}")
+        set(_openads_maria_linked TRUE)
+        message(STATUS "OpenADS: MariaDB backend (libmariadb: ${_openads_maria_lib})")
+    endif()
+    if(NOT _openads_maria_linked)
+        message(FATAL_ERROR "OPENADS_WITH_MARIADB=ON but libmariadb was not found")
+    endif()
 endif()
 
 if(MSVC)
