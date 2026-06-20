@@ -2,10 +2,15 @@
 
 #include <algorithm>
 #include <cstring>
+#include <mutex>
+#include <unordered_map>
 
 namespace openads::drivers::cdx {
 
 namespace {
+
+std::mutex g_cdx_alloc_mu;
+std::unordered_map<std::string, std::uint64_t> g_cdx_alloc_tail;
 
 std::uint16_t read_u16_le(const std::uint8_t* p) {
     return static_cast<std::uint16_t>(p[0]) |
@@ -405,7 +410,8 @@ util::Result<void>
 CdxIndex::open_named(const std::string& path,
                      IndexOpenMode      mode,
                      const std::string& tag_name) {
-    mode_ = mode;
+    mode_  = mode;
+    path_  = path;
     auto fres = platform::File::open(path, map_mode(mode));
     if (!fres) return fres.error();
     file_ = std::move(fres).value();
@@ -855,9 +861,7 @@ CdxIndex::insert_into_subtree_(std::uint32_t      subtree_root,
                 "CDX leaf split: cannot fit both halves", ""};
         }
 
-        std::uint32_t new_off = static_cast<std::uint32_t>(file_size_);
-        page_cache_.emplace(new_off, Page{});
-        file_size_ += CDX_PAGE_LEN;
+        std::uint32_t new_off = allocate_page_();
 
         if (auto e = encode_leaf_(subtree_root, left_keys,
                                    left_sib, new_off); !e)
@@ -968,9 +972,7 @@ CdxIndex::insert_into_subtree_(std::uint32_t      subtree_root,
     std::vector<BranchEntry> right_be(entries.begin() + static_cast<diff_t>(mid),
                                       entries.end());
 
-    std::uint32_t new_off = static_cast<std::uint32_t>(file_size_);
-    page_cache_.emplace(new_off, Page{});
-    file_size_ += CDX_PAGE_LEN;
+    std::uint32_t new_off = allocate_page_();
 
     auto lpg = get_page_(subtree_root);
     if (!lpg) return lpg.error();
@@ -1013,16 +1015,12 @@ CdxIndex::insert(std::uint32_t recno, const std::string& key) {
     if (padded.size() > key_size_) padded.resize(key_size_);
 
     if (root_page_ == 0) {
-        std::uint32_t base = static_cast<std::uint32_t>(
-            std::max<std::uint64_t>(file_size_, CDX_SUB_DATA_BASE));
-        std::uint32_t off = base;
-        page_cache_.emplace(off, Page{});
+        std::uint32_t off = allocate_page_();
         std::vector<std::pair<std::string, std::uint32_t>> keys{{padded, recno}};
         if (auto e = encode_leaf_(off, keys, 0xFFFFFFFFu, 0xFFFFFFFFu); !e) {
             return e.error();
         }
         root_page_ = off;
-        file_size_ = off + CDX_PAGE_LEN;
         return rewrite_header_();
     }
 
@@ -1033,9 +1031,7 @@ CdxIndex::insert(std::uint32_t recno, const std::string& key) {
     if (!promote.have) return {};
 
     // Root split → allocate new branch root with two children.
-    std::uint32_t new_root = static_cast<std::uint32_t>(file_size_);
-    page_cache_.emplace(new_root, Page{});
-    file_size_ += CDX_PAGE_LEN;
+    std::uint32_t new_root = allocate_page_();
 
     std::vector<BranchEntry> entries = {
         { promote.left_max_key,  promote.left_max_recno,  promote.old_left_off },
@@ -1058,13 +1054,52 @@ CdxIndex::erase(std::uint32_t recno, const std::string& key) {
     }
     if (root_page_ == 0) return util::Error{5044, 0, "CDX empty", ""};
 
-    auto dec = decode_leaf_(root_page_);
-    if (!dec) return dec.error();
-    auto keys = std::move(dec).value();
-
     std::string padded = key;
     if (padded.size() < key_size_) padded.append(key_size_ - padded.size(), ' ');
     if (padded.size() > key_size_) padded.resize(key_size_);
+
+    // Locate (key, recno) via the same leaf-chain walk seek_key uses.
+    // The old root-only decode path silently failed once insert_into_
+    // subtree_ promoted a branch root, leaving stale keys behind.
+    auto sk = seek_key(padded, /*soft=*/false);
+    if (!sk) return sk.error();
+
+    bool found = false;
+    if (sk.value().positioned && sk.value().hit == SeekHit::Exact) {
+        std::uint32_t guard = 0;
+        while (guard++ < 4096) {
+            if (cur_index_ >= 0 &&
+                static_cast<std::size_t>(cur_index_) < cur_decoded_.size()) {
+                const auto& e =
+                    cur_decoded_[static_cast<std::size_t>(cur_index_)];
+                if (e.first == padded && (recno == 0 || e.second == recno)) {
+                    found = true;
+                    break;
+                }
+                if (e.first != padded) break;
+            }
+            auto nx = next();
+            if (!nx || !nx.value().positioned) break;
+            if (nx.value().hit != SeekHit::Exact) break;
+            std::string ck = current_key();
+            if (ck.size() < padded.size())
+                ck.append(padded.size() - ck.size(), ' ');
+            if (ck.size() > padded.size()) ck.resize(padded.size());
+            if (ck != padded) break;
+        }
+    }
+    if (!found) {
+        return util::Error{5044, 0, "CDX key not found", ""};
+    }
+
+    auto pg = get_page_(cur_leaf_);
+    if (!pg) return pg.error();
+    std::uint32_t left_sib  = read_u32_le(pg.value()->data() + 4);
+    std::uint32_t right_sib = read_u32_le(pg.value()->data() + 8);
+
+    auto dec = decode_leaf_(cur_leaf_);
+    if (!dec) return dec.error();
+    auto keys = std::move(dec).value();
 
     auto it = std::find_if(keys.begin(), keys.end(),
         [&](const auto& kv) {
@@ -1074,7 +1109,8 @@ CdxIndex::erase(std::uint32_t recno, const std::string& key) {
         return util::Error{5044, 0, "CDX key not found", ""};
     }
     keys.erase(it);
-    return encode_leaf_(root_page_, keys, 0xFFFFFFFFu, 0xFFFFFFFFu);
+    invalidate_cursor();
+    return encode_leaf_(cur_leaf_, keys, left_sib, right_sib);
 }
 
 util::Result<void> CdxIndex::flush() {
@@ -1128,6 +1164,21 @@ util::Result<void> CdxIndex::clear_data() {
     cur_state_ = CurState::Initial;
     cur_decoded_.clear();
     return rewrite_header_();
+}
+
+std::uint32_t CdxIndex::allocate_page_() {
+    std::lock_guard<std::mutex> lk(g_cdx_alloc_mu);
+    auto& tail = g_cdx_alloc_tail[path_];
+    if (auto sz = file_.size()) {
+        tail = std::max(tail, sz.value());
+    }
+    tail = std::max(tail, file_size_);
+    tail = std::max(tail, static_cast<std::uint64_t>(CDX_SUB_DATA_BASE));
+    const std::uint32_t off = static_cast<std::uint32_t>(tail);
+    tail += CDX_PAGE_LEN;
+    file_size_ = tail;
+    page_cache_.emplace(off, Page{});
+    return off;
 }
 
 util::Result<void> CdxIndex::rewrite_header_() {
@@ -1211,6 +1262,7 @@ CdxIndex::create(const std::string& path,
     if (auto s = file.sync(); !s) return s.error();
 
     CdxIndex ix;
+    ix.path_              = path;
     ix.file_              = std::move(file);
     ix.mode_              = IndexOpenMode::Shared;
     ix.root_page_         = 0;
@@ -1225,6 +1277,11 @@ CdxIndex::create(const std::string& path,
     ix.tag_name_          = tag_name;
     ix.sub_header_offset_ = CDX_SUB_HEADER_OFFSET;
     ix.file_size_         = CDX_SUB_DATA_BASE;
+    {
+        std::lock_guard<std::mutex> lk(g_cdx_alloc_mu);
+        g_cdx_alloc_tail[path] = std::max(g_cdx_alloc_tail[path],
+            static_cast<std::uint64_t>(CDX_SUB_DATA_BASE));
+    }
     return ix;
 }
 
@@ -1340,6 +1397,7 @@ CdxIndex::add_tag(const std::string& path,
     if (auto s = file.sync(); !s) return s.error();
 
     CdxIndex ix;
+    ix.path_              = path;
     ix.file_              = std::move(file);
     ix.mode_              = IndexOpenMode::Shared;
     ix.root_page_         = 0;
@@ -1354,6 +1412,11 @@ CdxIndex::add_tag(const std::string& path,
     ix.tag_name_          = tag_name;
     ix.sub_header_offset_ = static_cast<std::uint32_t>(new_off);
     ix.file_size_         = new_off + CDX_HEADER_LEN;
+    {
+        std::lock_guard<std::mutex> lk(g_cdx_alloc_mu);
+        g_cdx_alloc_tail[path] = std::max(g_cdx_alloc_tail[path],
+            new_off + CDX_HEADER_LEN);
+    }
     return ix;
 }
 

@@ -1933,9 +1933,16 @@ UNSIGNED32 AdsCloseAllTables(void) {
     for (Handle h : to_release) {
         Table* t = s.registry.lookup<Table>(h, HandleKind::Table);
         if (t) {
+            Connection* owning = nullptr;
+            s.registry.for_each_handle([&](Handle, HandleKind k, void* p) {
+                if (k != HandleKind::Connection || owning) return;
+                auto* cc = static_cast<Connection*>(p);
+                if (cc->owns_table_ptr(t)) owning = cc;
+            });
             (void)t->flush();
             purge_bindings_for_table(t);
             purge_pending_binaries_for_table(t);
+            if (owning) owning->close_table_ptr(t);
         }
         s.registry.release(h);
     }
@@ -1967,10 +1974,17 @@ UNSIGNED32 AdsCloseTable(ADSHANDLE hTable) {
     // inherit stale entries.
     Table* t = s.registry.lookup<Table>(hTable, HandleKind::Table);
     if (t != nullptr) {
+        Connection* owning = nullptr;
+        s.registry.for_each_handle([&](Handle, HandleKind k, void* p) {
+            if (k != HandleKind::Connection || owning) return;
+            auto* cc = static_cast<Connection*>(p);
+            if (cc->owns_table_ptr(t)) owning = cc;
+        });
         (void)t->flush();
         purge_bindings_for_table(t);
         purge_pending_binaries_for_table(t);
         t->ri_snapshot().clear();
+        if (owning) owning->close_table_ptr(t);
     }
     cursor_projections().erase(hTable);
     s.registry.release(hTable);
