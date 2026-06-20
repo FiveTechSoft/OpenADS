@@ -301,7 +301,7 @@ ADSHANDLE get_or_create_default_connection() {
 // ROLLBACK call AdsBeginTransaction(0). Resolve 0 to the last AdsConnect
 // handle before falling back to cwd auto-connect.
 ADSHANDLE& rddads_default_connection() noexcept {
-    static ADSHANDLE h = 0;
+    thread_local ADSHANDLE h = 0;
     return h;
 }
 

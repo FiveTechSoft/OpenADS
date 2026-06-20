@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <filesystem>
 #include <mutex>
 #include <unordered_map>
 
@@ -11,6 +12,16 @@ namespace {
 
 std::mutex g_cdx_alloc_mu;
 std::unordered_map<std::string, std::uint64_t> g_cdx_alloc_tail;
+
+constexpr std::uint32_t kCdxEraseDupGuard = 1048576;
+
+std::string canonicalize_path(const std::string& path) {
+    try {
+        return std::filesystem::absolute(path).lexically_normal().string();
+    } catch (...) {
+        return path;
+    }
+}
 
 std::uint16_t read_u16_le(const std::uint8_t* p) {
     return static_cast<std::uint16_t>(p[0]) |
@@ -411,7 +422,7 @@ CdxIndex::open_named(const std::string& path,
                      IndexOpenMode      mode,
                      const std::string& tag_name) {
     mode_  = mode;
-    path_  = path;
+    path_  = canonicalize_path(path);
     auto fres = platform::File::open(path, map_mode(mode));
     if (!fres) return fres.error();
     file_ = std::move(fres).value();
@@ -1067,7 +1078,7 @@ CdxIndex::erase(std::uint32_t recno, const std::string& key) {
     bool found = false;
     if (sk.value().positioned && sk.value().hit == SeekHit::Exact) {
         std::uint32_t guard = 0;
-        while (guard++ < 4096) {
+        while (guard++ < kCdxEraseDupGuard) {
             if (cur_index_ >= 0 &&
                 static_cast<std::size_t>(cur_index_) < cur_decoded_.size()) {
                 const auto& e =
@@ -1262,7 +1273,7 @@ CdxIndex::create(const std::string& path,
     if (auto s = file.sync(); !s) return s.error();
 
     CdxIndex ix;
-    ix.path_              = path;
+    ix.path_              = canonicalize_path(path);
     ix.file_              = std::move(file);
     ix.mode_              = IndexOpenMode::Shared;
     ix.root_page_         = 0;
@@ -1279,7 +1290,7 @@ CdxIndex::create(const std::string& path,
     ix.file_size_         = CDX_SUB_DATA_BASE;
     {
         std::lock_guard<std::mutex> lk(g_cdx_alloc_mu);
-        g_cdx_alloc_tail[path] = std::max(g_cdx_alloc_tail[path],
+        g_cdx_alloc_tail[ix.path_] = std::max(g_cdx_alloc_tail[ix.path_],
             static_cast<std::uint64_t>(CDX_SUB_DATA_BASE));
     }
     return ix;
@@ -1397,7 +1408,7 @@ CdxIndex::add_tag(const std::string& path,
     if (auto s = file.sync(); !s) return s.error();
 
     CdxIndex ix;
-    ix.path_              = path;
+    ix.path_              = canonicalize_path(path);
     ix.file_              = std::move(file);
     ix.mode_              = IndexOpenMode::Shared;
     ix.root_page_         = 0;
@@ -1414,7 +1425,7 @@ CdxIndex::add_tag(const std::string& path,
     ix.file_size_         = new_off + CDX_HEADER_LEN;
     {
         std::lock_guard<std::mutex> lk(g_cdx_alloc_mu);
-        g_cdx_alloc_tail[path] = std::max(g_cdx_alloc_tail[path],
+        g_cdx_alloc_tail[ix.path_] = std::max(g_cdx_alloc_tail[ix.path_],
             new_off + CDX_HEADER_LEN);
     }
     return ix;
