@@ -327,6 +327,9 @@ std::size_t maria_field_index(openads::sql_backend::MariaTable* st,
             return std::numeric_limits<std::size_t>::max();
         }
     }
+    if (pucField == nullptr) {
+        return std::numeric_limits<std::size_t>::max();
+    }
     std::string want = openads::abi::to_internal(pucField, 0);
     for (auto& c : want) {
         c = static_cast<char>(
