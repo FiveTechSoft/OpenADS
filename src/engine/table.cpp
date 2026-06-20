@@ -732,20 +732,57 @@ Table::field_memo_type(std::uint16_t idx) {
     return memo_->read_type(block_no);
 }
 
+util::Result<void> Table::apply_tx_rollback(std::uint32_t recno,
+                                            const std::uint8_t* bytes,
+                                            std::size_t         len) {
+    if (driver_ == nullptr) {
+        return util::Error{5000, 0, "no driver", ""};
+    }
+    if (auto r = load_record_(recno); !r) return r.error();
+    auto snap = snapshot_index_keys_();
+    const std::size_t rl = driver_->record_length();
+    if (len != rl) {
+        return util::Error{5000, 0, "rollback record length mismatch", ""};
+    }
+    std::memcpy(record_buf_.data(), bytes, len);
+    if (auto w = driver_->write_record_raw(recno, record_buf_.data(), rl); !w) {
+        return w.error();
+    }
+    return sync_all_indexes_(snap);
+}
+
+util::Result<void> Table::apply_tx_rollback_append(std::uint32_t recno) {
+    if (driver_ == nullptr) {
+        return util::Error{5000, 0, "no driver", ""};
+    }
+    if (auto r = load_record_(recno); !r) return r.error();
+    auto snap = snapshot_index_keys_();
+    drivers::set_record_deleted(record_buf_.data(), record_buf_.size(), true);
+    if (auto w = driver_->write_record_raw(recno, record_buf_.data(),
+                                           record_buf_.size()); !w) {
+        return w.error();
+    }
+    return sync_all_indexes_(snap);
+}
+
 util::Result<void> Table::mark_deleted() {
     if (state_ != State::Positioned) {
         return util::Error{5026, 0, "no record positioned", ""};
     }
+    auto snap = snapshot_index_keys_();
     drivers::set_record_deleted(record_buf_.data(), record_buf_.size(), true);
-    return writeback_record_();
+    if (auto wb = writeback_record_(); !wb) return wb.error();
+    return sync_all_indexes_(snap);
 }
 
 util::Result<void> Table::recall_deleted() {
     if (state_ != State::Positioned) {
         return util::Error{5026, 0, "no record positioned", ""};
     }
+    auto snap = snapshot_index_keys_();
     drivers::set_record_deleted(record_buf_.data(), record_buf_.size(), false);
-    return writeback_record_();
+    if (auto wb = writeback_record_(); !wb) return wb.error();
+    return sync_all_indexes_(snap);
 }
 
 bool Table::is_deleted() const noexcept {
@@ -919,7 +956,7 @@ util::Result<void> Table::lock_record_excl(std::uint32_t recno) {
                                      locking_, recno);
     if (!h) return h.error();
     recno_locks_.emplace(recno, std::move(h).value());
-    return {};
+    return load_record_(recno);
 }
 
 util::Result<void> Table::try_lock_record_excl(std::uint32_t recno) {
@@ -928,7 +965,7 @@ util::Result<void> Table::try_lock_record_excl(std::uint32_t recno) {
                                          locking_, recno);
     if (!h) return h.error();
     recno_locks_.emplace(recno, std::move(h).value());
-    return {};
+    return load_record_(recno);
 }
 
 util::Result<void> Table::unlock_record(std::uint32_t recno) {

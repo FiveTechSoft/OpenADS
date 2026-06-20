@@ -297,6 +297,32 @@ ADSHANDLE get_or_create_default_connection() {
     return h;
 }
 
+// Harbour rddads: AdsConnect stores the handle globally; BEGIN/COMMIT/
+// ROLLBACK call AdsBeginTransaction(0). Resolve 0 to the last AdsConnect
+// handle before falling back to cwd auto-connect.
+ADSHANDLE& rddads_default_connection() noexcept {
+    static ADSHANDLE h = 0;
+    return h;
+}
+
+ADSHANDLE resolve_connection_handle(ADSHANDLE hConnect) {
+    if (hConnect != 0) return hConnect;
+    ADSHANDLE h = rddads_default_connection();
+    if (h != 0) {
+        auto& s = state();
+        if (s.registry.lookup<Connection>(h, HandleKind::Connection))
+            return h;
+        rddads_default_connection() = 0;
+    }
+    return get_or_create_default_connection();
+}
+
+Connection* lookup_connection(ADSHANDLE hConnect) {
+    auto& s = state();
+    return s.registry.lookup<Connection>(
+        resolve_connection_handle(hConnect), HandleKind::Connection);
+}
+
 Table* get_table(ADSHANDLE h) {
     auto& s = state();
     Table* t = s.registry.lookup<Table>(h, HandleKind::Table);
@@ -834,6 +860,7 @@ UNSIGNED32 AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 /*usServerType*/,
     Handle h = s.registry.register_object(HandleKind::Connection, raw);
     s.conns.emplace(h, std::move(holder));
     *phConnect = h;
+    rddads_default_connection() = h;
     // Return a non-fatal warning when the DD has SAP-written ACL permissions
     // that must be imported before OpenADS can enforce them.  The connection
     // handle IS valid; callers should disconnect, run openads_import_dd, and
@@ -893,6 +920,8 @@ UNSIGNED32 AdsDisconnect(ADSHANDLE hConnect) {
             s.registry.release(h);
         }
     }
+    if (hConnect == rddads_default_connection())
+        rddads_default_connection() = 0;
     s.registry.release(hConnect);
     s.conns.erase(hConnect);
     return ok();
@@ -7185,7 +7214,7 @@ UNSIGNED32 AdsDecryptRecord(ADSHANDLE /*hTable*/) {
 UNSIGNED32 AdsBeginTransaction(ADSHANDLE hConnect) {
     auto& s = state();
     std::lock_guard<std::recursive_mutex> lk(s.mu);
-    Connection* c = s.registry.lookup<Connection>(hConnect, HandleKind::Connection);
+    Connection* c = lookup_connection(hConnect);
     if (!c) return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
     auto r = c->begin_tx();
     if (!r) return fail(r.error());
@@ -7195,7 +7224,7 @@ UNSIGNED32 AdsBeginTransaction(ADSHANDLE hConnect) {
 UNSIGNED32 AdsCommitTransaction(ADSHANDLE hConnect) {
     auto& s = state();
     std::lock_guard<std::recursive_mutex> lk(s.mu);
-    Connection* c = s.registry.lookup<Connection>(hConnect, HandleKind::Connection);
+    Connection* c = lookup_connection(hConnect);
     if (!c) return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
     auto r = c->commit_tx();
     if (!r) return fail(r.error());
@@ -7205,7 +7234,7 @@ UNSIGNED32 AdsCommitTransaction(ADSHANDLE hConnect) {
 UNSIGNED32 AdsRollbackTransaction(ADSHANDLE hConnect) {
     auto& s = state();
     std::lock_guard<std::recursive_mutex> lk(s.mu);
-    Connection* c = s.registry.lookup<Connection>(hConnect, HandleKind::Connection);
+    Connection* c = lookup_connection(hConnect);
     if (!c) return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
     auto r = c->rollback_tx();
     if (!r) return fail(r.error());
@@ -7215,7 +7244,7 @@ UNSIGNED32 AdsRollbackTransaction(ADSHANDLE hConnect) {
 UNSIGNED32 AdsInTransaction(ADSHANDLE hConnect, UNSIGNED16* pbInTx) {
     auto& s = state();
     std::lock_guard<std::recursive_mutex> lk(s.mu);
-    Connection* c = s.registry.lookup<Connection>(hConnect, HandleKind::Connection);
+    Connection* c = lookup_connection(hConnect);
     if (!c || pbInTx == nullptr) {
         return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
     }
@@ -7308,7 +7337,7 @@ UNSIGNED32 AdsCreateSavepoint(ADSHANDLE hConnect, UNSIGNED8* pucName,
     (void)ulOptions;
     auto& s = state();
     std::lock_guard<std::recursive_mutex> lk(s.mu);
-    Connection* c = s.registry.lookup<Connection>(hConnect, HandleKind::Connection);
+    Connection* c = lookup_connection(hConnect);
     if (!c || pucName == nullptr) {
         return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
     }
@@ -7323,7 +7352,7 @@ UNSIGNED32 AdsCreateSavepoint(ADSHANDLE hConnect, UNSIGNED8* pucName,
 UNSIGNED32 AdsReleaseSavepoint(ADSHANDLE hConnect, UNSIGNED8* pucName) {
     auto& s = state();
     std::lock_guard<std::recursive_mutex> lk(s.mu);
-    Connection* c = s.registry.lookup<Connection>(hConnect, HandleKind::Connection);
+    Connection* c = lookup_connection(hConnect);
     if (!c || pucName == nullptr) {
         return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
     }
@@ -7340,7 +7369,7 @@ UNSIGNED32 AdsRollbackTransaction80(ADSHANDLE hConnect, UNSIGNED8* pucSavepoint,
     (void)ulOptions;
     auto& s = state();
     std::lock_guard<std::recursive_mutex> lk(s.mu);
-    Connection* c = s.registry.lookup<Connection>(hConnect, HandleKind::Connection);
+    Connection* c = lookup_connection(hConnect);
     if (!c) return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
     if (pucSavepoint == nullptr) {
         // Full rollback if no savepoint name supplied (matches ACE legacy).

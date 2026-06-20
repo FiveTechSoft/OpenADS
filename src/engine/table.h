@@ -124,6 +124,15 @@ public:
     util::Result<void> mark_deleted();
     util::Result<void> recall_deleted();
     bool               is_deleted() const noexcept;
+
+    // Transaction rollback helpers (M5). Restore a before-image or undo
+    // an append directly on disk and re-sync every bound index. Bypasses
+    // the active Tx journal — caller is rolling back the tx itself.
+    util::Result<void> apply_tx_rollback(std::uint32_t recno,
+                                       const std::uint8_t* bytes,
+                                       std::size_t         len);
+    util::Result<void> apply_tx_rollback_append(std::uint32_t recno);
+
     util::Result<void> flush();
 
     // Drop every record. Header rec count -> 0 and every bound index
