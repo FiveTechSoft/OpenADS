@@ -1,10 +1,8 @@
 @echo off
 REM MariaDB backend build with MSVC cl (no winlibs GCC runtime at run time).
 if not defined OPENADS_TOOLCHAIN_ROOT (
-    if defined DEVAI_ROOT set "OPENADS_TOOLCHAIN_ROOT=%DEVAI_ROOT%\_UtlAI"
-)
-if not defined OPENADS_TOOLCHAIN_ROOT (
-    echo ERROR: set OPENADS_TOOLCHAIN_ROOT or DEVAI_ROOT.
+    echo ERROR: set OPENADS_TOOLCHAIN_ROOT to the directory that holds the
+    echo        msvc, winlibs and mariadb client dependency folders.
     exit /b 1
 )
 if not defined OPENADS_LIBMARIADB_INCLUDE (

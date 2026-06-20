@@ -11,12 +11,8 @@ if not exist "%BUILD%\tests\openads_unit_tests.exe" (
 )
 
 if not defined OPENADS_TOOLCHAIN_ROOT (
-    if defined DEVAI_ROOT (
-        set "OPENADS_TOOLCHAIN_ROOT=%DEVAI_ROOT%\_UtlAI"
-    )
-)
-if not defined OPENADS_TOOLCHAIN_ROOT (
-    echo ERROR: set OPENADS_TOOLCHAIN_ROOT or DEVAI_ROOT for libmariadb PATH.
+    echo ERROR: set OPENADS_TOOLCHAIN_ROOT to the directory that holds the
+    echo        mariadb client and winlibs (for libmariadb PATH).
     exit /b 1
 )
 
