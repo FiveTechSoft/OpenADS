@@ -386,6 +386,11 @@ util::Result<void> Table::goto_record(std::uint32_t recno) {
     return {};
 }
 
+util::Result<void> Table::refresh_record_buffer() {
+    if (state_ != State::Positioned || recno_ == 0) return {};
+    return load_record_(recno_);
+}
+
 util::Result<void> Table::skip(std::int32_t delta) {
     if (!recno_sequence_.empty()) {
         if (delta == 0) return {};

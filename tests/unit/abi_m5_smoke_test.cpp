@@ -41,6 +41,70 @@ fs::path make_dbf(const fs::path& dir, const char* leaf) {
     return p;
 }
 
+std::string trim_field(const UNSIGNED8* buf, UNSIGNED32 cap) {
+    std::string s(reinterpret_cast<const char*>(buf), cap);
+    while (!s.empty() && s.back() == ' ') s.pop_back();
+    return s;
+}
+
+struct RelFixture {
+    fs::path dir;
+    ADSHANDLE hConn = 0;
+
+    explicit RelFixture(const char* leaf)
+        : dir(fs::temp_directory_path() / leaf) {}
+
+    void connect() {
+        std::error_code ec;
+        fs::remove_all(dir, ec);
+        fs::create_directories(dir);
+        std::vector<UNSIGNED8> srv(dir.string().size() + 1);
+        std::memcpy(srv.data(), dir.string().c_str(), dir.string().size() + 1);
+        REQUIRE(AdsConnect60(srv.data(), ADS_LOCAL_SERVER,
+                             nullptr, nullptr, 0, &hConn) == 0);
+    }
+
+    ADSHANDLE open_ord() {
+        ADSHANDLE h = 0;
+        UNSIGNED8 def[] =
+            "ORDNO,C,8,0;CUSTNO,C,8,0;AMT,N,10,0";
+        REQUIRE(AdsCreateTable(hConn, (UNSIGNED8*)"ord", nullptr, ADS_CDX,
+                               0, 0, 0, 0, def, &h) == 0);
+        ADSHANDLE hIdx = 0;
+        REQUIRE(AdsCreateIndex61(h, (UNSIGNED8*)"ord.cdx", (UNSIGNED8*)"ORDNO",
+                                 (UNSIGNED8*)"ORDNO", nullptr, nullptr,
+                                 0, 0, &hIdx) == 0);
+        REQUIRE(AdsCreateIndex61(h, (UNSIGNED8*)"ord.cdx", (UNSIGNED8*)"CUSTNO",
+                                 (UNSIGNED8*)"CUSTNO", nullptr, nullptr,
+                                 0, 0, &hIdx) == 0);
+        REQUIRE(AdsCloseIndex(hIdx) == 0);
+        return h;
+    }
+
+    ADSHANDLE open_ordln() {
+        ADSHANDLE h = 0;
+        UNSIGNED8 def[] =
+            "ORDNO,C,8,0;LINENO,N,3,0;SKU,C,8,0;QTY,N,5,0";
+        REQUIRE(AdsCreateTable(hConn, (UNSIGNED8*)"ordln", nullptr, ADS_CDX,
+                               0, 0, 0, 0, def, &h) == 0);
+        ADSHANDLE hIdx = 0;
+        REQUIRE(AdsCreateIndex61(h, (UNSIGNED8*)"ordln.cdx", (UNSIGNED8*)"ORDNO",
+                                 (UNSIGNED8*)"ORDNO", nullptr, nullptr,
+                                 0, 0, &hIdx) == 0);
+        REQUIRE(AdsCloseIndex(hIdx) == 0);
+        return h;
+    }
+
+    void teardown() {
+        if (hConn) {
+            AdsDisconnect(hConn);
+            hConn = 0;
+        }
+        std::error_code ec;
+        fs::remove_all(dir, ec);
+    }
+};
+
 } // namespace
 
 TEST_CASE("ABI M5 smoke: BeginTransaction + update + Rollback restores the original record") {
@@ -179,4 +243,67 @@ TEST_CASE("ABI M5 smoke: Commit makes changes durable") {
     REQUIRE(AdsCloseTable(hTable) == 0);
     REQUIRE(AdsDisconnect(hConn) == 0);
     fs::remove_all(dir, ec);
+}
+
+TEST_CASE("ABI M5 smoke: multi-tag CDX rollback seek finds deleted order") {
+    RelFixture fx("openads_m5_multitag_rb");
+    fx.connect();
+    ADSHANDLE hOrd = fx.open_ord();
+
+    const char* cOrd = "TXMULRB";
+    REQUIRE(AdsBeginTransaction(fx.hConn) == 0);
+    REQUIRE(AdsAppendRecord(hOrd) == 0);
+    REQUIRE(AdsSetString(hOrd, (UNSIGNED8*)"ORDNO",  (UNSIGNED8*)cOrd, 7) == 0);
+    REQUIRE(AdsSetString(hOrd, (UNSIGNED8*)"CUSTNO", (UNSIGNED8*)"C00001", 6) == 0);
+    REQUIRE(AdsSetDouble(hOrd, (UNSIGNED8*)"AMT", 1.0) == 0);
+    REQUIRE(AdsWriteRecord(hOrd) == 0);
+    REQUIRE(AdsRollbackTransaction(fx.hConn) == 0);
+
+    REQUIRE(AdsShowDeleted(1) == 0);
+    ADSHANDLE hIdx = 0;
+    REQUIRE(AdsGetIndexHandle(hOrd, (UNSIGNED8*)"ORDNO", &hIdx) == 0);
+    UNSIGNED16 found = 0;
+    REQUIRE(AdsSeek(hIdx, (UNSIGNED8*)cOrd, 7, 0, 0, &found) == 0);
+    CHECK(found == 1);
+    UNSIGNED16 deleted = 0;
+    REQUIRE(AdsIsRecordDeleted(hOrd, &deleted) == 0);
+    CHECK(deleted == 1);
+
+    REQUIRE(AdsCloseTable(hOrd) == 0);
+    fx.teardown();
+}
+
+TEST_CASE("ABI M5 smoke: multi-tag CDX commit keeps indexed order seekable") {
+    RelFixture fx("openads_m5_multitag_cm");
+    fx.connect();
+    ADSHANDLE hOrd = fx.open_ord();
+
+    const char* cOrd = "TXMULCM";
+    const char* cCust = "C00002";
+    REQUIRE(AdsBeginTransaction(fx.hConn) == 0);
+    REQUIRE(AdsAppendRecord(hOrd) == 0);
+    REQUIRE(AdsSetString(hOrd, (UNSIGNED8*)"ORDNO",  (UNSIGNED8*)cOrd, 7) == 0);
+    REQUIRE(AdsSetString(hOrd, (UNSIGNED8*)"CUSTNO", (UNSIGNED8*)cCust, 6) == 0);
+    REQUIRE(AdsSetDouble(hOrd, (UNSIGNED8*)"AMT", 250.0) == 0);
+    REQUIRE(AdsWriteRecord(hOrd) == 0);
+    REQUIRE(AdsCommitTransaction(fx.hConn) == 0);
+    REQUIRE(AdsCloseTable(hOrd) == 0);
+
+    hOrd = 0;
+    REQUIRE(AdsOpenTable(fx.hConn, (UNSIGNED8*)"ord", nullptr, ADS_CDX,
+                         0, 0, 0, 0, &hOrd) == 0);
+
+    ADSHANDLE hOrdIdx = 0;
+    REQUIRE(AdsGetIndexHandle(hOrd, (UNSIGNED8*)"ORDNO", &hOrdIdx) == 0);
+    UNSIGNED16 found = 0;
+    REQUIRE(AdsSeek(hOrdIdx, (UNSIGNED8*)cOrd, 7, 0, 0, &found) == 0);
+    CHECK(found == 1);
+
+    UNSIGNED8 cust[16] = {0};
+    UNSIGNED32 cap = sizeof(cust);
+    REQUIRE(AdsGetField(hOrd, (UNSIGNED8*)"CUSTNO", cust, &cap, 0) == 0);
+    CHECK(trim_field(cust, cap) == cCust);
+
+    REQUIRE(AdsCloseTable(hOrd) == 0);
+    fx.teardown();
 }

@@ -95,6 +95,9 @@ public:
     util::Result<void> goto_top();
     util::Result<void> goto_bottom();
     util::Result<void> goto_record(std::uint32_t recno);
+    // Reload the current row from disk without repositioning the active
+    // index cursor — used after transaction rollback refresh.
+    util::Result<void> refresh_record_buffer();
     util::Result<void> skip(std::int32_t delta);
 
     util::Result<drivers::DbfFieldValue>
