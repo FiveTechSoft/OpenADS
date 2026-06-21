@@ -37,6 +37,7 @@ public:
                    engine::LockingMode locking = engine::LockingMode::Compatible);
 
     void close_table(Handle h);
+    void close_table_ptr(const engine::Table* t);
 
     engine::Table* lookup_table(Handle h);
 

@@ -152,7 +152,14 @@ private:
 
     util::Result<void> rewrite_header_();
 
+    // Allocate a fresh 512-byte page at the next free offset for this
+    // CDX file. Compound files host several sub-tags; every sub-tag's
+    // CdxIndex shares one allocator keyed by path so their page
+    // streams cannot collide.
+    std::uint32_t allocate_page_();
+
     platform::File                          file_;
+    std::string                             path_;
     IndexOpenMode                           mode_      = IndexOpenMode::ReadOnly;
     std::uint32_t                           root_page_ = 0;
     std::uint32_t                           free_ptr_  = 0xFFFFFFFFu;

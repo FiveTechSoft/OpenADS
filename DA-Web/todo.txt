@@ -27,6 +27,19 @@ those after connecting with OpenADS to pmsys_imported.add.  Our objective is mak
 Let's work on triggers.  Item #3 below is all about trigger execution.  Some of this information needs to be documented on readme.md for OpenAds.
 Make sure you update documentation accordingly so user is aware of how triggers work in OpenAds.
 
+1. [DONE 2026-06-18] Output parameters for stored procedures — verified working end-to-end.
+   proc_body.php returns output_params via AdsDDGetProcProperty(801); save_proc.php saves via
+   createProcedure(name,'',body,input,output); engine stores JSON in .am; round-trip persists
+   across reconnects.  The pmsys procs have no output params in SAP (all OUTPUT='' in
+   system.storedprocedures) — that is expected, not a bug.  To verify: create a proc with
+   output params in the SP panel params grid, save, reopen — Output rows appear correctly.
+2. [DONE 2026-06-17] When clicking on an index row on the index grid tabulator, that row does not highlight.
+3. [DONE 2026-06-17] All columns on the Index row grid should be editable.  Yes/No columns should show a yes/no drop down list.
+
+
+
+
+DO NOT READ BELOW THIS LINE.
 3. [DONE 2026-06-17] Trigger execution — implemented in ace_exports.cpp:
    - BEFORE/INSTEAD_OF/AFTER timing dispatch (tl_trigger_depth counter, limit 64)
    - Priority-sorted firing order

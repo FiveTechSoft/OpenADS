@@ -648,8 +648,16 @@ util::Result<void> DataDict::load_add_binary_(const std::string& buf) {
                         std::string chunk = am_buf.substr(am_off, readable);
                         auto n0 = chunk.find('\0');
                         if (n0 != std::string::npos) {
-                            // Body continuation up to first NUL.
+                            // Body continuation up to first NUL — strip binary padding.
                             std::string cont = chunk.substr(0, n0);
+                            std::size_t lt = cont.size();
+                            while (lt > 0) {
+                                unsigned char uc = static_cast<unsigned char>(cont[lt - 1]);
+                                if ((uc >= 0x20u && uc <= 0x7Eu) ||
+                                    uc == '\t' || uc == '\n' || uc == '\r') break;
+                                --lt;
+                            }
+                            cont.resize(lt);
                             auto lc = cont.find_last_not_of(" \t\r\n");
                             if (lc != std::string::npos) cont.resize(lc + 1);
                             else cont.clear();
@@ -690,6 +698,28 @@ util::Result<void> DataDict::load_add_binary_(const std::string& buf) {
                 if (PS + PL <= buf.size()) {
                     std::size_t pos = rec.prop_null ? 0u : static_cast<std::size_t>(plen);
                     while (pos < PL && static_cast<uint8_t>(buf[PS + pos]) == 0xFF) ++pos;
+                    // Output params: LE16 length + NUL-terminated string, if present here.
+                    // Detected by: 2-byte LE16 > 0 AND all bytes in the string are printable ASCII.
+                    // If the first byte is < 0x20 (e.g. 0x04 for invoke_option), it is NOT output_params.
+                    if (pos + 2 < PL) {
+                        uint16_t olen = static_cast<uint16_t>(
+                            static_cast<uint8_t>(buf[PS + pos]) |
+                            (static_cast<uint16_t>(static_cast<uint8_t>(buf[PS + pos + 1])) << 8));
+                        if (olen > 0 && olen < 500 && pos + 2 + olen <= PL) {
+                            bool looks_text = true;
+                            for (std::size_t k = pos + 2; k < pos + 2 + olen && k < PL; ++k) {
+                                unsigned char c = static_cast<unsigned char>(buf[PS + k]);
+                                if (c != '\0' && (c < 0x20u || c > 0x7Eu)) { looks_text = false; break; }
+                            }
+                            if (looks_text) {
+                                e.output_params = buf.substr(PS + pos + 2, olen);
+                                auto nul = e.output_params.find('\0');
+                                if (nul != std::string::npos) e.output_params.resize(nul);
+                                pos += 2 + olen;
+                                while (pos < PL && static_cast<uint8_t>(buf[PS + pos]) == 0xFF) ++pos;
+                            }
+                        }
+                    }
                     for (; pos + 1 < PL; ++pos) {
                         if (static_cast<uint8_t>(buf[PS + pos])   == 0x0D &&
                             static_cast<uint8_t>(buf[PS + pos+1]) == 0x0A) break;
@@ -706,7 +736,16 @@ util::Result<void> DataDict::load_add_binary_(const std::string& buf) {
                         e.procedure = std::move(body);
                     }
                 }
-                append_am(e.procedure, rec.more_property);
+                // SAP .am body is a NUL-terminated C string; strip from first NUL.
+                {
+                    const auto body_end = e.procedure.size();
+                    append_am(e.procedure, rec.more_property);
+                    auto nul = e.procedure.find('\0', body_end);
+                    if (nul != std::string::npos) e.procedure.resize(nul);
+                    auto lc = e.procedure.find_last_not_of(" \t\r\n");
+                    if (lc != std::string::npos) e.procedure.resize(lc + 1);
+                    else e.procedure.clear();
+                }
             }
             procs_[e.name] = std::move(e);
 

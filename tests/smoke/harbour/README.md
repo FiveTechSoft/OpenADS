@@ -1,3 +1,109 @@
+# OpenADS Harbour smoke tests
+
+## Invoice fixture (`openads_cdx_invoice_fixture.prg`)
+
+Creates four related free DBF/CDX tables under `F:\OpenADS\testdata\invoices\`
+and populates them with random data. Verifies that the ADSCDX RDD produces
+correct per-table compound index files and that indexed navigation works.
+
+### Tables
+
+| File | Records | CDX tags |
+|------|---------|----------|
+| `customer.dbf` | 100 | CUSTNO, CUSTNAME |
+| `items.dbf` | 20 | ITEMNO |
+| `invoices.dbf` | 1 000 | INVNO, CUSTNO, INVDATE |
+| `invoicedetail.dbf` | 3 000 | INVNO, ITEMIDX |
+
+Each table gets its own structural CDX (`customer.cdx`, etc.).
+All tables are free tables — no data dictionary (`.add`) required.
+
+### Prerequisites
+
+| Component | Location |
+|-----------|----------|
+| Harbour 64-bit toolchain | `f:\harbour64` |
+| OpenADS engine (`openace64.dll`) | `F:\OpenADS\build\msvc-x64\src\Release` |
+| Visual Studio 2022 Community | default install path |
+| MSYS `make.exe` | `F:\MinGW63\msys\1.0\bin` |
+
+### Build
+
+**Step 1 — build the Harbour toolchain (once):**
+
+```cmd
+build_harbour64.cmd
+```
+
+Compiles Harbour from source at `f:\harbour64` with MSVC 64-bit.
+Output lands at `f:\harbour64\bin\win\msvc64\`.
+
+**Step 2 — build the fixture:**
+
+```cmd
+build_openads_invoice_fixture.cmd
+```
+
+Produces `openads_cdx_invoice_fixture.exe` in this directory.
+Links against `openace64.lib` (the current OpenADS engine).
+
+### Run
+
+**Unattended / CI** — no arguments:
+
+```cmd
+openads_cdx_invoice_fixture.exe
+```
+
+Rebuilds all tables from scratch and exits with code 0 on success.
+The data directory is created automatically if it does not exist.
+Existing tables are deleted and recreated for a known-good state.
+
+**Interactive — browse each table after creation:**
+
+```cmd
+openads_cdx_invoice_fixture.exe BROWSE
+```
+
+Any command-line argument enables browse mode. After each table is
+populated the program pauses with a full-screen record browser
+(25 rows × 120 columns). The header bar shows the active index tag and
+the current record position (`Rec X/Y`).
+
+| Key | Action |
+|-----|--------|
+| ↑ ↓ | move one row |
+| PgUp / PgDn | scroll one page |
+| Ctrl+PgDn / Ctrl+PgUp | go to last / first record |
+| ← → / Home / End | pan columns |
+| **Space** | cycle controlling index (invoices only: INVNO → CUSTNO → INVDATE → …) |
+| Esc | close browser, continue to next table |
+
+### Source files
+
+| File | Purpose |
+|------|---------|
+| `openads_cdx_invoice_fixture.prg` | Fixture source |
+| `build_openads_invoice_fixture.cmd` | Build script |
+| `build_harbour64.cmd` | Harbour toolchain build script |
+
+### Design notes
+
+- `RDDSETDEFAULT("ADSCDX")` is set once at startup; no `VIA` clause
+  needed on individual `USE` statements.
+- `SET FILETYPE TO CDX` selects compound (multi-tag) index files.
+- `SetMode(25, 120)` resizes the console before any output so the
+  browse fits within the window on any system.
+- Tables are opened `SHARED NEW` so the fixture can run while the
+  OpenADS server is active.
+- The fixture links against `openace64.lib`, not the legacy `ace64.lib`.
+- The invoices table carries three CDX tags (`INVNO`, `CUSTNO`,
+  `INVDATE`). `OrdSetFocus` is called before the browse to start in
+  invoice-number order; **Space** cycles through all three tags at
+  runtime using `OrdSetFocus` + `oBrw:RefreshAll()` + `oBrw:GoTop()`.
+
+---
+
 # Harbour rddads smoke test (M8.1)
 
 This directory contains a minimal Harbour `.prg` that links against

@@ -15,9 +15,16 @@
     },
     {
         "name": "Pmsys-Imported",
-        "path": "f:\\openads\\testdata\\pmsys\\pmsys_imported.add",
-        "username": "adssys",
+        "path": "f:\\OpenAds\\Testdata\\Pmsys\\pmsys_imported.add",
+        "username": "AdsSys",
         "connType": "local",
         "entryType": "dd"
+    },
+    {
+        "name": "Invoices",
+        "path": "f:\\Openads\\testdata\\invoices\\",
+        "username": "",
+        "connType": "local",
+        "entryType": "free"
     }
 ]

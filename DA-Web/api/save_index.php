@@ -43,14 +43,26 @@ $opts = ['path' => $c['path']];
 if (($c['username'] ?? '') !== '') $opts['user']     = $c['username'];
 if (($c['password'] ?? '') !== '') $opts['password'] = $c['password'];
 
+// Determine index file extension: .cdx for DBF tables, .adi for ADT.
+// For free-table directories, probe the filesystem; for DD connections
+// tables are ADT so default to .adi.
+function indexExtForTable(string $dir, string $table): string {
+    $base = rtrim($dir, '/\\') . DIRECTORY_SEPARATOR . $table;
+    foreach (['.dbf', '.DBF'] as $ext) {
+        if (file_exists($base . $ext)) return '.cdx';
+    }
+    return '.adi';
+}
+
+$isFree    = (($c['entryType'] ?? '') === 'free');
+$indexExt  = $isFree ? indexExtForTable($c['path'], $table) : '.adi';
+$indexFile = strtolower($table) . $indexExt;
+
 try {
     $conn = AdsConnection::connect($opts);
 
-    // Derive index file name: same base as table + .adi
-    $indexFile = strtolower($table) . '.adi';
-
     // Build flags bitmask
-    $flags = 2;  // base flag (ADS_CDX_TAG or similar default)
+    $flags = 2;  // base flag
     if ($unique)     $flags |= 0x0800;  // ADS_UNIQUE
     if ($descending) $flags |= 0x0010;  // ADS_DESCENDING
     if ($binary)     $flags |= 0x0004;  // ADS_BINARY_KEY
