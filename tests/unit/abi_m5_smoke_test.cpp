@@ -273,6 +273,82 @@ TEST_CASE("ABI M5 smoke: multi-tag CDX rollback seek finds deleted order") {
     fx.teardown();
 }
 
+// Regression guard for multi-table transaction rollback + index sync.
+//
+// When two tables are appended to in the SAME transaction and the
+// transaction is rolled back, the appended-then-deleted phantom of the
+// FIRST table must still be reachable through its index (the entry is
+// kept, only the record is flagged deleted). A single-table rollback
+// already preserved the entry; an earlier engine revision crashed when a
+// second table's append was added to the same rolled-back transaction.
+//
+// This mirrors the field scenario: the tables are created and CLOSED, then
+// reopened (which auto-binds the production .cdx) for the transaction, and
+// the index is queried only AFTER the rollback — forcing a fresh read of
+// the index from disk. The append to the second table is the only
+// difference versus the passing single-table case, so this case locks in
+// that the first table's index stays correct (and the engine stays alive)
+// across a multi-table rollback.
+TEST_CASE("ABI M5 smoke: multi-table CDX rollback keeps first table seekable") {
+    RelFixture fx("openads_m5_multitable_rb");
+    fx.connect();
+    // Create both tables (+ structural .cdx) and close them, so the
+    // transaction runs against freshly reopened tables — exactly like the
+    // field scenario where the index file exists on disk but is auto-bound
+    // on open rather than held open across the create.
+    REQUIRE(AdsCloseTable(fx.open_ord()) == 0);
+    REQUIRE(AdsCloseTable(fx.open_ordln()) == 0);
+
+    ADSHANDLE hOrd = 0;
+    REQUIRE(AdsOpenTable(fx.hConn, (UNSIGNED8*)"ord", nullptr, ADS_CDX,
+                         0, 0, 0, 0, &hOrd) == 0);
+    ADSHANDLE hOln = 0;
+    REQUIRE(AdsOpenTable(fx.hConn, (UNSIGNED8*)"ordln", nullptr, ADS_CDX,
+                         0, 0, 0, 0, &hOln) == 0);
+
+    const char* cOrd = "TXMULRB";
+    REQUIRE(AdsBeginTransaction(fx.hConn) == 0);
+    // First table append.
+    REQUIRE(AdsAppendRecord(hOrd) == 0);
+    REQUIRE(AdsSetString(hOrd, (UNSIGNED8*)"ORDNO",  (UNSIGNED8*)cOrd, 7) == 0);
+    REQUIRE(AdsSetString(hOrd, (UNSIGNED8*)"CUSTNO", (UNSIGNED8*)"C00001", 6) == 0);
+    REQUIRE(AdsSetDouble(hOrd, (UNSIGNED8*)"AMT", 1.0) == 0);
+    REQUIRE(AdsWriteRecord(hOrd) == 0);
+    // Second table append in the SAME transaction — this is the only
+    // difference versus the passing single-table case.
+    REQUIRE(AdsAppendRecord(hOln) == 0);
+    REQUIRE(AdsSetString(hOln, (UNSIGNED8*)"ORDNO",  (UNSIGNED8*)cOrd, 7) == 0);
+    REQUIRE(AdsSetDouble(hOln, (UNSIGNED8*)"LINENO", 99.0) == 0);
+    REQUIRE(AdsSetString(hOln, (UNSIGNED8*)"SKU", (UNSIGNED8*)"SKU99", 5) == 0);
+    REQUIRE(AdsSetDouble(hOln, (UNSIGNED8*)"QTY", 1.0) == 0);
+    REQUIRE(AdsWriteRecord(hOln) == 0);
+    REQUIRE(AdsRollbackTransaction(fx.hConn) == 0);
+
+    // Close both tables so the index must be read fresh FROM DISK on the
+    // next open. The in-memory index may still carry the kept entry, but
+    // the bug is that the first table's index flush is incomplete when a
+    // second table also took part in the rolled-back transaction — so a
+    // disk re-read loses the (deleted) phantom's key.
+    REQUIRE(AdsCloseTable(hOln) == 0);
+    REQUIRE(AdsCloseTable(hOrd) == 0);
+
+    REQUIRE(AdsShowDeleted(1) == 0);
+    ADSHANDLE hOrd2 = 0;
+    REQUIRE(AdsOpenTable(fx.hConn, (UNSIGNED8*)"ord", nullptr, ADS_CDX,
+                         0, 0, 0, 0, &hOrd2) == 0);
+    ADSHANDLE hIdx = 0;
+    REQUIRE(AdsGetIndexHandle(hOrd2, (UNSIGNED8*)"ORDNO", &hIdx) == 0);
+    UNSIGNED16 found = 0;
+    REQUIRE(AdsSeek(hIdx, (UNSIGNED8*)cOrd, 7, 0, 0, &found) == 0);
+    CHECK(found == 1);
+    UNSIGNED16 deleted = 0;
+    REQUIRE(AdsIsRecordDeleted(hOrd2, &deleted) == 0);
+    CHECK(deleted == 1);
+
+    REQUIRE(AdsCloseTable(hOrd2) == 0);
+    fx.teardown();
+}
+
 TEST_CASE("ABI M5 smoke: multi-tag CDX commit keeps indexed order seekable") {
     RelFixture fx("openads_m5_multitag_cm");
     fx.connect();
