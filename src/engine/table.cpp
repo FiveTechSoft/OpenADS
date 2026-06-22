@@ -504,9 +504,18 @@ util::Result<void> Table::skip(std::int32_t delta) {
     if (auto r = load_record_(static_cast<std::uint32_t>(target)); !r) {
         return r.error();
     }
-    if (filter_) {
+    // SET DELETE ON (no active index) and/or an active filter hide rows
+    // from the natural-order walk: step in the skip direction until a
+    // visible row appears or we run off either end. goto_top/goto_bottom
+    // already do this for deleted rows (576746e); skip was overlooked.
+    const bool skip_deleted = !openads::abi::show_deleted();
+    if (skip_deleted || filter_) {
         std::int64_t step = (delta >= 0) ? 1 : -1;
-        while (state_ == State::Positioned && !filter_(*this)) {
+        auto hidden = [&]() {
+            return (skip_deleted && is_deleted()) ||
+                   (filter_ && !filter_(*this));
+        };
+        while (state_ == State::Positioned && hidden()) {
             std::int64_t nt = static_cast<std::int64_t>(recno_) + step;
             if (nt < 1) { state_ = State::Bof; recno_ = 0; return {}; }
             if (nt > static_cast<std::int64_t>(n)) {
