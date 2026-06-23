@@ -134,6 +134,34 @@ TEST_CASE("parse_login_response: ERROR token = not authenticated with number") {
 }
 
 // ---------------------------------------------------------------------------
+// Task 2: token_length_class table + parse_login_response refactor
+// ---------------------------------------------------------------------------
+
+TEST_CASE("token_length_class classifies the control tokens we skip") {
+    uint8_t fx = 0;
+    CHECK(token_length_class(0xAA, fx) == TokenLenClass::VarLenUShort); // ERROR
+    CHECK(token_length_class(0xAB, fx) == TokenLenClass::VarLenUShort); // INFO
+    CHECK(token_length_class(0xAD, fx) == TokenLenClass::VarLenUShort); // LOGINACK
+    CHECK(token_length_class(0xE3, fx) == TokenLenClass::VarLenUShort); // ENVCHANGE
+    CHECK(token_length_class(0xA9, fx) == TokenLenClass::VarLenUShort); // ORDER
+    CHECK(token_length_class(0xFD, fx) == TokenLenClass::Done);         // DONE
+    CHECK(token_length_class(0x79, fx) == TokenLenClass::FixedLength);  // RETURNSTATUS (4)
+    CHECK((token_length_class(0x79, fx) == TokenLenClass::FixedLength && fx == 4));
+    CHECK(token_length_class(0x81, fx) == TokenLenClass::ColMetaDataDriven); // COLMETADATA
+    CHECK(token_length_class(0xD1, fx) == TokenLenClass::ColMetaDataDriven); // ROW
+    CHECK(token_length_class(0xD2, fx) == TokenLenClass::ColMetaDataDriven); // NBCROW
+}
+TEST_CASE("parse_login_response still authenticates after refactor (regression)") {
+    // Reuse the exact LOGINACK+DONE vector from the connect tests.
+    std::vector<uint8_t> s = {
+        0xAD, 0x06,0x00, 0x07, 0x74,0x00,0x00,0x04, 0x00,
+        0xFD, 0x00,0x00, 0x00,0x00, 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+    };
+    auto r = parse_login_response(s.data(), s.size());
+    CHECK(r.authenticated == true);
+}
+
+// ---------------------------------------------------------------------------
 // Task 1: SQL_BATCH builder (pure)
 // ---------------------------------------------------------------------------
 

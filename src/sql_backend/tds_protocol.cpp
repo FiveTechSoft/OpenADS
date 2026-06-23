@@ -188,6 +188,42 @@ std::vector<uint8_t> build_login7(const Login7Params& p) {
 }
 
 // ---------------------------------------------------------------------------
+// Token length-class table ([MS-TDS] §2.2.4)
+// ---------------------------------------------------------------------------
+
+TokenLenClass token_length_class(uint8_t token, uint8_t& fixed_len) {
+    switch (token) {
+        // VarLenUShort — 2-byte LE length prefix, then body
+        case 0xAA:  // ERROR
+        case 0xAB:  // INFO
+        case 0xAD:  // LOGINACK
+        case 0xA9:  // ORDER
+        case 0xE3:  // ENVCHANGE
+            return TokenLenClass::VarLenUShort;
+
+        // Done family — fixed 12-byte body (Status2+CurCmd2+RowCount8)
+        case 0xFD:  // DONE
+        case 0xFE:  // DONEPROC
+        case 0xFF:  // DONEINPROC
+            return TokenLenClass::Done;
+
+        // FixedLength — body size set in fixed_len
+        case 0x79:  // RETURNSTATUS: 4-byte signed integer
+            fixed_len = 4;
+            return TokenLenClass::FixedLength;
+
+        // ColMetaDataDriven — structural; caller must parse COLMETADATA first
+        case 0x81:  // COLMETADATA
+        case 0xD1:  // ROW
+        case 0xD2:  // NBCROW
+            return TokenLenClass::ColMetaDataDriven;
+
+        default:
+            return TokenLenClass::Unknown;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Login-response token stream parser ([MS-TDS] §2.2.4 / §2.2.7)
 // ---------------------------------------------------------------------------
 //
@@ -276,13 +312,25 @@ LoginResult parse_login_response(const uint8_t* payload, size_t n) {
             continue;
         }
 
-        // Unknown token — try to skip using a 2-byte LE length if present.
-        if (pos + 2 > n) break;
-        uint16_t len = static_cast<uint16_t>(payload[pos] | (payload[pos+1] << 8));
-        pos += 2;
-        if (len == 0) break;  // safe-fail: a zero length cannot advance us
-        if (pos + len > n) break;
-        pos += len;
+        // Unknown token — consult the length-class table instead of blindly
+        // assuming a 2-byte LE length (the previous heuristic).
+        uint8_t fixed_len = 0;
+        auto lc = token_length_class(token, fixed_len);
+        if (lc == TokenLenClass::VarLenUShort) {
+            if (pos + 2 > n) break;
+            uint16_t len = static_cast<uint16_t>(payload[pos] | (payload[pos+1] << 8));
+            pos += 2;
+            if (pos + len > n) break;
+            pos += len;
+        } else if (lc == TokenLenClass::Done) {
+            break;  // stop (e.g. DONEPROC 0xFE / DONEINPROC 0xFF)
+        } else if (lc == TokenLenClass::FixedLength) {
+            if (pos + fixed_len > n) break;
+            pos += fixed_len;
+        } else {
+            // Unknown or ColMetaDataDriven — cannot advance safely; stop.
+            break;
+        }
     }
 
     return res;

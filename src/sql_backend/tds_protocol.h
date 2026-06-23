@@ -84,6 +84,42 @@ struct LoginResult {
     std::string message;
 };
 
+/// Per-token length classification per [MS-TDS] §2.2.4.
+/// Used by the login-response parser and (later) the result-set parser to
+/// advance over tokens without knowing their full structure.
+///
+///   ZeroLength        — token has no length field and no body (0 extra bytes)
+///   FixedLength       — token body is exactly fixed_len bytes (no length field)
+///   VarLenByteCount   — 1-byte LE length prefix, then that many bytes
+///   VarLenUShort      — 2-byte LE length prefix, then that many bytes
+///   VarLenULong       — 4-byte LE length prefix, then that many bytes
+///   ColMetaDataDriven — body layout depends on prior COLMETADATA (structural)
+///   Done              — DONE/DONEPROC/DONEINPROC family (fixed 12-byte body)
+///   Unknown           — not classified; caller must stop (safe-fail)
+enum class TokenLenClass {
+    ZeroLength,
+    FixedLength,
+    VarLenByteCount,
+    VarLenUShort,
+    VarLenULong,
+    ColMetaDataDriven,
+    Done,
+    Unknown
+};
+
+/// Classify a TDS token byte into its length class per [MS-TDS] §2.2.4.
+/// For FixedLength tokens, sets |fixed_len| to the body size in bytes.
+/// For all other classes, |fixed_len| is left unchanged.
+///
+/// Mapping (canonical, not exhaustive):
+///   0xAA ERROR, 0xAB INFO, 0xAD LOGINACK, 0xE3 ENVCHANGE, 0xA9 ORDER
+///       → VarLenUShort
+///   0xFD DONE, 0xFE DONEPROC, 0xFF DONEINPROC → Done
+///   0x79 RETURNSTATUS → FixedLength, fixed_len=4
+///   0x81 COLMETADATA, 0xD1 ROW, 0xD2 NBCROW → ColMetaDataDriven
+///   everything else → Unknown
+TokenLenClass token_length_class(uint8_t token, uint8_t& fixed_len);
+
 /// Parse a server login-response payload (bytes AFTER the 8-byte TDS header).
 /// Walks the token stream per [MS-TDS] §2.2.4/§2.2.7:
 ///   LOGINACK (0xAD) → authenticated=true
