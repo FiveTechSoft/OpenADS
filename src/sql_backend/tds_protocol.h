@@ -56,6 +56,45 @@ bool read_header(const uint8_t* buf, size_t n, TdsPacketHeader& h);
 std::vector<uint8_t> obfuscate_password(const std::string& utf8_password);
 
 // ---------------------------------------------------------------------------
+// LOGIN7 ([MS-TDS] §2.2.6.4)
+// ---------------------------------------------------------------------------
+
+/// Parameters for the LOGIN7 message.  All strings are UTF-8 (ASCII-only in
+/// this v1 implementation — non-ASCII chars must be encoded externally).
+struct Login7Params {
+    std::string hostname;
+    std::string username;
+    std::string password;   // stored clear; obfuscated inside build_login7
+    std::string app_name;
+    std::string server_name;
+    std::string database;
+};
+
+/// Build a complete LOGIN7 packet (type=0x10, EOM) per [MS-TDS] §2.2.6.4.
+/// The password field is obfuscated via obfuscate_password().
+/// All string fields are encoded as UCS-2LE.
+/// OffsetLength offsets are relative to the start of the LOGIN7 structure
+/// (i.e., the byte immediately following the 8-byte TDS packet header).
+std::vector<uint8_t> build_login7(const Login7Params& p);
+
+/// Result of parsing a server login-response token stream.
+struct LoginResult {
+    bool     authenticated = false;
+    uint32_t error_number  = 0;
+    std::string message;
+};
+
+/// Parse a server login-response payload (bytes AFTER the 8-byte TDS header).
+/// Walks the token stream per [MS-TDS] §2.2.4/§2.2.7:
+///   LOGINACK (0xAD) → authenticated=true
+///   ERROR    (0xAA) → authenticated=false, fills error_number+message
+///   INFO     (0xAB) → ignored
+///   ENVCHANGE(0xE3) → ignored
+///   DONE     (0xFD) → stop
+/// Returns LoginResult with authenticated=true on success.
+LoginResult parse_login_response(const uint8_t* payload, size_t n);
+
+// ---------------------------------------------------------------------------
 // PRELOGIN ([MS-TDS] §2.2.6.5)
 // ---------------------------------------------------------------------------
 

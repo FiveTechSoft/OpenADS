@@ -1,6 +1,7 @@
 #include "doctest.h"
 #if defined(OPENADS_WITH_MSSQL)
 #include "sql_backend/tds_protocol.h"
+#include <algorithm>
 using namespace openads::sql_backend::tds;
 
 TEST_CASE("tds header write/read round-trip, length is big-endian incl header") {
@@ -59,4 +60,77 @@ TEST_CASE("parse_prelogin_response reads the ENCRYPTION option") {
     REQUIRE(parse_prelogin_response(p.data(), p.size(), enc));
     CHECK(enc == PreloginEncryption::On);
 }
+
+// ---------------------------------------------------------------------------
+// Task 5: LOGIN7 build + login-response token parse
+// ---------------------------------------------------------------------------
+
+TEST_CASE("login7 has TDS 7.4 version and obfuscated password at its offset") {
+    Login7Params p;
+    p.hostname="h"; p.username="sa"; p.password="abc";
+    p.app_name="openads"; p.server_name="srv"; p.database="db";
+    auto m = build_login7(p);
+    REQUIRE(m.size() > 8 + 36);          // header + fixed LOGIN7 prefix
+    CHECK(m[0] == 0x10);                  // LOGIN7 packet type
+    // TDSVersion field (LOGIN7 offset 4..7, little-endian 0x74000004).
+    // LOGIN7 structure starts at byte 8 (after the 8-byte TDS header).
+    size_t base = 8;
+    CHECK(m[base+4] == 0x04);   // TDSVersion LE byte 0
+    CHECK(m[base+7] == 0x74);   // TDSVersion LE byte 3
+    // The obfuscated bytes of "abc" (0xB3 0xA5 0x83 0xA5 0x93 0xA5) appear once.
+    std::vector<uint8_t> needle = {0xB3,0xA5,0x83,0xA5,0x93,0xA5};
+    bool found = std::search(m.begin(), m.end(), needle.begin(), needle.end()) != m.end();
+    CHECK(found);  // obfuscated "abc" needle is present in the LOGIN7 packet
+}
+
+TEST_CASE("parse_login_response: LOGINACK+DONE = authenticated") {
+    // LOGINACK token 0xAD per [MS-TDS] §2.2.7.6:
+    //   Token(1) + Length(2,LE) + Interface(1) + TDSVersion(4) +
+    //   ProgName(B_VARCHAR: 1-byte len + UCS-2LE) + ProgVersion(4)
+    // Body = Interface(1)+TDSVersion(4)+ProgName-len(1)+ProgVersion(4) = 10 bytes.
+    // DONE token 0xFD per §2.2.7.8: Status(2)+CurCmd(2)+RowCount(8) = 12 bytes.
+    std::vector<uint8_t> s = {
+        // LOGINACK
+        0xAD, 0x0A,0x00,                        // token, length=10
+        0x01,                                   // Interface (SQL_TSQL)
+        0x04,0x00,0x00,0x74,                    // TDSVersion LE (0x74000004)
+        0x00,                                   // ProgName B_VARCHAR len=0
+        0x00,0x00,0x00,0x00,                    // ProgVersion
+        // DONE
+        0xFD, 0x00,0x00, 0x00,0x00,             // token, Status, CurCmd
+        0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00 // RowCount
+    };
+    auto r = parse_login_response(s.data(), s.size());
+    CHECK(r.authenticated == true);
+}
+
+TEST_CASE("parse_login_response: ERROR token = not authenticated with number") {
+    // ERROR token 0xAA per [MS-TDS] §2.2.7.10:
+    //   Token(1) + Length(2,LE) +
+    //   Number(4,LE) + State(1) + Class(1) +
+    //   MsgText(US_VARCHAR: 2-byte LE char-count + UCS-2LE) +
+    //   ServerName(B_VARCHAR: 1-byte char-count + UCS-2LE) +
+    //   ProcName(B_VARCHAR: 1-byte char-count + UCS-2LE) +
+    //   LineNumber(4,LE)
+    // With all strings empty (zero lengths):
+    //   Number(4)+State(1)+Class(1)+MsgLen(2)+ServerLen(1)+ProcLen(1)+Line(4) = 14 bytes
+    // 18456 decimal = 0x4818; LE4 = 0x18,0x48,0x00,0x00
+    std::vector<uint8_t> s = {
+        // ERROR
+        0xAA, 0x0E,0x00,                        // token, length=14
+        0x18,0x48,0x00,0x00,                    // Number=18456 (login failed)
+        0x01, 0x0E,                             // State, Class
+        0x00,0x00,                              // MsgText US_VARCHAR len=0 chars
+        0x00,                                   // ServerName B_VARCHAR len=0
+        0x00,                                   // ProcName B_VARCHAR len=0
+        0x01,0x00,0x00,0x00,                    // LineNumber=1
+        // DONE
+        0xFD, 0x02,0x00, 0x00,0x00,             // token, Status=error, CurCmd
+        0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00 // RowCount
+    };
+    auto r = parse_login_response(s.data(), s.size());
+    CHECK(r.authenticated == false);
+    CHECK(r.error_number == 18456);
+}
+
 #endif

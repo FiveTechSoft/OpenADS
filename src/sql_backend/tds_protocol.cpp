@@ -39,6 +39,251 @@ std::vector<uint8_t> obfuscate_password(const std::string& pw) {
 }
 
 // ---------------------------------------------------------------------------
+// LOGIN7 ([MS-TDS] §2.2.6.4)
+// ---------------------------------------------------------------------------
+//
+// Structure layout (offsets relative to LOGIN7 structure start, i.e. byte 0
+// = the byte immediately after the 8-byte TDS packet header):
+//
+//   [0..3]   Length       (4, LE) — entire LOGIN7 structure size
+//   [4..7]   TDSVersion   (4, LE) — 0x74000004 for TDS 7.4
+//   [8..11]  PacketSize   (4, LE) — 0x1000 (4096)
+//   [12..15] ClientProgVer(4)     — 0
+//   [16..19] ClientPID    (4)     — 0
+//   [20..23] ConnectionID (4)     — 0
+//   [24]     OptionFlags1 (1)     — 0
+//   [25]     OptionFlags2 (1)     — 0
+//   [26]     TypeFlags    (1)     — 0
+//   [27]     OptionFlags3 (1)     — 0
+//   [28..31] ClientTimeZone(4)    — 0
+//   [32..35] ClientLCID   (4)     — 0
+//                                 = 36 bytes fixed header
+//
+// OffsetLength table (each pair = ibXxx/cchXxx, 2+2 bytes LE each):
+//   [36..37] ibHostName   / [38..39] cchHostName
+//   [40..41] ibUserName   / [42..43] cchUserName
+//   [44..45] ibPassword   / [46..47] cchPassword
+//   [48..49] ibAppName    / [50..51] cchAppName
+//   [52..53] ibServerName / [54..55] cchServerName
+//   [56..57] ibUnused     / [58..59] cbUnused      (always 0/0)
+//   [60..61] ibCltIntName / [62..63] cchCltIntName (always 0/0)
+//   [64..65] ibLanguage   / [66..67] cchLanguage   (always 0/0)
+//   [68..69] ibDatabase   / [70..71] cchDatabase
+//   [72..77] ClientID     (6 bytes, MAC address — all zeros)
+//   [78..79] ibSSPI       / [80..81] cbSSPI        (always 0/0)
+//   [82..83] ibAtchDBFile / [84..85] cchAtchDBFile (always 0/0)
+//   [86..87] ibChangePassword / [88..89] cchChangePassword (always 0/0)
+//   [90..93] cbSSPILong   (4, always 0)
+//                                 = 58 bytes OffsetLength table
+//
+// Total fixed part = 36 + 58 = 94 bytes.
+// Variable data (UCS-2LE strings) starts at LOGIN7 offset 94.
+// ibXxx offsets in the table are relative to the START of the LOGIN7 structure.
+// cchXxx is the number of UCS-2LE CHARACTER units (not bytes).
+// Exception: cchPassword is the number of bytes of obfuscated data.
+
+static void push_le16(std::vector<uint8_t>& out, uint16_t v) {
+    out.push_back(static_cast<uint8_t>(v & 0xFF));
+    out.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
+}
+
+static void push_le32(std::vector<uint8_t>& out, uint32_t v) {
+    out.push_back(static_cast<uint8_t>(v & 0xFF));
+    out.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
+    out.push_back(static_cast<uint8_t>((v >> 16) & 0xFF));
+    out.push_back(static_cast<uint8_t>((v >> 24) & 0xFF));
+}
+
+/// Append a UTF-8 string as UCS-2LE to |out| (ASCII-only, high byte = 0x00).
+static void push_ucs2le(std::vector<uint8_t>& out, const std::string& s) {
+    for (unsigned char c : s) {
+        out.push_back(static_cast<uint8_t>(c));  // low byte
+        out.push_back(0x00);                      // high byte (ASCII)
+    }
+}
+
+std::vector<uint8_t> build_login7(const Login7Params& p) {
+    // Obfuscate the password first (result is bytes, not chars).
+    auto pw_obs = obfuscate_password(p.password);
+
+    // Variable-data region starts at LOGIN7 structure offset 94.
+    static constexpr size_t VARDATA_OFFSET = 94;
+
+    // Build variable data and collect offsets/lengths.
+    // Offsets are relative to LOGIN7 structure start.
+    std::vector<uint8_t> var;
+    // Helper lambda: append UCS-2LE string and return (offset, char-count).
+    auto append_str = [&](const std::string& s) -> std::pair<uint16_t, uint16_t> {
+        uint16_t offset = static_cast<uint16_t>(VARDATA_OFFSET + var.size());
+        uint16_t cch    = static_cast<uint16_t>(s.size());  // char count (ASCII)
+        push_ucs2le(var, s);
+        return {offset, cch};
+    };
+    // Append obfuscated password bytes directly (special: offset+bytecount).
+    auto append_pw = [&]() -> std::pair<uint16_t, uint16_t> {
+        uint16_t offset = static_cast<uint16_t>(VARDATA_OFFSET + var.size());
+        uint16_t cb     = static_cast<uint16_t>(pw_obs.size());
+        var.insert(var.end(), pw_obs.begin(), pw_obs.end());
+        return {offset, cb};
+    };
+
+    auto [ibHostName,   cchHostName]   = append_str(p.hostname);
+    auto [ibUserName,   cchUserName]   = append_str(p.username);
+    auto [ibPassword,   cchPassword]   = append_pw();
+    auto [ibAppName,    cchAppName]    = append_str(p.app_name);
+    auto [ibServerName, cchServerName] = append_str(p.server_name);
+    // Unused, CltIntName, Language: all zero (empty).
+    auto [ibDatabase,   cchDatabase]   = append_str(p.database);
+
+    // Total LOGIN7 structure size.
+    uint32_t struct_len = static_cast<uint32_t>(VARDATA_OFFSET + var.size());
+    // Total packet size (8-byte TDS header + LOGIN7 structure).
+    uint16_t pkt_total  = static_cast<uint16_t>(8 + struct_len);
+
+    std::vector<uint8_t> out;
+    out.reserve(pkt_total);
+
+    // --- 8-byte TDS packet header ---
+    write_header(out, TDS_PKT_LOGIN7, TDS_STATUS_EOM, pkt_total);
+
+    // --- Fixed LOGIN7 header (36 bytes) ---
+    push_le32(out, struct_len);          // Length
+    push_le32(out, 0x74000004u);         // TDSVersion (7.4)
+    push_le32(out, 0x1000u);             // PacketSize = 4096
+    push_le32(out, 0u);                  // ClientProgVer
+    push_le32(out, 0u);                  // ClientPID
+    push_le32(out, 0u);                  // ConnectionID
+    out.push_back(0u);                   // OptionFlags1
+    out.push_back(0u);                   // OptionFlags2
+    out.push_back(0u);                   // TypeFlags
+    out.push_back(0u);                   // OptionFlags3
+    push_le32(out, 0u);                  // ClientTimeZone
+    push_le32(out, 0u);                  // ClientLCID
+
+    // --- OffsetLength table (58 bytes) ---
+    push_le16(out, ibHostName);   push_le16(out, cchHostName);
+    push_le16(out, ibUserName);   push_le16(out, cchUserName);
+    push_le16(out, ibPassword);   push_le16(out, cchPassword);
+    push_le16(out, ibAppName);    push_le16(out, cchAppName);
+    push_le16(out, ibServerName); push_le16(out, cchServerName);
+    push_le16(out, 0);            push_le16(out, 0);  // ibUnused/cbUnused
+    push_le16(out, 0);            push_le16(out, 0);  // ibCltIntName/cchCltIntName
+    push_le16(out, 0);            push_le16(out, 0);  // ibLanguage/cchLanguage
+    push_le16(out, ibDatabase);   push_le16(out, cchDatabase);
+    // ClientID: 6 bytes (MAC address, all zeros)
+    for (int i = 0; i < 6; ++i) out.push_back(0);
+    push_le16(out, 0);            push_le16(out, 0);  // ibSSPI/cbSSPI
+    push_le16(out, 0);            push_le16(out, 0);  // ibAtchDBFile/cchAtchDBFile
+    push_le16(out, 0);            push_le16(out, 0);  // ibChangePassword/cchChangePassword
+    push_le32(out, 0u);                               // cbSSPILong
+
+    // --- Variable data ---
+    out.insert(out.end(), var.begin(), var.end());
+
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// Login-response token stream parser ([MS-TDS] §2.2.4 / §2.2.7)
+// ---------------------------------------------------------------------------
+//
+// Variable-length tokens have a 2-byte LE length field after the token byte.
+// The parser advances by that length to skip unknown/ignored tokens.
+//
+// Token IDs we care about:
+//   0xAD LOGINACK  — authenticated; skip body
+//   0xAA ERROR     — Number(4,LE) + State(1) + Class(1) + MsgText(US_VARCHAR)
+//                    + ServerName(B_VARCHAR) + ProcName(B_VARCHAR) + Line(4,LE)
+//   0xAB INFO      — same structure as ERROR; ignored
+//   0xE3 ENVCHANGE — 2-byte LE length then body; ignored
+//   0xFD DONE      — 12 bytes fixed (Status2+CurCmd2+RowCount8); stop
+
+static std::string ucs2le_to_utf8(const uint8_t* p, uint16_t nchars) {
+    // v1: ASCII-range only (high byte always 0x00 for ASCII); fallback = '?'.
+    std::string out;
+    out.reserve(nchars);
+    for (uint16_t i = 0; i < nchars; ++i) {
+        uint8_t lo = p[i * 2];
+        // uint8_t hi = p[i * 2 + 1];  // ignored in ASCII-only v1
+        out.push_back(lo < 0x80 ? static_cast<char>(lo) : '?');
+    }
+    return out;
+}
+
+LoginResult parse_login_response(const uint8_t* payload, size_t n) {
+    LoginResult res;
+    size_t pos = 0;
+
+    while (pos < n) {
+        uint8_t token = payload[pos];
+        ++pos;
+
+        if (token == 0xFD) {
+            // DONE: 12 fixed bytes (Status(2)+CurCmd(2)+RowCount(8)); stop.
+            break;
+        }
+
+        if (token == 0xAD) {
+            // LOGINACK: Length(2,LE) then body — just skip the body.
+            if (pos + 2 > n) break;
+            uint16_t len = static_cast<uint16_t>(payload[pos] | (payload[pos+1] << 8));
+            pos += 2;
+            if (pos + len > n) break;
+            pos += len;
+            res.authenticated = true;
+            continue;
+        }
+
+        if (token == 0xAA || token == 0xAB) {
+            // ERROR (0xAA) or INFO (0xAB): Length(2,LE) then structured body.
+            if (pos + 2 > n) break;
+            uint16_t len = static_cast<uint16_t>(payload[pos] | (payload[pos+1] << 8));
+            pos += 2;
+            if (pos + len > n) break;
+            const uint8_t* body = payload + pos;
+            size_t body_len = len;
+            pos += len;
+
+            if (token == 0xAA && body_len >= 4) {
+                // Number (4, LE)
+                res.error_number = static_cast<uint32_t>(body[0])
+                                 | (static_cast<uint32_t>(body[1]) << 8)
+                                 | (static_cast<uint32_t>(body[2]) << 16)
+                                 | (static_cast<uint32_t>(body[3]) << 24);
+                // State(1) + Class(1) = 2 bytes at body[4..5].
+                // MsgText: US_VARCHAR at body[6]: len(2,LE chars) + UCS-2LE.
+                if (body_len >= 8) {
+                    uint16_t mlen = static_cast<uint16_t>(body[6] | (body[7] << 8));
+                    if (body_len >= static_cast<size_t>(8 + mlen * 2)) {
+                        res.message = ucs2le_to_utf8(body + 8, mlen);
+                    }
+                }
+            }
+            continue;
+        }
+
+        if (token == 0xE3) {
+            // ENVCHANGE: Length(2,LE) then body; ignored.
+            if (pos + 2 > n) break;
+            uint16_t len = static_cast<uint16_t>(payload[pos] | (payload[pos+1] << 8));
+            pos += 2;
+            if (pos + len > n) break;
+            pos += len;
+            continue;
+        }
+
+        // Unknown token — try to skip using a 2-byte LE length if present.
+        if (pos + 2 > n) break;
+        uint16_t len = static_cast<uint16_t>(payload[pos] | (payload[pos+1] << 8));
+        pos += 2;
+        if (pos + len > n) break;
+        pos += len;
+    }
+
+    return res;
+}
+
+// ---------------------------------------------------------------------------
 // PRELOGIN ([MS-TDS] §2.2.6.5)
 // ---------------------------------------------------------------------------
 //
