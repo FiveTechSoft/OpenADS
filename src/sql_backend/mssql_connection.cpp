@@ -85,7 +85,7 @@ util::Result<MssqlConnection> MssqlConnection::open(const MssqlUri& uri) {
 }
 
 util::Result<tds::QueryResult> MssqlConnection::query(const std::string& sql) {
-    if (!impl_ || !impl_->channel.valid()) {
+    if (!impl_ || !impl_->channel.valid() || !impl_->authenticated) {
         return util::Error{openads::AE_NO_CONNECTION, 0,
             "MSSQL not connected", ""};
     }
