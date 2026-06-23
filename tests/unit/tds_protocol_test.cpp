@@ -262,4 +262,54 @@ TEST_CASE("decode decimal scale and datetime epoch") {
     CHECK(decode_cell(col(0x3D), dt, 8) == "1900-01-02 00:00:00");
 }
 
+// ---------------------------------------------------------------------------
+// Regression: format_numeric — schoolbook long-division handles large magnitudes
+// Finding 1 fix: the previous hi*6+lo scheme overflowed for values >= 2^64-6.
+// ---------------------------------------------------------------------------
+TEST_CASE("decode numeric: large magnitudes exercise high limbs (regression F1)") {
+    // --- Test A: 2^64-1 = 18446744073709551615, scale=0, 8-byte magnitude ---
+    // 8-byte LE magnitude: 0xFF * 8 bytes; sign=1 (positive)
+    // Expected string: "18446744073709551615"
+    // Derivation: 0xFFFFFFFFFFFFFFFF decimal = 18446744073709551615
+    uint8_t dec_a[] = {
+        0x01,                                          // sign = positive
+        0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF        // magnitude = 2^64-1 LE
+    };
+    CHECK(decode_cell(col(0x6C, 0), dec_a, sizeof(dec_a)) == "18446744073709551615");
+
+    // --- Test B: 123456789012345678901234567890, scale=0, 16-byte magnitude ---
+    // LE bytes derived from BigInteger("123456789012345678901234567890"):
+    //   hex = 0x18EE90FF6C373E0EE4E3F0AD2
+    //   LE16 = D2 0A 3F 4E EE E0 73 C3 F6 0F E9 8E 01 00 00 00
+    // Expected string: "123456789012345678901234567890"
+    uint8_t dec_b[] = {
+        0x01,                                           // sign = positive
+        0xD2,0x0A,0x3F,0x4E,0xEE,0xE0,0x73,0xC3,      // LE bytes 0..7
+        0xF6,0x0F,0xE9,0x8E,0x01,0x00,0x00,0x00        // LE bytes 8..15
+    };
+    CHECK(decode_cell(col(0x6C, 0), dec_b, sizeof(dec_b)) == "123456789012345678901234567890");
+
+    // --- Test C: same value with scale=2 → "1234567890123456789012345678.90" ---
+    CHECK(decode_cell(col(0x6C, 2), dec_b, sizeof(dec_b)) == "1234567890123456789012345678.90");
+}
+
+// ---------------------------------------------------------------------------
+// Regression: MONEY / MONEY4 INT_MIN two's complement (Finding 2)
+// ---------------------------------------------------------------------------
+TEST_CASE("decode money: INT64_MIN and INT32_MIN handled correctly (regression F2)") {
+    // MONEY INT64_MIN = -9223372036854775808, unit 1/10000.
+    // TDS encoding: hi4(LE)=0x80000000, lo4(LE)=0x00000000.
+    //   v = (int32_t(0x80000000) << 32) | 0x00000000 = INT64_MIN
+    // magnitude = 2^63 = 9223372036854775808; /10000 = 922337203685477, %10000 = 5808
+    // Expected: "-922337203685477.5808"
+    uint8_t money_min[] = {0x00,0x00,0x00,0x80, 0x00,0x00,0x00,0x00};
+    CHECK(decode_cell(col(0x3C), money_min, 8) == "-922337203685477.5808");
+
+    // MONEY4 INT32_MIN = -2147483648, unit 1/10000.
+    // magnitude = 2147483648; /10000 = 214748, %10000 = 3648
+    // Expected: "-214748.3648"
+    uint8_t money4_min[] = {0x00,0x00,0x00,0x80};
+    CHECK(decode_cell(col(0x7A), money4_min, 4) == "-214748.3648");
+}
+
 #endif

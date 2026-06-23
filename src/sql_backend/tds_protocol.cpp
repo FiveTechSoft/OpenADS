@@ -711,36 +711,69 @@ static uint64_t read_le_uint(const uint8_t* data, size_t len) {
 }
 
 // Build decimal string for NUMERIC/DECIMAL: magnitude over up to 16 bytes.
-// Uses (hi:lo) pair of uint64_t for 128-bit precision.
 //
-// Algorithm — 128-bit division by 10, extracting one decimal digit per step:
-//   The 128-bit integer is split into (hi * 2^64 + lo).
-//   2^64 mod 10 = 6 (since 2^4 mod 10 = 6 and the period repeats every 4).
-//   digit = (rem_hi * 6 + lo) % 10   where rem_hi = hi % 10.
-//   new_lo = rem_hi * (2^64/10) + (rem_hi*6 + lo) / 10
-//           = rem_hi * 1844674407370955161 + (rem_hi*6 + lo) / 10
-//   new_hi = hi / 10
+// Algorithm — portable schoolbook long-division by 10 over 32-bit limbs.
+// The magnitude bytes (little-endian, 4/8/12/16 bytes) are loaded into an
+// array of uint32_t limbs in big-endian order (MSL first) so that the
+// standard "divide array by scalar" algorithm produces the LSDigit first.
+//
+// Each step: iterate limbs MSL→LSL, carry = (carry<<32)|limb, quotient_limb =
+// carry/10, carry = carry%10.  After the sweep, carry is the next decimal
+// digit (LSDigit first).  Since carry_in < 10 always, carry_in*2^32 + limb
+// < 10*2^32 < 2^64, every division is safe in uint64_t.  No __uint128_t needed.
 static std::string format_numeric(const uint8_t* mag, size_t mag_len, uint8_t scale) {
-    uint64_t lo = 0, hi = 0;
-    for (size_t i = 0; i < mag_len && i < 16; ++i) {
-        if (i < 8)
-            lo |= static_cast<uint64_t>(mag[i]) << (i * 8);
-        else
-            hi |= static_cast<uint64_t>(mag[i]) << ((i - 8) * 8);
+    // Maximum precision = 38 → magnitude at most 16 bytes → 4 uint32 limbs.
+    static constexpr size_t MAX_MAG = 16;
+    static constexpr size_t MAX_LIMBS = MAX_MAG / 4;  // 4
+
+    // Clamp to what we can handle.
+    size_t ml = (mag_len < MAX_MAG) ? mag_len : MAX_MAG;
+
+    // Number of 32-bit limbs needed (round up to 4-byte boundary).
+    size_t nlimbs = (ml + 3) / 4;
+
+    // Load magnitude into limbs[0..nlimbs-1], MSL first.
+    // mag is little-endian, so limb[0] holds the most-significant 4 bytes.
+    uint32_t limbs[MAX_LIMBS] = {};
+    for (size_t i = 0; i < nlimbs; ++i) {
+        // limb index 0 = most significant → bytes at offset (nlimbs-1-i)*4.
+        size_t byte_off = (nlimbs - 1 - i) * 4;
+        uint32_t v = 0;
+        for (size_t b = 0; b < 4; ++b) {
+            size_t src = byte_off + b;
+            if (src < ml) v |= static_cast<uint32_t>(mag[src]) << (b * 8);
+        }
+        limbs[i] = v;
     }
+
+    // Check for zero.
+    bool is_zero = true;
+    for (size_t i = 0; i < nlimbs; ++i) if (limbs[i] != 0) { is_zero = false; break; }
+
     std::string digits;
-    if (lo == 0 && hi == 0) {
+    if (is_zero) {
         digits = "0";
     } else {
-        while (lo != 0 || hi != 0) {
-            uint64_t rem_hi = hi % 10;
-            hi /= 10;
-            uint8_t digit = static_cast<uint8_t>((rem_hi * 6 + lo) % 10);
-            digits += static_cast<char>('0' + digit);
-            lo = rem_hi * 1844674407370955161ULL + (rem_hi * 6 + lo) / 10;
+        while (true) {
+            // Check if all limbs are zero.
+            bool all_zero = true;
+            for (size_t i = 0; i < nlimbs; ++i) if (limbs[i] != 0) { all_zero = false; break; }
+            if (all_zero) break;
+
+            // Divide the whole limb array by 10; collect remainder as digit.
+            uint64_t carry = 0;
+            for (size_t i = 0; i < nlimbs; ++i) {
+                // carry < 10 always, so carry*2^32 + limbs[i] < 10*2^32 < 2^64 — no overflow.
+                uint64_t acc = (carry << 32) | static_cast<uint64_t>(limbs[i]);
+                limbs[i] = static_cast<uint32_t>(acc / 10);
+                carry     = acc % 10;
+            }
+            // carry is the next decimal digit (least significant first).
+            digits += static_cast<char>('0' + static_cast<uint8_t>(carry));
         }
         std::reverse(digits.begin(), digits.end());
     }
+
     if (scale == 0) return digits;
     while (digits.size() <= scale) digits = "0" + digits;
     digits.insert(digits.size() - scale, ".");
@@ -767,10 +800,10 @@ std::string decode_cell(const TdsColumn& col, const uint8_t* data, size_t len) {
             return std::to_string(data[0]);
 
         case 0x34:  // INT2: signed 2-byte LE
-            return std::to_string(static_cast<int16_t>(read_le_uint(data, 2)));
+            return std::to_string(static_cast<int16_t>(read_le_int(data, 2)));
 
         case 0x38:  // INT4: signed 4-byte LE
-            return std::to_string(static_cast<int32_t>(read_le_uint(data, 4)));
+            return std::to_string(static_cast<int32_t>(read_le_int(data, 4)));
 
         case 0x7F:  // INT8: signed 8-byte LE
             return std::to_string(read_le_int(data, 8));
@@ -778,8 +811,8 @@ std::string decode_cell(const TdsColumn& col, const uint8_t* data, size_t len) {
         // ---- INTN: dispatch by len ----
         case 0x26:
             if (len == 1) return std::to_string(data[0]);       // tinyint: UNSIGNED
-            if (len == 2) return std::to_string(static_cast<int16_t>(read_le_uint(data, 2)));
-            if (len == 4) return std::to_string(static_cast<int32_t>(read_le_uint(data, 4)));
+            if (len == 2) return std::to_string(static_cast<int16_t>(read_le_int(data, 2)));
+            if (len == 4) return std::to_string(static_cast<int32_t>(read_le_int(data, 4)));
             if (len == 8) return std::to_string(read_le_int(data, 8));
             return "";
 
@@ -816,7 +849,8 @@ std::string decode_cell(const TdsColumn& col, const uint8_t* data, size_t len) {
                           | (static_cast<uint32_t>(data[6]) << 16) | (static_cast<uint32_t>(data[7]) << 24);
             int64_t v = (static_cast<int64_t>(static_cast<int32_t>(hi32)) << 32) | lo32;
             bool neg = (v < 0);
-            uint64_t uv = neg ? static_cast<uint64_t>(-v) : static_cast<uint64_t>(v);
+            // Two's complement on the unsigned type — safe even for INT64_MIN.
+            uint64_t uv = neg ? (uint64_t(0) - static_cast<uint64_t>(v)) : static_cast<uint64_t>(v);
             std::string r;
             if (neg) r += '-';
             r += std::to_string(uv / 10000);
@@ -834,7 +868,8 @@ std::string decode_cell(const TdsColumn& col, const uint8_t* data, size_t len) {
             if (len < 4) return "";
             int32_t v = static_cast<int32_t>(read_le_uint(data, 4));
             bool neg = (v < 0);
-            uint32_t uv = neg ? static_cast<uint32_t>(-v) : static_cast<uint32_t>(v);
+            // Two's complement on the unsigned type — safe even for INT32_MIN.
+            uint32_t uv = neg ? (uint32_t(0) - static_cast<uint32_t>(v)) : static_cast<uint32_t>(v);
             std::string r;
             if (neg) r += '-';
             r += std::to_string(uv / 10000);
