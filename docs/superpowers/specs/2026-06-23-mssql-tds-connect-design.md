@@ -175,10 +175,14 @@ service). Credentials live in env / a local untracked file, never in the repo.
 - **TLS-in-TDS framing** is the highest-risk piece (custom BIO callbacks that
   frame only during the handshake). Mitigation: the pure packet layer is unit
   tested first; the channel is exercised against a real server early.
-- **Encryption negotiation**: if the server advertises `ENCRYPT_NOT_SUP`, the
-  TLS step is skipped and LOGIN7 goes in clear; the channel must honour the
-  negotiated option rather than assuming TLS. v1 targets the common `ENCRYPT_ON`
-  / `ENCRYPT_OFF` (login-only) cases.
+- **Encryption negotiation**: the implementation always negotiates TLS and
+  requires the server to support encryption. If the server returns
+  `ENCRYPT_NOT_SUP` in the PRELOGIN response, the connection is rejected
+  with an error (rather than falling back to clear-text LOGIN7). v1 therefore
+  requires a SQL Server instance that has encryption enabled (`ENCRYPT_ON` or
+  `ENCRYPT_OFF` login-only). Servers explicitly refusing TLS (`ENCRYPT_NOT_SUP`)
+  are not supported in v1 and must have their encryption settings updated before
+  use with this backend.
 - **Provisioning dependency**: the live auth test is blocked until SQL Express
   (TCP) is installed; the pure unit tests are not.
 - Like the other native-backend branches, this depends on `sql_common.h` (not

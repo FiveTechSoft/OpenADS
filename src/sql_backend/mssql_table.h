@@ -40,7 +40,7 @@ struct MssqlTable {
     // --------------------------------------------------------------------
 
     /// Execute "SELECT * FROM [table_name]" on conn, buffer the result.
-    /// Returns AE_INVALID_TABLE_NAME if table_name fails the safe-identifier
+    /// Returns AE_INTERNAL_ERROR if table_name fails the safe-identifier
     /// check.  Returns the server error on a bad query.
     static util::Result<std::unique_ptr<MssqlTable>>
         open(MssqlConnection& c, const std::string& table_name);
