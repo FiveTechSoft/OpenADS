@@ -85,6 +85,7 @@ if(OPENADS_WITH_MSSQL)
         sql_backend/mssql_uri.cpp
         sql_backend/tds_tls_channel.cpp
         sql_backend/mssql_connection.cpp
+        sql_backend/mssql_table.cpp
     )
     target_compile_definitions(openads_core PUBLIC OPENADS_WITH_MSSQL=1)
 endif()

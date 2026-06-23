@@ -26,7 +26,8 @@ enum class HandleKind {
     OdbcTable      = 10,
     OdbcIndex      = 11,
     // Native MS SQL Server backend (mssql:// / tds://).
-    MssqlConnection = 12
+    MssqlConnection = 12,
+    MssqlTable      = 13
 };
 
 using Handle = std::uint64_t;

@@ -1,6 +1,8 @@
 #include "doctest.h"
 #if defined(OPENADS_WITH_MSSQL)
 #include "sql_backend/tds_protocol.h"
+#include "sql_backend/mssql_table.h"
+#include "openads/ace.h"
 #include <algorithm>
 using namespace openads::sql_backend::tds;
 
@@ -380,6 +382,94 @@ TEST_CASE("parse_query_response: NBCROW with null bitmap") {
     CHECK(r.rows[0][0].value == "7");
     CHECK(r.rows[0][0].is_null == false);
     CHECK(r.rows[0][1].is_null == true);
+}
+
+
+// ---------------------------------------------------------------------------
+// Task 7: MssqlTable — pure buffered-cursor unit tests
+// ---------------------------------------------------------------------------
+
+TEST_CASE("MssqlTable cursor over a 2-row buffer") {
+    QueryResult qr;
+    qr.ok = true;
+    qr.columns = { {"id", 0x26, 4, 0, 0, 0} };
+    qr.rows = { {{"1", false}}, {{"2", false}} };
+
+    auto t = openads::sql_backend::MssqlTable::from_result(std::move(qr));
+    t->go_top();
+    CHECK(t->record_count() == 2);
+    CHECK(t->record_num() == 1);
+    std::string v; bool nul = false;
+    REQUIRE(t->get_field(0, v, nul));
+    CHECK(v == "1");
+    t->skip(1);
+    CHECK(t->record_num() == 2);
+    t->skip(1);
+    CHECK(t->at_eof());
+}
+
+TEST_CASE("MssqlTable go_bottom positions at last row") {
+    QueryResult qr;
+    qr.ok = true;
+    qr.columns = { {"x", 0xE7, 20, 0, 0, 0} };
+    qr.rows = { {{"a", false}}, {{"b", false}}, {{"c", false}} };
+
+    auto t = openads::sql_backend::MssqlTable::from_result(std::move(qr));
+    t->go_bottom();
+    CHECK(t->record_num() == 3);
+    std::string v; bool nul = false;
+    REQUIRE(t->get_field(0, v, nul));
+    CHECK(v == "c");
+}
+
+TEST_CASE("MssqlTable empty result: bof and eof both true") {
+    QueryResult qr;
+    qr.ok = true;
+    qr.columns = { {"id", 0x26, 4, 0, 0, 0} };
+    // no rows
+    auto t = openads::sql_backend::MssqlTable::from_result(std::move(qr));
+    CHECK(t->record_count() == 0);
+    CHECK(t->record_num() == 0);
+    CHECK(t->at_bof());
+    CHECK(t->at_eof());
+}
+
+TEST_CASE("MssqlTable get_field returns null flag") {
+    QueryResult qr;
+    qr.ok = true;
+    qr.columns = { {"name", 0xE7, 40, 0, 0, 0} };
+    qr.rows = { {{"", true}} };  // NULL value
+    auto t = openads::sql_backend::MssqlTable::from_result(std::move(qr));
+    t->go_top();
+    std::string v; bool nul = false;
+    REQUIRE(t->get_field(0, v, nul));
+    CHECK(nul == true);
+}
+
+TEST_CASE("MssqlTable field metadata maps TDS tokens to ADS types") {
+    QueryResult qr;
+    qr.ok = true;
+    // columns: INTN(4), NVARCHAR(40 bytes=20 chars), BITN, DATETIMN, BIGVARBINARY(10)
+    qr.columns = {
+        {"i",    0x26, 4,   0, 0, 0},   // INTN     → ADS_DOUBLE
+        {"s",    0xE7, 40,  0, 0, 0},   // NVARCHAR → ADS_STRING
+        {"b",    0x68, 1,   0, 0, 0},   // BITN     → ADS_LOGICAL
+        {"d",    0x6F, 8,   0, 0, 0},   // DATETIMN → ADS_DATE
+        {"bin",  0xA5, 10,  0, 0, 0},   // VARBINARY→ ADS_BINARY
+    };
+    qr.rows = {};
+    auto t = openads::sql_backend::MssqlTable::from_result(std::move(qr));
+    CHECK(t->field_count() == 5);
+    CHECK(t->field_name(0) == "i");
+    CHECK(t->field_type(0) == ADS_DOUBLE);
+    CHECK(t->field_type(1) == ADS_STRING);
+    CHECK(t->field_type(2) == ADS_LOGICAL);
+    CHECK(t->field_type(3) == ADS_DATE);
+    CHECK(t->field_type(4) == ADS_BINARY);
+    // length for NVARCHAR(40 bytes) → 20 chars
+    CHECK(t->field_length(1) == 20u);
+    CHECK(t->field_length(2) == 1u);  // LOGICAL
+    CHECK(t->field_length(3) == 8u);  // DATE → "YYYYMMDD"
 }
 
 #endif
