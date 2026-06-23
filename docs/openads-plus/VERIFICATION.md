@@ -8,7 +8,7 @@ comments. Every claim below is reproducible from the branch itself.
 
 ## TL;DR
 
-The inline automated review (Gemini Code Assist) on the OpenADS Plus backend
+The inline automated review on the OpenADS Plus backend
 PRs was generated against **earlier revisions** of each branch. Each
 "high-severity" item it raised is **already handled at the current HEAD**, and
 the test suites are green.
@@ -17,10 +17,8 @@ So a finding like *"null-deref on `pucField`"* or *"`SELECT *` is fragile"* does
 **not** describe the code you would be merging — it describes a snapshot that
 predates the polish commits on the branch.
 
-> Context: the consumer edition of Gemini Code Assist is being retired — new
-> installations blocked 2026-06-18, review activity ceasing 2026-07-17 — and the
-> comments on these PRs predate the current HEAD. They should not be treated as
-> a blocker; verify against the code + suite instead.
+> Context: the inline review comments on these PRs predate the current HEAD.
+> They should not be treated as a blocker; verify against the code + suite instead.
 
 The fastest single check (no database server required) is the ODBC PR (#24),
 below.
