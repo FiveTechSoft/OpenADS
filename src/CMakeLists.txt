@@ -74,6 +74,7 @@ if(OPENADS_WITH_MSSQL)
     endif()
     target_sources(openads_core PRIVATE
         sql_backend/tds_protocol.cpp
+        sql_backend/mssql_uri.cpp
     )
     target_compile_definitions(openads_core PUBLIC OPENADS_WITH_MSSQL=1)
 endif()
