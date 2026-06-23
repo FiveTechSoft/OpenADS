@@ -9,10 +9,12 @@
 
 #if defined(OPENADS_WITH_MSSQL)
 
+#include "sql_backend/tds_protocol.h"
 #include "sql_backend/tds_tls_channel.h"
 #include "util/result.h"
 
 #include <memory>
+#include <string>
 
 namespace openads::sql_backend {
 
@@ -36,6 +38,11 @@ public:
 
     void disconnect() noexcept;
     bool valid() const noexcept;
+
+    // Execute a SQL batch and return the decoded result set.
+    // The connection must be authenticated (valid() == true).
+    // SQL text is backend-generated; NEVER put secrets or credentials in sql.
+    util::Result<tds::QueryResult> query(const std::string& sql);
 
 private:
     struct Impl;

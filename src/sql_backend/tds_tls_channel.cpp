@@ -10,6 +10,10 @@
 #include <cstring>
 #include <utility>
 
+// Maximum total reassembled TDS payload: 64 MiB.  A hostile or misbehaving
+// server cannot grow this buffer beyond the cap; we fail fast instead.
+static constexpr std::size_t kMaxReassembly = 64u * 1024u * 1024u;
+
 #if defined(OPENADS_WITH_TLS)
 #include <mbedtls/ctr_drbg.h>
 #include <mbedtls/entropy.h>
@@ -449,6 +453,10 @@ TdsTlsChannel::recv_tds() {
         }
         if (!have_first) { first_type = type; have_first = true; }
         full.insert(full.end(), chunk.begin(), chunk.end());
+        if (full.size() > kMaxReassembly) {
+            return util::Error{openads::AE_REMOTE_ERROR, 0,
+                "TDS reply exceeds reassembly cap", ""};
+        }
         if (status & tds::TDS_STATUS_EOM) break;
     }
     return std::pair<std::uint8_t, std::vector<std::uint8_t>>{

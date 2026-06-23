@@ -6,6 +6,7 @@
 #include "sql_backend/mssql_uri.h"
 #include "sql_backend/tds_protocol.h"
 
+#include <string>
 #include <utility>
 
 namespace openads::sql_backend {
@@ -81,6 +82,44 @@ util::Result<MssqlConnection> MssqlConnection::open(const MssqlUri& uri) {
 
     conn.impl_->authenticated = true;
     return conn;
+}
+
+util::Result<tds::QueryResult> MssqlConnection::query(const std::string& sql) {
+    if (!impl_ || !impl_->channel.valid()) {
+        return util::Error{openads::AE_NO_CONNECTION, 0,
+            "MSSQL not connected", ""};
+    }
+    // Send SQL batch packet.
+    if (auto r = impl_->channel.send_tds(tds::TDS_PKT_SQLBATCH,
+                                         tds::build_sql_batch(sql)); !r) {
+        return r.error();
+    }
+    // Receive the server reply (may span multiple TDS packets, reassembled
+    // by recv_tds with the 64 MiB cap).
+    auto reply = impl_->channel.recv_tds();
+    if (!reply) return reply.error();
+    const auto& payload = reply.value().second;
+
+    tds::QueryResult qr = tds::parse_query_response(payload.data(),
+                                                    payload.size());
+    if (!qr.ok) {
+        if (!qr.unsupported_type.empty()) {
+            // COLMETADATA contained a TDS type token we cannot decode.
+            return util::Error{openads::AE_TYPE_MISMATCH, 0,
+                "unsupported MSSQL column type: " + qr.unsupported_type, ""};
+        }
+        // Server ERROR token: surface the server error number if non-zero;
+        // fall back to AE_PARSE_ERROR so callers get a distinct, non-zero code.
+        // NEVER embed the sql string in the error (could contain sensitive data).
+        std::int32_t code = qr.error_number
+                              ? static_cast<std::int32_t>(qr.error_number)
+                              : static_cast<std::int32_t>(openads::AE_PARSE_ERROR);
+        std::string msg = qr.message.empty()
+                              ? std::string("MSSQL query failed")
+                              : qr.message;
+        return util::Error{code, 0, msg, ""};
+    }
+    return qr;
 }
 
 } // namespace openads::sql_backend
