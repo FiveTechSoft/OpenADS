@@ -140,6 +140,7 @@ add_executable(openads_unit_tests
     unit/abi_dd_proc_view_test.cpp
     unit/abi_sql_system_tables_test.cpp
     unit/abi_sql_dd_sql_test.cpp
+    unit/abi_plus_mssql_connect_test.cpp
 )
 
 if(OPENADS_WITH_ODBC)

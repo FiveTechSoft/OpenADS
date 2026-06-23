@@ -67,6 +67,17 @@ if(OPENADS_WITH_ODBC)
     )
 endif()
 
+if(OPENADS_WITH_MSSQL)
+    # sql_common.cpp is shared with the ODBC backend; add it only once.
+    if(NOT OPENADS_WITH_ODBC)
+        target_sources(openads_core PRIVATE sql_backend/sql_common.cpp)
+    endif()
+    target_sources(openads_core PRIVATE
+        sql_backend/tds_protocol.cpp
+    )
+    target_compile_definitions(openads_core PUBLIC OPENADS_WITH_MSSQL=1)
+endif()
+
 if(WIN32)
     target_sources(openads_core PRIVATE
         platform/file_win32.cpp

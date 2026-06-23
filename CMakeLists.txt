@@ -74,6 +74,12 @@ option(OPENADS_WITH_HTTP "Enable embedded HTTP web console (Studio) in openads_s
 # external dependency is downloaded. OFF by default.
 option(OPENADS_WITH_ODBC "Enable ODBC-backed table driver (system ODBC driver manager)" OFF)
 
+# Native MS SQL Server / TDS 7.4 backend. Requires OPENADS_WITH_TLS=ON
+# (uses mbedtls for the TLS layer that SQL Server mandates on port 1433
+# since MSSQL 2022 / Azure SQL). No external library is downloaded beyond
+# mbedtls which OPENADS_WITH_TLS already fetches. OFF by default.
+option(OPENADS_WITH_MSSQL "Enable native MS SQL Server / TDS backend" OFF)
+
 # Pull in mbedtls FIRST so our strict /WX -Werror flags don't bleed
 # into the upstream sources (C4200 zero-sized arrays etc). Each
 # OpenADS target adds the strict flags target-locally below via
