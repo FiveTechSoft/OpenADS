@@ -179,4 +179,64 @@ TEST_CASE("build_sql_batch: ALL_HEADERS prefix + UCS-2LE text") {
     CHECK(m[24] == 'E'); CHECK(m[25] == 0x00);
 }
 
+
+// ---------------------------------------------------------------------------
+// Task 3: parse_colmetadata — column descriptor parsing (pure)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("parse_colmetadata: int + nvarchar columns") {
+    // 2 columns: [INTN maxlen 4] "id", [NVARCHAR maxlen 100 chars = 200 bytes, collation] "nome".
+    // Per [MS-TDS] §2.2.5.5:
+    //   INTN(0x26): 1-byte max-len (0x04)
+    //   NVARCHAR(0xE7): 2-byte LE max-len in BYTES (100 chars × 2 = 200 = 0xC8,0x00)
+    //                   + 5-byte COLLATION
+    //   ColName: B_VARCHAR = 1-byte char-count + UCS-2LE chars
+    std::vector<uint8_t> p = {
+        0x02,0x00,                              // Count = 2
+        // col 1: INTN(4) named "id"
+        0x00,0x00,0x00,0x00,                   // UserType (4 LE)
+        0x00,0x00,                              // Flags (2 LE)
+        0x26,                                   // type token = INTN
+        0x04,                                   // max-len = 4
+        0x02,                                   // ColName len = 2 chars
+        'i',0x00,'d',0x00,                      // "id" UCS-2LE
+        // col 2: NVARCHAR(100 chars) named "nome"
+        0x00,0x00,0x00,0x00,                   // UserType (4 LE)
+        0x00,0x00,                              // Flags (2 LE)
+        0xE7,                                   // type token = NVARCHAR
+        0xC8,0x00,                              // max-len = 200 bytes (100 chars × 2), LE
+        0x09,0x04,0xD0,0x00,0x34,              // 5-byte COLLATION (LCID/flags/sortid)
+        0x04,                                   // ColName len = 4 chars
+        'n',0x00,'o',0x00,'m',0x00,'e',0x00,   // "nome" UCS-2LE
+    };
+    std::vector<TdsColumn> cols;
+    size_t pos = 0;
+    REQUIRE(parse_colmetadata(p.data(), p.size(), pos, cols));
+    REQUIRE(cols.size() == 2);
+    CHECK(cols[0].name == "id");
+    CHECK(cols[0].type_token == 0x26);
+    CHECK(cols[0].length == 4);
+    CHECK(cols[1].name == "nome");
+    CHECK(cols[1].type_token == 0xE7);
+    CHECK(cols[1].length == 200);
+    CHECK(pos == p.size());
+}
+
+TEST_CASE("parse_colmetadata: unsupported type fails closed") {
+    // GUIDTYPE 0x24 is not in our supported set → must return false.
+    // Count=1, one column with type 0x24, followed by a length byte and name.
+    std::vector<uint8_t> p = {
+        0x01,0x00,                              // Count = 1
+        0x00,0x00,0x00,0x00,                   // UserType
+        0x00,0x00,                              // Flags
+        0x24,                                   // GUIDTYPE = unsupported
+        0x10,                                   // (would-be length byte, but we return false first)
+        0x01,                                   // ColName len = 1
+        'g',0x00                               // "g" UCS-2LE
+    };
+    std::vector<TdsColumn> cols;
+    size_t pos = 0;
+    CHECK(parse_colmetadata(p.data(), p.size(), pos, cols) == false);
+}
+
 #endif

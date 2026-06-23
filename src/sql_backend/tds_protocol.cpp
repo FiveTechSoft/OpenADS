@@ -463,5 +463,182 @@ std::vector<uint8_t> build_sql_batch(const std::string& utf8_sql) {
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// COLMETADATA ([MS-TDS] §2.2.7.4 / TYPE_INFO §2.2.5.4–5.5)
+// ---------------------------------------------------------------------------
+//
+// Token body layout (pos points at byte immediately after the 0x81 token):
+//   Count         (2, LE)     — number of columns; 0xFFFF = no metadata
+//   For each column:
+//     UserType    (4, LE)
+//     Flags       (2, LE)
+//     TYPE_INFO   — type-token (1) then 0..N extra bytes per §2.2.5.5
+//     ColName     — B_VARCHAR: len(1 byte char-count) + UCS-2LE chars
+//
+// TYPE_INFO byte counts by token (see §2.2.5.4–5.5):
+//   Fixed-length tokens (no extra bytes):
+//     INT1  0x30, INT2  0x34, INT4  0x38, INT8  0x7F, BIT   0x32,
+//     DATETIM4 0x3A, DATETIME 0x3D, MONEY4 0x7A, MONEY 0x3C,
+//     FLT4  0x3B, FLT8  0x3E
+//   *N variable (1-byte max-len):
+//     INTN 0x26, BITN 0x68, MONEYN 0x6E, FLTN 0x6D, DATETIMN 0x6F
+//   Special:
+//     DATEN 0x28:      no extra bytes (date type, no len/scale)
+//     DATETIME2N 0x2A: 1-byte scale
+//   Decimal/Numeric (3 bytes: max-len, precision, scale):
+//     DECIMALN 0x6A, NUMERICN 0x6C
+//   Char/Nchar/Varchar/Nvarchar (2-byte LE max-len + 5-byte COLLATION):
+//     BIGCHAR 0xAF, BIGVARCHR 0xA7, NCHAR 0xEF, NVARCHAR 0xE7
+//   All other tokens → unsupported, return false.
+
+/// Helper: read a single byte from [p+pos] with bounds check.
+static bool read_u8(const uint8_t* p, size_t n, size_t& pos, uint8_t& out) {
+    if (pos >= n) return false;
+    out = p[pos++];
+    return true;
+}
+
+/// Helper: read 2-byte LE uint16 with bounds check.
+static bool read_u16le(const uint8_t* p, size_t n, size_t& pos, uint16_t& out) {
+    if (pos + 2 > n) return false;
+    out = static_cast<uint16_t>(p[pos] | (uint16_t(p[pos+1]) << 8));
+    pos += 2;
+    return true;
+}
+
+/// Helper: skip |nbytes| bytes with bounds check.
+static bool skip_bytes(size_t n, size_t& pos, size_t nbytes) {
+    if (pos + nbytes > n) return false;
+    pos += nbytes;
+    return true;
+}
+
+/// Consume the TYPE_INFO bytes for |type_token|, filling |col|.
+/// Returns false on unsupported token or short read.
+static bool read_type_info(const uint8_t* p, size_t n, size_t& pos,
+                           uint8_t type_token, TdsColumn& col) {
+    col.type_token = type_token;
+    switch (type_token) {
+        // ---- Fixed-length: no extra TYPE_INFO bytes ----
+        case 0x30:  // INT1
+        case 0x34:  // INT2
+        case 0x38:  // INT4
+        case 0x7F:  // INT8
+        case 0x32:  // BIT
+        case 0x3A:  // DATETIM4
+        case 0x3D:  // DATETIME
+        case 0x7A:  // MONEY4
+        case 0x3C:  // MONEY
+        case 0x3B:  // FLT4
+        case 0x3E:  // FLT8
+            // No extra bytes; length is implicit (could be set per type if needed).
+            return true;
+
+        // ---- *N variable: 1-byte max-len ----
+        case 0x26:  // INTN
+        case 0x68:  // BITN
+        case 0x6E:  // MONEYN
+        case 0x6D:  // FLTN
+        case 0x6F:  // DATETIMN
+        {
+            uint8_t maxlen = 0;
+            if (!read_u8(p, n, pos, maxlen)) return false;
+            col.length = maxlen;
+            return true;
+        }
+
+        // ---- DATEN: no extra bytes ----
+        case 0x28:  // DATEN (date only, no length/scale byte per spec)
+            return true;
+
+        // ---- DATETIME2N: 1-byte scale ----
+        case 0x2A:  // DATETIME2N
+        {
+            uint8_t scale = 0;
+            if (!read_u8(p, n, pos, scale)) return false;
+            col.scale = scale;
+            return true;
+        }
+
+        // ---- DECIMALN / NUMERICN: max-len(1) + precision(1) + scale(1) ----
+        case 0x6A:  // DECIMALN
+        case 0x6C:  // NUMERICN
+        {
+            uint8_t maxlen = 0, prec = 0, scale = 0;
+            if (!read_u8(p, n, pos, maxlen)) return false;
+            if (!read_u8(p, n, pos, prec))   return false;
+            if (!read_u8(p, n, pos, scale))  return false;
+            col.length    = maxlen;
+            col.precision = prec;
+            col.scale     = scale;
+            return true;
+        }
+
+        // ---- BIGCHAR/BIGVARCHR/NCHAR/NVARCHAR: max-len(2 LE) + 5-byte COLLATION ----
+        case 0xAF:  // BIGCHAR
+        case 0xA7:  // BIGVARCHR
+        case 0xEF:  // NCHAR
+        case 0xE7:  // NVARCHAR
+        {
+            uint16_t maxlen = 0;
+            if (!read_u16le(p, n, pos, maxlen)) return false;
+            col.length = maxlen;
+            // COLLATION: LCID(3) + CollationFlags(1) + SortId(1) = 5 bytes.
+            // The codepage is encoded inside the collation; for now, skip and
+            // store the raw codepage field from collation bytes [3..4] (sortid area).
+            // Sufficient for downstream row-reading which only needs the length.
+            if (pos + 5 > n) return false;
+            // Bytes [0..2] = LCID (3 bytes), [3] = CollationFlags, [4] = SortId.
+            // codepage lives in a lookup table; store SortId as a hint only.
+            col.codepage = p[pos + 4];  // SortId byte (informational)
+            pos += 5;
+            return true;
+        }
+
+        default:
+            // Unsupported / unknown type token → fail-closed.
+            return false;
+    }
+}
+
+bool parse_colmetadata(const uint8_t* p, size_t n, size_t& pos,
+                       std::vector<TdsColumn>& cols) {
+    cols.clear();
+
+    // Count (2, LE): number of columns. 0xFFFF means "no metadata" (not an error
+    // in some contexts, but we simply produce 0 columns and succeed).
+    uint16_t count = 0;
+    if (!read_u16le(p, n, pos, count)) return false;
+    if (count == 0xFFFFu) return true;  // no-metadata marker
+
+    cols.reserve(count);
+    for (uint16_t ci = 0; ci < count; ++ci) {
+        TdsColumn col;
+
+        // UserType (4, LE) — ignored but must be consumed.
+        if (!skip_bytes(n, pos, 4)) return false;
+
+        // Flags (2, LE) — ignored but must be consumed.
+        if (!skip_bytes(n, pos, 2)) return false;
+
+        // TYPE_INFO: type token (1 byte) then type-specific bytes.
+        uint8_t type_token = 0;
+        if (!read_u8(p, n, pos, type_token)) return false;
+        if (!read_type_info(p, n, pos, type_token, col)) return false;
+
+        // ColName: B_VARCHAR — 1-byte char-count then UCS-2LE chars.
+        uint8_t name_len = 0;
+        if (!read_u8(p, n, pos, name_len)) return false;
+        // Each char is 2 bytes (UCS-2LE).
+        if (pos + static_cast<size_t>(name_len) * 2 > n) return false;
+        col.name = ucs2le_to_utf8(p + pos, name_len);
+        pos += static_cast<size_t>(name_len) * 2;
+
+        cols.push_back(std::move(col));
+    }
+
+    return true;
+}
+
 }  // namespace openads::sql_backend::tds
 #endif  // defined(OPENADS_WITH_MSSQL)

@@ -170,6 +170,29 @@ bool parse_prelogin_response(const uint8_t* payload, size_t n,
 /// Feed the result body to send_tds with packet type TDS_PKT_SQLBATCH.
 std::vector<uint8_t> build_sql_batch(const std::string& utf8_sql);
 
+// ---------------------------------------------------------------------------
+// COLMETADATA ([MS-TDS] §2.2.7.4 / TYPE_INFO §2.2.5.4–5.5)
+// ---------------------------------------------------------------------------
+
+/// Descriptor for one column in a COLMETADATA token stream.
+/// Populated by parse_colmetadata().
+struct TdsColumn {
+    std::string name;            ///< Column name (UTF-8; UCS-2LE decoded on parse)
+    uint8_t     type_token = 0;  ///< TDS type token byte (e.g. 0x26 INTN, 0xE7 NVARCHAR)
+    uint32_t    length     = 0;  ///< Max length in bytes (0 for fixed-length types)
+    uint8_t     precision  = 0;  ///< Precision (DECIMALN/NUMERICN only)
+    uint8_t     scale      = 0;  ///< Scale (DECIMALN/NUMERICN, DATETIME2N)
+    uint16_t    codepage   = 0;  ///< Collation codepage (BIGCHAR/BIGVARCHR/NCHAR/NVARCHAR)
+};
+
+/// Parse a COLMETADATA token body per [MS-TDS] §2.2.7.4.
+/// |p| and |n| describe the raw byte buffer.
+/// |pos| must point at the byte immediately AFTER the 0x81 token id on entry;
+/// on success it is advanced past the entire COLMETADATA body and |cols| is filled.
+/// Returns false (fail-closed) on any short read or unsupported type token.
+bool parse_colmetadata(const uint8_t* p, size_t n, size_t& pos,
+                       std::vector<TdsColumn>& cols);
+
 #endif  // defined(OPENADS_WITH_MSSQL)
 
 }  // namespace openads::sql_backend::tds
