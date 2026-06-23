@@ -395,5 +395,25 @@ bool parse_prelogin_response(const uint8_t* payload, size_t n,
     return false;
 }
 
+// ---------------------------------------------------------------------------
+// SQL_BATCH ([MS-TDS] §2.2.6.7)
+// ---------------------------------------------------------------------------
+
+std::vector<uint8_t> build_sql_batch(const std::string& utf8_sql) {
+    std::vector<uint8_t> out;
+    auto put_u32le = [&out](uint32_t v) {
+        out.push_back(uint8_t(v & 0xFF));        out.push_back(uint8_t((v >> 8) & 0xFF));
+        out.push_back(uint8_t((v >> 16) & 0xFF)); out.push_back(uint8_t((v >> 24) & 0xFF));
+    };
+    // ALL_HEADERS (§2.2.5): TotalLength then one Transaction Descriptor header.
+    put_u32le(4 + 18);          // TotalLength = its own 4 bytes + the 18-byte header
+    put_u32le(18);              // HeaderLength
+    out.push_back(0x02); out.push_back(0x00);    // HeaderType = 2 (txn descriptor)
+    for (int i = 0; i < 8; ++i) out.push_back(0);// TransactionDescriptor = 0
+    put_u32le(1);               // OutstandingRequestCount = 1
+    push_ucs2le(out, utf8_sql); // SQL text, UCS-2LE
+    return out;
+}
+
 }  // namespace openads::sql_backend::tds
 #endif  // defined(OPENADS_WITH_MSSQL)

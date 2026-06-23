@@ -121,6 +121,19 @@ std::vector<uint8_t> build_prelogin();
 bool parse_prelogin_response(const uint8_t* payload, size_t n,
                              PreloginEncryption& enc);
 
+// ---------------------------------------------------------------------------
+// SQL_BATCH ([MS-TDS] §2.2.6.7)
+// ---------------------------------------------------------------------------
+
+/// Build a SQL_BATCH message body (bytes AFTER the 8-byte TDS header).
+/// Layout per [MS-TDS] §2.2.6.7: an ALL_HEADERS stream (§2.2.5) —
+///   TotalLength(4 LE) then one Transaction Descriptor header:
+///   { HeaderLength(4 LE)=18, HeaderType(2 LE)=0x0002,
+///     TransactionDescriptor(8)=0, OutstandingRequestCount(4 LE)=1 }
+/// — followed by the SQL text as UCS-2LE.
+/// Feed the result body to send_tds with packet type TDS_PKT_SQLBATCH.
+std::vector<uint8_t> build_sql_batch(const std::string& utf8_sql);
+
 #endif  // defined(OPENADS_WITH_MSSQL)
 
 }  // namespace openads::sql_backend::tds

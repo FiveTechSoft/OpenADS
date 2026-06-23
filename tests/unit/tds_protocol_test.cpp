@@ -133,4 +133,22 @@ TEST_CASE("parse_login_response: ERROR token = not authenticated with number") {
     CHECK(r.error_number == 18456);
 }
 
+// ---------------------------------------------------------------------------
+// Task 1: SQL_BATCH builder (pure)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("build_sql_batch: ALL_HEADERS prefix + UCS-2LE text") {
+    auto m = build_sql_batch("SELECT 1");
+    // ALL_HEADERS: TotalLength(4) = 4 + 18 = 22 (0x16); then one 18-byte header.
+    REQUIRE(m.size() == 22 + 8 * 2);            // 22-byte ALL_HEADERS + "SELECT 1" UCS-2LE
+    CHECK(m[0] == 0x16); CHECK(m[1] == 0x00); CHECK(m[2] == 0x00); CHECK(m[3] == 0x00);
+    CHECK(m[4] == 0x12); CHECK(m[5] == 0x00); CHECK(m[6] == 0x00); CHECK(m[7] == 0x00); // HeaderLength=18
+    CHECK(m[8] == 0x02); CHECK(m[9] == 0x00);   // HeaderType = 0x0002 (txn descriptor)
+    // OutstandingRequestCount = 1 at bytes 18..21
+    CHECK(m[18] == 0x01); CHECK(m[19] == 0x00); CHECK(m[20] == 0x00); CHECK(m[21] == 0x00);
+    // SQL text begins at byte 22: 'S' 0x00 'E' 0x00 ...
+    CHECK(m[22] == 'S'); CHECK(m[23] == 0x00);
+    CHECK(m[24] == 'E'); CHECK(m[25] == 0x00);
+}
+
 #endif
