@@ -3,7 +3,7 @@
 #include "sql_backend/mssql_uri.h"
 
 #include <cctype>
-#include <stdexcept>
+#include <cstdlib>
 
 namespace openads::sql_backend {
 
@@ -11,7 +11,7 @@ namespace {
 
 // Percent-decode a URI component (e.g. user or password).
 // Unknown or malformed escape sequences are passed through as-is.
-static std::string percent_decode(const std::string& src) {
+std::string percent_decode(const std::string& src) {
     std::string out;
     out.reserve(src.size());
     for (std::size_t i = 0; i < src.size(); ++i) {

@@ -42,6 +42,11 @@
 #include "sql_backend/odbc_uri.h"
 #endif
 
+#if defined(OPENADS_WITH_MSSQL)
+#include "sql_backend/mssql_connection.h"
+#include "sql_backend/mssql_uri.h"
+#endif
+
 #include <algorithm>
 #include <chrono>
 #include <functional>
@@ -343,6 +348,17 @@ std::size_t odbc_field_index(openads::sql_backend::OdbcTable* st,
     return std::numeric_limits<std::size_t>::max();
 }
 #endif // OPENADS_WITH_ODBC
+
+#if defined(OPENADS_WITH_MSSQL)
+// Keeps native MSSQL connections alive while a handle references them.
+std::unordered_map<Handle,
+    std::unique_ptr<openads::sql_backend::MssqlConnection>>&
+mssql_conns_map() {
+    static std::unordered_map<Handle,
+        std::unique_ptr<openads::sql_backend::MssqlConnection>> m;
+    return m;
+}
+#endif // OPENADS_WITH_MSSQL
 
 // Latch set by AdsSeekLast. AdsSeek consults this to suppress its
 // empty-key always-found quirk when called as part of rddads'
@@ -915,7 +931,26 @@ UNSIGNED32 AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 /*usServerType*/,
     }
 #endif
 #if defined(OPENADS_WITH_MSSQL)
-    // (filled in Task 7)
+    {
+        openads::sql_backend::MssqlUri muri;
+        if (openads::sql_backend::parse_mssql_uri(path, muri)) {
+            auto opened = openads::sql_backend::MssqlConnection::open(muri);
+            // On auth failure the Error carries the SERVER's error number and
+            // message only — never the password or connection string.
+            if (!opened) return fail(opened.error());
+            auto holder =
+                std::make_unique<openads::sql_backend::MssqlConnection>(
+                    std::move(opened).value());
+            openads::sql_backend::MssqlConnection* raw = holder.get();
+            auto& s = state();
+            std::lock_guard<std::recursive_mutex> lk(s.mu);
+            Handle h = s.registry.register_object(
+                HandleKind::MssqlConnection, raw);
+            mssql_conns_map().emplace(h, std::move(holder));
+            *phConnect = h;
+            return ok();
+        }
+    }
 #else
     {
         static constexpr const char* kMssqlPrefixes[] = {
@@ -986,6 +1021,16 @@ UNSIGNED32 AdsDisconnect(ADSHANDLE hConnect) {
             }
             sc->disconnect();
             odbc_conns_map().erase(hConnect);
+            s_local.registry.release(hConnect);
+            return ok();
+        }
+#endif
+#if defined(OPENADS_WITH_MSSQL)
+        if (auto* mc = s_local.registry.lookup<
+                openads::sql_backend::MssqlConnection>(
+                hConnect, HandleKind::MssqlConnection)) {
+            mc->disconnect();
+            mssql_conns_map().erase(hConnect);
             s_local.registry.release(hConnect);
             return ok();
         }

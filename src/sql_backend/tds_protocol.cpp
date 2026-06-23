@@ -79,8 +79,9 @@ std::vector<uint8_t> obfuscate_password(const std::string& pw) {
 // Total fixed part = 36 + 58 = 94 bytes.
 // Variable data (UCS-2LE strings) starts at LOGIN7 offset 94.
 // ibXxx offsets in the table are relative to the START of the LOGIN7 structure.
-// cchXxx is the number of UCS-2LE CHARACTER units (not bytes).
-// Exception: cchPassword is the number of bytes of obfuscated data.
+// cchXxx is the number of UCS-2LE CHARACTER units (not bytes) — this includes
+// cchPassword (a live SQL Server rejects the login with error 18456 if the
+// password length is sent as the obfuscated byte count instead).
 
 static void push_le16(std::vector<uint8_t>& out, uint16_t v) {
     out.push_back(static_cast<uint8_t>(v & 0xFF));
@@ -119,12 +120,15 @@ std::vector<uint8_t> build_login7(const Login7Params& p) {
         push_ucs2le(var, s);
         return {offset, cch};
     };
-    // Append obfuscated password bytes directly (special: offset+bytecount).
+    // Append obfuscated password bytes.  Like every other OffsetLength entry,
+    // cchPassword is a CHARACTER count (UCS-2 units), NOT the byte count — the
+    // obfuscated blob is 2 bytes per character.  (A live SQL Server rejects the
+    // login with error 18456 if this is set to the byte count.)
     auto append_pw = [&]() -> std::pair<uint16_t, uint16_t> {
         uint16_t offset = static_cast<uint16_t>(VARDATA_OFFSET + var.size());
-        uint16_t cb     = static_cast<uint16_t>(pw_obs.size());
+        uint16_t cch    = static_cast<uint16_t>(p.password.size());  // char count
         var.insert(var.end(), pw_obs.begin(), pw_obs.end());
-        return {offset, cb};
+        return {offset, cch};
     };
 
     auto [ibHostName,   cchHostName]   = append_str(p.hostname);
@@ -276,6 +280,7 @@ LoginResult parse_login_response(const uint8_t* payload, size_t n) {
         if (pos + 2 > n) break;
         uint16_t len = static_cast<uint16_t>(payload[pos] | (payload[pos+1] << 8));
         pos += 2;
+        if (len == 0) break;  // safe-fail: a zero length cannot advance us
         if (pos + len > n) break;
         pos += len;
     }

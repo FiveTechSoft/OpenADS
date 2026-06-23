@@ -111,3 +111,4 @@ rddtst_ads.log
 # Borland toolchain); regenerate with dist/import-libs/gen.ps1.
 !dist/import-libs/
 !dist/import-libs/**
+*.local.ps1
