@@ -930,7 +930,7 @@ std::string decode_cell(const TdsColumn& col, const uint8_t* data, size_t len) {
         case 0xE7:  // NVARCHAR
             return ucs2le_to_utf8(data, static_cast<uint16_t>(len / 2));
 
-        // ---- DATEN: 3-byte LE day count since 0001-01-01 → YYYY-MM-DD ----
+        // ---- DATEN: 3-byte LE day count since 0001-01-01 → YYYYMMDD (ADS native) ----
         case 0x28:  // DATEN
         {
             if (len < 3) return "";
@@ -941,13 +941,14 @@ std::string decode_cell(const TdsColumn& col, const uint8_t* data, size_t len) {
             int32_t year; uint32_t month, day;
             civil_from_days(days_1970, year, month, day);
             std::string r;
-            append_padded(r, year, 4); r += '-';
-            append_upadded(r, month, 2); r += '-';
+            append_padded(r, year, 4);
+            append_upadded(r, month, 2);
             append_upadded(r, day, 2);
             return r;
         }
 
         // ---- DATETIM4 (smalldatetime): days(2 LE)+minutes(2 LE) since 1900-01-01 ----
+        // Output: YYYYMMDDHHMMSS (ADS native convention, matches DbfFieldType::DateTime length=14)
         case 0x3A:  // DATETIM4
         {
             if (len < 4) return "";
@@ -959,16 +960,17 @@ std::string decode_cell(const TdsColumn& col, const uint8_t* data, size_t len) {
             int32_t year; uint32_t month, day;
             civil_from_days(days_1970, year, month, day);
             std::string r;
-            append_padded(r, year, 4); r += '-';
-            append_upadded(r, month, 2); r += '-';
-            append_upadded(r, day, 2); r += ' ';
-            append_upadded(r, hh, 2); r += ':';
-            append_upadded(r, mm, 2); r += ':';
+            append_padded(r, year, 4);
+            append_upadded(r, month, 2);
+            append_upadded(r, day, 2);
+            append_upadded(r, hh, 2);
+            append_upadded(r, mm, 2);
             r += "00";
             return r;
         }
 
         // ---- DATETIME: days(4 LE signed)+ticks(4 LE, 1/300 s) since 1900-01-01 ----
+        // Output: YYYYMMDDHHMMSS (ADS native convention, matches DbfFieldType::DateTime length=14)
         case 0x3D:  // DATETIME
         {
             if (len < 8) return "";
@@ -983,11 +985,11 @@ std::string decode_cell(const TdsColumn& col, const uint8_t* data, size_t len) {
             int32_t year; uint32_t month, day;
             civil_from_days(days_1970, year, month, day);
             std::string r;
-            append_padded(r, year, 4); r += '-';
-            append_upadded(r, month, 2); r += '-';
-            append_upadded(r, day, 2); r += ' ';
-            append_upadded(r, hh, 2); r += ':';
-            append_upadded(r, mm, 2); r += ':';
+            append_padded(r, year, 4);
+            append_upadded(r, month, 2);
+            append_upadded(r, day, 2);
+            append_upadded(r, hh, 2);
+            append_upadded(r, mm, 2);
             append_upadded(r, ss, 2);
             return r;
         }
@@ -995,6 +997,8 @@ std::string decode_cell(const TdsColumn& col, const uint8_t* data, size_t len) {
         // ---- DATETIME2N: time(3-5 bytes per scale)+date(3 bytes) since 0001-01-01 ----
         // Time part byte count per scale:
         //   scale 0-2 → 3 bytes, scale 3-4 → 4 bytes, scale 5-7 → 5 bytes
+        // Output: YYYYMMDDHHMMSS (ADS native; fractional seconds dropped to match the
+        // 14-char ADS_DATE convention — native path has no sub-second component).
         case 0x2A:  // DATETIME2N
         {
             uint8_t sc = col.scale;
@@ -1008,29 +1012,25 @@ std::string decode_cell(const TdsColumn& col, const uint8_t* data, size_t len) {
                                      | (static_cast<uint32_t>(dp[1]) << 8)
                                      | (static_cast<uint32_t>(dp[2]) << 16);
             int32_t days_1970 = static_cast<int32_t>(days_since_0001) - EPOCH_OFFSET_0001;
-            // Convert time_ticks (units of 10^-scale seconds) to H:M:S + fraction.
+            // Convert time_ticks (units of 10^-scale seconds) to H:M:S.
             // ticks_per_second = 10^scale.
             uint64_t pow10 = 1;
             for (int i = 0; i < sc; ++i) pow10 *= 10;
             uint64_t total_sec = (pow10 > 0) ? (time_ticks / pow10) : time_ticks;
-            uint32_t frac_units = (pow10 > 0) ? static_cast<uint32_t>(time_ticks % pow10) : 0;
             uint32_t hh = static_cast<uint32_t>(total_sec / 3600);
             uint32_t mm = static_cast<uint32_t>((total_sec % 3600) / 60);
             uint32_t ss = static_cast<uint32_t>(total_sec % 60);
             int32_t  year; uint32_t month, day;
             civil_from_days(days_1970, year, month, day);
             std::string r;
-            append_padded(r, year, 4); r += '-';
-            append_upadded(r, month, 2); r += '-';
-            append_upadded(r, day, 2); r += ' ';
-            append_upadded(r, hh, 2); r += ':';
-            append_upadded(r, mm, 2); r += ':';
+            append_padded(r, year, 4);
+            append_upadded(r, month, 2);
+            append_upadded(r, day, 2);
+            append_upadded(r, hh, 2);
+            append_upadded(r, mm, 2);
             append_upadded(r, ss, 2);
-            // Append fractional part only if scale > 0.
-            if (sc > 0 && frac_units > 0) {
-                r += '.';
-                append_upadded(r, frac_units, static_cast<int>(sc));
-            }
+            // Fractional seconds are dropped: the ADS native DateTime convention
+            // is YYYYMMDDHHMMSS (14 chars, no sub-second component).
             return r;
         }
 

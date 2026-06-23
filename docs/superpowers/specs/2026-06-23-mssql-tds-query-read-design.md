@@ -65,16 +65,20 @@ Decoded to a printable string (the ODBC/Firebird mold returns string cells):
 | float / real | FLTNTYPE (`0x6D`), FLT4 (`0x3B`), FLT8 (`0x3E`) | shortest round-trip text |
 | char / varchar | BIGCHARTYPE (`0xAF`), BIGVARCHRTYPE (`0xA7`) | bytes → string (collation code page treated as Latin1/UTF-8 passthrough for v1) |
 | nchar / nvarchar | NCHARTYPE (`0xEF`), NVARCHARTYPE (`0xE7`) | UCS-2LE → UTF-8 |
-| date | DATENTYPE (`0x28`) | `YYYY-MM-DD` |
-| smalldatetime / datetime | DATETIMNTYPE (`0x6F`), DATETIM4 (`0x3A`), DATETIME (`0x3D`) | `YYYY-MM-DD HH:MM:SS` |
-| datetime2 | DATETIME2NTYPE (`0x2A`) | `YYYY-MM-DD HH:MM:SS[.fff]` |
+| date | DATENTYPE (`0x28`) | `YYYYMMDD` (ADS native, 8 chars, no separators) |
+| smalldatetime / datetime | DATETIMNTYPE (`0x6F`), DATETIM4 (`0x3A`), DATETIME (`0x3D`) | `YYYYMMDDHHMMSS` (ADS native, 14 chars, no separators) |
+| datetime2 | DATETIME2NTYPE (`0x2A`) | `YYYYMMDDHHMMSS` (ADS native, 14 chars; fractional seconds dropped to match native ADS_DATE convention) |
 | (any) NULL | length sentinel / NBCROW null bitmap | `is_null = true`, empty value |
 
 Any column whose type token is outside this set makes `AdsOpenTable` fail with a
 clear `AE_*` error ("unsupported MSSQL column type 0xNN") rather than returning
 garbage. Date/time conversions use the documented TDS epochs (datetime: days
 since 1900-01-01 + 1/300 s ticks; date: days since 0001-01-01; datetime2:
-date part + time scaled by 10^-scale seconds).
+date part + time scaled by 10^-scale seconds). Date and datetime values follow
+the OpenADS native ADS_DATE convention (no separators: `YYYYMMDD` / `YYYYMMDDHHMMSS`)
+for legacy-client round-trip compatibility — this matches what `CTOD()`/`STOD()`
+and the DBF/ADT path emit, confirmed by `AdsGetFieldLength` returning 8 and 14
+respectively for those types.
 
 ## Architecture
 

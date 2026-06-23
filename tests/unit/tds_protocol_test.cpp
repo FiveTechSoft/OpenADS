@@ -260,8 +260,21 @@ TEST_CASE("decode decimal scale and datetime epoch") {
     uint8_t dec[] = {0x01, 0x39,0x30,0x00,0x00};           // 1=positive, 12345 LE
     CHECK(decode_cell(col(0x6C, /*scale*/2), dec, 5) == "123.45");
     // DATETIME = 1900-01-02 00:00:00 -> days=1, ticks=0.
+    // Native ADS convention: YYYYMMDDHHMMSS (14 chars, no separators).
     uint8_t dt[] = {0x01,0x00,0x00,0x00, 0x00,0x00,0x00,0x00};
-    CHECK(decode_cell(col(0x3D), dt, 8) == "1900-01-02 00:00:00");
+    CHECK(decode_cell(col(0x3D), dt, 8) == "19000102000000");
+}
+
+TEST_CASE("decode DATEN: known day-count → YYYYMMDD (ADS native)") {
+    // DATEN stores days since 0001-01-01 as 3-byte LE.
+    // 2020-01-15: days_from_1970 = 18276, days_since_0001 = 18276 + 719162 = 737438 (0x0B409E).
+    // LE3 bytes: 0x9E, 0x40, 0x0B.
+    uint8_t d[] = {0x9E, 0x40, 0x0B};   // 737438 LE3 = 0x0B409E
+    CHECK(decode_cell(col(0x28), d, 3) == "20200115");
+    // 1900-01-01: days_from_1970 = -25567, days_since_0001 = -25567 + 719162 = 693595 (0x0A955B).
+    // LE3 bytes: 0x5B, 0x95, 0x0A.
+    uint8_t d1900[] = {0x5B, 0x95, 0x0A};   // 693595 LE3 = 0x0A955B
+    CHECK(decode_cell(col(0x28), d1900, 3) == "19000101");
 }
 
 // ---------------------------------------------------------------------------

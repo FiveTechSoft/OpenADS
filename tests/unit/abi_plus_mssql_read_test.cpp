@@ -121,8 +121,8 @@ TEST_CASE("ABI: mssql read navigates a seeded CLIENTES table") {
     // Check saldo for row 1: DECIMAL(10,2) → ADS_DOUBLE → string "100.50"
     CHECK(field_str(hTable, "saldo") == "100.50");
 
-    // Check nascimento for row 1: DATE → ADS_DATE → "YYYY-MM-DD" (from DATEN decode)
-    CHECK(field_str(hTable, "nascimento") == "2020-01-15");
+    // Check nascimento for row 1: DATE → ADS_DATE → "YYYYMMDD" (ADS native, no separators)
+    CHECK(field_str(hTable, "nascimento") == "20200115");
 
     REQUIRE(AdsSkip(hTable, 1) == 0);  // → row 2: Bruno
 
