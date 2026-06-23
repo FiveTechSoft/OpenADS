@@ -28,4 +28,35 @@ TEST_CASE("tds password obfuscation: swap nibbles then XOR 0xA5 over UCS-2LE") {
     CHECK(o[2] == 0x83);  CHECK(o[3] == 0xA5);
     CHECK(o[4] == 0x93);  CHECK(o[5] == 0xA5);
 }
+
+TEST_CASE("prelogin request is a valid 0x12 message advertising encryption") {
+    auto m = build_prelogin();
+    REQUIRE(m.size() > 8);
+    CHECK(m[0] == 0x12);                 // PRELOGIN packet type
+    CHECK((m[1] & 0x01) == 0x01);        // EOM
+    // The option table starts at byte 8; first option token is VERSION (0x00),
+    // and a terminator token (0xFF) ends the table. Assert the table is
+    // terminated and an ENCRYPTION option (token 0x01) is present.
+    bool has_enc = false, terminated = false;
+    for (size_t i = 8; i + 1 < m.size(); ++i) {
+        if (m[i] == 0xFF) { terminated = true; break; }
+        if (m[i] == 0x01) has_enc = true;
+    }
+    CHECK(has_enc);
+    CHECK(terminated);
+}
+
+TEST_CASE("parse_prelogin_response reads the ENCRYPTION option") {
+    // Minimal server PRELOGIN response payload: ENCRYPTION option (token 0x01)
+    // at offset, value ENCRYPT_ON(0x01), terminated by 0xFF.
+    // Option table entry: token(1) offset(2,BE) length(2,BE); then 0xFF; then data.
+    std::vector<uint8_t> p = {
+        0x01, 0x00, 0x06, 0x00, 0x01,   // ENCRYPTION @ offset 6, len 1
+        0xFF,                           // terminator
+        0x01                            // data: ENCRYPT_ON
+    };
+    PreloginEncryption enc{};
+    REQUIRE(parse_prelogin_response(p.data(), p.size(), enc));
+    CHECK(enc == PreloginEncryption::On);
+}
 #endif

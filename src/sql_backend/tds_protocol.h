@@ -55,6 +55,33 @@ bool read_header(const uint8_t* buf, size_t n, TdsPacketHeader& h);
 // ---------------------------------------------------------------------------
 std::vector<uint8_t> obfuscate_password(const std::string& utf8_password);
 
+// ---------------------------------------------------------------------------
+// PRELOGIN ([MS-TDS] §2.2.6.5)
+// ---------------------------------------------------------------------------
+
+/// Encryption negotiation values for the PRELOGIN / PRELOGIN_RESPONSE exchange.
+enum class PreloginEncryption : uint8_t {
+    Off    = 0,
+    On     = 1,
+    NotSup = 2,
+    Req    = 3,
+};
+
+/// Build a complete PRELOGIN packet (type=0x12, EOM) advertising
+/// VERSION and ENCRYPTION=ENCRYPT_ON per [MS-TDS] §2.2.6.5.
+/// Option table layout:
+///   { token(1), offset(2 BE), length(2 BE) } per entry, terminated by 0xFF.
+/// Offsets are measured from the start of the message body (byte right after
+/// the 8-byte packet header).
+std::vector<uint8_t> build_prelogin();
+
+/// Parse a server PRELOGIN response payload (bytes AFTER the 8-byte header).
+/// Walks the option table, finds token 0x01 (ENCRYPTION), reads its 1-byte
+/// value into |enc|.  Returns false if the option is absent or the payload
+/// is malformed.
+bool parse_prelogin_response(const uint8_t* payload, size_t n,
+                             PreloginEncryption& enc);
+
 #endif  // defined(OPENADS_WITH_MSSQL)
 
 }  // namespace openads::sql_backend::tds
