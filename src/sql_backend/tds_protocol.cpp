@@ -1,5 +1,8 @@
 #include "sql_backend/tds_protocol.h"
 #if defined(OPENADS_WITH_MSSQL)
+#include <algorithm>
+#include <cstdio>
+#include <cstring>
 namespace openads::sql_backend::tds {
 
 void write_header(std::vector<uint8_t>& out, uint8_t type, uint8_t status,
@@ -638,6 +641,367 @@ bool parse_colmetadata(const uint8_t* p, size_t n, size_t& pos,
     }
 
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// decode_cell ([MS-TDS] §2.2.5.5)
+// ---------------------------------------------------------------------------
+//
+// All integer reads are little-endian unless noted.
+// Type token constants (same values as in parse_colmetadata):
+//   INT1  0x30   INT2  0x34   INT4  0x38   INT8  0x7F
+//   INTN  0x26   BIT   0x32   BITN  0x68
+//   DECIMALN 0x6A  NUMERICN 0x6C
+//   MONEY  0x3C   MONEY4  0x7A   MONEYN  0x6E
+//   FLT4   0x3B   FLT8    0x3E   FLTN    0x6D
+//   BIGCHAR 0xAF  BIGVARCHR 0xA7
+//   NCHAR   0xEF  NVARCHAR  0xE7
+//   DATEN   0x28  DATETIM4  0x3A  DATETIME 0x3D  DATETIME2N 0x2A
+
+// civil_from_days: Howard Hinnant's proleptic Gregorian algorithm.
+// |z| = days since 1970-01-01 (may be negative for dates before 1970).
+// Returns (year, month, day) in the proleptic Gregorian calendar.
+static void civil_from_days(int32_t z,
+                             int32_t& year, uint32_t& month, uint32_t& day) {
+    // Hinnant's algorithm (shifted epoch to March 1, year 0):
+    z += 719468;                           // shift to March 1, 0000
+    int32_t era  = (z >= 0 ? z : z - 146096) / 146097;
+    uint32_t doe = static_cast<uint32_t>(z - era * 146097);            // [0, 146096]
+    uint32_t yoe = (doe - doe/1460 + doe/36524 - doe/146096) / 365;   // [0, 399]
+    int32_t  y   = static_cast<int32_t>(yoe) + era * 400;
+    uint32_t doy = doe - (365*yoe + yoe/4 - yoe/100);                 // [0, 365]
+    uint32_t mp  = (5*doy + 2) / 153;                                  // [0, 11]
+    day   = doy  - (153*mp + 2)/5 + 1;                                // [1, 31]
+    month = mp   < 10u ? mp + 3u : mp - 9u;                           // [1, 12]
+    year  = y    + (month <= 2u ? 1 : 0);
+}
+
+// Helpers: zero-pad integer into a fixed-width string (appended to |out|).
+static void append_padded(std::string& out, int32_t v, int width) {
+    std::string s = std::to_string(v < 0 ? -v : v);
+    while ((int)s.size() < width) s = "0" + s;
+    if (v < 0) s = "-" + s;
+    out += s;
+}
+static void append_upadded(std::string& out, uint32_t v, int width) {
+    std::string s = std::to_string(v);
+    while ((int)s.size() < width) s = "0" + s;
+    out += s;
+}
+
+// Read little-endian signed integer from |data|[0..len-1].
+static int64_t read_le_int(const uint8_t* data, size_t len) {
+    uint64_t v = 0;
+    for (size_t i = 0; i < len && i < 8; ++i)
+        v |= static_cast<uint64_t>(data[i]) << (i * 8);
+    // Sign-extend.
+    if (len < 8) {
+        uint64_t sign_bit = uint64_t(1) << (len * 8 - 1);
+        if (v & sign_bit) v |= ~(sign_bit - 1 | sign_bit);
+    }
+    return static_cast<int64_t>(v);
+}
+
+// Read little-endian unsigned integer from |data|[0..len-1].
+static uint64_t read_le_uint(const uint8_t* data, size_t len) {
+    uint64_t v = 0;
+    for (size_t i = 0; i < len && i < 8; ++i)
+        v |= static_cast<uint64_t>(data[i]) << (i * 8);
+    return v;
+}
+
+// Build decimal string for NUMERIC/DECIMAL: magnitude over up to 16 bytes.
+// Uses (hi:lo) pair of uint64_t for 128-bit precision.
+//
+// Algorithm — 128-bit division by 10, extracting one decimal digit per step:
+//   The 128-bit integer is split into (hi * 2^64 + lo).
+//   2^64 mod 10 = 6 (since 2^4 mod 10 = 6 and the period repeats every 4).
+//   digit = (rem_hi * 6 + lo) % 10   where rem_hi = hi % 10.
+//   new_lo = rem_hi * (2^64/10) + (rem_hi*6 + lo) / 10
+//           = rem_hi * 1844674407370955161 + (rem_hi*6 + lo) / 10
+//   new_hi = hi / 10
+static std::string format_numeric(const uint8_t* mag, size_t mag_len, uint8_t scale) {
+    uint64_t lo = 0, hi = 0;
+    for (size_t i = 0; i < mag_len && i < 16; ++i) {
+        if (i < 8)
+            lo |= static_cast<uint64_t>(mag[i]) << (i * 8);
+        else
+            hi |= static_cast<uint64_t>(mag[i]) << ((i - 8) * 8);
+    }
+    std::string digits;
+    if (lo == 0 && hi == 0) {
+        digits = "0";
+    } else {
+        while (lo != 0 || hi != 0) {
+            uint64_t rem_hi = hi % 10;
+            hi /= 10;
+            uint8_t digit = static_cast<uint8_t>((rem_hi * 6 + lo) % 10);
+            digits += static_cast<char>('0' + digit);
+            lo = rem_hi * 1844674407370955161ULL + (rem_hi * 6 + lo) / 10;
+        }
+        std::reverse(digits.begin(), digits.end());
+    }
+    if (scale == 0) return digits;
+    while (digits.size() <= scale) digits = "0" + digits;
+    digits.insert(digits.size() - scale, ".");
+    return digits;
+}
+
+// ---------------------------------------------------------------------------
+// Epoch offsets for civil_from_days (which takes days since 1970-01-01):
+//   DATEN / DATETIME2N use days since 0001-01-01.
+//     0001-01-01 is 719162 days before 1970-01-01  (computed as
+//     1969 full years × 365 + 477 leap years = 718685+477 = 719162).
+//   DATETIME / DATETIM4 use days since 1900-01-01.
+//     1900-01-01 is 25567 days before 1970-01-01  (70 years × 365 + 17 leaps).
+// ---------------------------------------------------------------------------
+static constexpr int32_t EPOCH_OFFSET_0001 = 719162;  // days from 0001-01-01 to 1970-01-01
+static constexpr int32_t EPOCH_OFFSET_1900 = 25567;   // days from 1900-01-01 to 1970-01-01
+
+std::string decode_cell(const TdsColumn& col, const uint8_t* data, size_t len) {
+    if (len == 0) return "";
+
+    switch (col.type_token) {
+        // ---- Fixed-length signed integers ----
+        case 0x30:  // INT1 (tinyint): UNSIGNED 1-byte
+            return std::to_string(data[0]);
+
+        case 0x34:  // INT2: signed 2-byte LE
+            return std::to_string(static_cast<int16_t>(read_le_uint(data, 2)));
+
+        case 0x38:  // INT4: signed 4-byte LE
+            return std::to_string(static_cast<int32_t>(read_le_uint(data, 4)));
+
+        case 0x7F:  // INT8: signed 8-byte LE
+            return std::to_string(read_le_int(data, 8));
+
+        // ---- INTN: dispatch by len ----
+        case 0x26:
+            if (len == 1) return std::to_string(data[0]);       // tinyint: UNSIGNED
+            if (len == 2) return std::to_string(static_cast<int16_t>(read_le_uint(data, 2)));
+            if (len == 4) return std::to_string(static_cast<int32_t>(read_le_uint(data, 4)));
+            if (len == 8) return std::to_string(read_le_int(data, 8));
+            return "";
+
+        // ---- BIT / BITN ----
+        case 0x32:  // BIT
+        case 0x68:  // BITN
+            return (data[0] != 0) ? "1" : "0";
+
+        // ---- DECIMALN / NUMERICN ----
+        // Layout: byte[0] = sign (1=positive, 0=negative),
+        //         bytes[1..] = little-endian magnitude (4/8/12/16 bytes)
+        case 0x6A:  // DECIMALN
+        case 0x6C:  // NUMERICN
+        {
+            if (len < 2) return "";
+            bool positive = (data[0] != 0);
+            std::string s = format_numeric(data + 1, len - 1, col.scale);
+            if (!positive && s != "0" && s != "0.00" && s.find_first_not_of("0.") != std::string::npos) {
+                // Only prefix '-' if the value is non-zero.
+                bool all_zero = true;
+                for (char c : s) { if (c != '0' && c != '.') { all_zero = false; break; } }
+                if (!all_zero) s = "-" + s;
+            }
+            return s;
+        }
+
+        // ---- MONEY (8-byte: high 4 LE then low 4 LE → signed 64-bit, units 1/10000) ----
+        case 0x3C:  // MONEY
+        {
+            if (len < 8) return "";
+            uint32_t hi32 = static_cast<uint32_t>(data[0]) | (static_cast<uint32_t>(data[1]) << 8)
+                          | (static_cast<uint32_t>(data[2]) << 16) | (static_cast<uint32_t>(data[3]) << 24);
+            uint32_t lo32 = static_cast<uint32_t>(data[4]) | (static_cast<uint32_t>(data[5]) << 8)
+                          | (static_cast<uint32_t>(data[6]) << 16) | (static_cast<uint32_t>(data[7]) << 24);
+            int64_t v = (static_cast<int64_t>(static_cast<int32_t>(hi32)) << 32) | lo32;
+            bool neg = (v < 0);
+            uint64_t uv = neg ? static_cast<uint64_t>(-v) : static_cast<uint64_t>(v);
+            std::string r;
+            if (neg) r += '-';
+            r += std::to_string(uv / 10000);
+            r += '.';
+            uint32_t frac = static_cast<uint32_t>(uv % 10000);
+            std::string fs = std::to_string(frac);
+            while (fs.size() < 4) fs = "0" + fs;
+            r += fs;
+            return r;
+        }
+
+        // ---- MONEY4 (4-byte signed LE, units 1/10000) ----
+        case 0x7A:  // MONEY4
+        {
+            if (len < 4) return "";
+            int32_t v = static_cast<int32_t>(read_le_uint(data, 4));
+            bool neg = (v < 0);
+            uint32_t uv = neg ? static_cast<uint32_t>(-v) : static_cast<uint32_t>(v);
+            std::string r;
+            if (neg) r += '-';
+            r += std::to_string(uv / 10000);
+            r += '.';
+            std::string fs = std::to_string(uv % 10000);
+            while (fs.size() < 4) fs = "0" + fs;
+            r += fs;
+            return r;
+        }
+
+        // ---- MONEYN: dispatch by len 4 or 8 ----
+        case 0x6E:  // MONEYN
+        {
+            TdsColumn c4 = col; c4.type_token = (len == 4) ? 0x7A : 0x3C;
+            return decode_cell(c4, data, len);
+        }
+
+        // ---- FLT4 (4-byte IEEE float) ----
+        case 0x3B:  // FLT4
+        {
+            if (len < 4) return "";
+            float f;
+            static_assert(sizeof(float) == 4, "float must be 4 bytes");
+            std::memcpy(&f, data, 4);
+            // 9 significant decimal digits for round-trip exact float.
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "%.9g", static_cast<double>(f));
+            return buf;
+        }
+
+        // ---- FLT8 (8-byte IEEE double) ----
+        case 0x3E:  // FLT8
+        {
+            if (len < 8) return "";
+            double d;
+            static_assert(sizeof(double) == 8, "double must be 8 bytes");
+            std::memcpy(&d, data, 8);
+            // 17 significant decimal digits for round-trip exact double.
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "%.17g", d);
+            return buf;
+        }
+
+        // ---- FLTN: dispatch by len 4 or 8 ----
+        case 0x6D:  // FLTN
+        {
+            TdsColumn c4 = col; c4.type_token = (len == 4) ? 0x3B : 0x3E;
+            return decode_cell(c4, data, len);
+        }
+
+        // ---- BIGCHAR / BIGVARCHR: passthrough as Latin1/UTF-8 ----
+        case 0xAF:  // BIGCHAR
+        case 0xA7:  // BIGVARCHR
+            return std::string(reinterpret_cast<const char*>(data), len);
+
+        // ---- NCHAR / NVARCHAR: UCS-2LE → UTF-8 ----
+        case 0xEF:  // NCHAR
+        case 0xE7:  // NVARCHAR
+            return ucs2le_to_utf8(data, static_cast<uint16_t>(len / 2));
+
+        // ---- DATEN: 3-byte LE day count since 0001-01-01 → YYYY-MM-DD ----
+        case 0x28:  // DATEN
+        {
+            if (len < 3) return "";
+            uint32_t days_since_0001 = static_cast<uint32_t>(data[0])
+                                     | (static_cast<uint32_t>(data[1]) << 8)
+                                     | (static_cast<uint32_t>(data[2]) << 16);
+            int32_t days_1970 = static_cast<int32_t>(days_since_0001) - EPOCH_OFFSET_0001;
+            int32_t year; uint32_t month, day;
+            civil_from_days(days_1970, year, month, day);
+            std::string r;
+            append_padded(r, year, 4); r += '-';
+            append_upadded(r, month, 2); r += '-';
+            append_upadded(r, day, 2);
+            return r;
+        }
+
+        // ---- DATETIM4 (smalldatetime): days(2 LE)+minutes(2 LE) since 1900-01-01 ----
+        case 0x3A:  // DATETIM4
+        {
+            if (len < 4) return "";
+            uint16_t days16   = static_cast<uint16_t>(data[0] | (data[1] << 8));
+            uint16_t minutes16 = static_cast<uint16_t>(data[2] | (data[3] << 8));
+            int32_t days_1970 = static_cast<int32_t>(days16) - EPOCH_OFFSET_1900;
+            uint32_t hh = minutes16 / 60;
+            uint32_t mm = minutes16 % 60;
+            int32_t year; uint32_t month, day;
+            civil_from_days(days_1970, year, month, day);
+            std::string r;
+            append_padded(r, year, 4); r += '-';
+            append_upadded(r, month, 2); r += '-';
+            append_upadded(r, day, 2); r += ' ';
+            append_upadded(r, hh, 2); r += ':';
+            append_upadded(r, mm, 2); r += ':';
+            r += "00";
+            return r;
+        }
+
+        // ---- DATETIME: days(4 LE signed)+ticks(4 LE, 1/300 s) since 1900-01-01 ----
+        case 0x3D:  // DATETIME
+        {
+            if (len < 8) return "";
+            int32_t  days32  = static_cast<int32_t>(read_le_uint(data, 4));
+            uint32_t ticks   = static_cast<uint32_t>(read_le_uint(data + 4, 4));
+            int32_t  days_1970 = days32 - EPOCH_OFFSET_1900;
+            // ticks: 1 tick = 1/300 second.  Convert to whole seconds.
+            uint32_t total_sec = ticks / 300;
+            uint32_t hh = total_sec / 3600;
+            uint32_t mm = (total_sec % 3600) / 60;
+            uint32_t ss = total_sec % 60;
+            int32_t year; uint32_t month, day;
+            civil_from_days(days_1970, year, month, day);
+            std::string r;
+            append_padded(r, year, 4); r += '-';
+            append_upadded(r, month, 2); r += '-';
+            append_upadded(r, day, 2); r += ' ';
+            append_upadded(r, hh, 2); r += ':';
+            append_upadded(r, mm, 2); r += ':';
+            append_upadded(r, ss, 2);
+            return r;
+        }
+
+        // ---- DATETIME2N: time(3-5 bytes per scale)+date(3 bytes) since 0001-01-01 ----
+        // Time part byte count per scale:
+        //   scale 0-2 → 3 bytes, scale 3-4 → 4 bytes, scale 5-7 → 5 bytes
+        case 0x2A:  // DATETIME2N
+        {
+            uint8_t sc = col.scale;
+            size_t time_bytes = (sc <= 2) ? 3 : (sc <= 4) ? 4 : 5;
+            if (len < time_bytes + 3) return "";
+            // Time ticks: little-endian integer over time_bytes bytes.
+            uint64_t time_ticks = read_le_uint(data, time_bytes);
+            // Date: 3-byte LE days since 0001-01-01.
+            const uint8_t* dp = data + time_bytes;
+            uint32_t days_since_0001 = static_cast<uint32_t>(dp[0])
+                                     | (static_cast<uint32_t>(dp[1]) << 8)
+                                     | (static_cast<uint32_t>(dp[2]) << 16);
+            int32_t days_1970 = static_cast<int32_t>(days_since_0001) - EPOCH_OFFSET_0001;
+            // Convert time_ticks (units of 10^-scale seconds) to H:M:S + fraction.
+            // ticks_per_second = 10^scale.
+            uint64_t pow10 = 1;
+            for (int i = 0; i < sc; ++i) pow10 *= 10;
+            uint64_t total_sec = (pow10 > 0) ? (time_ticks / pow10) : time_ticks;
+            uint32_t frac_units = (pow10 > 0) ? static_cast<uint32_t>(time_ticks % pow10) : 0;
+            uint32_t hh = static_cast<uint32_t>(total_sec / 3600);
+            uint32_t mm = static_cast<uint32_t>((total_sec % 3600) / 60);
+            uint32_t ss = static_cast<uint32_t>(total_sec % 60);
+            int32_t  year; uint32_t month, day;
+            civil_from_days(days_1970, year, month, day);
+            std::string r;
+            append_padded(r, year, 4); r += '-';
+            append_upadded(r, month, 2); r += '-';
+            append_upadded(r, day, 2); r += ' ';
+            append_upadded(r, hh, 2); r += ':';
+            append_upadded(r, mm, 2); r += ':';
+            append_upadded(r, ss, 2);
+            // Append fractional part only if scale > 0.
+            if (sc > 0 && frac_units > 0) {
+                r += '.';
+                append_upadded(r, frac_units, static_cast<int>(sc));
+            }
+            return r;
+        }
+
+        default:
+            return "";  // Unrecognised; defensive fallback.
+    }
 }
 
 }  // namespace openads::sql_backend::tds

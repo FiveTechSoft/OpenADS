@@ -193,6 +193,18 @@ struct TdsColumn {
 bool parse_colmetadata(const uint8_t* p, size_t n, size_t& pos,
                        std::vector<TdsColumn>& cols);
 
+// ---------------------------------------------------------------------------
+// decode_cell ([MS-TDS] §2.2.5.5)
+// ---------------------------------------------------------------------------
+
+/// Decode one column value from its raw TDS wire bytes to a printable string.
+/// |col|  — column descriptor from parse_colmetadata() (type_token, scale).
+/// |data| — pointer to the value bytes (already extracted by the row reader).
+/// |len|  — byte count of |data|; 0 is allowed (NULL / zero-length).
+/// Returns the decimal/text representation, or "" for unrecognised type tokens
+/// (those were rejected at COLMETADATA; this is a defensive fallback).
+std::string decode_cell(const TdsColumn& col, const uint8_t* data, size_t len);
+
 #endif  // defined(OPENADS_WITH_MSSQL)
 
 }  // namespace openads::sql_backend::tds

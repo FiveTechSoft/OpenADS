@@ -239,4 +239,27 @@ TEST_CASE("parse_colmetadata: unsupported type fails closed") {
     CHECK(parse_colmetadata(p.data(), p.size(), pos, cols) == false);
 }
 
+// ---------------------------------------------------------------------------
+// Task 4: decode_cell — column value bytes to printable string
+// ---------------------------------------------------------------------------
+
+static TdsColumn col(uint8_t t, uint8_t scale=0){ TdsColumn c; c.type_token=t; c.scale=scale; return c; }
+
+TEST_CASE("decode int / bit / nvarchar") {
+    uint8_t i4[] = {0x2A,0x00,0x00,0x00};                 // 42 LE
+    CHECK(decode_cell(col(0x26), i4, 4) == "42");          // INTN(4)
+    uint8_t b[] = {0x01};
+    CHECK(decode_cell(col(0x68), b, 1) == "1");            // BITN
+    uint8_t nv[] = {'n',0x00,'o',0x00};                    // "no" UCS-2LE
+    CHECK(decode_cell(col(0xE7), nv, 4) == "no");          // NVARCHAR
+}
+TEST_CASE("decode decimal scale and datetime epoch") {
+    // NUMERIC(10,2) value 123.45 -> sign(1)=positive + magnitude 12345 LE.
+    uint8_t dec[] = {0x01, 0x39,0x30,0x00,0x00};           // 1=positive, 12345 LE
+    CHECK(decode_cell(col(0x6C, /*scale*/2), dec, 5) == "123.45");
+    // DATETIME = 1900-01-02 00:00:00 -> days=1, ticks=0.
+    uint8_t dt[] = {0x01,0x00,0x00,0x00, 0x00,0x00,0x00,0x00};
+    CHECK(decode_cell(col(0x3D), dt, 8) == "1900-01-02 00:00:00");
+}
+
 #endif
