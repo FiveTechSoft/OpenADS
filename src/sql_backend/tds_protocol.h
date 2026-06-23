@@ -205,6 +205,38 @@ bool parse_colmetadata(const uint8_t* p, size_t n, size_t& pos,
 /// (those were rejected at COLMETADATA; this is a defensive fallback).
 std::string decode_cell(const TdsColumn& col, const uint8_t* data, size_t len);
 
+// ---------------------------------------------------------------------------
+// parse_query_response ([MS-TDS] §2.2.7.17 TABULAR_RESULT)
+// ---------------------------------------------------------------------------
+
+/// One decoded cell value from a result row.
+struct TdsCell {
+    std::string value;
+    bool        is_null = false;
+};
+
+/// Result of parsing a TABULAR_RESULT token stream (response to SQL_BATCH).
+struct QueryResult {
+    std::vector<TdsColumn>              columns;
+    std::vector<std::vector<TdsCell>>   rows;
+    bool        ok               = false;
+    uint32_t    error_number     = 0;
+    std::string message;
+    std::string unsupported_type;  ///< set when COLMETADATA rejects an unknown type
+};
+
+/// Walk a TABULAR_RESULT token stream ([MS-TDS] §2.2.7.17).
+/// |payload| is the raw server payload bytes (after the TDS packet header).
+/// Token handling:
+///   COLMETADATA(0x81) → parse_colmetadata; unsupported type → unsupported_type + ok=false, stop.
+///   ROW(0xD1)         → one cell per column; length from column type wire rule.
+///   NBCROW(0xD2)      → null bitmap (ceil(ncols/8) bytes) then non-null column values.
+///   ERROR(0xAA)       → error_number + message, ok=false.
+///   INFO(0xAB)/ENVCHANGE(0xE3)/ORDER(0xA9)/RETURNSTATUS(0x79) → skipped.
+///   DONE/DONEPROC/DONEINPROC(0xFD/0xFE/0xFF) → ok=true (unless error), stop.
+/// Any short/over-long read → ok=false, stop (fail-closed, no OOB).
+QueryResult parse_query_response(const uint8_t* payload, size_t n);
+
 #endif  // defined(OPENADS_WITH_MSSQL)
 
 }  // namespace openads::sql_backend::tds

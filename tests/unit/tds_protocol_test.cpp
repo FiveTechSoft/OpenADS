@@ -312,4 +312,74 @@ TEST_CASE("decode money: INT64_MIN and INT32_MIN handled correctly (regression F
     CHECK(decode_cell(col(0x7A), money4_min, 4) == "-214748.3648");
 }
 
+
+// ---------------------------------------------------------------------------
+// Task 5: parse_query_response — TABULAR_RESULT token-stream walker
+// ---------------------------------------------------------------------------
+
+TEST_CASE("parse_query_response: one int + nvarchar row") {
+    // COLMETADATA (id INTN4, nome NVARCHAR) + one ROW (42, "oi") + DONE.
+    std::vector<uint8_t> s;
+    auto push = [&](std::initializer_list<uint8_t> b){ for (auto x:b) s.push_back(x); };
+    push({0x81, 0x02,0x00});                                  // COLMETADATA, 2 cols
+    push({0,0,0,0, 0,0, 0x26,0x04, 0x02,'i',0,'d',0});        // id INTN4
+    push({0,0,0,0, 0,0, 0xE7,0xC8,0x00, 0x09,0x04,0xD0,0x00,0x34, // nome NVARCHAR(100)
+          0x04,'n',0,'o',0,'m',0,'e',0});
+    push({0xD1});                                             // ROW
+    push({0x04, 0x2A,0x00,0x00,0x00});                        // id: len 4, value 42
+    push({0x04,0x00, 'o',0,'i',0});                           // nome: USHORT len 4, "oi"
+    push({0xFD, 0x10,0x00, 0x00,0x00, 0,0,0,0,0,0,0,0});      // DONE (final)
+    auto r = parse_query_response(s.data(), s.size());
+    REQUIRE(r.ok);
+    REQUIRE(r.columns.size() == 2);
+    REQUIRE(r.rows.size() == 1);
+    CHECK(r.rows[0][0].value == "42");
+    CHECK(r.rows[0][1].value == "oi");
+}
+
+TEST_CASE("parse_query_response: ERROR token surfaces number, ok=false") {
+    std::vector<uint8_t> s = {
+        0xAA, 0x0E,0x00, 0x18,0x48,0x00,0x00, 0x01,0x0E,
+        0x00,0x00, 0x00, 0x00, 0x01,0x00,0x00,0x00,
+        0xFD, 0x02,0x00, 0,0, 0,0,0,0,0,0,0,0
+    };
+    auto r = parse_query_response(s.data(), s.size());
+    CHECK(r.ok == false);
+    CHECK(r.error_number == 18456);
+}
+
+TEST_CASE("parse_query_response: malformed length terminates fail-closed (no OOB)") {
+    // ROW value claims a 4-byte int but only 1 byte remains.
+    std::vector<uint8_t> s;
+    auto push = [&](std::initializer_list<uint8_t> b){ for (auto x:b) s.push_back(x); };
+    push({0x81, 0x01,0x00, 0,0,0,0, 0,0, 0x26,0x04, 0x02,'i',0,'d',0}); // 1 col id INTN4
+    push({0xD1, 0x04, 0x2A});                                 // ROW, len 4 but 1 byte left
+    auto r = parse_query_response(s.data(), s.size());
+    CHECK(r.ok == false);                                     // returned, no crash
+}
+
+TEST_CASE("parse_query_response: NBCROW with null bitmap") {
+    // COLMETADATA: 2 cols (id INTN4, nome NVARCHAR).
+    // NBCROW: bitmap byte = 0x02 (bit1 set -> col index 1 = nome is NULL).
+    // col0 (id) is non-null: value 7.
+    // col1 (nome) is null: no bytes on wire.
+    std::vector<uint8_t> s;
+    auto push = [&](std::initializer_list<uint8_t> b){ for (auto x:b) s.push_back(x); };
+    push({0x81, 0x02,0x00});                                  // COLMETADATA, 2 cols
+    push({0,0,0,0, 0,0, 0x26,0x04, 0x02,'i',0,'d',0});        // id INTN4
+    push({0,0,0,0, 0,0, 0xE7,0xC8,0x00, 0x09,0x04,0xD0,0x00,0x34,
+          0x04,'n',0,'o',0,'m',0,'e',0});                      // nome NVARCHAR
+    push({0xD2});                                             // NBCROW
+    push({0x02});                                             // bitmap byte: bit1 set -> col1 NULL
+    push({0x01, 0x07});                                       // id: len=1, value=7
+    // nome: NULL (no bytes), no length prefix
+    push({0xFD, 0x10,0x00, 0x00,0x00, 0,0,0,0,0,0,0,0});      // DONE
+    auto r = parse_query_response(s.data(), s.size());
+    REQUIRE(r.ok);
+    REQUIRE(r.rows.size() == 1);
+    CHECK(r.rows[0][0].value == "7");
+    CHECK(r.rows[0][0].is_null == false);
+    CHECK(r.rows[0][1].is_null == true);
+}
+
 #endif

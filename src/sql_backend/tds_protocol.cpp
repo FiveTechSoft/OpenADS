@@ -1039,5 +1039,245 @@ std::string decode_cell(const TdsColumn& col, const uint8_t* data, size_t len) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// parse_query_response — TABULAR_RESULT token-stream walker
+// ---------------------------------------------------------------------------
+//
+// Per-column "wire length rule" (MS-TDS §2.2.7.17):
+//
+//  Fixed-length types (no length prefix on the wire; fixed byte size):
+//    INT1   0x30 → 1 byte      INT2   0x34 → 2 bytes
+//    INT4   0x38 → 4 bytes     INT8   0x7F → 8 bytes
+//    BIT    0x32 → 1 byte      DATETIM4 0x3A → 4 bytes
+//    DATETIME 0x3D → 8 bytes   MONEY4 0x7A → 4 bytes
+//    MONEY  0x3C → 8 bytes     FLT4   0x3B → 4 bytes
+//    FLT8   0x3E → 8 bytes
+//
+//  1-byte length prefix (*N / DATE / DATETIME2N / DECIMAL / NUMERIC):
+//    INTN   0x26    BITN   0x68    MONEYN 0x6E    FLTN   0x6D
+//    DATETIMN 0x6F  DATEN  0x28   DATETIME2N 0x2A
+//    DECIMALN 0x6A  NUMERICN 0x6C
+//    Sentinel 0xFF (255) → NULL (no value bytes follow)
+//
+//  2-byte LE (USHORT) length prefix (char/nchar types):
+//    BIGCHAR 0xAF   BIGVARCHR 0xA7   NCHAR 0xEF   NVARCHAR 0xE7
+//    Sentinel 0xFFFF → NULL
+
+/// Return the fixed byte size for fixed-length type tokens; 0 = not fixed.
+static size_t fixed_type_size(uint8_t tok) {
+    switch (tok) {
+        case 0x30: return 1;   // INT1
+        case 0x34: return 2;   // INT2
+        case 0x38: return 4;   // INT4
+        case 0x7F: return 8;   // INT8
+        case 0x32: return 1;   // BIT
+        case 0x3A: return 4;   // DATETIM4
+        case 0x3D: return 8;   // DATETIME
+        case 0x7A: return 4;   // MONEY4
+        case 0x3C: return 8;   // MONEY
+        case 0x3B: return 4;   // FLT4
+        case 0x3E: return 8;   // FLT8
+        default:   return 0;
+    }
+}
+
+/// Read one ROW/NBCROW column value from [p+pos..p+n).
+/// Returns false on any short read. Sets cell.is_null=true + no advance if NULL sentinel.
+static bool read_column_value(const uint8_t* p, size_t n, size_t& pos,
+                              const TdsColumn& col, TdsCell& cell) {
+    uint8_t tok = col.type_token;
+
+    // ---- Fixed-length types ----
+    size_t flen = fixed_type_size(tok);
+    if (flen > 0) {
+        if (pos + flen > n) return false;
+        cell.value  = decode_cell(col, p + pos, flen);
+        cell.is_null = false;
+        pos += flen;
+        return true;
+    }
+
+    // ---- 1-byte length prefix (*N / DATE / DATETIME2N / DECIMAL / NUMERIC) ----
+    switch (tok) {
+        case 0x26: case 0x68: case 0x6E: case 0x6D: case 0x6F:
+        case 0x28: case 0x2A: case 0x6A: case 0x6C:
+        {
+            if (pos >= n) return false;
+            uint8_t vlen = p[pos++];
+            if (vlen == 0xFF) {
+                cell.is_null = true;
+                return true;
+            }
+            if (pos + vlen > n) return false;
+            cell.value   = decode_cell(col, p + pos, vlen);
+            cell.is_null = false;
+            pos += vlen;
+            return true;
+        }
+
+        // ---- 2-byte LE length prefix (char / nchar) ----
+        case 0xAF: case 0xA7: case 0xEF: case 0xE7:
+        {
+            if (pos + 2 > n) return false;
+            uint16_t vlen = static_cast<uint16_t>(p[pos] | (uint16_t(p[pos+1]) << 8));
+            pos += 2;
+            if (vlen == 0xFFFF) {
+                cell.is_null = true;
+                return true;
+            }
+            if (pos + vlen > n) return false;
+            cell.value   = decode_cell(col, p + pos, vlen);
+            cell.is_null = false;
+            pos += vlen;
+            return true;
+        }
+
+        default:
+            // Unrecognised type — fail-closed (should have been rejected at COLMETADATA).
+            return false;
+    }
+}
+
+QueryResult parse_query_response(const uint8_t* payload, size_t n) {
+    QueryResult res;
+    size_t pos = 0;
+    bool error_seen = false;
+
+    while (pos < n) {
+        if (pos >= n) break;
+        uint8_t token = payload[pos++];
+
+        // ---- COLMETADATA (0x81) ----
+        if (token == 0x81) {
+            res.columns.clear();
+            bool ok = parse_colmetadata(payload, n, pos, res.columns);
+            if (!ok) {
+                // Distinguish unsupported type from short read by noting that
+                // parse_colmetadata returns false for both; we set a generic label.
+                res.unsupported_type = "unsupported_or_short_read";
+                res.ok = false;
+                return res;
+            }
+            continue;
+        }
+
+        // ---- ROW (0xD1) ----
+        if (token == 0xD1) {
+            std::vector<TdsCell> row;
+            row.reserve(res.columns.size());
+            for (const auto& col : res.columns) {
+                TdsCell cell;
+                if (!read_column_value(payload, n, pos, col, cell)) {
+                    res.ok = false;
+                    return res;
+                }
+                row.push_back(std::move(cell));
+            }
+            res.rows.push_back(std::move(row));
+            continue;
+        }
+
+        // ---- NBCROW (0xD2) ----
+        if (token == 0xD2) {
+            size_t ncols = res.columns.size();
+            // Null bitmap: ceil(ncols/8) bytes.
+            size_t bitmap_bytes = (ncols + 7) / 8;
+            if (pos + bitmap_bytes > n) {
+                res.ok = false;
+                return res;
+            }
+            // Read null bitmap bytes.
+            std::vector<uint8_t> bitmap(payload + pos, payload + pos + bitmap_bytes);
+            pos += bitmap_bytes;
+
+            std::vector<TdsCell> row(ncols);
+            for (size_t ci = 0; ci < ncols; ++ci) {
+                // Bit ci (0-based) in the bitmap, LSB-first within each byte.
+                bool is_null = ((bitmap[ci / 8] >> (ci % 8)) & 1) != 0;
+                if (is_null) {
+                    row[ci].is_null = true;
+                } else {
+                    if (!read_column_value(payload, n, pos, res.columns[ci], row[ci])) {
+                        res.ok = false;
+                        return res;
+                    }
+                }
+            }
+            res.rows.push_back(std::move(row));
+            continue;
+        }
+
+        // ---- ERROR (0xAA) ----
+        if (token == 0xAA) {
+            // Length(2,LE) then body.
+            if (pos + 2 > n) { res.ok = false; return res; }
+            uint16_t len = static_cast<uint16_t>(payload[pos] | (uint16_t(payload[pos+1]) << 8));
+            pos += 2;
+            if (pos + len > n) { res.ok = false; return res; }
+            const uint8_t* body = payload + pos;
+            size_t body_len = len;
+            pos += len;
+            if (body_len >= 4) {
+                res.error_number = static_cast<uint32_t>(body[0])
+                                 | (static_cast<uint32_t>(body[1]) << 8)
+                                 | (static_cast<uint32_t>(body[2]) << 16)
+                                 | (static_cast<uint32_t>(body[3]) << 24);
+                // State(1)+Class(1)+MsgText(US_VARCHAR: 2-byte LE char-count + UCS-2LE)
+                if (body_len >= 8) {
+                    uint16_t mlen = static_cast<uint16_t>(body[6] | (uint16_t(body[7]) << 8));
+                    if (body_len >= static_cast<size_t>(8 + mlen * 2)) {
+                        res.message = ucs2le_to_utf8(body + 8, mlen);
+                    }
+                }
+            }
+            error_seen = true;
+            res.ok = false;
+            continue;
+        }
+
+        // ---- DONE / DONEPROC / DONEINPROC (0xFD/0xFE/0xFF) — fixed 12-byte body ----
+        if (token == 0xFD || token == 0xFE || token == 0xFF) {
+            // Skip the 12-byte body (Status2+CurCmd2+RowCount8).
+            // Not bounds-checking strictly: we stop regardless.
+            if (!error_seen) {
+                res.ok = true;
+            }
+            return res;
+        }
+
+        // ---- Skippable tokens: INFO/ENVCHANGE/ORDER/RETURNSTATUS ----
+        {
+            uint8_t fixed_len = 0;
+            auto lc = token_length_class(token, fixed_len);
+            if (lc == TokenLenClass::VarLenUShort) {
+                if (pos + 2 > n) { res.ok = false; return res; }
+                uint16_t len = static_cast<uint16_t>(payload[pos] | (uint16_t(payload[pos+1]) << 8));
+                pos += 2;
+                if (pos + len > n) { res.ok = false; return res; }
+                pos += len;
+            } else if (lc == TokenLenClass::FixedLength) {
+                if (pos + fixed_len > n) { res.ok = false; return res; }
+                pos += fixed_len;
+            } else if (lc == TokenLenClass::Done) {
+                // Shouldn't arrive here (handled above) but treat as stop.
+                if (!error_seen) res.ok = true;
+                return res;
+            } else {
+                // Unknown or ColMetaDataDriven (ROW/NBCROW already handled).
+                // Cannot advance safely — stop fail-closed.
+                res.ok = false;
+                return res;
+            }
+        }
+    }
+
+    // Fell off the end without a DONE token.
+    if (!error_seen) {
+        // Incomplete stream — fail-closed.
+        res.ok = false;
+    }
+    return res;
+}
+
 }  // namespace openads::sql_backend::tds
 #endif  // defined(OPENADS_WITH_MSSQL)
