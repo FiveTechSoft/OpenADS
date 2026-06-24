@@ -45,6 +45,7 @@ EXPORTS
     AdsSetLockRetryCount
     AdsGetLockRetryCount
     AdsFlushFileBuffers
+    AdsSetDeferredFlush
     AdsOpenIndex
     AdsCloseIndex
     AdsCloseAllIndexes

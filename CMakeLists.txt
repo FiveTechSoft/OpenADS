@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 project(OpenADS
-    VERSION 1.1.0
+    VERSION 1.2.0
     LANGUAGES C CXX
     DESCRIPTION "Open-source ADS-compatible engine"
 )
@@ -77,6 +77,11 @@ option(OPENADS_WITH_POSTGRESQL "Enable PostgreSQL-backed table driver (libpq)" O
 option(OPENADS_WITH_MARIADB "Enable MariaDB-backed table driver (libmariadb)" OFF)
 # Optional generic ODBC table driver (system ODBC driver manager). OFF by default.
 option(OPENADS_WITH_ODBC "Enable ODBC-backed table driver (system ODBC driver manager)" OFF)
+# Native MS SQL Server / TDS 7.4 backend. Requires OPENADS_WITH_TLS=ON
+# (uses mbedtls for the TLS layer that SQL Server mandates on port 1433
+# since MSSQL 2022 / Azure SQL). No external library is downloaded beyond
+# mbedtls which OPENADS_WITH_TLS already fetches. OFF by default.
+option(OPENADS_WITH_MSSQL "Enable native MS SQL Server / TDS backend" OFF)
 # Opt-in: build the SQLite backend from the SQLite3 Multiple Ciphers
 # amalgamation (SQLCipher-compatible encryption at rest, self-contained — no
 # external OpenSSL) instead of plain SQLite. Vendored under

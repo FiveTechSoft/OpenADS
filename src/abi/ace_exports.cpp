@@ -46,6 +46,11 @@
 #include "sql_backend/odbc_index.h"
 #include "sql_backend/odbc_uri.h"
 #endif
+#if defined(OPENADS_WITH_MSSQL)
+#include "sql_backend/mssql_connection.h"
+#include "sql_backend/mssql_table.h"
+#include "sql_backend/mssql_uri.h"
+#endif
 #if defined(OPENADS_WITH_FIREBIRD)
 #include "sql_backend/firebird_connection.h"
 #include "sql_backend/firebird_index.h"
@@ -451,6 +456,46 @@ std::size_t odbc_field_index(openads::sql_backend::OdbcTable* st,
     return std::numeric_limits<std::size_t>::max();
 }
 #endif // OPENADS_WITH_ODBC
+
+#if defined(OPENADS_WITH_MSSQL)
+std::unordered_map<Handle,
+    std::unique_ptr<openads::sql_backend::MssqlConnection>>&
+mssql_conns_map() {
+    static std::unordered_map<Handle,
+        std::unique_ptr<openads::sql_backend::MssqlConnection>> m;
+    return m;
+}
+
+std::unordered_map<Handle,
+    std::unique_ptr<openads::sql_backend::MssqlTable>>&
+mssql_tables_map() {
+    static std::unordered_map<Handle,
+        std::unique_ptr<openads::sql_backend::MssqlTable>> m;
+    return m;
+}
+
+openads::sql_backend::MssqlTable* get_mssql_table(ADSHANDLE h) {
+    auto& s = state();
+    return s.registry.lookup<openads::sql_backend::MssqlTable>(
+        h, HandleKind::MssqlTable);
+}
+
+std::size_t mssql_field_index(openads::sql_backend::MssqlTable* st,
+                               UNSIGNED8* pucField) {
+    if (pucField == nullptr) return std::numeric_limits<std::size_t>::max();
+    auto p = reinterpret_cast<std::uintptr_t>(pucField);
+    if (p != 0 && p < 0x10000u) {
+        auto idx = static_cast<std::size_t>(p) - 1;
+        if (idx < st->field_count()) return idx;
+        return std::numeric_limits<std::size_t>::max();
+    }
+    std::string fname(reinterpret_cast<const char*>(pucField));
+    for (std::size_t i = 0; i < st->field_count(); ++i) {
+        if (st->field_name(i) == fname) return i;
+    }
+    return std::numeric_limits<std::size_t>::max();
+}
+#endif // OPENADS_WITH_MSSQL
 
 #if defined(OPENADS_WITH_FIREBIRD)
 std::unordered_map<Handle,
@@ -1244,6 +1289,181 @@ const openads::abi::BackendTableOps* odbc_table_ops() {
 }
 
 #endif // OPENADS_WITH_ODBC (lifted ops)
+
+// ---------------------------------------------------------------------------
+// Lifted MSSQL table ops + accessor
+// ---------------------------------------------------------------------------
+#if defined(OPENADS_WITH_MSSQL)
+
+UNSIGNED32 mssql_close_table(ADSHANDLE hTable) {
+    auto* st = get_mssql_table(hTable);
+    (void)st;
+    auto& s2 = state();
+    std::lock_guard<std::recursive_mutex> lk2(s2.mu);
+    mssql_tables_map().erase(hTable);
+    s2.registry.release(hTable);
+    return ok();
+}
+
+UNSIGNED32 mssql_goto_top(ADSHANDLE hTable) {
+    auto* st = get_mssql_table(hTable);
+    if (!st) return fail(openads::AE_INTERNAL_ERROR, "");
+    st->go_top();
+    return ok();
+}
+
+UNSIGNED32 mssql_goto_bottom(ADSHANDLE hTable) {
+    auto* st = get_mssql_table(hTable);
+    if (!st) return fail(openads::AE_INTERNAL_ERROR, "");
+    st->go_bottom();
+    return ok();
+}
+
+UNSIGNED32 mssql_skip(ADSHANDLE hTable, SIGNED32 lRows) {
+    auto* st = get_mssql_table(hTable);
+    if (!st) return fail(openads::AE_INTERNAL_ERROR, "");
+    st->skip(static_cast<long>(lRows));
+    return ok();
+}
+
+UNSIGNED32 mssql_at_eof(ADSHANDLE hTable, UNSIGNED16* pbAtEnd) {
+    auto* st = get_mssql_table(hTable);
+    if (!st) return fail(openads::AE_INTERNAL_ERROR, "");
+    if (pbAtEnd == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    *pbAtEnd = st->at_eof() ? 1 : 0;
+    return ok();
+}
+
+UNSIGNED32 mssql_at_bof(ADSHANDLE hTable, UNSIGNED16* pbAtBegin) {
+    auto* st = get_mssql_table(hTable);
+    if (!st) return fail(openads::AE_INTERNAL_ERROR, "");
+    *pbAtBegin = st->at_bof() ? 1 : 0;
+    return ok();
+}
+
+UNSIGNED32 mssql_num_fields(ADSHANDLE hTable, UNSIGNED16* pusCnt) {
+    auto* st = get_mssql_table(hTable);
+    if (!st) return fail(openads::AE_INTERNAL_ERROR, "");
+    if (pusCnt == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    *pusCnt = static_cast<UNSIGNED16>(st->field_count());
+    return ok();
+}
+
+UNSIGNED32 mssql_field_name(ADSHANDLE hTable, UNSIGNED16 n,
+                               UNSIGNED8* pucBuf, UNSIGNED16* pusLen) {
+    auto* st = get_mssql_table(hTable);
+    if (!st) return fail(openads::AE_INTERNAL_ERROR, "");
+    if (n == 0 || n > st->field_count()) {
+        return fail(openads::AE_COLUMN_NOT_FOUND, "");
+    }
+    auto name = st->field_name(n - 1);
+    openads::abi::copy_to_caller(pucBuf, pusLen, name);
+    return ok();
+}
+
+UNSIGNED32 mssql_field_type(ADSHANDLE hTable, UNSIGNED8* pucField,
+                               UNSIGNED16* pusType) {
+    auto* st = get_mssql_table(hTable);
+    if (!st) return fail(openads::AE_INTERNAL_ERROR, "");
+    auto i = mssql_field_index(st, pucField);
+    if (i == std::numeric_limits<std::size_t>::max()) {
+        return fail(openads::AE_COLUMN_NOT_FOUND, "");
+    }
+    if (pusType) *pusType = st->field_type(i);
+    return ok();
+}
+
+UNSIGNED32 mssql_field_length(ADSHANDLE hTable, UNSIGNED8* pucField,
+                                 UNSIGNED32* pulLen) {
+    auto* st = get_mssql_table(hTable);
+    if (!st) return fail(openads::AE_INTERNAL_ERROR, "");
+    auto i = mssql_field_index(st, pucField);
+    if (i == std::numeric_limits<std::size_t>::max()) {
+        return fail(openads::AE_COLUMN_NOT_FOUND, "");
+    }
+    if (pulLen) *pulLen = st->field_length(i);
+    return ok();
+}
+
+UNSIGNED32 mssql_field_decimals(ADSHANDLE hTable, UNSIGNED8* pucField,
+                                   UNSIGNED16* pusDec) {
+    auto* st = get_mssql_table(hTable);
+    if (!st) return fail(openads::AE_INTERNAL_ERROR, "");
+    auto i = mssql_field_index(st, pucField);
+    if (i == std::numeric_limits<std::size_t>::max()) {
+        return fail(openads::AE_COLUMN_NOT_FOUND, "");
+    }
+    if (pusDec) *pusDec = st->field_decimals(i);
+    return ok();
+}
+
+UNSIGNED32 mssql_record_num(ADSHANDLE hTable, UNSIGNED32* pulRec) {
+    auto* st = get_mssql_table(hTable);
+    if (!st) return fail(openads::AE_INTERNAL_ERROR, "");
+    if (pulRec == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    *pulRec = st->record_num();
+    return ok();
+}
+
+UNSIGNED32 mssql_record_count(ADSHANDLE hTable, UNSIGNED32* pulCount,
+                                 UNSIGNED16 /*usFilterOption*/) {
+    auto* st = get_mssql_table(hTable);
+    if (!st) return fail(openads::AE_INTERNAL_ERROR, "");
+    if (pulCount == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    *pulCount = st->record_count();
+    return ok();
+}
+
+UNSIGNED32 mssql_get_field(ADSHANDLE hTable, UNSIGNED8* pucField,
+                              UNSIGNED8* pucBuf, UNSIGNED32* pulLen,
+                              UNSIGNED16 /*usOption*/) {
+    auto* st = get_mssql_table(hTable);
+    if (!st) return fail(openads::AE_INTERNAL_ERROR, "");
+    if (pulLen == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    auto fi = mssql_field_index(st, pucField);
+    if (fi == std::numeric_limits<std::size_t>::max()) {
+        return fail(openads::AE_COLUMN_NOT_FOUND, "");
+    }
+    bool is_null = false;
+    std::string val;
+    if (!st->get_field(fi, val, is_null)) {
+        return fail(openads::AE_INTERNAL_ERROR, "");
+    }
+    if (is_null) val.clear();
+    openads::abi::copy_to_caller(pucBuf, pulLen, val);
+    return ok();
+}
+
+UNSIGNED32 mssql_is_record_deleted(ADSHANDLE hTable, UNSIGNED16* pbDeleted) {
+    auto* st = get_mssql_table(hTable);
+    if (!st) return fail(openads::AE_INTERNAL_ERROR, "");
+    if (pbDeleted) *pbDeleted = 0;
+    return ok();
+}
+
+const openads::abi::BackendTableOps* mssql_table_ops() {
+    static const openads::abi::BackendTableOps ops = [] {
+        openads::abi::BackendTableOps o{};
+        o.close_table       = &mssql_close_table;
+        o.goto_top          = &mssql_goto_top;
+        o.goto_bottom       = &mssql_goto_bottom;
+        o.skip              = &mssql_skip;
+        o.at_eof            = &mssql_at_eof;
+        o.at_bof            = &mssql_at_bof;
+        o.num_fields        = &mssql_num_fields;
+        o.field_name        = &mssql_field_name;
+        o.field_type        = &mssql_field_type;
+        o.field_length      = &mssql_field_length;
+        o.field_decimals    = &mssql_field_decimals;
+        o.record_num        = &mssql_record_num;
+        o.record_count      = &mssql_record_count;
+        o.get_field         = &mssql_get_field;
+        o.is_record_deleted = &mssql_is_record_deleted;
+        return o;
+    }();
+    return &ops;
+}
+#endif // OPENADS_WITH_MSSQL (lifted ops)
 
 // ---------------------------------------------------------------------------
 // Lifted Firebird table ops + accessor (mirrors the ODBC lift exactly; the
@@ -2367,6 +2587,10 @@ void register_builtin_backends() {
     register_backend_table_ops(openads::session::HandleKind::OdbcTable,
                                odbc_table_ops());
 #endif
+#if defined(OPENADS_WITH_MSSQL)
+    register_backend_table_ops(openads::session::HandleKind::MssqlTable,
+                               mssql_table_ops());
+#endif
 #if defined(OPENADS_WITH_FIREBIRD)
     register_backend_table_ops(openads::session::HandleKind::FirebirdTable,
                                firebird_table_ops());
@@ -2521,6 +2745,39 @@ UNSIGNED32 AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 /*usServerType*/,
             if (path.size() >= plen && path.compare(0, plen, prefix) == 0) {
                 return fail(openads::AE_FUNCTION_NOT_AVAILABLE,
                             "odbc URI requires OPENADS_WITH_ODBC=ON");
+            }
+        }
+    }
+#endif
+#if defined(OPENADS_WITH_MSSQL)
+    {
+        openads::sql_backend::MssqlUri muri;
+        if (openads::sql_backend::parse_mssql_uri(path, muri)) {
+            auto opened = openads::sql_backend::MssqlConnection::open(muri);
+            if (!opened) return fail(opened.error());
+            auto holder =
+                std::make_unique<openads::sql_backend::MssqlConnection>(
+                    std::move(opened).value());
+            openads::sql_backend::MssqlConnection* raw = holder.get();
+            auto& s = state();
+            std::lock_guard<std::recursive_mutex> lk(s.mu);
+            Handle h = s.registry.register_object(
+                HandleKind::MssqlConnection, raw);
+            mssql_conns_map().emplace(h, std::move(holder));
+            *phConnect = h;
+            return ok();
+        }
+    }
+#else
+    {
+        static constexpr const char* kMssqlPrefixes[] = {
+            "mssql://", "tds://",
+        };
+        for (const char* prefix : kMssqlPrefixes) {
+            const auto plen = std::char_traits<char>::length(prefix);
+            if (path.size() >= plen && path.compare(0, plen, prefix) == 0) {
+                return fail(openads::AE_FUNCTION_NOT_AVAILABLE,
+                            "mssql/tds URI requires OPENADS_WITH_MSSQL=ON");
             }
         }
     }
@@ -2703,6 +2960,16 @@ UNSIGNED32 AdsDisconnect(ADSHANDLE hConnect) {
             return ok();
         }
 #endif
+#if defined(OPENADS_WITH_MSSQL)
+        if (auto* mc = s_local.registry.lookup<
+                openads::sql_backend::MssqlConnection>(
+                hConnect, HandleKind::MssqlConnection)) {
+            mc->disconnect();
+            mssql_conns_map().erase(hConnect);
+            s_local.registry.release(hConnect);
+            return ok();
+        }
+#endif
 #if defined(OPENADS_WITH_FIREBIRD)
         if (auto* sc = s_local.registry.lookup<
                 openads::sql_backend::FirebirdConnection>(
@@ -2860,6 +3127,20 @@ UNSIGNED32 AdsOpenTable(ADSHANDLE  hConnect,
         Handle gh = s.registry.register_object(
             HandleKind::OdbcTable, st.get());
         odbc_tables_map().emplace(gh, std::move(st));
+        *phTable = gh;
+        return ok();
+    }
+#endif
+#if defined(OPENADS_WITH_MSSQL)
+    if (auto* mc = s.registry.lookup<openads::sql_backend::MssqlConnection>(
+            hConnect, HandleKind::MssqlConnection)) {
+        auto name = openads::abi::to_internal(pucName, 0);
+        auto tbl = openads::sql_backend::MssqlTable::open(*mc, name);
+        if (!tbl) return fail(tbl.error());
+        auto st = std::move(tbl).value();
+        Handle gh = s.registry.register_object(
+            HandleKind::MssqlTable, st.get());
+        mssql_tables_map().emplace(gh, std::move(st));
         *phTable = gh;
         return ok();
     }
@@ -5215,6 +5496,12 @@ UNSIGNED32 AdsAppendRecord(ADSHANDLE hTable) {
         if (!r) return fail(r.error());
         return ok();
     }
+#if defined(OPENADS_WITH_MSSQL)
+    if (get_mssql_table(hTable)) {
+        return fail(openads::AE_FUNCTION_NOT_AVAILABLE,
+                    "MssqlTable: write not available in v1");
+    }
+#endif
     Table* t = get_table(hTable);
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
     auto r = t->append_record();
@@ -5236,6 +5523,12 @@ UNSIGNED32 AdsWriteRecord(ADSHANDLE hTable) {
         if (!r) return fail(r.error());
         return ok();
     }
+#if defined(OPENADS_WITH_MSSQL)
+    if (get_mssql_table(hTable)) {
+        return fail(openads::AE_FUNCTION_NOT_AVAILABLE,
+                    "MssqlTable: write not available in v1");
+    }
+#endif
     Table* t = get_table(hTable);
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
     bool is_insert = t->pending_append();
@@ -5269,8 +5562,10 @@ UNSIGNED32 AdsWriteRecord(ADSHANDLE hTable) {
         }
     }
 
-    auto r = t->flush();
-    if (!r) return fail(r.error());
+    if (!t->deferred_flush()) {
+        auto r = t->flush();
+        if (!r) return fail(r.error());
+    }
 
     if (Connection* conn = conn_for_table(t)) {
         std::string alias = ri_alias_for_path(conn, t->path());
@@ -5292,6 +5587,12 @@ UNSIGNED32 AdsDeleteRecord(ADSHANDLE hTable) {
         if (!r) return fail(r.error());
         return ok();
     }
+#if defined(OPENADS_WITH_MSSQL)
+    if (get_mssql_table(hTable)) {
+        return fail(openads::AE_FUNCTION_NOT_AVAILABLE,
+                    "MssqlTable: write not available in v1");
+    }
+#endif
     Table* t = get_table(hTable);
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
     t->set_pending_append(false);   // abandon any in-flight append
@@ -5876,6 +6177,13 @@ UNSIGNED32 AdsFlushFileBuffers(ADSHANDLE hTable) {
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
     auto r = t->flush();
     if (!r) return fail(r.error());
+    return ok();
+}
+
+UNSIGNED32 AdsSetDeferredFlush(ADSHANDLE hTable, UNSIGNED16 usDeferred) {
+    Table* t = get_table(hTable);
+    if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
+    t->set_deferred_flush(usDeferred != 0);
     return ok();
 }
 
@@ -10260,6 +10568,9 @@ struct SqlStatement {
     Connection*                            conn   = nullptr;
     openads::network::RemoteConnection*    remote = nullptr;
     openads::sql_backend::SqliteConnection* sqlite = nullptr;
+#if defined(OPENADS_WITH_MSSQL)
+    openads::sql_backend::MssqlConnection*     mssql_conn  = nullptr;
+#endif
     std::string                            sql;
     // RCB 2026-05-22 17:03 — The original struct stored only the raw SQL string.
     // AdsSet* functions never had a place to write named parameter values because
@@ -10346,6 +10657,17 @@ UNSIGNED32 AdsCreateSQLStatement(ADSHANDLE hConnect, ADSHANDLE* phStatement) {
             hConnect, HandleKind::SqliteConnection)) {
         auto stmt = std::make_unique<SqlStatement>();
         stmt->sqlite = sc;
+        ADSHANDLE h = next_stmt_handle();
+        stmt_map()[h] = std::move(stmt);
+        *phStatement = h;
+        return ok();
+    }
+#endif
+#if defined(OPENADS_WITH_MSSQL)
+    if (auto* mc = s.registry.lookup<openads::sql_backend::MssqlConnection>(
+            hConnect, HandleKind::MssqlConnection)) {
+        auto stmt = std::make_unique<SqlStatement>();
+        stmt->mssql_conn = mc;
         ADSHANDLE h = next_stmt_handle();
         stmt_map()[h] = std::move(stmt);
         *phStatement = h;
@@ -11724,6 +12046,27 @@ UNSIGNED32 AdsExecuteSQLDirect(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         openads::sql_backend::SqliteTable* raw = cursor.get();
         Handle h = s.registry.register_object(HandleKind::SqliteTable, raw);
         sqlite_tables_map().emplace(h, std::move(cursor));
+        *phCursor = h;
+        return ok();
+    }
+#endif
+#if defined(OPENADS_WITH_MSSQL)
+    if (it->second->mssql_conn != nullptr) {
+        auto sqlstr = openads::abi::to_internal(pucSQL, 0);
+        auto qr = it->second->mssql_conn->query(sqlstr);
+        if (!qr) return fail(qr.error());
+        openads::sql_backend::tds::QueryResult result = std::move(qr).value();
+        if (!result.ok) {
+            return fail(static_cast<int>(result.error_number),
+                        result.message.c_str());
+        }
+        auto st = openads::sql_backend::MssqlTable::from_result(
+            std::move(result));
+        auto& s = state();
+        std::lock_guard<std::recursive_mutex> lk(s.mu);
+        Handle h = s.registry.register_object(
+            HandleKind::MssqlTable, st.get());
+        mssql_tables_map().emplace(h, std::move(st));
         *phCursor = h;
         return ok();
     }

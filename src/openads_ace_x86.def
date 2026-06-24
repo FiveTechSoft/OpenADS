@@ -176,6 +176,7 @@ EXPORTS
     AdsFindNextTable@16         = AdsFindNextTable
     AdsFindNextTable62@20       = AdsFindNextTable62
     AdsFlushFileBuffers@4       = AdsFlushFileBuffers
+    AdsSetDeferredFlush@8       = AdsSetDeferredFlush
     AdsFTSSearch@20             = AdsFTSSearch
     AdsGetAOF@12                = AdsGetAOF
     AdsGetAllIndexes@12         = AdsGetAllIndexes

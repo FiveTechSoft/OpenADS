@@ -85,6 +85,29 @@ if(OPENADS_WITH_ODBC)
     )
 endif()
 
+if(OPENADS_WITH_MSSQL)
+    # The native MSSQL backend tunnels the TLS handshake inside TDS packets,
+    # so it links mbedtls symbols directly — require OPENADS_WITH_TLS.
+    if(NOT OPENADS_WITH_TLS)
+        message(FATAL_ERROR
+            "OPENADS_WITH_MSSQL=ON requires OPENADS_WITH_TLS=ON "
+            "(the native TDS backend tunnels the TLS handshake through "
+            "mbedtls). Re-run cmake with -DOPENADS_WITH_TLS=ON.")
+    endif()
+    # sql_common.cpp is shared with the ODBC backend; add it only once.
+    if(NOT OPENADS_WITH_ODBC)
+        target_sources(openads_core PRIVATE sql_backend/sql_common.cpp)
+    endif()
+    target_sources(openads_core PRIVATE
+        sql_backend/tds_protocol.cpp
+        sql_backend/mssql_uri.cpp
+        sql_backend/tds_tls_channel.cpp
+        sql_backend/mssql_connection.cpp
+        sql_backend/mssql_table.cpp
+    )
+    target_compile_definitions(openads_core PUBLIC OPENADS_WITH_MSSQL=1)
+endif()
+
 if(OPENADS_WITH_FIREBIRD)
     target_sources(openads_core PRIVATE
         sql_backend/firebird_uri.cpp

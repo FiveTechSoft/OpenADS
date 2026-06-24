@@ -136,6 +136,13 @@ public:
                                        std::size_t         len);
     util::Result<void> apply_tx_rollback_append(std::uint32_t recno);
 
+    // Deferred flush mode. When true, AdsWriteRecord skips the
+    // per-record FlushFileBuffers — the record is written to OS cache
+    // but not synced to physical media until AdsFlushFileBuffers is
+    // called. Gives 10-100x speedup for bulk inserts.
+    bool deferred_flush() const noexcept { return deferred_flush_; }
+    void set_deferred_flush(bool v) noexcept { deferred_flush_ = v; }
+
     util::Result<void> flush();
 
     // Drop every record. Header rec count -> 0 and every bound index
@@ -366,6 +373,7 @@ private:
     std::string                                   path_;
     std::unordered_map<std::string, std::string>  ri_snapshot_;
     bool                                          pending_append_ = false;
+    bool                                          deferred_flush_ = false;
     bool                                          last_seek_found_ = false;
     bool                                          aof_active_      = false;
     int                                           aof_opt_level_   = 0;

@@ -40,7 +40,10 @@ enum class HandleKind {
     // OpenADS Plus — native Firebird backend (firebird:// / fb:// …).
     FirebirdConnection = 21,
     FirebirdTable      = 22,
-    FirebirdIndex      = 23
+    FirebirdIndex      = 23,
+    // Native MS SQL Server backend (mssql:// / tds://).
+    MssqlConnection = 24,
+    MssqlTable      = 25
 };
 
 using Handle = std::uint64_t;

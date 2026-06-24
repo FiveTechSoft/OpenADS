@@ -2,8 +2,29 @@
 
 All notable changes to OpenADS are recorded here. The project follows
 [Semantic Versioning](https://semver.org/) once 1.0 ships; until then
-0.x.y releases may break the C ABI between minor versions to track the
-real ACE SDK.
+0.x.y releases may break the C ABI between minor versions to track
+the real ACE SDK.
+
+## 1.2.0 — 2026-06-24
+
+- **Deferred-flush bulk-insert mode (528× speedup).** A new
+  `AdsSetDeferredFlush(hTable, 1)` API puts the table into
+  deferred-flush mode: `AdsWriteRecord` writes the record to OS
+  cache but skips the per-record `FlushFileBuffers` call. Data is
+  flushed to physical media only when `AdsFlushFileBuffers` is
+  called explicitly (or on table close). 500K records + CDX index
+  build completes in ~26 seconds (19s bulk insert at 26,381 rec/s +
+  7.2s CDX build + 36ms final flush) vs. ~2.7 hours before
+  (50 rec/s). 649/649 unit tests pass; backward-compatible —
+  default behaviour is unchanged (flush on every write).
+
+- **MSSQL native TDS 7.4 backend (PR #53 integration).** Native
+  SQL Server connectivity via the TDS 7.4 wire protocol with
+  optional mbedTLS encryption. Supports connect, authentication
+  (SQL/Windows), table open, field read, and navigation. URI
+  scheme: `mssql://user:pass@host:port/database`. Enabled via
+  `OPENADS_WITH_MSSQL=ON` CMake option (requires
+  `OPENADS_WITH_TLS=ON`). 649/649 unit tests pass.
 
 ## 1.1.0 — 2026-06-23
 

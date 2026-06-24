@@ -214,6 +214,7 @@ UNSIGNED32 AdsSetLockRetryCount (ADSHANDLE hConnect, UNSIGNED16 usRetryCount);
 UNSIGNED32 AdsGetLockRetryCount (ADSHANDLE hConnect, UNSIGNED16* pusRetryCount);
 
 UNSIGNED32 AdsFlushFileBuffers(ADSHANDLE hTable);
+UNSIGNED32 AdsSetDeferredFlush(ADSHANDLE hTable, UNSIGNED16 usDeferred);
 
 UNSIGNED32 AdsOpenIndex     (ADSHANDLE hTable, UNSIGNED8* pucName,
                               ADSHANDLE* ahIndex,

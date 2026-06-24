@@ -191,6 +191,15 @@ if(OPENADS_WITH_FIREBIRD)
     )
 endif()
 
+if(OPENADS_WITH_MSSQL)
+    target_sources(openads_unit_tests PRIVATE
+        unit/abi_plus_mssql_connect_test.cpp
+        unit/abi_plus_mssql_read_test.cpp
+        unit/tds_protocol_test.cpp
+        unit/mssql_uri_test.cpp
+    )
+endif()
+
 # M11.4 — side DLL with stored procedures used by abi_aep_test.
 add_library(openads_test_aep_proc SHARED
     fixtures/test_aep_proc.cpp
@@ -235,3 +244,8 @@ target_link_libraries(probe_cdx PRIVATE openads_core)
 add_executable(probe_cdx2 smoke/harbour/probe_cdx2.cpp)
 target_include_directories(probe_cdx2 PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(probe_cdx2 PRIVATE openads_core)
+
+# Benchmark: DBF 500K records + CDX index build
+add_executable(dbf_cdx_bench bench/dbf_cdx_bench.cpp)
+target_include_directories(dbf_cdx_bench PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(dbf_cdx_bench PRIVATE openads_ace)
