@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <unordered_map>
 #include <variant>
 
 namespace openads::engine {
@@ -255,6 +256,89 @@ std::string rtrim_ascii(const std::string& s) {
     return s.substr(0, e);
 }
 
+// Shared scalar-function evaluator, used by BOTH the key-expression parser
+// (Parser, below) and the FOR-clause truthy evaluator (eval_cmp, further
+// down). Keeping a single implementation means a FOR condition like
+// `UPPER(SUBS(ALLTRIM(col),1,5)) == 'ABC'` evaluates byte-identically to the
+// key path — previously the FOR evaluator only knew RECNO()/DELETED() and
+// returned an empty string for every other call, so such conditions matched
+// no rows and the conditional index came out EMPTY.
+std::string format_number_fn(double v, int width, int dec) {
+    char buf[64];
+    if (width <= 0) {
+        std::snprintf(buf, sizeof(buf), "%.*f", dec > 0 ? dec : 0, v);
+    } else {
+        std::snprintf(buf, sizeof(buf), "%*.*f", width, dec > 0 ? dec : 0, v);
+    }
+    std::string out = buf;
+    if (width > 0 && static_cast<int>(out.size()) > width) {
+        out.resize(static_cast<std::size_t>(width));
+    }
+    return out;
+}
+
+Value apply_scalar_fn(const std::string& fn, const std::vector<Value>& args) {
+    Value v;
+    v.is_number = false;
+    if (fn == "UPPER" && args.size() >= 1) {
+        v.s = upper_utf8(args[0].s);
+    } else if (fn == "LOWER" && args.size() >= 1) {
+        v.s = lower_utf8(args[0].s);
+    } else if (fn == "LTRIM" && args.size() >= 1) {
+        v.s = ltrim_ascii(args[0].s);
+    } else if ((fn == "RTRIM" || fn == "TRIM") && args.size() >= 1) {
+        v.s = rtrim_ascii(args[0].s);
+    } else if (fn == "ALLTRIM" && args.size() >= 1) {
+        v.s = rtrim_ascii(ltrim_ascii(args[0].s));
+    } else if (fn == "DTOS" && args.size() >= 1) {
+        // Date fields are already YYYYMMDD on disk; return the raw bytes.
+        v.s = args[0].s;
+    } else if (fn == "STR") {
+        int width = args.size() >= 2 && args[1].is_number
+                  ? static_cast<int>(args[1].n) : 10;
+        int dec   = args.size() >= 3 && args[2].is_number
+                  ? static_cast<int>(args[2].n) : 0;
+        double n = args[0].is_number ? args[0].n
+                 : std::strtod(args[0].s.c_str(), nullptr);
+        v.s = format_number_fn(n, width, dec);
+    } else if ((fn == "SUBSTR" || fn == "SUBS") && args.size() >= 2) {
+        const std::string& s = args[0].s;
+        int start = args[1].is_number ? static_cast<int>(args[1].n) : 1;
+        int len   = args.size() >= 3 && args[2].is_number
+                  ? static_cast<int>(args[2].n)
+                  : static_cast<int>(s.size());
+        v.s = substr_utf8(s, start, len);
+    } else if (fn == "VAL" && args.size() >= 1) {
+        v.is_number = true;
+        v.n = std::strtod(args[0].s.c_str(), nullptr);
+    } else if ((fn == "AT" || fn == "ATNUM") && args.size() >= 2) {
+        // AT(needle, haystack) / ATNUM(needle, haystack [, occurrence]) ->
+        // 1-based position of the (occurrence-th) match, else 0. Used by the
+        // browse "contains" search as `ATNUM(...) > 0`.
+        const std::string& needle = args[0].s;
+        const std::string& hay    = args[1].s;
+        int occ = (fn == "ATNUM" && args.size() >= 3 && args[2].is_number)
+                ? (static_cast<int>(args[2].n) < 1 ? 1
+                   : static_cast<int>(args[2].n))
+                : 1;
+        v.is_number = true;
+        v.n = 0.0;
+        if (!needle.empty()) {
+            std::size_t pos = 0;
+            int found = 0;
+            while (true) {
+                std::size_t p = hay.find(needle, pos);
+                if (p == std::string::npos) break;
+                if (++found == occ) { v.n = static_cast<double>(p + 1); break; }
+                pos = p + 1;
+            }
+        }
+    } else {
+        // Unknown function — empty string (FoxPro/ADS would error; we degrade).
+    }
+    return v;
+}
+
 class Parser {
 public:
     Parser(const std::vector<Token>& toks, Table& t)
@@ -268,8 +352,8 @@ public:
             // String concatenation; numeric values are stringified
             // first (Clipper semantics for + on mixed operands are
             // unsupported in CDX expressions).
-            std::string a = lhs.is_number ? format_number(lhs.n, 0, 0) : lhs.s;
-            std::string b = rhs.is_number ? format_number(rhs.n, 0, 0) : rhs.s;
+            std::string a = lhs.is_number ? format_number_fn(lhs.n, 0, 0) : lhs.s;
+            std::string b = rhs.is_number ? format_number_fn(rhs.n, 0, 0) : rhs.s;
             lhs.is_number = false;
             lhs.s = a + b;
         }
@@ -315,7 +399,7 @@ private:
                     }
                 }
                 if (peek().kind == TokKind::RParen) ++pos_;
-                return call(upper_utf8(name), args);
+                return apply_scalar_fn(upper_utf8(name), args);
             }
             return field_or_empty(name);
         }
@@ -351,58 +435,6 @@ private:
         return v;
     }
 
-    static std::string format_number(double v, int width, int dec) {
-        char buf[64];
-        if (width <= 0) {
-            std::snprintf(buf, sizeof(buf), "%.*f", dec > 0 ? dec : 0, v);
-        } else {
-            std::snprintf(buf, sizeof(buf), "%*.*f", width,
-                          dec > 0 ? dec : 0, v);
-        }
-        std::string out = buf;
-        if (width > 0 && static_cast<int>(out.size()) > width) {
-            out.resize(static_cast<std::size_t>(width));
-        }
-        return out;
-    }
-
-    Value call(const std::string& fn, const std::vector<Value>& args) {
-        Value v;
-        v.is_number = false;
-        if (fn == "UPPER" && args.size() >= 1) {
-            v.s = upper_utf8(args[0].s);
-        } else if (fn == "LOWER" && args.size() >= 1) {
-            v.s = lower_utf8(args[0].s);
-        } else if (fn == "LTRIM" && args.size() >= 1) {
-            v.s = ltrim_ascii(args[0].s);
-        } else if (fn == "RTRIM" && args.size() >= 1) {
-            v.s = rtrim_ascii(args[0].s);
-        } else if (fn == "ALLTRIM" && args.size() >= 1) {
-            v.s = rtrim_ascii(ltrim_ascii(args[0].s));
-        } else if (fn == "DTOS" && args.size() >= 1) {
-            // Date fields are already YYYYMMDD on disk; just return the raw bytes.
-            v.s = args[0].s;
-        } else if (fn == "STR") {
-            int width = args.size() >= 2 && args[1].is_number
-                      ? static_cast<int>(args[1].n) : 10;
-            int dec   = args.size() >= 3 && args[2].is_number
-                      ? static_cast<int>(args[2].n) : 0;
-            double n = args[0].is_number ? args[0].n
-                     : std::strtod(args[0].s.c_str(), nullptr);
-            v.s = format_number(n, width, dec);
-        } else if (fn == "SUBSTR" && args.size() >= 2) {
-            const std::string& s = args[0].s;
-            int start = args[1].is_number ? static_cast<int>(args[1].n) : 1;
-            int len   = args.size() >= 3 && args[2].is_number
-                      ? static_cast<int>(args[2].n)
-                      : static_cast<int>(s.size());
-            v.s = substr_utf8(s, start, len);
-        } else {
-            // Unknown function — return empty string.
-        }
-        return v;
-    }
-
     const std::vector<Token>& toks_;
     std::size_t               pos_ = 0;
     Table&                    t_;
@@ -412,32 +444,54 @@ private:
 
 util::Result<std::string>
 evaluate_index_expr(Table& t, const std::string& expr, std::uint16_t key_len) {
-    const std::string e = strip_alias_qualifiers(expr);
+    // Memoise the alias-strip + tokenize step keyed by the raw expression.
+    // These depend only on the expression text, not the row, so for a
+    // CREATE INDEX / REINDEX that evaluates the same expression over every
+    // record (and for every seek), tokenising ONCE instead of per-call
+    // removes the dominant per-record allocation cost (a fresh vector<Token>
+    // with per-token std::strings was built on each call). thread_local
+    // avoids locking; the cache holds one tiny entry per distinct index
+    // expression. The bare-field fast-path stays byte-identical.
+    struct CompiledExpr {
+        std::string        stripped;
+        bool               bare = false;
+        std::vector<Token> toks;
+    };
+    thread_local std::unordered_map<std::string, CompiledExpr> s_expr_cache;
+    auto cit = s_expr_cache.find(expr);
+    if (cit == s_expr_cache.end()) {
+        CompiledExpr ce;
+        ce.stripped = strip_alias_qualifiers(expr);
+        ce.bare = !ce.stripped.empty() &&
+            std::all_of(ce.stripped.begin(), ce.stripped.end(),
+                [](char c) {
+                    return std::isalnum(static_cast<unsigned char>(c)) ||
+                           c == '_';
+                });
+        ce.toks = tokenize(ce.stripped);
+        cit = s_expr_cache.emplace(expr, std::move(ce)).first;
+    }
+    const CompiledExpr& ce = cit->second;
+    const std::string& e = ce.stripped;
     if (e.empty()) return std::string(key_len, ' ');
 
     // Fast-path: bare field-name expression (matches the M8.8 behaviour
-    // exactly so existing CDX files round-trip identical bytes).
-    if (std::all_of(e.begin(), e.end(),
-            [](char c) {
-                return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
-            })) {
-        // Only treat as bare-field when the identifier resolves to a
-        // real column; otherwise fall through to the general parser.
-        if (t.field_index(e) >= 0) {
-            std::int32_t fidx = t.field_index(e);
-            const auto& f = t.field_descriptor(static_cast<std::uint16_t>(fidx));
-            auto r = t.read_field(static_cast<std::uint16_t>(fidx));
-            if (!r) return r.error();
-            std::string key = r.value().as_string;
-            if (key.size() < key_len) key.append(key_len - key.size(), ' ');
-            if (key.size() > key_len) key.resize(key_len);
-            (void)f;
-            return key;
-        }
+    // exactly so existing CDX files round-trip identical bytes). Only when
+    // the identifier resolves to a real column; otherwise fall through to
+    // the general parser over the cached tokens.
+    if (ce.bare && t.field_index(e) >= 0) {
+        std::int32_t fidx = t.field_index(e);
+        const auto& f = t.field_descriptor(static_cast<std::uint16_t>(fidx));
+        auto r = t.read_field(static_cast<std::uint16_t>(fidx));
+        if (!r) return r.error();
+        std::string key = r.value().as_string;
+        if (key.size() < key_len) key.append(key_len - key.size(), ' ');
+        if (key.size() > key_len) key.resize(key_len);
+        (void)f;
+        return key;
     }
 
-    auto toks = tokenize(e);
-    Parser p(toks, t);
+    Parser p(ce.toks, t);
     Value v = p.parse_expr();
     std::string s = v.s;
     if (s.size() < key_len) s.append(key_len - s.size(), ' ');
@@ -558,9 +612,13 @@ Value parse_atom(Lex& lx, Table& t) {
                 v.n = t.is_deleted() ? 1.0 : 0.0;
                 return v;
             }
-            // Fallback: treat unknown call as empty string.
-            v.is_number = false;
-            return v;
+            // Scalar functions (UPPER / SUBS / ALLTRIM / STR / DTOS / AT /
+            // ATNUM / ...) — evaluate via the shared implementation so a FOR
+            // condition like UPPER(SUBS(ALLTRIM(col),1,N)) == 'X' matches the
+            // same rows ADS would. Previously every non-RECNO/DELETED call
+            // returned "" here, so conditional-index FOR clauses matched no
+            // rows and the temporary index (and its browse) came out EMPTY.
+            return apply_scalar_fn(upper, args);
         }
         // Field lookup.
         std::int32_t fidx = t.field_index(name);

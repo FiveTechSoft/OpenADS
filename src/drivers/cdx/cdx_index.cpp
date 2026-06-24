@@ -1132,6 +1132,7 @@ CdxIndex::insert(std::uint32_t recno, const std::string& key) {
     if (mode_ == IndexOpenMode::ReadOnly) {
         return util::Error{5000, 0, "CDX opened read-only", ""};
     }
+    invalidate_pos_cache();
     std::string padded = key;
     if (padded.size() < key_size_) padded.append(key_size_ - padded.size(), ' ');
     if (padded.size() > key_size_) padded.resize(key_size_);
@@ -1170,7 +1171,185 @@ CdxIndex::insert(std::uint32_t recno, const std::string& key) {
 }
 
 util::Result<void>
+CdxIndex::build_bulk(std::vector<std::pair<std::string, std::uint32_t>> keys) {
+    if (mode_ == IndexOpenMode::ReadOnly) {
+        return util::Error{5000, 0, "CDX opened read-only", ""};
+    }
+    invalidate_pos_cache();
+
+    // Pad to key_size_ and sort by (key, recno) — the CDX leaf order. Ties
+    // on key resolve by recno so a forward seek surfaces the first-inserted
+    // recno, matching the incremental insert path (upper_bound on key,recno).
+    for (auto& kv : keys) {
+        if (kv.first.size() < key_size_)
+            kv.first.append(key_size_ - kv.first.size(), ' ');
+        else if (kv.first.size() > key_size_)
+            kv.first.resize(key_size_);
+    }
+    std::sort(keys.begin(), keys.end(),
+        [](const std::pair<std::string, std::uint32_t>& a,
+           const std::pair<std::string, std::uint32_t>& b) {
+            int c = std::memcmp(a.first.data(), b.first.data(),
+                                std::min(a.first.size(), b.first.size()));
+            if (c != 0) return c < 0;
+            return a.second < b.second;
+        });
+
+    if (unique_) {
+        for (std::size_t i = 1; i < keys.size(); ++i) {
+            if (keys[i].first == keys[i - 1].first) {
+                return util::Error{5044, 0, "CDX duplicate key", ""};
+            }
+        }
+    }
+
+    if (keys.empty()) {
+        root_page_ = 0;
+        return rewrite_header_();
+    }
+
+    // --- Pass 1: partition the sorted keys into leaf-sized groups. Compact
+    // leaf packing is dup/trl-prefix dependent, so capacity is data-driven;
+    // probe-encode the growing group and close it just before overflow.
+    std::vector<std::pair<std::size_t, std::size_t>> groups;   // [start, count)
+    {
+        Page probe{};
+        std::vector<std::pair<std::string, std::uint32_t>> cur;
+        std::size_t start = 0;
+        std::size_t i = 0;
+        while (i < keys.size()) {
+            cur.push_back(keys[i]);
+            auto e = encode_compact_leaf_static(probe, key_size_, cur,
+                                                0xFFFFFFFFu, 0xFFFFFFFFu);
+            if (!e) {
+                if (cur.size() == 1) {
+                    return util::Error{5000, 0,
+                        "CDX bulk: single key exceeds page capacity", ""};
+                }
+                groups.emplace_back(start, i - start);   // close [start, i)
+                start = i;
+                cur.clear();
+                // retry keys[i] as the first key of the next leaf (no ++i)
+            } else {
+                ++i;
+            }
+        }
+        groups.emplace_back(start, keys.size() - start);
+    }
+
+    // Allocate one page per leaf up front so sibling links reference the
+    // real offsets while encoding.
+    std::vector<std::uint32_t> offs;
+    offs.reserve(groups.size());
+    for (std::size_t g = 0; g < groups.size(); ++g)
+        offs.push_back(allocate_page_());
+
+    // Encode each leaf (doubly-linked sibling pointers) and collect one
+    // separator entry (the leaf's max key + recno + offset) for the level
+    // above. Separators are the highest key in the subtree, which the
+    // descent code expects.
+    std::vector<BranchEntry> level;
+    level.reserve(groups.size());
+    for (std::size_t g = 0; g < groups.size(); ++g) {
+        const std::size_t s = groups[g].first;
+        const std::size_t c = groups[g].second;
+        std::vector<std::pair<std::string, std::uint32_t>> leaf_keys(
+            keys.begin() + static_cast<std::ptrdiff_t>(s),
+            keys.begin() + static_cast<std::ptrdiff_t>(s + c));
+        std::uint32_t left  = (g == 0)              ? 0xFFFFFFFFu : offs[g - 1];
+        std::uint32_t right = (g + 1 == groups.size()) ? 0xFFFFFFFFu : offs[g + 1];
+        if (auto e = encode_leaf_(offs[g], leaf_keys, left, right); !e)
+            return e.error();
+        BranchEntry be;
+        be.key   = leaf_keys.back().first;
+        be.recno = leaf_keys.back().second;
+        be.child = offs[g];
+        level.push_back(std::move(be));
+    }
+
+    // --- Build branch levels bottom-up until a single root page remains.
+    const std::size_t bcap = std::max<std::size_t>(branch_capacity(key_size_), 2);
+    while (level.size() > 1) {
+        const std::size_t ngroups = (level.size() + bcap - 1) / bcap;
+        std::vector<std::uint32_t> boffs;
+        boffs.reserve(ngroups);
+        for (std::size_t g = 0; g < ngroups; ++g)
+            boffs.push_back(allocate_page_());
+
+        std::vector<BranchEntry> next;
+        next.reserve(ngroups);
+        for (std::size_t g = 0; g < ngroups; ++g) {
+            const std::size_t s = g * bcap;
+            const std::size_t c = std::min(bcap, level.size() - s);
+            std::vector<BranchEntry> ents(
+                level.begin() + static_cast<std::ptrdiff_t>(s),
+                level.begin() + static_cast<std::ptrdiff_t>(s + c));
+            std::uint32_t left  = (g == 0)             ? 0xFFFFFFFFu : boffs[g - 1];
+            std::uint32_t right = (g + 1 == ngroups)   ? 0xFFFFFFFFu : boffs[g + 1];
+            auto pg = get_page_(boffs[g]);
+            if (!pg) return pg.error();
+            if (auto e = encode_branch_static(*pg.value(), key_size_,
+                                              ents, left, right); !e)
+                return e.error();
+            dirty_[boffs[g]] = true;
+            BranchEntry be;
+            be.key   = ents.back().key;
+            be.recno = ents.back().recno;
+            be.child = boffs[g];
+            next.push_back(std::move(be));
+        }
+        level = std::move(next);
+    }
+
+    root_page_ = level.front().child;
+    return rewrite_header_();
+}
+
+const std::vector<std::uint32_t>& CdxIndex::ordered_recnos_cached() {
+    if (pos_cache_valid_) return pos_walk_;
+    // Save the navigation cursor — the walk below moves it, and callers
+    // (scrollbar / OrdKeyNo) must not see their position change.
+    std::uint32_t  s_leaf    = cur_leaf_;
+    std::int32_t   s_index   = cur_index_;
+    CurState       s_state   = cur_state_;
+    auto           s_decoded = cur_decoded_;
+    std::string    s_key      = current_key_;
+
+    pos_walk_.clear();
+    pos_map_.clear();
+    auto first = seek_first();
+    if (first && first.value().positioned) {
+        auto cur = first.value();
+        while (cur.positioned) {
+            pos_map_[cur.recno] =
+                static_cast<std::uint32_t>(pos_walk_.size());
+            pos_walk_.push_back(cur.recno);
+            auto nx = next();
+            if (!nx) break;
+            cur = nx.value();
+        }
+    }
+
+    // Restore the cursor exactly as it was.
+    cur_leaf_    = s_leaf;
+    cur_index_   = s_index;
+    cur_state_   = s_state;
+    cur_decoded_ = std::move(s_decoded);
+    current_key_ = std::move(s_key);
+
+    pos_cache_valid_ = true;
+    return pos_walk_;
+}
+
+std::uint32_t CdxIndex::pos_of_recno_cached(std::uint32_t recno) {
+    ordered_recnos_cached();
+    auto it = pos_map_.find(recno);
+    return it == pos_map_.end() ? 0xFFFFFFFFu : it->second;
+}
+
+util::Result<void>
 CdxIndex::erase(std::uint32_t recno, const std::string& key) {
+    invalidate_pos_cache();
     if (mode_ == IndexOpenMode::ReadOnly) {
         return util::Error{5000, 0, "CDX opened read-only", ""};
     }
@@ -1324,6 +1503,7 @@ util::Result<void> CdxIndex::free_tree_(std::uint32_t off) {
 }
 
 util::Result<void> CdxIndex::clear_data() {
+    invalidate_pos_cache();
     // Reclaim the existing tree's pages onto the free list so the rebuild
     // that follows reuses them; otherwise every CREATE INDEX / reindex
     // leaked a full tree and the .cdx outgrew the table without bound.

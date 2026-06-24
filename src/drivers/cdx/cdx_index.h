@@ -84,6 +84,30 @@ public:
                               const std::string& key) override;
     util::Result<void> flush() override;
 
+    // Bulk-load this sub-tag's B+tree from a key stream in one bottom-up
+    // pass: sort the keys, pack them into leaf pages, then build the branch
+    // levels above. The fast CREATE INDEX / REINDEX path — each page is
+    // encoded exactly once, vs record-by-record insert() which descends +
+    // decodes + re-encodes a leaf on every key (~10x slower). Call on a
+    // fresh (root_page_ == 0) or clear_data()'d tag, then flush().
+    util::Result<void>
+        build_bulk(std::vector<std::pair<std::string, std::uint32_t>> keys);
+
+    // Logical-position cache for O(1) scrollbar / OrdKeyNo / OrdKeyCount.
+    // Walks the index ONCE (lazily) into an ordered recno list + a
+    // recno->position map, reused until the index is modified. Without it,
+    // AdsGetRelKeyPos / AdsGetKeyNum walked the whole index on EVERY browse
+    // paint -> O(n) per keystroke, freezing large (e.g. filtered) browses.
+    // The walk saves/restores the navigation cursor so callers see no move.
+    const std::vector<std::uint32_t>& ordered_recnos_cached();
+    // 0-based position of recno in key order, or 0xFFFFFFFF if absent.
+    std::uint32_t pos_of_recno_cached(std::uint32_t recno);
+    void invalidate_pos_cache() {
+        pos_cache_valid_ = false;
+        pos_walk_.clear();
+        pos_map_.clear();
+    }
+
     // Build a fresh compound CDX on disk with a single sub-tag.
     static util::Result<CdxIndex>
         create(const std::string& path,
@@ -207,6 +231,11 @@ private:
 
     std::unordered_map<std::uint32_t, Page> page_cache_;
     std::unordered_map<std::uint32_t, bool> dirty_;
+
+    // Lazily-built logical-position cache (see ordered_recnos_cached()).
+    std::vector<std::uint32_t>                       pos_walk_;
+    std::unordered_map<std::uint32_t, std::uint32_t> pos_map_;
+    bool                                             pos_cache_valid_ = false;
 
     // Cursor: a single (leaf_page, key_index_in_leaf) plus the cached
     // decoded keys for that leaf.

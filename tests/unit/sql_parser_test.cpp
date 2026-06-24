@@ -361,10 +361,53 @@ TEST_CASE("comma-join: missing equi-join predicate is a cartesian error") {
     CHECK_FALSE(r.has_value());   // cartesian products are not supported
 }
 
-TEST_CASE("comma-join: three comma tables are rejected") {
+TEST_CASE("comma-join: three+ comma tables parse for the N-way executor") {
+    // ADS dialect — 3+ tables are now captured in from_tables and routed to
+    // the N-way join executor (not the single inner_join lowering).
     auto r = parse_select(
         "SELECT * FROM a, b, c WHERE a.x = b.y AND b.z = c.w");
-    CHECK_FALSE(r.has_value());   // only two-table comma-join is supported
+    REQUIRE(r.has_value());
+    CHECK(r.value().from_tables.size() == 3);
+    CHECK(r.value().from_tables[0].name == "a");
+    CHECK(r.value().from_tables[1].name == "b");
+    CHECK(r.value().from_tables[2].name == "c");
+    CHECK_FALSE(r.value().inner_join.has_value());   // N-way path, not 2-table
+}
+
+TEST_CASE("comma-join: N-way with aliases, composite key and alias.* parse") {
+    // A 5-table header/detail + dimensions report shape: a composite join
+    // key (h<->d on two columns), qualified columns and a `<alias>.*`
+    // wildcard. All must parse; the executor consumes from_tables +
+    // select_items + the WHERE equalities.
+    auto r = parse_select(
+        "SELECT i.item_name, h.tx_date, d.* "
+        "FROM doctype AS dt, doc AS h, line AS d, "
+        "party AS p, item AS i "
+        "WHERE ( i.item_id = d.item_id ) AND "
+        "( h.party_id = p.party_id ) AND "
+        "( h.doctype_id = d.doctype_id AND h.doc_no = d.doc_no ) AND "
+        "( dt.doctype_id = h.doctype_id )");
+    REQUIRE(r.has_value());
+    CHECK(r.value().from_tables.size() == 5);
+    CHECK(r.value().from_tables[1].alias == "h");
+    CHECK_FALSE(r.value().inner_join.has_value());
+    // projection: two plain qualified columns + one alias.* wildcard
+    REQUIRE(r.value().select_items.size() == 3);
+    CHECK(r.value().select_items[0].alias == "i");
+    CHECK(r.value().select_items[0].column == "item_name");
+    CHECK(r.value().select_items[1].alias == "h");
+    CHECK(r.value().select_items[2].wildcard);
+    CHECK(r.value().select_items[2].alias == "d");
+}
+
+TEST_CASE("WHERE: ODBC date escape {d 'YYYY-MM-DD'} parses to digits") {
+    // ADS uses `{d '...'}` date constants. Reduced to YYYYMMDD so it
+    // string-compares against the DBF Date field's raw bytes.
+    auto r = parse_select(
+        "SELECT * FROM doc WHERE tx_date >= {d '2026-01-01'}");
+    REQUIRE(r.has_value());
+    REQUIRE(r.value().where);
+    CHECK(r.value().where->cmp.literal == "20260101");
 }
 
 TEST_CASE("comma-join: composite (multiple) join keys are rejected") {

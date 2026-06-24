@@ -7149,6 +7149,16 @@ UNSIGNED32 AdsCreateIndex61(ADSHANDLE   hTable,
         idx_owner->set_key_encoding(openads::drivers::KeyEncoding::FoxNumeric);
     }
     auto rec_count = t->record_count();
+    // Fast path: for CDX, collect the whole key stream and bulk-load the
+    // B+tree in one bottom-up pass (sort -> pack leaves -> branch levels)
+    // instead of record-by-record top-down insertion. Each page is encoded
+    // once rather than decoded+re-encoded on every key, ~10x faster on a
+    // full CREATE INDEX / REINDEX. NTX keeps the incremental path.
+    openads::drivers::cdx::CdxIndex* cdx_bulk =
+        is_cdx ? static_cast<openads::drivers::cdx::CdxIndex*>(idx_owner.get())
+               : nullptr;
+    std::vector<std::pair<std::string, std::uint32_t>> bulk_keys;
+    if (cdx_bulk) bulk_keys.reserve(rec_count);
     for (std::uint32_t r = 1; r <= rec_count; ++r) {
         if (auto g = t->goto_record(r); !g) return fail(g.error());
         // DBFCDX inserts deleted rows too — the index is a logical
@@ -7178,9 +7188,15 @@ UNSIGNED32 AdsCreateIndex61(ADSHANDLE   hTable,
             if (!k) return fail(k.error());
             kbytes = std::move(k).value();
         }
-        if (auto ins = idx_owner->insert(r, kbytes); !ins) {
+        if (cdx_bulk) {
+            bulk_keys.emplace_back(std::move(kbytes), r);
+        } else if (auto ins = idx_owner->insert(r, kbytes); !ins) {
             return fail(ins.error());
         }
+    }
+    if (cdx_bulk) {
+        if (auto b = cdx_bulk->build_bulk(std::move(bulk_keys)); !b)
+            return fail(b.error());
     }
     if (auto fl = idx_owner->flush(); !fl) return fail(fl.error());
 
@@ -7225,30 +7241,48 @@ UNSIGNED32 AdsCreateIndex61(ADSHANDLE   hTable,
                 if (auto r0 = sub->open_named(p.string(),
                         openads::drivers::IndexOpenMode::Shared,
                         sib); !r0) continue;
-                if (auto cl = sub->clear_data(); !cl) continue;
                 mark_cdx_key_encoding(t, sub.get());
-                std::string sib_expr = sub->expression();
-                std::uint16_t sib_klen = sub->key_length();
-                const bool sib_fox = sub->key_encoding() ==
-                    openads::drivers::KeyEncoding::FoxNumeric;
-                for (std::uint32_t r2 = 1; r2 <= rec_count; ++r2) {
-                    if (auto g = t->goto_record(r2); !g) continue;
-                    std::string k2b;
-                    if (sib_fox) {
-                        double dv = 0.0;
-                        if (!openads::engine::evaluate_index_expr_number(
-                                *t, sib_expr, dv))
-                            continue;
-                        k2b = openads::engine::fox_numeric_key(dv);
-                    } else {
-                        auto k2 = openads::engine::evaluate_index_expr(
-                            *t, sib_expr, sib_klen);
-                        if (!k2) continue;
-                        k2b = std::move(k2).value();
+                // The sibling lost its binding (rddads ORDLSTCLEAR) but its
+                // on-disk B+tree is already current when it was built earlier
+                // in this same INDEX / REINDEX run — the common case, since a
+                // full reindex builds every tag in turn. Rebuilding it again
+                // on each subsequent CREATE INDEX is the O(tags^2) re-scan
+                // that made INDEXAR of a 10-tag table take minutes. So if the
+                // tag already has a populated tree, just RE-PARK the binding
+                // (cheap) so sync_all_indexes_ tracks it again. Only rebuild
+                // from the DBF when the tree is empty (never built / cleared).
+                bool sib_has_data = false;
+                if (auto sf = sub->seek_first(); sf)
+                    sib_has_data = sf.value().positioned;
+                sub->invalidate_cursor();
+                if (!sib_has_data) {
+                    if (auto cl = sub->clear_data(); !cl) continue;
+                    std::string sib_expr = sub->expression();
+                    std::uint16_t sib_klen = sub->key_length();
+                    const bool sib_fox = sub->key_encoding() ==
+                        openads::drivers::KeyEncoding::FoxNumeric;
+                    std::vector<std::pair<std::string, std::uint32_t>> sib_keys;
+                    sib_keys.reserve(rec_count);
+                    for (std::uint32_t r2 = 1; r2 <= rec_count; ++r2) {
+                        if (auto g = t->goto_record(r2); !g) continue;
+                        std::string k2b;
+                        if (sib_fox) {
+                            double dv = 0.0;
+                            if (!openads::engine::evaluate_index_expr_number(
+                                    *t, sib_expr, dv))
+                                continue;
+                            k2b = openads::engine::fox_numeric_key(dv);
+                        } else {
+                            auto k2 = openads::engine::evaluate_index_expr(
+                                *t, sib_expr, sib_klen);
+                            if (!k2) continue;
+                            k2b = std::move(k2).value();
+                        }
+                        sib_keys.emplace_back(std::move(k2b), r2);
                     }
-                    (void)sub->insert(r2, k2b);
+                    (void)sub->build_bulk(std::move(sib_keys));
+                    (void)sub->flush();
                 }
-                (void)sub->flush();
                 // Park as extra binding (persists across rddads
                 // ORDLSTCLEAR cycles? - it gets dropped, but at
                 // least sync_all_indexes_ can see it until then).
@@ -7344,8 +7378,16 @@ UNSIGNED32 AdsCreateIndex(ADSHANDLE hTable, UNSIGNED8* pucFile,
 
     // Populate from existing live records in primary order. Deleted
     // records are skipped so AdsSeek over the new index never returns
-    // phantom recnos.
+    // phantom recnos. For CDX, collect the key stream and bulk-load the
+    // B+tree bottom-up (one encode per page) instead of record-by-record
+    // insertion — ~10x faster on a full build.
     auto rec_count = t->record_count();
+    openads::drivers::cdx::CdxIndex* cdx_bulk =
+        path_ends_with_ci(file, ".cdx")
+            ? static_cast<openads::drivers::cdx::CdxIndex*>(idx.get())
+            : nullptr;
+    std::vector<std::pair<std::string, std::uint32_t>> bulk_keys;
+    if (cdx_bulk) bulk_keys.reserve(rec_count);
     for (std::uint32_t r = 1; r <= rec_count; ++r) {
         if (auto rr = t->goto_record(r); !rr) return fail(rr.error());
         if (t->is_deleted()) continue;
@@ -7354,7 +7396,15 @@ UNSIGNED32 AdsCreateIndex(ADSHANDLE hTable, UNSIGNED8* pucFile,
         std::string padded = v.value().as_string;
         if (padded.size() < klen) padded.append(klen - padded.size(), ' ');
         if (padded.size() > klen) padded.resize(klen);
-        if (auto ins = idx->insert(r, padded); !ins) return fail(ins.error());
+        if (cdx_bulk) {
+            bulk_keys.emplace_back(std::move(padded), r);
+        } else if (auto ins = idx->insert(r, padded); !ins) {
+            return fail(ins.error());
+        }
+    }
+    if (cdx_bulk) {
+        if (auto b = cdx_bulk->build_bulk(std::move(bulk_keys)); !b)
+            return fail(b.error());
     }
     if (auto fl = idx->flush(); !fl) return fail(fl.error());
 
@@ -13547,6 +13597,572 @@ UNSIGNED32 AdsExecuteSQLDirect(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
     auto parsed = openads::sql::parse_select(sql);
     if (!parsed) return fail(parsed.error());
 
+    // ====================================================================
+    // ADS dialect — N-way comma join (3+ tables) with composite keys and
+    // `<alias>.*` projection. The single-JoinClause path below handles only
+    // two tables; this path generalises to the multi-table inventory
+    // aggregation the application issues (a header/detail join with
+    // dimension tables). It runs a left-deep equi-join in FROM order and writes the
+    // projected columns — named by their UNQUALIFIED column name, the ADS
+    // result semantics — into a temp DBF cursor.
+    //
+    // NOTE: filters are applied after the join is fully bound (same as the
+    // two-table path). Pushing single-table predicates (e.g. the date range)
+    // down per level is a future optimisation; correctness first.
+    // ====================================================================
+    if (parsed.value().from_tables.size() >= 3) {
+        auto& st = parsed.value();
+        if (st.projection_complex) {
+            return fail(openads::AE_INTERNAL_ERROR,
+                "multi-table join: only column and <alias>.* projections "
+                "are supported");
+        }
+        auto& s = state();
+        std::lock_guard<std::recursive_mutex> lk(s.mu);
+
+        const std::size_t N = st.from_tables.size();
+        auto lc = [](std::string v) {
+            for (auto& ch : v)
+                ch = static_cast<char>(
+                    std::tolower(static_cast<unsigned char>(ch)));
+            return v;
+        };
+        auto trim_trailing = [](std::string v) {
+            while (!v.empty() && v.back() == ' ') v.pop_back();
+            return v;
+        };
+
+        // --- 1. Open every table; map alias (and bare name) -> index. ---
+        std::vector<Handle> handles(N, 0);
+        std::vector<openads::engine::Table*> tbls(N, nullptr);
+        std::unordered_map<std::string, std::size_t> alias_idx;
+        std::size_t opened = 0;
+        bool open_ok = true;
+        for (std::size_t i = 0; i < N; ++i) {
+            auto h = open_or_sys(st.from_tables[i].name,
+                                 openads::engine::TableType::Cdx,
+                                 openads::engine::OpenMode::Read,
+                                 openads::engine::LockingMode::Compatible);
+            if (!h) { open_ok = false; break; }
+            handles[i] = h.value();
+            ++opened;
+            tbls[i] = c->lookup_table(h.value());
+            if (!tbls[i]) { open_ok = false; break; }
+            const std::string& al = st.from_tables[i].alias;
+            if (!al.empty()) alias_idx[lc(al)] = i;
+            // Also index by the table's base name (strip dir + extension) so
+            // a column may qualify by table name as well as by alias.
+            std::string base = st.from_tables[i].name;
+            std::size_t slash = base.find_last_of("\\/");
+            if (slash != std::string::npos) base = base.substr(slash + 1);
+            std::size_t dot = base.find_last_of('.');
+            if (dot != std::string::npos) base = base.substr(0, dot);
+            if (!base.empty()) alias_idx.emplace(lc(base), i);
+        }
+        auto close_all = [&]() {
+            for (std::size_t k = 0; k < opened; ++k)
+                if (handles[k]) c->close_table(handles[k]);
+        };
+        if (!open_ok) {
+            close_all();
+            return fail(openads::AE_NO_FILE_FOUND,
+                        "multi-table join: table open failed");
+        }
+
+        // --- 2. Resolve a qualified column -> (table idx, field idx). ---
+        auto resolve = [&](const std::string& alias, const std::string& col,
+                           std::size_t& ti, std::int32_t& fi) -> bool {
+            if (!alias.empty()) {
+                auto a = alias_idx.find(lc(alias));
+                if (a == alias_idx.end()) return false;
+                ti = a->second;
+                fi = tbls[ti]->field_index(col);
+                return fi >= 0;
+            }
+            for (std::size_t i = 0; i < N; ++i) {
+                std::int32_t f = tbls[i]->field_index(col);
+                if (f >= 0) { ti = i; fi = f; return true; }
+            }
+            return false;
+        };
+
+        // --- 3. Walk the top-level AND spine: separate equi-join predicates
+        //        (col = col, enforced by the hash join) from residual filter
+        //        conjuncts. Each residual conjunct is bucketed by the DEEPEST
+        //        table it references, so the join walk can evaluate it the
+        //        moment that table is bound and prune early (filter pushdown).
+        //        Only the AND spine is descended for join keys, so a `col=col`
+        //        nested under OR/NOT is treated as a residual filter, not a
+        //        join key.
+        struct JEq { std::size_t lti; std::int32_t lfi;
+                     std::size_t rti; std::int32_t rfi; };
+        std::vector<JEq> jeqs;
+        std::vector<std::vector<const openads::sql::WhereExpr*>> buckets(N);
+        // Residual conjuncts that reference ONLY one joined table (index >= 1)
+        // are applied while BUILDING that table's hash, so the hash holds just
+        // the matching rows (e.g. only the month's detail rows) instead of the
+        // whole history. Indexed by table.
+        std::vector<std::vector<const openads::sql::WhereExpr*>> pure(N);
+        bool spine_ok = true;
+        // Accumulate the min/max table index a (sub)expression references.
+        // mx < 0 means it references no column (a folded constant).
+        std::function<void(const openads::sql::WhereExpr*, int&, int&)>
+            conj_range = [&](const openads::sql::WhereExpr* n,
+                             int& mn, int& mx) {
+                if (n == nullptr) return;
+                std::size_t ti; std::int32_t fi;
+                if (n->kind == openads::sql::WhereExpr::Kind::Cmp) {
+                    const auto& w = n->cmp;
+                    if (resolve(w.column_alias, w.column, ti, fi)) {
+                        mn = std::min(mn, static_cast<int>(ti));
+                        mx = std::max(mx, static_cast<int>(ti));
+                    }
+                    if (w.is_outer_ref &&
+                        resolve(w.outer_column_alias, w.outer_column, ti, fi)) {
+                        mn = std::min(mn, static_cast<int>(ti));
+                        mx = std::max(mx, static_cast<int>(ti));
+                    }
+                    return;
+                }
+                if (n->kind == openads::sql::WhereExpr::Kind::In) {
+                    if (resolve(std::string(), n->in_clause.column, ti, fi)) {
+                        mn = std::min(mn, static_cast<int>(ti));
+                        mx = std::max(mx, static_cast<int>(ti));
+                    }
+                    return;
+                }
+                for (auto& ch : n->children) conj_range(ch.get(), mn, mx);
+                conj_range(n->child.get(), mn, mx);
+            };
+        std::function<void(const openads::sql::WhereExpr*)> spine =
+            [&](const openads::sql::WhereExpr* n) {
+                if (n == nullptr || !spine_ok) return;
+                if (n->kind == openads::sql::WhereExpr::Kind::And) {
+                    for (auto& ch : n->children) spine(ch.get());
+                    return;
+                }
+                if (n->kind == openads::sql::WhereExpr::Kind::Cmp &&
+                    n->cmp.op == openads::sql::WhereOp::Eq &&
+                    n->cmp.is_outer_ref) {
+                    JEq e{};
+                    if (!resolve(n->cmp.column_alias, n->cmp.column,
+                                 e.lti, e.lfi) ||
+                        !resolve(n->cmp.outer_column_alias, n->cmp.outer_column,
+                                 e.rti, e.rfi)) {
+                        spine_ok = false;
+                        return;
+                    }
+                    jeqs.push_back(e);
+                    return;
+                }
+                int mn = static_cast<int>(N), mx = -1;
+                conj_range(n, mn, mx);
+                if (mx < 0) {
+                    buckets[0].push_back(n);                  // constant -> level 0
+                } else if (mn == mx && mn >= 1) {
+                    pure[static_cast<std::size_t>(mn)].push_back(n);  // hash-build
+                } else {
+                    buckets[static_cast<std::size_t>(mx)].push_back(n);  // walk
+                }
+            };
+        spine(st.where.get());
+        if (!spine_ok) {
+            close_all();
+            return fail(openads::AE_COLUMN_NOT_FOUND,
+                        "multi-table join: unresolved join column");
+        }
+
+        // --- 4. Build a left-deep probe plan in FROM order. ---
+        struct Probe {
+            std::size_t partner = 0;
+            std::vector<std::int32_t> myCols;
+            std::vector<std::int32_t> partnerCols;
+            std::unordered_map<std::string,
+                               std::vector<std::uint32_t>> hash;
+        };
+        std::vector<Probe> probes(N);
+        for (std::size_t i = 1; i < N; ++i) {
+            std::size_t partner = N;   // sentinel = unset
+            for (const auto& e : jeqs) {
+                std::int32_t myc; std::size_t other; std::int32_t otc;
+                if (e.lti == i && e.rti < i) {
+                    myc = e.lfi; other = e.rti; otc = e.rfi;
+                } else if (e.rti == i && e.lti < i) {
+                    myc = e.rfi; other = e.lti; otc = e.lfi;
+                } else {
+                    continue;
+                }
+                if (partner == N) partner = other;
+                if (other != partner) {
+                    close_all();
+                    return fail(openads::AE_INTERNAL_ERROR,
+                        "multi-table join: a table joins to more than one "
+                        "prior table (only left-deep trees are supported)");
+                }
+                probes[i].myCols.push_back(myc);
+                probes[i].partnerCols.push_back(otc);
+            }
+            if (partner == N) {
+                close_all();
+                return fail(openads::AE_INTERNAL_ERROR,
+                    "multi-table join: a table has no equi-join to a prior "
+                    "table (cartesian products are not supported)");
+            }
+            probes[i].partner = partner;
+        }
+
+        // --- 5. (Table hashes are built in step 7b below, after the WHERE
+        //         evaluator is defined, so the single-table residual filters
+        //         in pure[i] can be applied during the build.) ---
+
+        // --- 6. Resolve the output schema from select_items (ADS names). ---
+        struct OutCol { std::size_t ti; openads::drivers::DbfField fld; };
+        std::vector<OutCol> outcols;
+        std::unordered_set<std::string> seen;
+        auto add_out = [&](std::size_t ti, std::int32_t fi) {
+            const auto& f =
+                tbls[ti]->driver()->fields()[static_cast<std::size_t>(fi)];
+            std::string nm = f.name;
+            if (nm.size() > 10) nm.resize(10);
+            if (!seen.insert(lc(nm)).second) return;   // first-wins de-dupe
+            outcols.push_back(OutCol{ti, f});
+        };
+        if (st.select_items.empty()) {
+            // bare `SELECT *` across all tables, in FROM order.
+            for (std::size_t i = 0; i < N; ++i) {
+                const auto& flds = tbls[i]->driver()->fields();
+                for (std::int32_t k = 0;
+                     k < static_cast<std::int32_t>(flds.size()); ++k)
+                    add_out(i, k);
+            }
+        } else {
+            for (const auto& si : st.select_items) {
+                if (si.wildcard) {
+                    auto a = alias_idx.find(lc(si.alias));
+                    if (a == alias_idx.end()) {
+                        close_all();
+                        return fail(openads::AE_COLUMN_NOT_FOUND,
+                                    si.alias.c_str());
+                    }
+                    const auto& flds =
+                        tbls[a->second]->driver()->fields();
+                    for (std::int32_t k = 0;
+                         k < static_cast<std::int32_t>(flds.size()); ++k)
+                        add_out(a->second, k);
+                } else {
+                    std::size_t ti; std::int32_t fi;
+                    if (!resolve(si.alias, si.column, ti, fi)) {
+                        close_all();
+                        return fail(openads::AE_COLUMN_NOT_FOUND,
+                                    si.column.c_str());
+                    }
+                    add_out(ti, fi);
+                }
+            }
+        }
+        if (outcols.empty()) {
+            close_all();
+            return fail(openads::AE_INTERNAL_ERROR,
+                        "multi-table join: empty projection");
+        }
+
+        // --- 7. Residual WHERE evaluator over the bound raw records. ---
+        std::vector<std::vector<std::uint8_t>> raws(N);
+        auto slice = [&](std::size_t ti, std::int32_t fi) -> std::string {
+            const auto& f =
+                tbls[ti]->driver()->fields()[static_cast<std::size_t>(fi)];
+            const auto& buf = raws[ti];
+            if (static_cast<std::size_t>(f.record_offset) + f.length
+                    > buf.size())
+                return std::string();
+            return std::string(reinterpret_cast<const char*>(
+                buf.data() + f.record_offset), f.length);
+        };
+        auto is_num_type = [](openads::drivers::DbfFieldType t) {
+            return t == openads::drivers::DbfFieldType::Numeric  ||
+                   t == openads::drivers::DbfFieldType::Float    ||
+                   t == openads::drivers::DbfFieldType::Integer  ||
+                   t == openads::drivers::DbfFieldType::Currency ||
+                   t == openads::drivers::DbfFieldType::Double;
+        };
+        auto fold = [&](std::string v, openads::sql::WhereFn fn) {
+            if (fn == openads::sql::WhereFn::Upper)
+                for (auto& ch : v)
+                    ch = static_cast<char>(
+                        std::toupper(static_cast<unsigned char>(ch)));
+            else if (fn == openads::sql::WhereFn::Lower)
+                for (auto& ch : v)
+                    ch = static_cast<char>(
+                        std::tolower(static_cast<unsigned char>(ch)));
+            return v;
+        };
+        std::function<bool(const char*, const char*)> like_m =
+            [&](const char* p, const char* sv) -> bool {
+            if (*p == '\0') return *sv == '\0';
+            if (*p == '%') {
+                if (like_m(p + 1, sv)) return true;
+                return *sv != '\0' && like_m(p, sv + 1);
+            }
+            if (*sv == '\0') return false;
+            if (*p == '_' || *p == *sv) return like_m(p + 1, sv + 1);
+            return false;
+        };
+        std::function<bool(const openads::sql::WhereExpr*)> eval =
+            [&](const openads::sql::WhereExpr* n) -> bool {
+            if (n == nullptr) return true;
+            using K  = openads::sql::WhereExpr::Kind;
+            using Op = openads::sql::WhereOp;
+            switch (n->kind) {
+                case K::And: {
+                    for (auto& ch : n->children)
+                        if (!eval(ch.get())) return false;
+                    return true;                 // empty AND -> true
+                }
+                case K::Or: {
+                    if (n->children.empty()) return false;  // empty OR -> false
+                    for (auto& ch : n->children)
+                        if (eval(ch.get())) return true;
+                    return false;
+                }
+                case K::Not:
+                    return !eval(n->child.get());
+                case K::In: {
+                    std::size_t lti; std::int32_t lfi;
+                    if (!resolve(std::string(), n->in_clause.column, lti, lfi))
+                        return false;
+                    std::string lhs = trim_trailing(slice(lti, lfi));
+                    for (const auto& v : n->in_clause.literals)
+                        if (lhs == v) return true;
+                    return false;
+                }
+                case K::Cmp: {
+                    const auto& w = n->cmp;
+                    std::size_t lti; std::int32_t lfi;
+                    if (!resolve(w.column_alias, w.column, lti, lfi))
+                        return false;
+                    const auto& lf =
+                        tbls[lti]->driver()->fields()[
+                            static_cast<std::size_t>(lfi)];
+                    std::string lhs = fold(trim_trailing(slice(lti, lfi)),
+                                           w.lhs_fn);
+                    if (w.is_outer_ref) {
+                        std::size_t rti; std::int32_t rfi;
+                        if (!resolve(w.outer_column_alias, w.outer_column,
+                                     rti, rfi))
+                            return false;
+                        int cc = lhs.compare(trim_trailing(slice(rti, rfi)));
+                        switch (w.op) {
+                            case Op::Ne: return cc != 0;
+                            case Op::Lt: return cc <  0;
+                            case Op::Gt: return cc >  0;
+                            case Op::Le: return cc <= 0;
+                            case Op::Ge: return cc >= 0;
+                            default:     return cc == 0;   // Eq
+                        }
+                    }
+                    if (w.op == Op::IsNull)    return lhs.empty();
+                    if (w.op == Op::IsNotNull) return !lhs.empty();
+                    bool numeric = is_num_type(lf.type);
+                    if (w.op == Op::Like)
+                        return like_m(w.literal.c_str(), lhs.c_str());
+                    if (w.op == Op::Between) {
+                        if (numeric) {
+                            double a  = std::strtod(lhs.c_str(), nullptr);
+                            double b1 = std::strtod(w.literal.c_str(), nullptr);
+                            double b2 = std::strtod(w.literal2.c_str(), nullptr);
+                            return a >= b1 && a <= b2;
+                        }
+                        return lhs.compare(w.literal)  >= 0 &&
+                               lhs.compare(w.literal2) <= 0;
+                    }
+                    int cc;
+                    if (numeric) {
+                        double a = std::strtod(lhs.c_str(), nullptr);
+                        double b = w.is_numeric
+                                       ? w.number
+                                       : std::strtod(w.literal.c_str(), nullptr);
+                        cc = (a < b) ? -1 : (a > b ? 1 : 0);
+                    } else {
+                        cc = lhs.compare(w.literal);
+                    }
+                    switch (w.op) {
+                        case Op::Eq: return cc == 0;
+                        case Op::Ne: return cc != 0;
+                        case Op::Lt: return cc <  0;
+                        case Op::Gt: return cc >  0;
+                        case Op::Le: return cc <= 0;
+                        case Op::Ge: return cc >= 0;
+                        default:     return false;
+                    }
+                }
+                default:
+                    return true;   // Exists / unsupported -> non-filtering
+            }
+        };
+
+        // --- 7b. Hash each joined table on its key columns, applying the
+        //         single-table residual filters (pure[i]) up front so the hash
+        //         holds only matching rows (e.g. just the month's detail rows)
+        //         instead of the whole history. raws[i] is scratch here; the
+        //         walk re-binds it per emitted combination.
+        for (std::size_t i = 1; i < N; ++i) {
+            auto& pr = probes[i];
+            const auto& flds = tbls[i]->driver()->fields();
+            std::uint32_t rc = tbls[i]->record_count();
+            for (std::uint32_t r = 1; r <= rc; ++r) {
+                auto raw = tbls[i]->driver()->read_record_raw(r);
+                if (!raw) continue;
+                raws[i] = std::move(raw).value();
+                const auto& buf = raws[i];
+                if (buf.empty() || buf[0] == '*') continue;   // skip deleted
+                bool keep = true;
+                for (const auto* cj : pure[i])
+                    if (!eval(cj)) { keep = false; break; }   // single-table filter
+                if (!keep) continue;
+                std::string key;
+                bool kok = true;
+                for (std::int32_t fc : pr.myCols) {
+                    const auto& f = flds[static_cast<std::size_t>(fc)];
+                    if (static_cast<std::size_t>(f.record_offset) + f.length
+                            > buf.size()) { kok = false; break; }
+                    key += trim_trailing(std::string(
+                        reinterpret_cast<const char*>(
+                            buf.data() + f.record_offset), f.length));
+                    key.push_back('\x01');
+                }
+                if (!kok) continue;
+                pr.hash[key].push_back(r);
+            }
+        }
+
+        // --- 8. Output DBF header + field descriptors. ---
+        std::uint16_t out_hlen = static_cast<std::uint16_t>(
+            32 + 32 * outcols.size() + 1);
+        std::uint32_t out_rlen = 1;
+        for (const auto& oc : outcols) out_rlen += oc.fld.length;
+        if (out_rlen > 0xFFFF) {
+            close_all();
+            return fail(openads::AE_INTERNAL_ERROR,
+                        "multi-table join: record exceeds 64 KiB");
+        }
+        std::vector<std::uint8_t> file;
+        {
+            std::array<std::uint8_t, 32> hdr{};
+            hdr[0] = 0x03;
+            stamp_dbf_header_today(hdr.data());
+            hdr[8]  = static_cast<std::uint8_t>( out_hlen       & 0xFFu);
+            hdr[9]  = static_cast<std::uint8_t>((out_hlen >> 8) & 0xFFu);
+            hdr[10] = static_cast<std::uint8_t>( out_rlen       & 0xFFu);
+            hdr[11] = static_cast<std::uint8_t>((out_rlen >> 8) & 0xFFu);
+            file.insert(file.end(), hdr.begin(), hdr.end());
+            for (const auto& oc : outcols) {
+                std::array<std::uint8_t, 32> fd{};
+                std::size_t nn = std::min<std::size_t>(oc.fld.name.size(), 10);
+                std::memcpy(fd.data(), oc.fld.name.data(), nn);
+                fd[11] = static_cast<std::uint8_t>(oc.fld.raw_type);
+                fd[16] = static_cast<std::uint8_t>(oc.fld.length);
+                fd[17] = oc.fld.decimals;
+                file.insert(file.end(), fd.begin(), fd.end());
+            }
+            file.push_back(0x0D);
+        }
+
+        // --- 9. Left-deep nested-loop join walk; emit projected rows. ---
+        std::uint32_t emitted = 0;
+        auto emit_row = [&]() {
+            std::vector<std::uint8_t> rec(out_rlen, ' ');
+            rec[0] = ' ';
+            std::size_t off = 1;
+            for (const auto& oc : outcols) {
+                const auto& buf = raws[oc.ti];
+                std::size_t so = oc.fld.record_offset;
+                std::size_t L  = oc.fld.length;
+                if (so + L <= buf.size())
+                    std::memcpy(rec.data() + off, buf.data() + so, L);
+                off += L;
+            }
+            file.insert(file.end(), rec.begin(), rec.end());
+            ++emitted;
+        };
+        // Evaluate the residual conjuncts that become bound at `level`;
+        // returning false prunes the branch before descending further.
+        auto pass_bucket = [&](std::size_t level) -> bool {
+            for (const auto* cj : buckets[level])
+                if (!eval(cj)) return false;
+            return true;
+        };
+        std::function<void(std::size_t)> walk = [&](std::size_t level) {
+            if (level == N) { emit_row(); return; }   // all conjuncts checked
+            if (level == 0) {
+                std::uint32_t rc = tbls[0]->record_count();
+                for (std::uint32_t r = 1; r <= rc; ++r) {
+                    auto raw = tbls[0]->driver()->read_record_raw(r);
+                    if (!raw) continue;
+                    if (raw.value().empty() || raw.value()[0] == '*') continue;
+                    raws[0] = std::move(raw).value();
+                    if (pass_bucket(0)) walk(1);   // prune table-0 filters early
+                }
+                return;
+            }
+            const auto& pr = probes[level];
+            const auto& pfld = tbls[pr.partner]->driver()->fields();
+            std::string key;
+            for (std::int32_t pc : pr.partnerCols) {
+                const auto& f = pfld[static_cast<std::size_t>(pc)];
+                const auto& pbuf = raws[pr.partner];
+                std::string v;
+                if (static_cast<std::size_t>(f.record_offset) + f.length
+                        <= pbuf.size())
+                    v.assign(reinterpret_cast<const char*>(
+                        pbuf.data() + f.record_offset), f.length);
+                key += trim_trailing(v);
+                key.push_back('\x01');
+            }
+            auto it2 = pr.hash.find(key);
+            if (it2 == pr.hash.end()) return;
+            for (std::uint32_t r : it2->second) {
+                auto raw = tbls[level]->driver()->read_record_raw(r);
+                if (!raw) continue;
+                raws[level] = std::move(raw).value();
+                if (pass_bucket(level)) walk(level + 1);  // push filters down
+            }
+        };
+        walk(0);
+
+        file.push_back(0x1A);
+        file[4] = static_cast<std::uint8_t>( emitted        & 0xFFu);
+        file[5] = static_cast<std::uint8_t>((emitted >>  8) & 0xFFu);
+        file[6] = static_cast<std::uint8_t>((emitted >> 16) & 0xFFu);
+        file[7] = static_cast<std::uint8_t>((emitted >> 24) & 0xFFu);
+
+        close_all();
+
+        // --- 10. Write temp DBF, reopen as cursor, register, return. ---
+        namespace fs = std::filesystem;
+        char nb[64];
+        std::snprintf(nb, sizeof(nb), "_mjoin_%llx.dbf",
+                      static_cast<unsigned long long>(
+                          openads::platform::monotonic_nanos()));
+        fs::path mj = fs::path(c->data_dir()) / nb;
+        {
+            std::ofstream out(mj, std::ios::binary);
+            if (!out)
+                return fail(openads::AE_INTERNAL_ERROR,
+                            "multi-table join temp DBF: open for write failed");
+            out.write(reinterpret_cast<const char*>(file.data()),
+                      static_cast<std::streamsize>(file.size()));
+        }
+        std::string rel = mj.filename().string();
+        auto cth = c->open_table(rel, openads::engine::TableType::Cdx,
+                                 openads::engine::OpenMode::Read);
+        if (!cth) return fail(cth.error());
+        openads::engine::Table* ctbl = c->lookup_table(cth.value());
+        if (!ctbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
+        ADSHANDLE gh = s.registry.register_object(HandleKind::Table, ctbl);
+        *phCursor = gh;
+        return ok();
+    }
+
     if (parsed.value().inner_join) {
         // M10.14 materialises the join into a temp DBF cursor; M10.20
         // additionally compiles the outer WHERE / ORDER BY against
@@ -17316,10 +17932,16 @@ UNSIGNED32 AdsGetKeyNum(ADSHANDLE hObj, UNSIGNED16 /*usFilterOption*/,
         *pulKeyNum = t->recno();
         return ok();
     }
-    // Active order: walk the index counting until we reach the current
-    // record's key. Mirrors AdsGetRelKeyPos's walk; cursor is restored.
+    // Active order: logical key number = position in key order + 1.
     std::uint32_t rn  = t->recno();
     auto*         idx = ord->index();
+    // CDX: O(1) via the cached ordered-recno walk.
+    if (auto* cdx = dynamic_cast<openads::drivers::cdx::CdxIndex*>(idx)) {
+        std::uint32_t pos = cdx->pos_of_recno_cached(rn);
+        *pulKeyNum = (pos == 0xFFFFFFFFu) ? 0u : (pos + 1u);
+        return ok();
+    }
+    // Non-CDX: legacy O(n) walk (cursor restored).
     idx->invalidate_cursor();
     auto first = idx->seek_first();
     if (!first) { (void)t->goto_record(rn); return fail(first.error()); }
@@ -17466,7 +18088,15 @@ UNSIGNED32 AdsGetRelKeyPos(ADSHANDLE h, double* p) {
     if (t == nullptr) return fail(openads::AE_INTERNAL_ERROR, "no table");
     std::uint32_t rc = t->record_count();
     std::uint32_t rn = t->recno();
-    if (rc <= 1 || rn == 0) { *p = 0.0; return ok(); }
+    if (rc <= 1) { *p = 0.0; return ok(); }
+    if (rn == 0) {
+        // Phantom position (recno 0): EOF -> bottom (1.0), BOF -> top (0.0).
+        // Returning 0.0 for EOF made the scrollbar snap to the TOP when a
+        // held PageDown overshot the end, so the browse jumped back up and
+        // would not scroll down again. Reporting EOF as bottom keeps it put.
+        *p = t->eof() ? 1.0 : 0.0;
+        return ok();
+    }
 
     // Active-order path: ADS reports the cursor's relative position
     // in the *index walk*, not in raw recno space. Walk the index
@@ -17477,6 +18107,26 @@ UNSIGNED32 AdsGetRelKeyPos(ADSHANDLE h, double* p) {
     auto* ord = t->order();
     if (ord != nullptr && ord->index() != nullptr) {
         auto* idx = ord->index();
+        // CDX: O(1) via the cached ordered-recno walk (built once, reused
+        // across paints). The previous per-call O(n) walk made TXBrowse
+        // freeze on large/filtered orders (the scrollbar hits this every
+        // paint).
+        if (auto* cdx =
+                dynamic_cast<openads::drivers::cdx::CdxIndex*>(idx)) {
+            const auto& walk = cdx->ordered_recnos_cached();
+            if (walk.size() <= 1) { *p = 0.0; return ok(); }
+            std::uint32_t pos = cdx->pos_of_recno_cached(rn);
+            if (pos == 0xFFFFFFFFu) {
+                if (rn > rc) rn = rc;
+                *p = static_cast<double>(rn - 1) /
+                     static_cast<double>(rc - 1);
+                return ok();
+            }
+            *p = static_cast<double>(pos) /
+                 static_cast<double>(walk.size() - 1);
+            return ok();
+        }
+        // Non-CDX (NTX/ADI): legacy per-call O(n) walk.
         idx->invalidate_cursor();
         auto first = idx->seek_first();
         if (!first) return fail(first.error());
@@ -17605,23 +18255,29 @@ UNSIGNED32 AdsSetRelKeyPos(ADSHANDLE h, double pos) {
     auto* ord = t->order();
     if (ord != nullptr && ord->index() != nullptr) {
         auto* idx = ord->index();
-        idx->invalidate_cursor();
-        auto first = idx->seek_first();
-        if (!first) return fail(first.error());
-        std::vector<std::uint32_t> walk;
-        walk.reserve(128);
-        auto cur = first.value();
-        while (cur.positioned) {
-            walk.push_back(cur.recno);
-            auto nx = idx->next();
-            if (!nx) return fail(nx.error());
-            cur = nx.value();
+        const std::vector<std::uint32_t>* walkp = nullptr;
+        std::vector<std::uint32_t> walk_local;
+        if (auto* cdx =
+                dynamic_cast<openads::drivers::cdx::CdxIndex*>(idx)) {
+            walkp = &cdx->ordered_recnos_cached();   // O(1) after first build
+        } else {
+            idx->invalidate_cursor();
+            auto first = idx->seek_first();
+            if (!first) return fail(first.error());
+            auto cur = first.value();
+            while (cur.positioned) {
+                walk_local.push_back(cur.recno);
+                auto nx = idx->next();
+                if (!nx) return fail(nx.error());
+                cur = nx.value();
+            }
+            idx->invalidate_cursor();
+            walkp = &walk_local;
         }
-        idx->invalidate_cursor();
+        const auto& walk = *walkp;
         if (walk.empty()) return ok();
-        std::size_t target =
-            static_cast<std::size_t>(
-                pos * static_cast<double>(walk.size() - 1) + 0.5);
+        std::size_t target = static_cast<std::size_t>(
+            pos * static_cast<double>(walk.size() - 1) + 0.5);
         if (target >= walk.size()) target = walk.size() - 1;
         auto r = t->goto_record(walk[target]);
         if (!r) return fail(r.error());
@@ -18295,7 +18951,23 @@ UNSIGNED32 AdsGetKeyCount(ADSHANDLE hIndex, UNSIGNED16 /*usFilter*/,
                           UNSIGNED32* pulCount) {
     if (pulCount == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
     *pulCount = 0;
-    if (Table* t = get_table(hIndex)) *pulCount = t->record_count();
+    Table* t = get_table(hIndex);
+    if (t == nullptr) return ok();
+    // With an active order, the KEY count can be far fewer than the table's
+    // record_count() (a conditional/FOR index indexes only matching rows).
+    // Returning record_count() here made it inconsistent with OrdKeyNo /
+    // GetRelKeyPos (which count the index walk) -> TXBrowse position math
+    // broke on conditional orders. Use the cached index walk (O(1)).
+    auto* ord = t->order();
+    if (ord != nullptr && ord->index() != nullptr) {
+        if (auto* cdx =
+                dynamic_cast<openads::drivers::cdx::CdxIndex*>(ord->index())) {
+            *pulCount = static_cast<UNSIGNED32>(
+                cdx->ordered_recnos_cached().size());
+            return ok();
+        }
+    }
+    *pulCount = t->record_count();
     return ok();
 }
 UNSIGNED32 AdsContinue(ADSHANDLE hTable, UNSIGNED16* pbFound) {

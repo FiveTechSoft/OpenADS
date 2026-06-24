@@ -36,6 +36,11 @@ struct SelectStmt;
 
 struct WhereCmp {
     std::string column;
+    // ADS dialect — table alias qualifier on the LHS column (`h.tx_date`
+    // → column="tx_date", column_alias="h"). Empty when unqualified.
+    // Required by the N-way join executor to disambiguate same-named columns
+    // across the joined tables (e.g. h.tx_date vs d.tx_date).
+    std::string column_alias;
     WhereOp     op = WhereOp::Eq;
     WhereFn     lhs_fn = WhereFn::None;   // ADS UPPER()/LOWER() on the LHS
     std::string literal;       // raw string content, unquoted
@@ -51,6 +56,10 @@ struct WhereCmp {
     // `literal`/`number`.
     bool        is_outer_ref = false;
     std::string outer_column;
+    // ADS dialect — alias qualifier of the RHS outer/join column
+    // (`h.doctype_id = d.doctype_id` → outer_column="doctype_id",
+    // outer_column_alias="d"). Empty when unqualified.
+    std::string outer_column_alias;
     // M10.33 — BETWEEN's upper bound (`<col> BETWEEN lit1 AND lit2`).
     // When op == WhereOp::Between, `literal`/`number` hold the lower
     // bound and `literal2`/`number2` hold the upper bound.
@@ -202,8 +211,41 @@ struct JoinClause {
     bool         is_full  = false;  // M10.22 — true for FULL OUTER JOIN
 };
 
+// ADS dialect — one entry per table in a comma-separated FROM list
+// (`FROM a, b, c`). `name` is the table/free-file name, `alias` the
+// optional AS/bare alias used to qualify columns. Populated for every
+// SELECT (size 1 for a single table). The N-way join executor uses
+// from_tables.size() >= 3 as its trigger.
+struct FromTable {
+    std::string name;
+    std::string alias;
+};
+
+// ADS dialect — one projection item for the N-way join path. A plain
+// column carries (alias, column); `<alias>.*` sets wildcard and expands
+// to every field of that aliased table at execution time. Only populated
+// for plain-column / wildcard projection items; CASE/aggregate/scalar/
+// window/arith items set SelectStmt::projection_complex instead.
+struct SelectItem {
+    std::string alias;     // table alias qualifier ("" if unqualified)
+    std::string column;    // column name ("" when wildcard)
+    bool        wildcard = false;   // true for `<alias>.*`
+};
+
 struct SelectStmt {
     std::string                table;
+    // ADS dialect — full comma-separated FROM table list (with aliases).
+    // size()==1 for a single table; >=2 for a comma join. The N-way join
+    // executor activates at size()>=3.
+    std::vector<FromTable>     from_tables;
+    // ADS dialect — projection items for the N-way join path (plain
+    // columns + `<alias>.*` wildcards, in order). See SelectItem.
+    std::vector<SelectItem>    select_items;
+    // ADS dialect — set when the projection contains a CASE / aggregate /
+    // scalar fn / window fn / arithmetic item, which the N-way join path
+    // does not handle. The executor errors clearly if it sees this on the
+    // multi-table path.
+    bool                       projection_complex = false;
     // ADS dialect — optional table alias from `FROM <table> AS <alias>`
     // (or the bare `FROM <table> <alias>` form). Qualified column refs
     // `<alias>.<col>` are resolved by column name, so this is recorded

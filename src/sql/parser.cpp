@@ -113,7 +113,16 @@ public:
         return out;
     }
 
-    std::string read_identifier() {
+    // Reads an identifier, optionally reporting the dropped alias and a
+    // qualified-wildcard marker. `out_alias` (if non-null) receives the
+    // `<alias>` of a qualified ref `<alias>.<col>`. `out_wildcard` (if
+    // non-null) enables `<alias>.*` recognition: when present and the ref
+    // is `alias.*`, the '*' is consumed, *out_wildcard is set, and the
+    // alias is returned as the name. When `out_wildcard` is null the old
+    // behaviour is preserved exactly (the '*' is left unconsumed), so all
+    // existing callers are unaffected.
+    std::string read_identifier(std::string* out_alias = nullptr,
+                                bool* out_wildcard = nullptr) {
         skip_ws();
         std::string out;
         // SAP ADS bracket-quoted identifier: [reserved_word] or [name with spaces]
@@ -137,7 +146,17 @@ public:
         // alias and return only the column name; the engine resolves
         // bare names against the (single, possibly joined) cursor.
         if (pos_ < s_.size() && s_[pos_] == '.') {
+            // ADS dialect — qualified wildcard `<alias>.*` (only when the
+            // caller opted in via out_wildcard; otherwise leave '*' alone).
+            if (out_wildcard != nullptr && pos_ + 1 < s_.size() &&
+                s_[pos_ + 1] == '*') {
+                if (out_alias) *out_alias = out;
+                *out_wildcard = true;
+                pos_ += 2;   // consume '.' and '*'
+                return out;  // name == alias; caller keys on the wildcard flag
+            }
             ++pos_;
+            if (out_alias) *out_alias = out;   // remember the dropped alias
             std::string col;
             while (pos_ < s_.size()) {
                 char c = s_[pos_];
@@ -179,6 +198,40 @@ public:
         }
         ++pos_;   // consume closing quote
         return out;
+    }
+
+    // ADS / ODBC temporal literal escape: {d 'YYYY-MM-DD'}, {t 'HH:MM:SS'},
+    // {ts 'YYYY-MM-DD HH:MM:SS'}. Returns the inner value reduced to digits
+    // only (e.g. '2026-01-01' -> '20260101') so it string-compares against a
+    // DBF Date field's raw YYYYMMDD bytes. Assumes the current char is '{'.
+    util::Result<std::string> read_odbc_temporal_literal() {
+        skip_ws();
+        if (pos_ >= s_.size() || s_[pos_] != '{') {
+            return util::Error{7200, 0,
+                "expected '{' for temporal literal", ""};
+        }
+        ++pos_;                       // consume '{'
+        skip_ws();
+        // Type marker d / t / ts (case-insensitive) — consumed and ignored.
+        while (pos_ < s_.size() &&
+               std::isalpha(static_cast<unsigned char>(s_[pos_]))) {
+            ++pos_;
+        }
+        auto lit = read_string_literal();
+        if (!lit) return lit.error();
+        skip_ws();
+        if (pos_ < s_.size() && s_[pos_] == '}') {
+            ++pos_;                   // consume '}'
+        } else {
+            return util::Error{7200, 0,
+                "expected '}' to close temporal literal", ""};
+        }
+        std::string digits;
+        for (char ch : lit.value()) {
+            if (std::isdigit(static_cast<unsigned char>(ch)))
+                digits.push_back(ch);
+        }
+        return digits;
     }
 
     // Decimal numeric literal — optional sign, digits, optional `.` +
@@ -309,7 +362,8 @@ parse_cmp(Cursor& c, const std::string& sql) {
     // name is only treated as such when an opening paren follows; a column
     // literally named UPPER/LOWER (no paren) still reads as a column.
     {
-        std::string head = c.read_identifier();
+        std::string head_alias;
+        std::string head = c.read_identifier(&head_alias);
         std::string upper;
         upper.reserve(head.size());
         for (char ch : head) {
@@ -319,7 +373,8 @@ parse_cmp(Cursor& c, const std::string& sql) {
         if ((upper == "UPPER" || upper == "LOWER") && c.match_char('(')) {
             node->cmp.lhs_fn =
                 (upper == "UPPER") ? WhereFn::Upper : WhereFn::Lower;
-            node->cmp.column = c.read_identifier();   // drops <alias>. prefix
+            // drops the <alias>. prefix but keeps the alias for the N-way path
+            node->cmp.column = c.read_identifier(&node->cmp.column_alias);
             if (node->cmp.column.empty()) {
                 return util::Error{7200, 0,
                     "expected column inside UPPER()/LOWER()", sql};
@@ -329,7 +384,8 @@ parse_cmp(Cursor& c, const std::string& sql) {
                     "expected ')' after UPPER()/LOWER() column", sql};
             }
         } else {
-            node->cmp.column = std::move(head);
+            node->cmp.column       = std::move(head);
+            node->cmp.column_alias = std::move(head_alias);
         }
     }
     if (node->cmp.column.empty()) {
@@ -466,7 +522,15 @@ parse_cmp(Cursor& c, const std::string& sql) {
             "expected =, !=, <>, <, >, <= or >= after column name", sql};
     }
 
-    if (c.peek_char('\'')) {
+    if (c.peek_char('{')) {
+        // ADS / ODBC temporal escape on the RHS: `tx_date >= {d '...'}`.
+        // Reduced to digits so it string-compares against the Date field's
+        // raw YYYYMMDD bytes.
+        auto d = c.read_odbc_temporal_literal();
+        if (!d) return d.error();
+        node->cmp.literal    = std::move(d).value();
+        node->cmp.is_numeric = false;
+    } else if (c.peek_char('\'')) {
         auto lit = c.read_string_literal();
         if (!lit) return lit.error();
         node->cmp.literal    = std::move(lit).value();
@@ -513,7 +577,8 @@ parse_cmp(Cursor& c, const std::string& sql) {
             // M10.24: bare identifier on RHS — outer-column reference
             // for a correlated subquery (`b.x = a.y`), OR a zero-arg
             // function call like CURDATE() evaluated at parse time.
-            std::string id = c.read_identifier();
+            std::string id_alias;
+            std::string id = c.read_identifier(&id_alias);
             if (id.empty()) {
                 return util::Error{7200, 0,
                     "expected string literal, number, or column "
@@ -570,10 +635,11 @@ parse_cmp(Cursor& c, const std::string& sql) {
                         "unsupported function call on RHS of WHERE comparison: " + id, sql};
                 }
             } else {
-                node->cmp.is_outer_ref = true;
-                node->cmp.outer_column = id;
-                node->cmp.is_numeric   = false;
-                node->cmp.literal      = id;       // diagnostic fallback
+                node->cmp.is_outer_ref       = true;
+                node->cmp.outer_column       = id;
+                node->cmp.outer_column_alias = id_alias;   // for N-way joins
+                node->cmp.is_numeric         = false;
+                node->cmp.literal            = id;     // diagnostic fallback
             }
         }
     }
@@ -859,7 +925,24 @@ util::Result<SelectStmt> parse_select(const std::string& sql) {
                 if (c.match_char(',')) continue;
                 break;
             }
-            std::string head = c.read_identifier();
+            std::string head_alias;
+            bool        head_wild = false;
+            std::string head = c.read_identifier(&head_alias, &head_wild);
+            if (head_wild) {
+                // ADS dialect — qualified wildcard `<alias>.*` projection
+                // item (e.g. `mov.*`). Recorded for the N-way join path;
+                // the single/two-table paths use `projection` and never
+                // emit this form.
+                if (aggregate_mode) {
+                    return util::Error{7200, 0,
+                        "mixing wildcard + aggregates in SELECT not supported",
+                        sql};
+                }
+                stmt.select_items.push_back(
+                    SelectItem{head_alias, std::string(), true});
+                if (c.match_char(',')) continue;
+                break;
+            }
             if (head.empty()) {
                 return util::Error{7200, 0,
                     "expected '*' or column name in SELECT", sql};
@@ -1247,12 +1330,26 @@ util::Result<SelectStmt> parse_select(const std::string& sql) {
                     if (c.match_char(',')) continue;
                     break;
                 }
+                // ADS dialect — record the alias-qualified column for the
+                // N-way join path (kept index-independent from `projection`,
+                // which the single/two-table paths consume).
+                stmt.select_items.push_back(
+                    SelectItem{head_alias, head, false});
                 stmt.projection.push_back(std::move(head));
             }
             if (c.match_char(',')) continue;
             break;
         }
     }
+    // ADS dialect — the N-way join executor only handles plain-column and
+    // `<alias>.*` projections (captured in select_items). Flag any complex
+    // projection item so that path errors clearly instead of silently
+    // dropping columns. The single/two-table paths ignore this.
+    stmt.projection_complex = !stmt.case_items.empty()   ||
+                              !stmt.aggregates.empty()   ||
+                              !stmt.fn_items.empty()     ||
+                              !stmt.arith_items.empty()  ||
+                              !stmt.window_items.empty();
     if (!c.match_keyword("FROM")) {
         return util::Error{7200, 0, "expected FROM", sql};
     }
@@ -1289,10 +1386,10 @@ util::Result<SelectStmt> parse_select(const std::string& sql) {
     } else {
         stmt.table = c.read_identifier_or_filename();
         // ADS dialect — optional table alias: `FROM <table> AS <alias>` or
-        // the bare `FROM <table> <alias>` form. Qualified column refs
-        // `<alias>.<col>` already drop the alias at read time, so the alias
-        // is recorded but not required to resolve columns. Guard the bare
-        // form so a following clause keyword is not eaten as an alias.
+        // the bare `FROM <table> <alias>` form. The alias is recorded in
+        // from_tables; the N-way join executor needs it to disambiguate
+        // same-named columns across tables. Guard the bare form so a
+        // following clause keyword is not eaten as an alias.
         if (c.match_keyword("AS")) {
             stmt.table_alias = c.read_identifier();
         } else if (!c.peek_keyword("WHERE")  && !c.peek_keyword("GROUP")  &&
@@ -1304,35 +1401,38 @@ util::Result<SelectStmt> parse_select(const std::string& sql) {
             std::string maybe_alias = c.read_identifier();
             if (!maybe_alias.empty()) stmt.table_alias = std::move(maybe_alias);
         }
-        // ADS dialect — SQL-89 comma-join: `FROM a, b WHERE a.x = b.y`.
+        stmt.from_tables.push_back(FromTable{stmt.table, stmt.table_alias});
+        // ADS dialect — SQL-89 comma-join: `FROM a, b, c, ... WHERE a.x=b.y`.
         // Legacy ADS apps write the join as a comma list with the equality
-        // predicate in the WHERE. We support the two-table case by recording
-        // the second table here and lowering it into the single inner_join
-        // AST once the WHERE is parsed (the equality is lifted out below).
-        if (c.match_char(',')) {
-            comma_join_table = c.read_identifier_or_filename();
-            if (comma_join_table.empty()) {
+        // predicates in the WHERE. Collect every table (with its alias).
+        // The two-table case keeps the proven single-JoinClause lowering
+        // below; three-or-more tables route to the N-way join executor,
+        // which consumes from_tables + the WHERE equalities directly.
+        while (c.match_char(',')) {
+            std::string tname = c.read_identifier_or_filename();
+            if (tname.empty()) {
                 return util::Error{7200, 0,
                     "expected table name after ',' in FROM", sql};
             }
-            // Optional alias on the second table (AS <a> or bare form).
+            std::string talias;
             if (c.match_keyword("AS")) {
-                c.read_identifier();    // alias is informational; discard
+                talias = c.read_identifier();
             } else if (!c.peek_keyword("WHERE")  && !c.peek_keyword("GROUP") &&
                        !c.peek_keyword("ORDER")  && !c.peek_keyword("HAVING")&&
                        !c.peek_keyword("LIMIT")  && !c.peek_keyword("OFFSET")&&
                        !c.peek_keyword("INNER")  && !c.peek_keyword("LEFT")  &&
                        !c.peek_keyword("RIGHT")  && !c.peek_keyword("FULL")  &&
                        !c.peek_keyword("JOIN")   && !c.peek_keyword("ON")) {
-                c.read_identifier();    // bare alias; discard
+                talias = c.read_identifier();
             }
-            // Only the two-table case maps onto the single JoinClause; a
-            // third comma table needs a multi-way join the engine lacks.
-            if (c.match_char(',')) {
-                return util::Error{7200, 0,
-                    "comma-join supports exactly two tables; "
-                    "use INNER JOIN ... ON for more", sql};
-            }
+            stmt.from_tables.push_back(FromTable{tname, talias});
+        }
+        // Two tables → keep the existing single-JoinClause lowering (the
+        // equality is lifted out of the WHERE below). Three or more → leave
+        // comma_join_table empty so that lowering is skipped and the N-way
+        // executor takes over.
+        if (stmt.from_tables.size() == 2) {
+            comma_join_table = stmt.from_tables[1].name;
         }
     }
     bool is_left_join  = false;
