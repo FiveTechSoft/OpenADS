@@ -80,7 +80,7 @@ static std::string am_path(const std::string& add_path) {
 }
 
 // Trim whitespace.
-static std::string trim(std::string s) {
+[[maybe_unused]] static std::string trim(std::string s) {
     auto is_ws = [](char c) {
         return c == ' ' || c == '\t' || c == '\r' || c == '\n';
     };
@@ -102,8 +102,9 @@ static inline std::uint32_t le32(const std::string& buf, std::size_t off) {
 }
 
 static inline std::uint16_t le16(const std::string& buf, std::size_t off) {
-    return  static_cast<std::uint16_t>(static_cast<std::uint8_t>(buf[off]))
-          | (static_cast<std::uint16_t>(static_cast<std::uint8_t>(buf[off+1])) << 8);
+    return static_cast<std::uint16_t>(
+              static_cast<std::uint16_t>(static_cast<std::uint8_t>(buf[off]))
+            | (static_cast<std::uint16_t>(static_cast<std::uint8_t>(buf[off+1])) << 8));
 }
 
 // Split a string on embedded NUL bytes.
@@ -211,7 +212,7 @@ static std::unordered_map<std::string,std::string> json_parse_flat(const std::st
                             unsigned cp = 0;
                             bool ok = true;
                             for (int k = 1; k <= 4; ++k) {
-                                char h = s[i + k];
+                                char h = s[i + static_cast<std::size_t>(k)];
                                 unsigned nib = 0;
                                 if      (h >= '0' && h <= '9') nib = static_cast<unsigned>(h - '0');
                                 else if (h >= 'a' && h <= 'f') nib = static_cast<unsigned>(h - 'a') + 10u;
