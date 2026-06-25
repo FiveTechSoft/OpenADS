@@ -1415,6 +1415,15 @@ CdxIndex::erase(std::uint32_t recno, const std::string& key) {
 }
 
 util::Result<void> CdxIndex::flush() {
+    // Read-only open/navigate leaves no page dirty, yet AdsCloseTable flushes
+    // every table on close. Skip the rewrite so a read-only open/close cycle
+    // does not bump the .cdx mtime or take a write lock another station needs
+    // (the production CDX is auto-opened on AdsOpenTable in shared multi-user).
+    {
+        bool any_dirty = false;
+        for (const auto& kv : dirty_) { if (kv.second) { any_dirty = true; break; } }
+        if (!any_dirty) return {};
+    }
     // The page at root_page_ is the B+tree root; native FoxPro / Harbour
     // readers require the ROOT bit (0x01) on it -> 0x03 for a root that is
     // also a leaf, 0x01 for a branch root. Every insert rewrites its
