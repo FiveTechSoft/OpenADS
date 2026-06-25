@@ -507,7 +507,7 @@ util::Result<DataDict> DataDict::create(const std::string& path) {
 }
 
 namespace {
-std::vector<std::string> split_tabs(const std::string& s) {
+[[maybe_unused]] std::vector<std::string> split_tabs(const std::string& s) {
     std::vector<std::string> out;
     std::string cur;
     for (char c : s) {
