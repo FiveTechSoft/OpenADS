@@ -79,11 +79,13 @@ public:
     util::Result<void> set_options(bool unique, bool descend,
                                    std::uint16_t new_key_size);
 
-    // Rewrite the FOR-clause predicate in the on-disk sub-tag header
-    // (and the in-memory member). Used when CREATE INDEX overwrites an
-    // existing tag with a new (or cleared) condition. Mirrors the FOR
-    // pool layout that build_subtag_header writes on a fresh create.
-    util::Result<void> set_condition(const std::string& for_expr);
+    // Rewrite the stored key expression (and FOR clause) in the on-disk
+    // sub-tag header + the in-memory members. Used when CREATE INDEX
+    // re-creates an existing tag on a DIFFERENT column: clear_data +
+    // set_options rebuild the tree/options but keep the old expression,
+    // which then lies to AdsGetIndexExpr and mis-syncs later appends.
+    util::Result<void> set_expression(const std::string& key_expr,
+                                      const std::string& for_expr);
 
     util::Result<void> insert(std::uint32_t recno,
                               const std::string& key) override;

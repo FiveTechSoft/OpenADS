@@ -7131,11 +7131,15 @@ UNSIGNED32 AdsCreateIndex61(ADSHANDLE   hTable,
             // prior options.
             if (auto so = existing.set_options(unique, descend, klen); !so)
                 return fail(so.error());
-            // Re-creating an existing tag overwrites its FOR clause too
-            // (a new condition, or none, replaces the old one) so the
-            // on-disk header matches the just-issued CREATE INDEX.
-            if (auto sc = existing.set_condition(for_expr); !sc)
-                return fail(sc.error());
+            // Re-creating an existing tag overwrites its stored KEY
+            // expression and FOR clause too — the whole point of
+            // "INDEX ON <other column> TAG ORDERX" without first deleting
+            // the bag. Without this the header kept the old column, so
+            // AdsGetIndexExpr lied and the next dbAppend synced the wrong
+            // column into the tag (silent disorder). Native DBFCDX deletes
+            // and recreates the tag; rewriting the pool here matches that.
+            if (auto se = existing.set_expression(expr, for_expr); !se)
+                return fail(se.error());
             idx_owner = std::make_unique<openads::drivers::cdx::CdxIndex>(
                 std::move(existing));
         } else if (!added) {

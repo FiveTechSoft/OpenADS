@@ -398,6 +398,39 @@ decode_branch_static(const CdxIndex::Page& p, std::uint16_t key_size)
     return out;
 }
 
+// Write the key-/FOR-expression pool (offsets 504..1024) into a 1024-byte
+// sub-tag header buffer, mirroring hb_cdxTagHeaderStore (Harbour
+// src/rdd/dbfcdx/dbfcdx1.c): the key expression lives at the START of
+// keyExpPool (pool-relative offset 0 == byte 512), lengths INCLUDE the
+// trailing NUL, and the FOR slot points just past the key NUL. Clears the
+// whole 510-byte pool first so rewriting an EXISTING header with a shorter
+// expression (re-create on a different column) never leaves the old tail
+// behind. Bounds every length to what is actually copied so a native reader
+// can't be told to read past the copied region / the header buffer.
+void write_expr_pool_(std::uint8_t* hdr,
+                      const std::string& key_expr,
+                      const std::string& for_expr)
+{
+    const std::size_t   copy_len    = std::min<std::size_t>(key_expr.size(), 510);
+    const std::uint16_t exp_len_nul = static_cast<std::uint16_t>(copy_len + 1);
+    const std::size_t   for_room =
+        (exp_len_nul <= 510) ? static_cast<std::size_t>(510 - exp_len_nul) : 0;
+    const std::size_t   for_copy_len =
+        std::min<std::size_t>(for_expr.size(), for_room);
+    const std::uint16_t for_len_nul =
+        static_cast<std::uint16_t>(for_copy_len + 1);
+    std::memset(hdr + 512, 0, CDX_HEADER_LEN - 512);
+    write_u16_le(hdr + 504, exp_len_nul);  // forExpPos = keyLen+1
+    write_u16_le(hdr + 506, for_len_nul);  // forExpLen = forLen+1 (incl NUL)
+    write_u16_le(hdr + 508, 0);            // keyExpPos = 0
+    write_u16_le(hdr + 510, exp_len_nul);  // keyExpLen = keyLen+1
+    std::memcpy(hdr + 512, key_expr.data(), copy_len);
+    // the byte at 512+copy_len is already a NUL (cleared above); the FOR
+    // bytes start one past the key expr's terminating NUL.
+    if (for_copy_len > 0)
+        std::memcpy(hdr + 512 + exp_len_nul, for_expr.data(), for_copy_len);
+}
+
 // Build a fresh sub-tag CDXTAGHEADER (1024 bytes). Mirrors the file
 // header layout but is stored at the sub-tag's offset, not at 0.
 std::array<std::uint8_t, CDX_HEADER_LEN>
@@ -422,42 +455,7 @@ build_subtag_header(std::uint32_t root_page,
     write_u16_le(hdr.data() + 16, CDX_HEADER_LEN);
     write_u16_le(hdr.data() + 18, CDX_PAGE_LEN);
     write_u16_le(hdr.data() + 502, descend ? 1 : 0);
-    // Key-/FOR-expression pool layout MUST mirror hb_cdxTagHeaderStore
-    // (Harbour src/rdd/dbfcdx/dbfcdx1.c): the key expression lives at the
-    // START of keyExpPool (relative offset 0, NOT 512 which is the pool's
-    // byte offset inside the 1024-byte header), the lengths INCLUDE the
-    // trailing NUL, and the FOR slot points just past the key NUL. Writing
-    // keyExpPos=512 made the native reader's bounds check
-    // (uiKeyPos + uiKeyLen > CDX_HEADEREXPLEN) fail -> "Corruption detected".
-    // Bound the length to what actually fits the pool: lengths are derived
-    // from the bytes we copy, never from the raw expr size, so the reader
-    // can't be told to read past the copied region / the header buffer.
-    const std::size_t   copy_len    = std::min<std::size_t>(key_expr.size(), 510);
-    const std::uint16_t exp_len_nul =
-        static_cast<std::uint16_t>(copy_len + 1);
-    // The FOR expression follows the key expr's trailing NUL inside the
-    // 510-byte pool. forExpPos is the pool-relative offset of the FOR
-    // slot (== keyLen+1); when there is no FOR, mirror today's behavior
-    // (forExpLen = 1, a lone NUL). Bound the FOR copy to what is left of
-    // the pool after the key expr so the reader can never be told to read
-    // past the copied region / the 1024-byte header buffer.
-    const std::size_t   for_room =
-        (exp_len_nul <= 510) ? static_cast<std::size_t>(510 - exp_len_nul) : 0;
-    const std::size_t   for_copy_len =
-        std::min<std::size_t>(for_expr.size(), for_room);
-    const std::uint16_t for_len_nul =
-        static_cast<std::uint16_t>(for_copy_len + 1);
-    write_u16_le(hdr.data() + 504, exp_len_nul);  // forExpPos = keyLen+1
-    write_u16_le(hdr.data() + 506, for_len_nul);  // forExpLen = forLen+1 (incl NUL)
-    write_u16_le(hdr.data() + 508, 0);            // keyExpPos = 0
-    write_u16_le(hdr.data() + 510, exp_len_nul);  // keyExpLen = keyLen+1
-    std::memcpy(hdr.data() + 512, key_expr.data(), copy_len);
-    // hdr is zero-initialised, so the byte at 512+copy_len is already the
-    // key expr's terminating NUL; the FOR bytes start one past it.
-    if (for_copy_len > 0) {
-        std::memcpy(hdr.data() + 512 + exp_len_nul,
-                    for_expr.data(), for_copy_len);
-    }
+    write_expr_pool_(hdr.data(), key_expr, for_expr);
     // The sub-tag's name lives in the structure tag's leaf; we also
     // mirror it into reserved2 of the sub-tag header for diagnostics
     // and for legacy single-tag readers.
@@ -1519,7 +1517,8 @@ util::Result<void> CdxIndex::set_options(bool unique, bool descend,
     return {};
 }
 
-util::Result<void> CdxIndex::set_condition(const std::string& for_expr) {
+util::Result<void> CdxIndex::set_expression(const std::string& key_expr,
+                                            const std::string& for_expr) {
     if (sub_header_offset_ == 0) {
         return util::Error{6106, 0,
             "CDX sub-tag header offset uninitialised", ""};
@@ -1527,41 +1526,19 @@ util::Result<void> CdxIndex::set_condition(const std::string& for_expr) {
     std::array<std::uint8_t, CDX_HEADER_LEN> hdr{};
     auto got = file_.read_at(sub_header_offset_, hdr.data(), hdr.size());
     if (!got) return got.error();
-
-    // FOR slot starts at the pool-relative forExpPos (just past the key
-    // expr's NUL). Bound the copy to the remaining pool space, mirroring
-    // build_subtag_header. forExpLen INCLUDES the trailing NUL (1 == none).
-    std::uint16_t fep_pos = read_u16_le(hdr.data() + 504);  // pool-relative
-    std::uint16_t key_len = read_u16_le(hdr.data() + 510);  // keyExpLen (incl NUL)
-    // Reject a corrupt header whose FOR slot would overlap the key expr.
-    if (fep_pos < key_len) {
-        return util::Error{6106, 0,
-            "Corrupt CDX header: FOR expression overlaps key expression", ""};
-    }
-    std::size_t   abs_pos = 512u + static_cast<std::size_t>(fep_pos);
-    std::size_t   for_room =
-        (abs_pos < 1024u) ? (1024u - abs_pos - 1u) : 0u;   // leave room for NUL
-    // Refuse to silently truncate a condition that does not fit the pool.
-    if (for_expr.size() > for_room) {
-        return util::Error{6106, 0,
-            "FOR expression too long for CDX header pool", ""};
-    }
-    std::size_t   for_copy_len = for_expr.size();
-    // Wipe the old FOR region (to its prior length) before writing the new
-    // one so a shorter / cleared condition leaves no stale bytes.
-    std::uint16_t old_len = read_u16_le(hdr.data() + 506);
-    if (old_len > 0 && abs_pos + old_len <= 1024u) {
-        std::memset(hdr.data() + abs_pos, 0, old_len);
-    }
-    if (for_copy_len > 0) {
-        std::memcpy(hdr.data() + abs_pos, for_expr.data(), for_copy_len);
-    }
-    write_u16_le(hdr.data() + 506,
-                 static_cast<std::uint16_t>(for_copy_len + 1));
-
+    // Rewrite the whole key-/FOR-expression pool from scratch (clears any
+    // stale tail), matching build_subtag_header. Needed when CREATE INDEX
+    // re-creates an EXISTING tag on a DIFFERENT column: clear_data +
+    // set_options rebuild the tree + options but leave the stored expression
+    // pointing at the old column, so AdsGetIndexExpr lies and the next
+    // dbAppend/dbReplace syncs the wrong column into the tag. Native DBFCDX
+    // deletes + recreates the tag (hb_cdxOrderCreate -> hb_cdxIndexDelTag);
+    // this brings OpenADS to the same observable result.
+    write_expr_pool_(hdr.data(), key_expr, for_expr);
     auto wrote = file_.write_at(sub_header_offset_, hdr.data(), hdr.size());
     if (!wrote) return wrote.error();
-    for_expr_ = for_expr.substr(0, for_copy_len);
+    key_expr_ = key_expr;
+    for_expr_ = for_expr;
     return {};
 }
 
