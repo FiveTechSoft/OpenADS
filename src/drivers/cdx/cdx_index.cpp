@@ -1523,6 +1523,20 @@ util::Result<void> CdxIndex::set_expression(const std::string& key_expr,
         return util::Error{6106, 0,
             "CDX sub-tag header offset uninitialised", ""};
     }
+    // Fail loud rather than silently truncate (write_expr_pool_ clamps with
+    // std::min): a clipped key expression is a corrupt index, and a clipped
+    // FOR changes which rows are indexed. The former set_condition enforced
+    // this for the FOR; keep it for both halves of the pool.
+    if (key_expr.size() > 510) {
+        return util::Error{6106, 0,
+            "Key expression too long for CDX header pool", ""};
+    }
+    const std::size_t exp_len_nul = key_expr.size() + 1;
+    const std::size_t for_room = (exp_len_nul <= 510) ? (510 - exp_len_nul) : 0;
+    if (for_expr.size() > for_room) {
+        return util::Error{6106, 0,
+            "FOR expression too long for CDX header pool", ""};
+    }
     std::array<std::uint8_t, CDX_HEADER_LEN> hdr{};
     auto got = file_.read_at(sub_header_offset_, hdr.data(), hdr.size());
     if (!got) return got.error();

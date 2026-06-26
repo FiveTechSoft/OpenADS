@@ -20,6 +20,7 @@
 
 #include "doctest.h"
 #include "openads/ace.h"
+#include "drivers/cdx/cdx_index.h"
 
 #include <cstdio>
 #include <cstring>
@@ -72,10 +73,11 @@ TEST_CASE("CDX re-create existing tag on a different column follows the new colu
     fs::remove_all(dir, ec);
     fs::create_directories(dir);
 
-    UNSIGNED8 srv[256];
-    std::memcpy(srv, dir.string().c_str(), dir.string().size() + 1);
+    const std::string dir_str = dir.string();
+    std::vector<UNSIGNED8> srv(dir_str.begin(), dir_str.end());
+    srv.push_back(0);
     ADSHANDLE hConn = 0;
-    REQUIRE(AdsConnect60(srv, ADS_LOCAL_SERVER,
+    REQUIRE(AdsConnect60(srv.data(), ADS_LOCAL_SERVER,
                          nullptr, nullptr, 0, &hConn) == 0);
 
     // Two char columns whose ascending orders are the REVERSE of each other,
@@ -132,4 +134,27 @@ TEST_CASE("CDX re-create existing tag on a different column follows the new colu
     AdsCloseTable(hT);
     AdsDisconnect(hConn);
     fs::remove_all(dir, ec);
+}
+
+// set_expression must fail loud instead of silently truncating an expression
+// that does not fit the 510-byte sub-header pool (a clipped key expression is
+// a corrupt index). Mirrors the guard the former set_condition enforced.
+TEST_CASE("CDX set_expression rejects an over-long expression instead of truncating") {
+    auto p = fs::temp_directory_path() / "openads_cdx_setexpr_overflow.cdx";
+    std::error_code ec;
+    fs::remove(p, ec);
+
+    auto c = openads::drivers::cdx::CdxIndex::create(
+        p.string(), "ORD", "K1", 8, false, false);
+    REQUIRE(c.has_value());
+    openads::drivers::cdx::CdxIndex ix = std::move(c).value();
+
+    auto ok = ix.set_expression("K2", "");          // fits -> ok
+    CHECK(ok.has_value());
+
+    std::string huge(600, 'A');                      // > 510-byte pool
+    auto bad = ix.set_expression(huge, "");
+    CHECK_FALSE(bad.has_value());
+
+    fs::remove(p, ec);
 }
