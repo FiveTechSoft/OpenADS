@@ -637,6 +637,14 @@ Value parse_atom(Lex& lx, Table& t) {
             f.type == drivers::DbfFieldType::AdtMoney) {
             v.is_number = true;
             v.n = r.value().as_double;
+        } else if (f.type == drivers::DbfFieldType::Logical) {
+            // A bare logical field as a truthy term (e.g. FOR ACTIVE) must
+            // evaluate to its boolean value. Its as_string is "T"/"F" — both
+            // non-empty — so the truthy fallback (!s.empty()) would match
+            // every row and a conditional FOR index would index ALL records.
+            // Carry it as a number (1/0) instead.
+            v.is_number = true;
+            v.n = r.value().as_bool ? 1.0 : 0.0;
         } else {
             v.is_number = false;
             std::string sv = r.value().as_string;

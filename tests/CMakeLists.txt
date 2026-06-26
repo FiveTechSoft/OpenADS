@@ -49,6 +49,7 @@ add_executable(openads_unit_tests
     unit/engine_order_test.cpp
     unit/engine_scope_test.cpp
     unit/abi_index_smoke_test.cpp
+    unit/abi_qa_repro_test.cpp
     unit/aof_expr_test.cpp
     unit/aggregate_test.cpp
     unit/abi_aggregate_test.cpp

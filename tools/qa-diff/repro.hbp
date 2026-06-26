@@ -1,0 +1,7 @@
+repro.prg
+-lrddads
+-L${OPENADS_LIB}
+-l${OPENADS_ACELIB}
+-lrddcdx
+-lrddntx
+-lrddfpt
