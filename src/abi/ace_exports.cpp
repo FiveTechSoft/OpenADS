@@ -4850,6 +4850,22 @@ UNSIGNED32 AdsGetRecordCount(ADSHANDLE hTable, UNSIGNED16 bFilterOption,
         if (ops->record_count) return ops->record_count(hTable, pulRecordCount, 0);
     Table* t = get_table(hTable);
     if (!t || pulRecordCount == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    // rddads' OrdKeyCount (DBOI_KEYCOUNT) does NOT call AdsGetKeyCount; it
+    // calls AdsGetRecordCount with the ORDER handle (pArea->hOrdCurrent) to
+    // count the records reachable THROUGH that order. For a conditional/FOR
+    // order the index holds only the matching rows, so the count must be the
+    // index key count (e.g. 4), not the table's physical record_count() (5) —
+    // native DBFCDX reports 4 here. AdsGetKeyCount already special-cases this;
+    // mirror it, but ONLY when an INDEX handle was passed: a TABLE handle must
+    // still report the full physical count (RecCount() semantics).
+    if (auto* idx = iindex_for_handle(hTable)) {
+        if (auto* cdx =
+                dynamic_cast<openads::drivers::cdx::CdxIndex*>(idx)) {
+            *pulRecordCount = static_cast<UNSIGNED32>(
+                cdx->ordered_recnos_cached().size());
+            return ok();
+        }
+    }
     // M10.31 / M10.32 — when SQL has materialised a traversal sequence
     // (DISTINCT / LIMIT / OFFSET / ORDER BY), report that sequence's
     // length so apps that drive walking by record-count get the
