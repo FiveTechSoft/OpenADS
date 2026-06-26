@@ -13613,7 +13613,7 @@ UNSIGNED32 AdsExecuteSQLDirect(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         // Enforce that table name is a simple identifier/filename.
         const auto& tname = ci.value().table;
         if (tname.empty() || tname[0] == '(' || tname.find("SELECT") != std::string::npos) {
-            return fail(openads::AE_SYNTAX_ERROR,
+            return fail(openads::AE_PARSE_ERROR,
                 "INDEX ON requires a table name, not a SELECT result; "
                 "use SELECT ... ORDER BY/DISTINCT/LIMIT to materialize first");
         }
