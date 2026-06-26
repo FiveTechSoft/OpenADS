@@ -4,6 +4,7 @@ layout: default
 parent: Início (PT)
 nav_order: 5
 permalink: /pt/api-reference/
+has_children: true
 ---
 
 # Referência da API do OpenADS — v1.4.0
