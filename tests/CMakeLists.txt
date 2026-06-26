@@ -79,6 +79,7 @@ add_executable(openads_unit_tests
     unit/abi_pack_reindex_softseek_test.cpp
     unit/abi_ntx_pack_reindex_test.cpp
     unit/abi_ntx_multipage_dup_test.cpp
+    unit/abi_ntx_internal_split_test.cpp
     unit/abi_record_count_filter_test.cpp
     unit/abi_reindex_test.cpp
     unit/abi_cdx_conditional_index_test.cpp

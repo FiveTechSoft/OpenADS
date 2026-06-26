@@ -643,9 +643,20 @@ NtxIndex::insert(std::uint32_t recno, const std::string& key) {
         pinsert.key    = prop_sep.key;
         ents.insert(ents.begin() +
             static_cast<std::ptrdiff_t>(pos), std::move(pinsert));
-        // The entry that was at pos now lives at pos+1; its lchild
-        // becomes prop_right (the new sibling we just produced).
-        ents[static_cast<std::size_t>(pos) + 1].lchild = prop_right;
+        // Wire prop_right (the new right sibling produced below us) into the
+        // node. If the separator landed before the end, the entry that was at
+        // `pos` now lives at pos+1 and takes prop_right as its left child, and
+        // the node keeps its original rightmost child. If it landed at the
+        // very end (pos == pkc, the common ascending-key case), there is no
+        // entry after it: prop_right becomes the node's new rightmost child.
+        // Indexing ents[pos+1] in that case would read past the vector.
+        std::uint32_t node_rightmost;
+        if (static_cast<std::size_t>(pos) + 1 < ents.size()) {
+            ents[static_cast<std::size_t>(pos) + 1].lchild = prop_right;
+            node_rightmost = right_sentinel;
+        } else {
+            node_rightmost = prop_right;
+        }
 
         std::size_t pmid = ents.size() / 2;
         std::vector<InternalEntry> p_left (ents.begin(),
@@ -687,8 +698,10 @@ NtxIndex::insert(std::uint32_t recno, const std::string& key) {
         // separator (since p_left contains entries strictly before
         // psep, and the next "boundary" is psep's lchild).
         fill_internal(parent_left,  p_left,  psep.lchild);
-        // Right half's rightmost child = the original sentinel.
-        fill_internal(parent_right, p_right, right_sentinel);
+        // Right half's rightmost child = the whole node's rightmost child
+        // (the original sentinel, or prop_right when the separator was
+        // appended at the end).
+        fill_internal(parent_right, p_right, node_rightmost);
 
         prop_left  = parent_left;
         prop_right = parent_right;
