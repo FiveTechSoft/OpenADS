@@ -17,6 +17,12 @@ jobs:
           - os: windows-2022
             preset: msvc-x64
             tls: false
+          # 32-bit MSVC: many deployments still ship x86. CI must build it
+          # so x86-only breakage (bitness-dependent narrowing C4244/C2220,
+          # SQLLEN*/SQLPOINTER signatures C2733, /WX C4100) can't slip past.
+          - os: windows-2022
+            preset: msvc-x86
+            tls: false
           - os: ubuntu-24.04
             preset: ninja-clang
             tls: false
