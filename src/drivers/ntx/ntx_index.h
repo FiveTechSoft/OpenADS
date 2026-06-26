@@ -110,8 +110,19 @@ private:
 
     util::Result<SeekOutcome> descend_leftmost_(std::uint32_t root);
     util::Result<SeekOutcome> descend_rightmost_(std::uint32_t root);
+    // Stack-based B-tree descent used by insert()/erase(). NTX stores keys
+    // in internal nodes too, so an exact-match key may live in a branch.
+    // For erase (and read positioning) we stop at that branch frame. For
+    // insert we must NEVER stop at a branch: a B-tree insert always lands
+    // on a leaf, then splits upward. Stopping at a branch made insert()
+    // write the new entry into an internal node with left_child = 0,
+    // orphaning a whole subtree — the cause of incomplete multi-page
+    // indexes built over runs of duplicate keys. `descend_to_leaf` (insert)
+    // therefore ignores the exact-match branch shortcut and keeps walking
+    // down the left child.
     util::Result<SeekOutcome>
-        seek_key_for_write_(const std::string& padded_key, bool soft);
+        seek_key_for_write_(const std::string& padded_key, bool soft,
+                            bool descend_to_leaf = false);
 
     platform::File                                 file_;
     IndexOpenMode                                  mode_      = IndexOpenMode::ReadOnly;

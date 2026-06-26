@@ -274,7 +274,8 @@ util::Result<SeekOutcome> NtxIndex::seek_last() {
 }
 
 util::Result<SeekOutcome>
-NtxIndex::seek_key_for_write_(const std::string& padded, bool soft) {
+NtxIndex::seek_key_for_write_(const std::string& padded, bool soft,
+                             bool descend_to_leaf) {
     stack_.clear();
     if (root_page_ == 0) return SeekOutcome{SeekHit::AfterEnd, 0, false};
     std::uint32_t cur = root_page_;
@@ -316,10 +317,13 @@ NtxIndex::seek_key_for_write_(const std::string& padded, bool soft) {
                                current_recno_, true};
         }
         stack_.push_back({cur, i});
-        if (found_exact) {
+        if (found_exact && !descend_to_leaf) {
+            // erase / read positioning: the key lives in this internal node.
             if (auto r = load_current_key_(); !r) return r.error();
             return SeekOutcome{SeekHit::Exact, current_recno_, true};
         }
+        // insert (descend_to_leaf): an exact match in a branch must NOT stop
+        // the descent — keep walking down so the new key is placed in a leaf.
         cur = child;
     }
     return SeekOutcome{SeekHit::AfterEnd, 0, false};
@@ -441,7 +445,11 @@ NtxIndex::insert(std::uint32_t recno, const std::string& key) {
     }
 
     // Locate insertion point via stack-based descent (cache is read-only path).
-    auto seek = seek_key_for_write_(padded, true);
+    // descend_to_leaf=true: never stop at an internal-node exact match — a
+    // B-tree insert must always reach a leaf (otherwise a duplicate key that
+    // was promoted to a branch would be inserted into that branch with a null
+    // child, orphaning its subtree).
+    auto seek = seek_key_for_write_(padded, true, /*descend_to_leaf=*/true);
     if (!seek) return seek.error();
 
     if (stack_.empty()) {
@@ -567,6 +575,15 @@ NtxIndex::insert(std::uint32_t recno, const std::string& key) {
             // position `pos` and update the entry now at pos+1 to
             // point its lchild at prop_right.
             std::uint16_t free_off = get_key_offset(parent, pkc);
+            // The parent's rightmost child lives in the sentinel slot
+            // offset[pkc] (= free_off) — the very slot we are about to
+            // reuse for the inserted key. Capture it BEFORE the shift so
+            // it can be reinstated as the new sentinel; otherwise a
+            // separator inserted anywhere left of the end (pos < pkc, the
+            // common case for runs of duplicate keys, which sort to the
+            // left subtree) drops the original right subtree, leaving an
+            // unreachable branch with a 0 right child.
+            std::uint32_t old_rightmost = get_left_child(parent, pkc);
             for (std::int32_t i = static_cast<std::int32_t>(pkc); i > pos; --i) {
                 set_key_offset(parent, i, get_key_offset(parent, i - 1));
             }
@@ -582,6 +599,13 @@ NtxIndex::insert(std::uint32_t recno, const std::string& key) {
             // The entry that was at pos has moved to pos+1; its
             // left_child should now be prop_right (the new sibling).
             put_left_child(parent, pos + 1, prop_right);
+            if (pos < static_cast<std::int32_t>(pkc)) {
+                // Inserted left of the end: pos+1 is an interior entry, so
+                // the new sentinel must carry the node's original rightmost
+                // child. (When pos == pkc the put_left_child above already
+                // wrote prop_right into the sentinel.)
+                put_left_child(parent, pkc + 1, old_rightmost);
+            }
 
             set_key_count(parent, pkc + 1);
             dirty_[parent_frame.page] = true;
