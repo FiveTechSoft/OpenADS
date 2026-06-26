@@ -18042,8 +18042,8 @@ UNSIGNED32 AdsGetHandleType(ADSHANDLE h, UNSIGNED16* p) {
         case HandleKind::RemoteTable:
         case HandleKind::SqliteTable:
         case HandleKind::MssqlTable:
-        case HandleKind::MariadbTable:
-        case HandleKind::PostgresqlTable:
+        case HandleKind::MariaTable:
+        case HandleKind::PostgresTable:
         case HandleKind::OdbcTable:
         case HandleKind::FirebirdTable:
             *p = ADS_TABLE;  break;
@@ -18236,7 +18236,7 @@ UNSIGNED32 AdsGetNumOpenTables(UNSIGNED16* p) {
     s.registry.for_each_handle([&](Handle, HandleKind k, void*) {
         if (k == HandleKind::Table || k == HandleKind::RemoteTable
             || k == HandleKind::SqliteTable || k == HandleKind::MssqlTable
-            || k == HandleKind::MariadbTable || k == HandleKind::PostgresqlTable
+            || k == HandleKind::MariaTable || k == HandleKind::PostgresTable
             || k == HandleKind::OdbcTable || k == HandleKind::FirebirdTable) {
             ++count;
         }
