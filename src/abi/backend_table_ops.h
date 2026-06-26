@@ -1,6 +1,9 @@
 #pragma once
 
 #include "openads/ace.h"  // ADSHANDLE, UNSIGNED32, SIGNED32, UNSIGNED16, UNSIGNED8
+#include "engine/aggregate.h"  // engine::AggSpec / AggValue (Tier-3 push-down)
+
+#include <vector>
 
 namespace openads::abi {
 
@@ -30,6 +33,15 @@ struct BackendTableOps {
     // fragment so the backend filters rows server-side; navigation then walks
     // only matching rows. Null when the backend can't push filters down.
     UNSIGNED32 (*set_filter)       (ADSHANDLE, UNSIGNED8* /*where, null=clear*/);
+    // Tier-3 push-down: run COUNT/SUM/AVG/MIN/MAX over the rows matching
+    // `where_sql` (already-translated SQL, null = all rows) entirely in the
+    // backend (one `SELECT ... WHERE`), filling `out` with one value per spec.
+    // Null when the backend can't aggregate server-side (caller declines /
+    // falls back to a client-side totalling loop).
+    UNSIGNED32 (*aggregate)        (ADSHANDLE,
+                                    const char* /*where_sql, null=all*/,
+                                    const std::vector<openads::engine::AggSpec>*,
+                                    std::vector<openads::engine::AggValue>*);
 };
 
 }  // namespace openads::abi

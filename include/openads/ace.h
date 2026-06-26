@@ -1857,11 +1857,14 @@ UNSIGNED32 ENTRYPOINT AdsFetchWhereApplyRow(ADSHANDLE hRes, UNSIGNED32 ulRow,
 // Server-side aggregation.  `pszForCond` is an xBase-style FOR predicate
 // (empty = all rows).  `pszAggSpec` is a ';'-separated list of "FN:FIELD"
 // items, where FN is COUNT|SUM|AVG|MIN|MAX and FIELD is the column to fold
-// (empty for COUNT(*)), e.g. "COUNT:;SUM:QTY;MIN:NM".  The server scans the
-// whole table once and returns one scalar per item, in order.  The handle is
-// valid until `AdsAggregateClose`.  Non-remote (local) tables return
-// AE_FUNCTION_NOT_AVAILABLE (5004) — the caller falls back to a client-side
-// totalling loop.
+// (empty for COUNT(*)), e.g. "COUNT:;SUM:QTY;MIN:NM".  Returns one scalar per
+// item, in order; the handle is valid until `AdsAggregateClose`.
+//   - Remote (tcp://) table: the server scans + folds once (opcode 0xA6).
+//   - SQL-backed (sqlite://, etc.) table: pushed down as one
+//     `SELECT COUNT/SUM/AVG/MIN/MAX ... WHERE`; a FOR that can't translate to
+//     SQL returns AE_FUNCTION_NOT_AVAILABLE (caller falls back).
+//   - Local in-process DBF: AE_FUNCTION_NOT_AVAILABLE (5004) — caller falls
+//     back to a client-side totalling loop.
 UNSIGNED32 ENTRYPOINT AdsAggregate      (ADSHANDLE  hTbl,
                                          UNSIGNED8* pszForCond,
                                          UNSIGNED8* pszAggSpec,

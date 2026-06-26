@@ -850,6 +850,105 @@ UNSIGNED32 sqlite_set_filter(ADSHANDLE hTable, UNSIGNED8* pucWhere) {
     return ok();
 }
 
+// Tier-3 push-down: compute the aggregates with a single SQL statement in the
+// backend (`SELECT COUNT/TOTAL/AVG/MIN/MAX ... WHERE`). TOTAL() (not SUM())
+// gives 0 over zero rows, matching xBase SUM semantics; AVG/MIN/MAX over zero
+// rows come back SQL NULL -> AggType::Empty. Numeric results are re-formatted
+// through format_agg_double so they match the wire path byte-for-byte.
+UNSIGNED32 sqlite_aggregate(
+        ADSHANDLE hTable, const char* where_sql,
+        const std::vector<openads::engine::AggSpec>* specs,
+        std::vector<openads::engine::AggValue>* out) {
+    auto* st = get_sqlite_table(hTable);
+    if (st == nullptr || st->conn == nullptr)
+        return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
+    if (specs == nullptr || out == nullptr)
+        return fail(openads::AE_INTERNAL_ERROR, "sqlite_aggregate: null arg");
+
+    if (!st->fields_cached) {
+        auto d = st->conn->describe_table(st);
+        if (!d) return fail(d.error());
+        st->fields = std::move(d).value();
+        st->fields_cached = true;
+    }
+    auto iequal = [](const std::string& a, const std::string& b) {
+        if (a.size() != b.size()) return false;
+        for (std::size_t i = 0; i < a.size(); ++i)
+            if (std::toupper(static_cast<unsigned char>(a[i])) !=
+                std::toupper(static_cast<unsigned char>(b[i]))) return false;
+        return true;
+    };
+    auto field_is_numeric = [&](const std::string& name) {
+        for (const auto& f : st->fields) {
+            if (!iequal(f.name, name)) continue;
+            switch (f.type) {
+                case ADS_NUMERIC: case ADS_DOUBLE:  case ADS_INTEGER:
+                case ADS_SHORTINT: case ADS_AUTOINC: case ADS_CURDOUBLE:
+                case ADS_MONEY:
+                    return true;
+                default:
+                    return false;
+            }
+        }
+        return false;
+    };
+
+    std::string sql = "SELECT ";
+    for (std::size_t i = 0; i < specs->size(); ++i) {
+        if (i) sql += ", ";
+        const auto& s   = (*specs)[i];
+        const std::string col = "\"" + s.field + "\"";
+        switch (s.fn) {
+            case openads::engine::AggFn::Count:
+                sql += s.field.empty() ? "COUNT(*)" : ("COUNT(" + col + ")");
+                break;
+            case openads::engine::AggFn::Sum: sql += "TOTAL(" + col + ")"; break;
+            case openads::engine::AggFn::Avg: sql += "AVG("   + col + ")"; break;
+            case openads::engine::AggFn::Min: sql += "MIN("   + col + ")"; break;
+            case openads::engine::AggFn::Max: sql += "MAX("   + col + ")"; break;
+        }
+        sql += " AS a" + std::to_string(i);
+    }
+    sql += " FROM \"" + st->name + "\"";
+    if (where_sql != nullptr && *where_sql != '\0')
+        sql += " WHERE (" + std::string(where_sql) + ")";
+
+    auto cur = st->conn->run_sql(sql);
+    if (!cur) return fail(cur.error());
+    const auto& res = *cur.value();
+
+    out->clear();
+    out->reserve(specs->size());
+    for (std::size_t i = 0; i < specs->size(); ++i) {
+        const auto& s = (*specs)[i];
+        bool is_null  = true;
+        std::string val;
+        if (!res.result_rows.empty() && i < res.result_rows[0].size()) {
+            val = res.result_rows[0][i];
+            is_null = !res.result_nulls.empty() &&
+                      i < res.result_nulls[0].size() && res.result_nulls[0][i];
+        }
+        const bool numeric_result =
+            (s.fn == openads::engine::AggFn::Count) ||
+            (s.fn == openads::engine::AggFn::Sum)   ||
+            (s.fn == openads::engine::AggFn::Avg)   ||
+            field_is_numeric(s.field);
+        openads::engine::AggValue av;
+        if (is_null) {
+            av.type = openads::engine::AggType::Empty;        // AVG/MIN/MAX, 0 rows
+        } else if (numeric_result) {
+            av.type  = openads::engine::AggType::Numeric;
+            av.bytes = openads::engine::format_agg_double(
+                std::strtod(val.c_str(), nullptr));
+        } else {
+            av.type  = openads::engine::AggType::String;      // MIN/MAX of text
+            av.bytes = val;
+        }
+        out->push_back(std::move(av));
+    }
+    return ok();
+}
+
 UNSIGNED32 sqlite_goto_bottom(ADSHANDLE hTable) {
     auto* st = get_sqlite_table(hTable);
     if (st->conn == nullptr) return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
@@ -1057,6 +1156,7 @@ const openads::abi::BackendTableOps* sqlite_table_ops() {
         o.open_index        = &sqlite_open_index;
         o.is_found          = &sqlite_is_found;
         o.set_filter        = &sqlite_set_filter;
+        o.aggregate         = &sqlite_aggregate;
         return o;
     }();
     return &ops;
@@ -20954,10 +21054,6 @@ UNSIGNED32 AdsAggregate(ADSHANDLE hTbl, UNSIGNED8* pszForCond,
     if (phResult == nullptr)
         return fail(openads::AE_INTERNAL_ERROR, "AdsAggregate: null phResult");
     *phResult = 0;
-    auto* rt = get_remote_table(hTbl);
-    if (rt == nullptr)
-        return fail(openads::AE_FUNCTION_NOT_AVAILABLE,
-                    "AdsAggregate: not applicable on a local table");
     std::string for_expr;
     if (pszForCond != nullptr)
         for_expr = openads::abi::to_internal(pszForCond, 0);
@@ -20965,13 +21061,47 @@ UNSIGNED32 AdsAggregate(ADSHANDLE hTbl, UNSIGNED8* pszForCond,
     if (!agg_parse_spec(pszAggSpec, specs) || specs.empty())
         return fail(openads::AE_INTERNAL_ERROR,
                     "AdsAggregate: bad or empty aggregate spec");
-    auto r = rt->conn->aggregate(rt->id, for_expr, specs);
-    if (!r) return fail(r.error());
-    std::lock_guard<std::mutex> lk(agg_mu());
-    ADSHANDLE h = agg_next_handle();
-    agg_results().emplace(h, AggregateResult{std::move(r).value().values});
-    *phResult = h;
-    return ok();
+
+    // Remote (tcp://) table: the server scans + folds (opcode 0xA6).
+    if (auto* rt = get_remote_table(hTbl)) {
+        auto r = rt->conn->aggregate(rt->id, for_expr, specs);
+        if (!r) return fail(r.error());
+        std::lock_guard<std::mutex> lk(agg_mu());
+        ADSHANDLE h = agg_next_handle();
+        agg_results().emplace(h, AggregateResult{std::move(r).value().values});
+        *phResult = h;
+        return ok();
+    }
+
+    // SQL-backed (SQLite/Postgres/...) table: push down a real
+    // `SELECT COUNT/SUM/AVG/MIN/MAX ... WHERE <translated FOR>`. The FOR must
+    // translate to SQL via try_emit_sql_where; otherwise decline so the caller
+    // falls back (never half-apply a predicate).
+    if (const auto* ops = openads::abi::backend_table_ops_for(hTbl);
+        ops != nullptr && ops->aggregate != nullptr) {
+        std::string where_sql;
+        const char* where_arg = nullptr;
+        if (!for_expr.empty()) {
+            auto w = openads::engine::try_emit_sql_where(for_expr);
+            if (!w)
+                return fail(openads::AE_FUNCTION_NOT_AVAILABLE,
+                            "AdsAggregate: FOR not translatable to SQL");
+            where_sql = std::move(w).value();
+            where_arg = where_sql.c_str();
+        }
+        std::vector<openads::engine::AggValue> vals;
+        UNSIGNED32 rc = ops->aggregate(hTbl, where_arg, &specs, &vals);
+        if (rc != 0) return rc;
+        std::lock_guard<std::mutex> lk(agg_mu());
+        ADSHANDLE h = agg_next_handle();
+        agg_results().emplace(h, AggregateResult{std::move(vals)});
+        *phResult = h;
+        return ok();
+    }
+
+    // Local in-process DBF: not wired yet — fall back to a client-side loop.
+    return fail(openads::AE_FUNCTION_NOT_AVAILABLE,
+                "AdsAggregate: not applicable on a local table");
 }
 
 // ─ AdsAggregateCount ─────────────────────────────────────────────────────────

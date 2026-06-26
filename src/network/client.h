@@ -27,12 +27,10 @@ struct FetchWhereBatch {
     bool                                  eof = false;
 };
 
-// One requested aggregate for RemoteConnection::aggregate. `field` is the
-// column to fold (empty for COUNT(*)).
-struct AggSpec {
-    engine::AggFn fn = engine::AggFn::Count;
-    std::string   field;
-};
+// One requested aggregate (function + column; empty field = COUNT(*)).
+// Defined in engine/aggregate.h so the SQL-backend push-down (abi layer)
+// and the wire client share one type.
+using AggSpec = engine::AggSpec;
 
 // Result of RemoteConnection::aggregate — one scalar per requested AggSpec,
 // in the same order.

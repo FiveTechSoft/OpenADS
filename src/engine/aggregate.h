@@ -28,6 +28,13 @@ struct AggValue {
     std::string bytes;
 };
 
+// One requested aggregate: a function plus the column it folds (empty field
+// means COUNT(*)). Shared by the wire client and the SQL-backend push-down.
+struct AggSpec {
+    AggFn       fn = AggFn::Count;
+    std::string field;
+};
+
 // Format a double as a compact, round-trippable ASCII decimal: no
 // exponent, no trailing-zero noise, integral values print without a
 // decimal point. Hides binary float noise (0.1+0.2 -> "0.3").
