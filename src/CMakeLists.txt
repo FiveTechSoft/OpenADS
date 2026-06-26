@@ -22,6 +22,7 @@ add_library(openads_core STATIC
     platform/proc.cpp
     abi/ace_exports.cpp
     abi/ace_stubs.cpp
+    abi/openads_sql_c.cpp
     abi/last_error.cpp
     abi/charset.cpp
     abi/backend_registry.cpp
