@@ -2,7 +2,10 @@
 
 #include "sql_backend/postgres_table.h"
 #include "sql_backend/postgres_uri.h"
+#include "engine/aggregate.h"
 #include "util/result.h"
+
+#include <vector>
 
 #include <cstdint>
 #include <memory>
@@ -38,6 +41,14 @@ public:
     // matching rows. `where` must be a trusted, already-translated SQL boolean
     // expression (see engine::try_emit_sql_where). Resets the cursor.
     util::Result<void> set_filter(PostgresTable* tbl, const std::string& where);
+
+    // Tier-3 push-down: compute COUNT/SUM/AVG/MIN/MAX over the rows matching
+    // `where_sql` (already-translated SQL, empty = all rows) with one SELECT in
+    // PostgreSQL. Returns one scalar per spec, in order (see engine::AggValue).
+    util::Result<std::vector<engine::AggValue>>
+        aggregate(PostgresTable* tbl,
+                  const std::string& where_sql,
+                  const std::vector<engine::AggSpec>& specs);
 
     util::Result<bool>          at_eof(PostgresTable* tbl) const;
     util::Result<bool>          at_bof(PostgresTable* tbl) const;

@@ -394,6 +394,101 @@ PostgresConnection::set_filter(PostgresTable* tbl, const std::string& where) {
 #endif
 }
 
+util::Result<std::vector<engine::AggValue>>
+PostgresConnection::aggregate(PostgresTable* tbl,
+                              const std::string& where_sql,
+                              const std::vector<engine::AggSpec>& specs) {
+#if defined(OPENADS_WITH_POSTGRESQL)
+    if (!valid() || tbl == nullptr)
+        return util::Error{5001, 0, "invalid postgres aggregate", ""};
+    if (!tbl->fields_cached) {
+        auto d = describe_table(tbl);
+        if (!d) return d.error();
+        tbl->fields        = std::move(d).value();
+        tbl->fields_cached = true;
+    }
+    auto field_is_numeric = [&](const std::string& name) {
+        for (const auto& f : tbl->fields) {
+            if (f.name.size() != name.size()) continue;
+            bool same = true;
+            for (std::size_t i = 0; i < name.size(); ++i)
+                if (std::toupper(static_cast<unsigned char>(f.name[i])) !=
+                    std::toupper(static_cast<unsigned char>(name[i]))) {
+                    same = false; break;
+                }
+            if (!same) continue;
+            switch (f.type) {                       // ADS numeric type codes
+                case 2: case 10: case 11: case 12:
+                case 15: case 17: case 18:
+                    return true;
+                default:
+                    return false;
+            }
+        }
+        return false;
+    };
+
+    std::string sql = "SELECT ";
+    for (std::size_t i = 0; i < specs.size(); ++i) {
+        if (i) sql += ", ";
+        const auto& s = specs[i];
+        // Leave the column unquoted so PostgreSQL case-folds it (the ABI hands
+        // field names in upper case, e.g. "QTY", but the column is "qty");
+        // this matches how the translated WHERE refers to the same column.
+        const std::string col = s.field;
+        switch (s.fn) {
+            case engine::AggFn::Count:
+                sql += s.field.empty() ? "COUNT(*)" : ("COUNT(" + col + ")");
+                break;
+            // COALESCE(SUM(),0) gives 0 over zero rows (xBase SUM semantics).
+            case engine::AggFn::Sum: sql += "COALESCE(SUM(" + col + "),0)"; break;
+            case engine::AggFn::Avg: sql += "AVG(" + col + ")"; break;
+            case engine::AggFn::Min: sql += "MIN(" + col + ")"; break;
+            case engine::AggFn::Max: sql += "MAX(" + col + ")"; break;
+        }
+        sql += " AS a" + std::to_string(i);
+    }
+    sql += " FROM " + quote_ident(tbl->name);
+    if (!where_sql.empty()) sql += " WHERE (" + where_sql + ")";
+
+    PGresult* res = PQexec(impl_->conn, sql.c_str());
+    if (PQresultStatus(res) != PGRES_TUPLES_OK) {
+        util::Error e = postgres_error("aggregate", PQerrorMessage(impl_->conn));
+        PQclear(res);
+        return e;
+    }
+    const bool have_row = PQntuples(res) >= 1;
+    std::vector<engine::AggValue> out;
+    out.reserve(specs.size());
+    for (std::size_t i = 0; i < specs.size(); ++i) {
+        const auto& s   = specs[i];
+        const int    ci = static_cast<int>(i);
+        const bool   is_null = !have_row || PQgetisnull(res, 0, ci);
+        std::string  val =
+            is_null ? std::string{} : std::string(PQgetvalue(res, 0, ci));
+        const bool numeric_result =
+            s.fn == engine::AggFn::Count || s.fn == engine::AggFn::Sum ||
+            s.fn == engine::AggFn::Avg   || field_is_numeric(s.field);
+        engine::AggValue av;
+        if (is_null) {
+            av.type = engine::AggType::Empty;
+        } else if (numeric_result) {
+            av.type  = engine::AggType::Numeric;
+            av.bytes = engine::format_agg_double(std::strtod(val.c_str(), nullptr));
+        } else {
+            av.type  = engine::AggType::String;
+            av.bytes = std::move(val);
+        }
+        out.push_back(std::move(av));
+    }
+    PQclear(res);
+    return out;
+#else
+    (void)tbl; (void)where_sql; (void)specs;
+    return util::Error{5004, 0, "postgresql backend disabled", ""};
+#endif
+}
+
 util::Result<void> PostgresConnection::goto_top(PostgresTable* tbl) {
 #if defined(OPENADS_WITH_POSTGRESQL)
     if (!valid() || tbl == nullptr) {

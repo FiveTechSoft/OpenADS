@@ -2090,6 +2090,24 @@ UNSIGNED32 postgres_set_filter(ADSHANDLE hTable, UNSIGNED8* pucWhere) {
     return ok();
 }
 
+// Tier-3 push-down: delegate to PostgresConnection::aggregate (one SELECT
+// COUNT/SUM/AVG/MIN/MAX ... WHERE) — same contract as sqlite_aggregate.
+UNSIGNED32 postgres_aggregate(
+        ADSHANDLE hTable, const char* where_sql,
+        const std::vector<openads::engine::AggSpec>* specs,
+        std::vector<openads::engine::AggValue>* out) {
+    auto* st = get_postgres_table(hTable);
+    if (st == nullptr || st->conn == nullptr)
+        return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
+    if (specs == nullptr || out == nullptr)
+        return fail(openads::AE_INTERNAL_ERROR, "postgres_aggregate: null arg");
+    auto r = st->conn->aggregate(
+        st, where_sql ? std::string(where_sql) : std::string(), *specs);
+    if (!r) return fail(r.error());
+    *out = std::move(r).value();
+    return ok();
+}
+
 UNSIGNED32 postgres_goto_bottom(ADSHANDLE hTable) {
     auto* st = get_postgres_table(hTable);
     if (st->conn == nullptr) return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
@@ -2297,6 +2315,7 @@ const openads::abi::BackendTableOps* postgres_table_ops() {
         o.open_index        = &postgres_open_index;
         o.is_found          = &postgres_is_found;
         o.set_filter        = &postgres_set_filter;
+        o.aggregate         = &postgres_aggregate;
         return o;
     }();
     return &ops;
