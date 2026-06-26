@@ -3,6 +3,7 @@
 #include "engine/aof_eval.h"
 #include "engine/index_expr.h"
 #include "engine/aof_expr.h"
+#include "engine/aggregate.h"
 #include "engine/table.h"
 #include "mgmt/mg_collector.h"
 #include "mgmt/mg_stats.h"
@@ -1778,6 +1779,154 @@ DispatchResult Session::dispatch(const Frame& f) {
                                      rowbuf.begin(), rowbuf.end());
                 reply.payload.push_back(
                     static_cast<std::uint8_t>(tbl->eof() ? 1 : 0));
+                break;
+            }
+            case Opcode::Aggregate: {
+                // Tier-3 server-side aggregation. Payload:
+                //   [u32 tid][u16 forlen][for_expr][u8 n_aggs]
+                //     per agg: [u8 fn_type][u8 nlen][field_name]
+                // Reply (AggregateAck):
+                //   [u8 n_aggs] per agg: [u8 result_type][u16 vlen][val]
+                // The server scans the whole table once (independent of the
+                // cursor position), folds each matching row into the
+                // accumulators, and returns one scalar per requested agg.
+                if (f.payload.size() < 7) {
+                    reply = err("Aggregate: bad payload"); break;
+                }
+                std::uint32_t id   = read_u32_le(f.payload.data());
+                std::uint16_t flen =
+                    static_cast<std::uint16_t>(
+                        static_cast<std::uint32_t>(f.payload[4]) |
+                        (static_cast<std::uint32_t>(f.payload[5]) << 8));
+                std::size_t p = 6;
+                if (p + flen > f.payload.size()) {
+                    reply = err("Aggregate: truncated expr"); break;
+                }
+                std::string for_expr(
+                    reinterpret_cast<const char*>(f.payload.data() + p), flen);
+                p += flen;
+                if (p + 1 > f.payload.size()) {
+                    reply = err("Aggregate: missing n_aggs"); break;
+                }
+                std::uint8_t naggs = f.payload[p++];
+                struct AggReq { std::uint8_t fn; std::string field; };
+                std::vector<AggReq> specs;
+                specs.reserve(naggs);
+                bool parse_ok = true;
+                for (std::uint8_t i = 0; i < naggs && parse_ok; ++i) {
+                    if (p + 2 > f.payload.size()) {
+                        reply = err("Aggregate: truncated agg header");
+                        parse_ok = false; break;
+                    }
+                    AggReq s;
+                    s.fn = f.payload[p++];
+                    std::uint8_t nlen = f.payload[p++];
+                    if (p + nlen > f.payload.size()) {
+                        reply = err("Aggregate: truncated field name");
+                        parse_ok = false; break;
+                    }
+                    s.field.assign(
+                        reinterpret_cast<const char*>(f.payload.data() + p),
+                        nlen);
+                    p += nlen;
+                    specs.push_back(std::move(s));
+                }
+                if (!parse_ok) break;
+
+                // Base tables only — a SQL cursor aggregates via SQL.
+                if (cursor_tbls_.find(id) != cursor_tbls_.end()) {
+                    reply = err("Aggregate: not supported on SQL cursors "
+                                "(use SQL aggregates)");
+                    break;
+                }
+                auto it = tbls_.find(id);
+                if (it == tbls_.end() || !sess_conn_) {
+                    reply = err("Aggregate: bad table id"); break;
+                }
+                auto* tbl = sess_conn_->lookup_table(it->second);
+                if (!tbl) { reply = err("Aggregate: lookup failed"); break; }
+
+                auto field_is_numeric =
+                    [](openads::drivers::DbfFieldType t) {
+                        using T = openads::drivers::DbfFieldType;
+                        switch (t) {
+                            case T::Numeric:  case T::Float:
+                            case T::Integer:  case T::Currency:
+                            case T::Double:   case T::ShortInt:
+                            case T::AutoInc:  case T::AdtMoney:
+                                return true;
+                            default:
+                                return false;
+                        }
+                    };
+
+                // One accumulator per spec; resolve field index + numeric-ness
+                // (the latter drives numeric vs lexical MIN/MAX).
+                std::vector<openads::engine::AggAccumulator> accs;
+                std::vector<std::int32_t> fidx;
+                accs.reserve(specs.size());
+                fidx.reserve(specs.size());
+                for (const auto& s : specs) {
+                    std::int32_t fi =
+                        s.field.empty() ? -1 : tbl->field_index(s.field);
+                    bool numeric = false;
+                    if (fi >= 0) {
+                        const auto& fd = tbl->field_descriptor(
+                            static_cast<std::uint16_t>(fi));
+                        numeric = field_is_numeric(fd.type);
+                    }
+                    accs.emplace_back(
+                        static_cast<openads::engine::AggFn>(s.fn), numeric);
+                    fidx.push_back(fi);
+                }
+
+                // Scan the whole table once, restoring the cursor afterwards.
+                std::uint32_t saved   = tbl->recno();
+                bool          was_eof = tbl->eof();
+                tbl->goto_top();
+                while (!tbl->eof()) {
+                    if (openads::engine::evaluate_index_expr_truthy(
+                            *tbl, for_expr)) {
+                        for (std::size_t i = 0; i < accs.size(); ++i) {
+                            if (fidx[i] < 0) {
+                                accs[i].feed(false, 0.0, "");   // COUNT(*)
+                            } else {
+                                auto v = tbl->read_field(
+                                    static_cast<std::uint16_t>(fidx[i]));
+                                if (v) {
+                                    const auto& dv = v.value();
+                                    accs[i].feed(dv.is_null, dv.as_double,
+                                                 dv.as_string);
+                                } else {
+                                    accs[i].feed(true, 0.0, "");
+                                }
+                            }
+                        }
+                    }
+                    if (!tbl->skip(1)) break;
+                }
+                if (!was_eof && saved >= 1 && saved <= tbl->record_count())
+                    tbl->goto_record(saved);
+                else
+                    tbl->goto_top();
+
+                reply.opcode = Opcode::AggregateAck;
+                auto write_u16 = [](std::vector<std::uint8_t>& out,
+                                    std::uint16_t v) {
+                    out.push_back(static_cast<std::uint8_t>( v       & 0xFFu));
+                    out.push_back(static_cast<std::uint8_t>((v >> 8) & 0xFFu));
+                };
+                reply.payload.push_back(
+                    static_cast<std::uint8_t>(accs.size()));
+                for (auto& a : accs) {
+                    openads::engine::AggValue val = a.finalize();
+                    reply.payload.push_back(
+                        static_cast<std::uint8_t>(val.type));
+                    write_u16(reply.payload,
+                              static_cast<std::uint16_t>(val.bytes.size()));
+                    reply.payload.insert(reply.payload.end(),
+                                         val.bytes.begin(), val.bytes.end());
+                }
                 break;
             }
         case Opcode::Reindex: {

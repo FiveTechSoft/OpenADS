@@ -166,6 +166,22 @@ enum class Opcode : std::uint8_t {
     FetchWhere         = 0xA4,
     FetchWhereAck      = 0xA5,
 
+    // Tier-3 server-side aggregation. The server scans the whole table
+    // once, evaluating a Clipper-style FOR predicate per row, and folds
+    // each matching row into the requested COUNT / SUM / AVG / MIN / MAX
+    // accumulators — returning just the scalars instead of streaming
+    // every matching row back. Collapses `COUNT FOR` / `SUM .. FOR` /
+    // `AVERAGE` / totalling reports from O(matched rows over the wire)
+    // to a single round-trip. Request payload:
+    //   [u32 tid][u16 forlen][for_expr][u8 n_aggs]
+    //     per agg: [u8 fn_type][u8 nlen][field_name]   (nlen=0 => COUNT(*))
+    // Reply (AggregateAck):
+    //   [u8 n_aggs] per agg: [u8 result_type][u16 vlen][val]
+    // fn_type: 0=COUNT 1=SUM 2=AVG 3=MIN 4=MAX (engine::AggFn).
+    // result_type: 0=empty/null 1=numeric(ASCII) 2=string (engine::AggType).
+    Aggregate          = 0xA6,
+    AggregateAck       = 0xA7,
+
     Error              = 0xFF,
 };
 
@@ -191,6 +207,12 @@ inline constexpr std::uint32_t kMaxFramePayload = 16u * 1024u * 1024u;
 // one-round-trip-per-Skip behavior, so the wire stays backward
 // compatible in every version-mix direction.
 inline constexpr std::uint32_t kCapPrefetchConsume = 0x00000001u;
+
+// Tier-3: the client understands the Aggregate / AggregateAck opcodes
+// (0xA6/0xA7). A server only routes a `COUNT/SUM/.. FOR` to the
+// server-side accumulator path for clients that advertise this; older
+// servers never see a 0xA6 frame, so the wire stays backward compatible.
+inline constexpr std::uint32_t kCapAggregate = 0x00000002u;
 
 struct Frame {
     Opcode                    opcode = Opcode::Hello;

@@ -4,6 +4,7 @@
 #include "network/socket.h"
 #include "network/transport.h"
 #include "network/wire.h"
+#include "engine/aggregate.h"
 #include "util/result.h"
 
 #include <cstdint>
@@ -24,6 +25,19 @@ struct FetchWhereBatch {
     std::vector<std::vector<std::string>> rows;
     std::vector<std::uint32_t>            recnos;   // 1 per row iff WANT_RECNO
     bool                                  eof = false;
+};
+
+// One requested aggregate for RemoteConnection::aggregate. `field` is the
+// column to fold (empty for COUNT(*)).
+struct AggSpec {
+    engine::AggFn fn = engine::AggFn::Count;
+    std::string   field;
+};
+
+// Result of RemoteConnection::aggregate — one scalar per requested AggSpec,
+// in the same order.
+struct AggregateBatch {
+    std::vector<engine::AggValue> values;
 };
 
 struct RemoteTable;
@@ -191,6 +205,15 @@ public:
                     const std::string&              where_expr,
                     const std::vector<std::string>& columns,
                     std::uint8_t                    flags = 0);
+
+    // Tier-3 — server-side aggregation. The server scans the whole table
+    // once, evaluates `for_expr` per row, and folds each match into the
+    // requested accumulators, returning one scalar per spec (same order).
+    // Base tables only — a SQL cursor already aggregates via SQL.
+    util::Result<AggregateBatch>
+        aggregate(std::uint32_t               id,
+                  const std::string&          for_expr,
+                  const std::vector<AggSpec>& specs);
 
 private:
     util::Result<Frame> request(const Frame& f);

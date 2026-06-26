@@ -662,6 +662,65 @@ RemoteConnection::fetch_where(std::uint32_t id,
     return batch;
 }
 
+util::Result<AggregateBatch>
+RemoteConnection::aggregate(std::uint32_t               id,
+                            const std::string&          for_expr,
+                            const std::vector<AggSpec>& specs) {
+    if (specs.size() > 0xFFu)
+        return util::Error{5000, 0,
+            "Aggregate: too many aggregates (max 255)", ""};
+    if (for_expr.size() > 0xFFFFu)
+        return util::Error{5000, 0,
+            "Aggregate: predicate too long (max 65535)", ""};
+    Frame req;
+    req.opcode = Opcode::Aggregate;
+    write_u32_le(id, req.payload);
+    req.payload.push_back(
+        static_cast<std::uint8_t>( for_expr.size()       & 0xFFu));
+    req.payload.push_back(
+        static_cast<std::uint8_t>((for_expr.size() >> 8) & 0xFFu));
+    req.payload.insert(req.payload.end(), for_expr.begin(), for_expr.end());
+    req.payload.push_back(static_cast<std::uint8_t>(specs.size()));
+    for (const auto& s : specs) {
+        if (s.field.size() > 0xFFu)
+            return util::Error{5000, 0,
+                "Aggregate: field name too long (max 255)", s.field};
+        req.payload.push_back(static_cast<std::uint8_t>(s.fn));
+        req.payload.push_back(static_cast<std::uint8_t>(s.field.size()));
+        req.payload.insert(req.payload.end(), s.field.begin(), s.field.end());
+    }
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::AggregateAck ||
+        rep.value().payload.empty())
+        return util::Error{5000, 0, "Aggregate: server error", ""};
+
+    const auto& pl = rep.value().payload;
+    std::size_t  p = 0;
+    std::uint8_t n = pl[p++];
+    AggregateBatch out;
+    out.values.reserve(n);
+    for (std::uint8_t i = 0; i < n; ++i) {
+        if (p + 3 > pl.size())
+            return util::Error{5000, 0,
+                "Aggregate: truncated payload (header)", ""};
+        std::uint8_t  rt   = pl[p++];
+        std::uint16_t vlen = static_cast<std::uint16_t>(
+            static_cast<std::uint32_t>(pl[p]) |
+            (static_cast<std::uint32_t>(pl[p + 1]) << 8));
+        p += 2;
+        if (p + vlen > pl.size())
+            return util::Error{5000, 0,
+                "Aggregate: truncated payload (value)", ""};
+        engine::AggValue v;
+        v.type = static_cast<engine::AggType>(rt);
+        v.bytes.assign(reinterpret_cast<const char*>(pl.data() + p), vlen);
+        p += vlen;
+        out.values.push_back(std::move(v));
+    }
+    return out;
+}
+
 util::Result<std::uint32_t>
 RemoteConnection::execute_sql(const std::string& sql) {
     Frame req;

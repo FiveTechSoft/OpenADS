@@ -20881,3 +20881,140 @@ UNSIGNED32 AdsFetchWhereApplyRow(ADSHANDLE hRes, UNSIGNED32 ulRow, ADSHANDLE hTb
 }
 
 } // extern "C"  — AdsFetchWhere* export block
+
+// ── Tier-3: AdsAggregate result-set registry + exports ────────────────────────
+//
+// Mirrors the FetchWhere registry: opaque high-range handles map to the
+// vector of scalars returned by RemoteConnection::aggregate. A distinct
+// high range keeps Aggregate handles from colliding with FetchWhere ones.
+
+namespace {
+
+struct AggregateResult {
+    std::vector<openads::engine::AggValue> values;
+};
+
+std::mutex& agg_mu() {
+    static std::mutex m;
+    return m;
+}
+
+std::unordered_map<ADSHANDLE, AggregateResult>& agg_results() {
+    static std::unordered_map<ADSHANDLE, AggregateResult> m;
+    return m;
+}
+
+// Must be called while holding agg_mu().
+ADSHANDLE agg_next_handle() {
+    static std::uint64_t n = 0xC000000000000001ULL;
+    return static_cast<ADSHANDLE>(n++);
+}
+
+// Parse "COUNT:;SUM:QTY;MIN:NM" into AggSpec list. Returns false on an
+// unknown function token (so the caller can reject the whole request).
+bool agg_parse_spec(const UNSIGNED8* pszAggSpec,
+                    std::vector<openads::network::AggSpec>& out) {
+    if (pszAggSpec == nullptr) return false;
+    std::string s = reinterpret_cast<const char*>(pszAggSpec);
+    std::size_t i = 0;
+    while (i < s.size()) {
+        std::size_t semi = s.find(';', i);
+        std::string item = (semi == std::string::npos)
+                               ? s.substr(i)
+                               : s.substr(i, semi - i);
+        i = (semi == std::string::npos) ? s.size() : semi + 1;
+        if (item.empty()) continue;
+        std::size_t colon = item.find(':');
+        std::string fn    = (colon == std::string::npos)
+                                ? item : item.substr(0, colon);
+        std::string field = (colon == std::string::npos)
+                                ? std::string() : item.substr(colon + 1);
+        for (auto& c : fn)
+            c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        openads::network::AggSpec spec;
+        if      (fn == "COUNT") spec.fn = openads::engine::AggFn::Count;
+        else if (fn == "SUM")   spec.fn = openads::engine::AggFn::Sum;
+        else if (fn == "AVG")   spec.fn = openads::engine::AggFn::Avg;
+        else if (fn == "MIN")   spec.fn = openads::engine::AggFn::Min;
+        else if (fn == "MAX")   spec.fn = openads::engine::AggFn::Max;
+        else return false;
+        spec.field = std::move(field);
+        out.push_back(std::move(spec));
+    }
+    return true;
+}
+
+} // namespace
+
+extern "C" {  // reopen for AdsAggregate* exports
+
+// ─ AdsAggregate ──────────────────────────────────────────────────────────────
+UNSIGNED32 AdsAggregate(ADSHANDLE hTbl, UNSIGNED8* pszForCond,
+                        UNSIGNED8* pszAggSpec, ADSHANDLE* phResult) {
+    if (phResult == nullptr)
+        return fail(openads::AE_INTERNAL_ERROR, "AdsAggregate: null phResult");
+    *phResult = 0;
+    auto* rt = get_remote_table(hTbl);
+    if (rt == nullptr)
+        return fail(openads::AE_FUNCTION_NOT_AVAILABLE,
+                    "AdsAggregate: not applicable on a local table");
+    std::string for_expr;
+    if (pszForCond != nullptr)
+        for_expr = openads::abi::to_internal(pszForCond, 0);
+    std::vector<openads::network::AggSpec> specs;
+    if (!agg_parse_spec(pszAggSpec, specs) || specs.empty())
+        return fail(openads::AE_INTERNAL_ERROR,
+                    "AdsAggregate: bad or empty aggregate spec");
+    auto r = rt->conn->aggregate(rt->id, for_expr, specs);
+    if (!r) return fail(r.error());
+    std::lock_guard<std::mutex> lk(agg_mu());
+    ADSHANDLE h = agg_next_handle();
+    agg_results().emplace(h, AggregateResult{std::move(r).value().values});
+    *phResult = h;
+    return ok();
+}
+
+// ─ AdsAggregateCount ─────────────────────────────────────────────────────────
+UNSIGNED32 AdsAggregateCount(ADSHANDLE hRes, UNSIGNED32* pulCount) {
+    if (pulCount == nullptr)
+        return fail(openads::AE_INTERNAL_ERROR, "AdsAggregateCount: null");
+    std::lock_guard<std::mutex> lk(agg_mu());
+    auto it = agg_results().find(hRes);
+    if (it == agg_results().end())
+        return fail(openads::AE_INTERNAL_ERROR,
+                    "AdsAggregateCount: invalid handle");
+    *pulCount = static_cast<UNSIGNED32>(it->second.values.size());
+    return ok();
+}
+
+// ─ AdsAggregateValue ─────────────────────────────────────────────────────────
+// ulIndex is 0-based. *pusType receives the result discriminator
+// (0=empty, 1=numeric, 2=string); *pusLen is in/out (capacity / written).
+UNSIGNED32 AdsAggregateValue(ADSHANDLE hRes, UNSIGNED32 ulIndex,
+                             UNSIGNED16* pusType, UNSIGNED8* pucBuf,
+                             UNSIGNED16* pusLen) {
+    if (pusType == nullptr || pucBuf == nullptr || pusLen == nullptr)
+        return fail(openads::AE_INTERNAL_ERROR, "AdsAggregateValue: null arg");
+    std::lock_guard<std::mutex> lk(agg_mu());
+    auto it = agg_results().find(hRes);
+    if (it == agg_results().end())
+        return fail(openads::AE_INTERNAL_ERROR,
+                    "AdsAggregateValue: invalid handle");
+    const auto& vals = it->second.values;
+    if (ulIndex >= static_cast<UNSIGNED32>(vals.size()))
+        return fail(openads::AE_INTERNAL_ERROR,
+                    "AdsAggregateValue: index out of range");
+    const auto& v = vals[ulIndex];
+    *pusType = static_cast<UNSIGNED16>(v.type);
+    openads::abi::copy_to_caller(pucBuf, pusLen, v.bytes);
+    return ok();
+}
+
+// ─ AdsAggregateClose ─────────────────────────────────────────────────────────
+UNSIGNED32 AdsAggregateClose(ADSHANDLE hRes) {
+    std::lock_guard<std::mutex> lk(agg_mu());
+    agg_results().erase(hRes);
+    return ok();
+}
+
+} // extern "C"  — AdsAggregate* export block

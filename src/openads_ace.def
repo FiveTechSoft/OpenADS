@@ -410,3 +410,9 @@ EXPORTS
     AdsFetchWhereClose
     AdsFetchWhereApplyRow
 
+    ; Tier-3: server-side aggregation result API
+    AdsAggregate
+    AdsAggregateCount
+    AdsAggregateValue
+    AdsAggregateClose
+
