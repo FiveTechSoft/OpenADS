@@ -18,7 +18,8 @@
 
 namespace openads::sql_backend {
 
-struct MssqlUri;  // sql_backend/mssql_uri.h
+struct MssqlUri;    // sql_backend/mssql_uri.h
+struct MssqlTable;  // sql_backend/mssql_table.h
 
 class MssqlConnection {
 public:
@@ -43,6 +44,18 @@ public:
     // The connection must be authenticated (valid() == true).
     // SQL text is backend-generated; NEVER put secrets or credentials in sql.
     util::Result<tds::QueryResult> query(const std::string& sql);
+
+    // Navigational write (mirrors the other SQL backends): append_blank stages
+    // a blank row, set_field stages one column, flush_record emits an INSERT
+    // (pending_append) or a PK-keyed UPDATE, delete_record a PK-keyed DELETE.
+    // The result set is re-fetched after each write so navigation/count stay
+    // consistent. Requires the table to have a discovered primary key.
+    util::Result<void> append_blank(MssqlTable* tbl);
+    util::Result<void> set_field(MssqlTable* tbl,
+                                 const std::string& field_name,
+                                 const std::string& value);
+    util::Result<void> flush_record(MssqlTable* tbl);
+    util::Result<void> delete_record(MssqlTable* tbl);
 
 private:
     struct Impl;

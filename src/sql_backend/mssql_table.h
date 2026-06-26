@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace openads::sql_backend {
 
@@ -34,6 +35,18 @@ struct MssqlTable {
 
     // Last seek result — always false (no seek in v1).
     bool last_found = false;
+
+    // --------------------------------------------------------------------
+    // Navigational write state (set by MssqlTable::open; used by
+    // MssqlConnection::append_blank/set_field/flush_record/delete_record).
+    // --------------------------------------------------------------------
+    MssqlConnection*          conn = nullptr;   // owning connection (for query)
+    std::string               table_name;       // for write SQL generation
+    std::vector<std::size_t>  pk_cols;          // primary-key column indices
+    std::vector<std::string>  staging_row;      // pending column values
+    std::vector<bool>         staging_nulls;
+    bool                      pending_append = false;
+    bool                      row_dirty      = false;
 
     // --------------------------------------------------------------------
     // Factory

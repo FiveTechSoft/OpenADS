@@ -12,6 +12,7 @@
 #include "sql_backend/sql_common.h"
 
 #include <algorithm>
+#include <cctype>
 #include <limits>
 #include <string>
 
@@ -158,7 +159,41 @@ MssqlTable::open(MssqlConnection& c, const std::string& table_name) {
                            result.message, sql};
     }
 
-    return from_result(std::move(result));
+    auto t = from_result(std::move(result));
+    t->conn       = &c;
+    t->table_name = table_name;
+
+    // Discover primary-key columns (best-effort; only writes need them).
+    // table_name passed is_safe_identifier above, so it is safe to inline.
+    auto ci_equal = [](const std::string& a, const std::string& b) {
+        if (a.size() != b.size()) return false;
+        for (std::size_t i = 0; i < a.size(); ++i) {
+            if (std::tolower(static_cast<unsigned char>(a[i])) !=
+                std::tolower(static_cast<unsigned char>(b[i]))) return false;
+        }
+        return true;
+    };
+    const std::string pk_sql =
+        "SELECT kcu.COLUMN_NAME "
+        "FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc "
+        "JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu "
+        "  ON tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME "
+        " AND tc.TABLE_NAME = kcu.TABLE_NAME "
+        "WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY' "
+        "  AND tc.TABLE_NAME = '" + table_name + "' "
+        "ORDER BY kcu.ORDINAL_POSITION";
+    if (auto pk = c.query(pk_sql); pk && pk.value().ok) {
+        for (const auto& row : pk.value().rows) {
+            if (row.empty()) continue;
+            for (std::size_t i = 0; i < t->data.columns.size(); ++i) {
+                if (ci_equal(t->data.columns[i].name, row[0].value)) {
+                    t->pk_cols.push_back(i);
+                    break;
+                }
+            }
+        }
+    }
+    return t;
 }
 
 std::unique_ptr<MssqlTable> MssqlTable::from_result(tds::QueryResult qr) {

@@ -5976,9 +5976,12 @@ UNSIGNED32 AdsAppendRecord(ADSHANDLE hTable) {
     }
 #endif
 #if defined(OPENADS_WITH_MSSQL)
-    if (get_mssql_table(hTable)) {
-        return fail(openads::AE_FUNCTION_NOT_AVAILABLE,
-                    "MssqlTable: write not available in v1");
+    if (auto* st = get_mssql_table(hTable)) {
+        if (st->conn == nullptr)
+            return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
+        auto r = st->conn->append_blank(st);
+        if (!r) return fail(r.error());
+        return ok();
     }
 #endif
     Table* t = get_table(hTable);
@@ -6039,9 +6042,12 @@ UNSIGNED32 AdsWriteRecord(ADSHANDLE hTable) {
     }
 #endif
 #if defined(OPENADS_WITH_MSSQL)
-    if (get_mssql_table(hTable)) {
-        return fail(openads::AE_FUNCTION_NOT_AVAILABLE,
-                    "MssqlTable: write not available in v1");
+    if (auto* st = get_mssql_table(hTable)) {
+        if (st->conn == nullptr)
+            return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
+        auto r = st->conn->flush_record(st);
+        if (!r) return fail(r.error());
+        return ok();
     }
 #endif
     Table* t = get_table(hTable);
@@ -6139,9 +6145,12 @@ UNSIGNED32 AdsDeleteRecord(ADSHANDLE hTable) {
     }
 #endif
 #if defined(OPENADS_WITH_MSSQL)
-    if (get_mssql_table(hTable)) {
-        return fail(openads::AE_FUNCTION_NOT_AVAILABLE,
-                    "MssqlTable: write not available in v1");
+    if (auto* st = get_mssql_table(hTable)) {
+        if (st->conn == nullptr)
+            return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
+        auto r = st->conn->delete_record(st);
+        if (!r) return fail(r.error());
+        return ok();
     }
 #endif
     Table* t = get_table(hTable);
@@ -6303,6 +6312,20 @@ UNSIGNED32 AdsSetString(ADSHANDLE hTable, UNSIGNED8* pucField,
         if (pucValue != nullptr && ulLen > 0)
             val.assign(reinterpret_cast<const char*>(pucValue), ulLen);
         auto r = ot->conn->set_field(ot, fname, val);
+        if (!r) return fail(r.error());
+        return ok();
+    }
+#endif
+#if defined(OPENADS_WITH_MSSQL)
+    if (auto* st = get_mssql_table(hTable)) {
+        if (pucField == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+        if (st->conn == nullptr)
+            return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
+        std::string fname(reinterpret_cast<const char*>(pucField));
+        std::string val;
+        if (pucValue != nullptr && ulLen > 0)
+            val.assign(reinterpret_cast<const char*>(pucValue), ulLen);
+        auto r = st->conn->set_field(st, fname, val);
         if (!r) return fail(r.error());
         return ok();
     }
