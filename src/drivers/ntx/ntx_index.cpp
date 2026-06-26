@@ -743,6 +743,19 @@ NtxIndex::erase(std::uint32_t recno, const std::string& key) {
     set_key_offset(leaf, kc, get_key_offset(leaf, kc));   // tail unchanged
 
     set_key_count(leaf, kc - 1);
+    if (kc - 1 == 0) {
+        // The leaf is now empty. The swap-to-tail scheme above leaves
+        // offset[0] pointing at the physical slot of the *last-removed*
+        // key, not the pristine first slot. A subsequent insert into this
+        // empty-but-rooted leaf (the PACK/reindex re-insert handled by the
+        // empty-leaf branch of seek_key_for_write_) takes offset[kc] as its
+        // free slot and marches the free pointer forward from there — off
+        // the end of the 1024-byte page once enough keys are re-inserted,
+        // corrupting the heap (surfaces as 6106 "short read on NTX page"
+        // and then a crash in flush()). Reset the page to a pristine empty
+        // layout so every free-slot offset is valid again.
+        format_empty_page(leaf, max_keys_, item_size_);
+    }
     dirty_[leaf_frame.page] = true;
     return {};
 }
