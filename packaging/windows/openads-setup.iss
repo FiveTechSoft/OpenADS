@@ -39,7 +39,7 @@ SolidCompression=yes
 WizardStyle=modern
 ; Service registration + Program Files install need elevation.
 PrivilegesRequired=admin
-ArchitecturesInstallIn64BitMode=x64
+ArchitecturesInstallIn64BitMode=x64compatible
 LicenseFile={#SrcDir}\LICENSE
 
 [Files]
@@ -83,9 +83,11 @@ begin
   CfgPage.Add('Studio web console port:', False);
   CfgPage.Add('Studio admin user (leave blank for an open console):', False);
   CfgPage.Add('Studio admin password:', True);
-  { Default the data dir under ProgramData, not Program Files: a service
-    needs write access to where the tables live, and {autopf} is read-only
-    for non-elevated processes / subject to UAC virtualisation. }
+  // Default the data dir under ProgramData, not Program Files: a service
+  // needs write access to where the tables live, and Program Files is
+  // read-only for non-elevated processes / subject to UAC virtualisation.
+  // (Use line comments here: a brace comment can't contain the constant
+  // braces the explanation refers to — Inno's { } comments don't nest.)
   CfgPage.Values[0] := ExpandConstant('{commonappdata}\OpenADS\data');
   CfgPage.Values[1] := '6262';
   CfgPage.Values[2] := '6263';
