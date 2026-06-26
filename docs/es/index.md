@@ -58,6 +58,9 @@ Release actual: **v1.1.0**.
 - **[Compatibilidad de ordinales](ordinal-compat/)** — solucionar
   el error Win "no se encontró ordinal NNN" cuando la import
   table de la app referencia ordinales SAP.
+- **[Referencia API](api-reference/)** — 357 funciones `Ads*`
+  exportadas por `ace64.dll` / `libace.so` (conexiones, tablas,
+  índices, SQL, Data Dictionary, cifra, telemetría).
 - **[Issues conocidos](/OpenADS/known-issues/)** — items
   abiertos. *Disponible en inglés.*
 
