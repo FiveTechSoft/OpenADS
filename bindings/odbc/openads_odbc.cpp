@@ -429,7 +429,7 @@ SQLRETURN SQL_API SQLGetConnectAttr(SQLHDBC, SQLINTEGER, SQLPOINTER, SQLINTEGER,
     if (out) *out = 0;
     return SQL_SUCCESS;
 }
-SQLRETURN SQL_API SQLSetStmtAttr(SQLHSTMT, SQLINTEGER a, SQLPOINTER, SQLINTEGER) {
+SQLRETURN SQL_API SQLSetStmtAttr(SQLHSTMT, SQLINTEGER, SQLPOINTER, SQLINTEGER) {
     return SQL_SUCCESS;
 }
 SQLRETURN SQL_API SQLGetStmtAttr(SQLHSTMT hstmt, SQLINTEGER a, SQLPOINTER val,
@@ -601,10 +601,23 @@ SQLRETURN SQL_API SQLDescribeCol(SQLHSTMT hstmt, SQLUSMALLINT col, SQLCHAR* name
     return SQL_SUCCESS;
 }
 
+// The ODBC header switches the final parameter's type by bitness: SQLLEN* on
+// 64-bit, SQLPOINTER on 32-bit (Windows SDK sqlext.h guards this with
+// `defined(_WIN64) || defined(SQLCOLATTRIBUTE_SQLLEN)`). The definition must
+// match the declaration exactly or MSVC rejects it as an extern "C" overload
+// (C2733) on x86. Mirror the SDK guard and alias back to SQLLEN* internally.
+#if defined(_WIN64) || defined(SQLCOLATTRIBUTE_SQLLEN)
 SQLRETURN SQL_API SQLColAttribute(SQLHSTMT hstmt, SQLUSMALLINT col,
                                   SQLUSMALLINT field, SQLPOINTER charattr,
                                   SQLSMALLINT bufmax, SQLSMALLINT* strlen,
                                   SQLLEN* numattr) {
+#else
+SQLRETURN SQL_API SQLColAttribute(SQLHSTMT hstmt, SQLUSMALLINT col,
+                                  SQLUSMALLINT field, SQLPOINTER charattr,
+                                  SQLSMALLINT bufmax, SQLSMALLINT* strlen,
+                                  SQLPOINTER numattr_) {
+    SQLLEN* numattr = reinterpret_cast<SQLLEN*>(numattr_);
+#endif
     if (!hstmt) return SQL_ERROR;
     switch (field) {
         case SQL_DESC_NAME:
