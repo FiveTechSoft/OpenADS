@@ -222,6 +222,8 @@ milestones reused gaps left by earlier ones.
 | `MgReplyAck`          | `0xA3` | S→C | `MgSnapshot` payload            | M9.25 (rc24) |
 | `FetchWhere`          | `0xA4` | C→S | Server-side filtered batch scan | Tier-2 |
 | `FetchWhereAck`       | `0xA5` | S→C | Matching-row matrix + EOF flag  | Tier-2 |
+| `Aggregate`           | `0xA6` | C→S | Server-side COUNT/SUM/AVG/MIN/MAX | Tier-3 |
+| `AggregateAck`        | `0xA7` | S→C | One scalar per requested aggregate | Tier-3 |
 | `Error`               | `0xFF` | S→C | Any failure (4-byte ACE-code prefix since M12.10) | M12.3 |
 
 ## 5. Payload formats
@@ -428,6 +430,39 @@ round-trips.
 - **Base tables only.** A `FetchWhere` against a SQL cursor id
   (from `ExecuteSQL`) returns `Error` — a SQL cursor already filters
   server-side through its own `WHERE` clause.
+
+### 5.23 Aggregate / AggregateAck (Tier-3)
+
+Server-side aggregation. Where `FetchWhere` (§5.22) streams the matching
+rows back, `Aggregate` folds them **on the server** into scalar
+accumulators and returns only the results. The server scans the whole
+table once (independent of, and restoring, the cursor position),
+evaluates the `FOR` predicate per row with the same evaluator as §5.22,
+and feeds each match into the requested `COUNT` / `SUM` / `AVG` / `MIN` /
+`MAX` accumulators. This collapses a `COUNT FOR` / `SUM .. FOR` /
+`AVERAGE` / totalling report from one round-trip per matched row (or a
+whole `FetchWhere` row matrix) down to a **single** round-trip carrying
+just the scalars.
+
+- `Aggregate`:
+  `[u32 tid][u16 forlen][for_expr][u8 n_aggs][per agg: u8 fn_type, u8 nlen, field_name]`.
+  `for_expr` is the FOR predicate (empty = every row). `fn_type` is
+  `0=COUNT 1=SUM 2=AVG 3=MIN 4=MAX`; `field_name` is the column to fold
+  (`nlen = 0` ⇒ `COUNT(*)`). SUM/AVG use the field's numeric value;
+  MIN/MAX compare numerically for numeric field types and
+  lexicographically (raw bytes) otherwise. A request may carry several
+  aggregates so one scan answers `COUNT`+`SUM`+`MIN`+`MAX` together.
+- `AggregateAck`:
+  `[u8 n_aggs][per agg: u8 result_type, u16 vlen, val]`, one entry per
+  requested aggregate, same order. `result_type` is `0=empty/null`
+  (zero matched rows for AVG/MIN/MAX), `1=numeric` (ASCII decimal, parse
+  with `VAL()`), `2=string` (raw field bytes). `COUNT` and `SUM` over zero
+  rows return numeric `0`.
+- **Base tables only.** An `Aggregate` against a SQL cursor id returns
+  `Error` — a SQL cursor already aggregates through its own SQL.
+- **Capability-gated.** A client advertises `kCapAggregate` (`0x02`) in
+  the Connect capability word; it must only send `0xA6` to a server that
+  understands it (older servers never receive the frame).
 
 ## 6. Versioning
 
