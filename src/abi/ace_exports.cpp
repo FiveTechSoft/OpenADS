@@ -17969,8 +17969,20 @@ UNSIGNED32 AdsGetAOF(ADSHANDLE, UNSIGNED8* pucFilter, UNSIGNED16* pusLen)
         }
         return openads::AE_SUCCESS;
     }
-UNSIGNED32 AdsGetConnectionType(ADSHANDLE, UNSIGNED16* p)
-    { if (p) *p = ADS_LOCAL_SERVER; return openads::AE_SUCCESS; }
+UNSIGNED32 AdsGetConnectionType(ADSHANDLE hConnect, UNSIGNED16* p) {
+    if (p == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    *p = ADS_LOCAL_SERVER;
+    // If the handle resolves to a remote connection, report REMOTE.
+    if (get_remote_table(hConnect) != nullptr) {
+        *p = ADS_REMOTE_SERVER;
+        return ok();
+    }
+    Connection* c = lookup_connection(hConnect);
+    if (c != nullptr) {
+        *p = ADS_LOCAL_SERVER;
+    }
+    return ok();
+}
 UNSIGNED32 AdsGetDateFormat(UNSIGNED8* pucBuf, UNSIGNED16* pusLen) {
     copy_ace_string(g_date_format, pucBuf, pusLen);
     return openads::AE_SUCCESS;
@@ -18017,12 +18029,64 @@ UNSIGNED32 AdsGetFieldRaw(ADSHANDLE hTable, UNSIGNED8* pucField,
 }
 UNSIGNED32 AdsGetFilter(ADSHANDLE, UNSIGNED8* p, UNSIGNED16* l)
     { if (l) { if (p && *l > 0) p[0] = 0; *l = 0; } return openads::AE_SUCCESS; }
-UNSIGNED32 AdsGetHandleType(ADSHANDLE, UNSIGNED16* p)
-    { if (p) *p = ADS_TABLE; return openads::AE_SUCCESS; }
-UNSIGNED32 AdsGetIndexCondition(ADSHANDLE, UNSIGNED8* p, UNSIGNED16* l)
-    { if (l) { if (p && *l > 0) p[0] = 0; *l = 0; } return openads::AE_SUCCESS; }
-UNSIGNED32 AdsGetIndexFilename(ADSHANDLE, UNSIGNED16, UNSIGNED8* p, UNSIGNED16* l)
-    { if (l) { if (p && *l > 0) p[0] = 0; *l = 0; } return openads::AE_SUCCESS; }
+UNSIGNED32 AdsGetHandleType(ADSHANDLE h, UNSIGNED16* p) {
+    if (p == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    *p = ADS_NONE;
+    auto& s = state();
+    auto kind = s.registry.kind_of(h);
+    switch (kind) {
+        case HandleKind::Connection:
+        case HandleKind::RemoteConnection:
+            *p = ADS_DATABASE_CONNECTION;  break;
+        case HandleKind::Table:
+        case HandleKind::RemoteTable:
+        case HandleKind::SqliteTable:
+        case HandleKind::MssqlTable:
+        case HandleKind::MariadbTable:
+        case HandleKind::PostgresqlTable:
+        case HandleKind::OdbcTable:
+        case HandleKind::FirebirdTable:
+            *p = ADS_TABLE;  break;
+        case HandleKind::Statement:
+            *p = ADS_STATEMENT;  break;
+        default:
+            *p = ADS_NONE;  break;
+    }
+    return ok();
+}
+UNSIGNED32 AdsGetIndexCondition(ADSHANDLE hIndex, UNSIGNED8* p,
+                               UNSIGNED16* l) {
+    if (l == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    auto& m = index_bindings();
+    auto it = m.find(hIndex);
+    if (it == m.end()) {
+        if (p && *l > 0) p[0] = 0;
+        *l = 0;
+        return ok();
+    }
+    std::string cond;
+    if (it->second.parked) {
+        cond = it->second.parked->condition();
+    } else if (it->second.table && it->second.table->order()
+            && it->second.table->order()->index()) {
+        cond = it->second.table->order()->index()->condition();
+    }
+    openads::abi::copy_to_caller(p, l, cond);
+    return ok();
+}
+UNSIGNED32 AdsGetIndexFilename(ADSHANDLE hIndex, UNSIGNED16 /*usOrder*/,
+                               UNSIGNED8* p, UNSIGNED16* l) {
+    if (l == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    auto& m = index_bindings();
+    auto it = m.find(hIndex);
+    if (it == m.end()) {
+        if (p && *l > 0) p[0] = 0;
+        *l = 0;
+        return ok();
+    }
+    openads::abi::copy_to_caller(p, l, it->second.path);
+    return ok();
+}
 // 1-based position of the order `hIndex` within its table's ordinal
 // sequence — the exact inverse of AdsGetIndexHandleByOrder. Harbour
 // rddads' OrdNumber() / DBOI_NUMBER calls this after resolving a tag
@@ -18055,8 +18119,14 @@ UNSIGNED32 AdsGetIndexOrderByHandle(ADSHANDLE hIndex, UNSIGNED16* p) {
     return ok();
 }
 // AdsGetJulian already defined elsewhere in this file.
-UNSIGNED32 AdsGetKeyLength(ADSHANDLE, UNSIGNED16* p)
-    { if (p) *p = 0; return openads::AE_SUCCESS; }
+UNSIGNED32 AdsGetKeyLength(ADSHANDLE hIndex, UNSIGNED16* p) {
+    if (p == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    *p = 0;
+    auto* idx = iindex_for_handle(hIndex);
+    if (idx == nullptr) return fail(openads::AE_INTERNAL_ERROR, "no index");
+    *p = idx->key_length();
+    return ok();
+}
 // 1-based position of the current record within the active order's key
 // sequence (== the record number when no order is active). FWH's
 // xBrowse uses this (via Harbour rddads' AdsKeyNo()) as its scrollbar
@@ -18108,8 +18178,20 @@ UNSIGNED32 AdsGetKeyNum(ADSHANDLE hObj, UNSIGNED16 /*usFilterOption*/,
     *pulKeyNum = found;            // 0 when rn isn't in the index walk
     return ok();
 }
-UNSIGNED32 AdsGetKeyType(ADSHANDLE, UNSIGNED16* p)
-    { if (p) *p = ADS_STRINGKEY; return openads::AE_SUCCESS; }
+UNSIGNED32 AdsGetKeyType(ADSHANDLE hIndex, UNSIGNED16* p) {
+    if (p == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    *p = ADS_STRINGKEY;
+    auto* idx = iindex_for_handle(hIndex);
+    if (idx == nullptr) return ok();
+    switch (idx->key_encoding()) {
+        case openads::drivers::KeyEncoding::Text:
+            *p = ADS_STRINGKEY;  break;
+        case openads::drivers::KeyEncoding::FoxNumeric:
+        case openads::drivers::KeyEncoding::NtxNumeric:
+            *p = ADS_DOUBLEKEY;  break;
+    }
+    return ok();
+}
 UNSIGNED32 AdsGetLastTableUpdate(ADSHANDLE hTable, UNSIGNED8* pucDate,
                                  UNSIGNED16* pusLen) {
     int y = 0, m = 0, d = 0;
@@ -18146,8 +18228,22 @@ UNSIGNED32 AdsGetNumActiveLinks(ADSHANDLE, UNSIGNED16* p)
     { if (p) *p = 0; return openads::AE_SUCCESS; }
 UNSIGNED32 AdsGetNumLocks(ADSHANDLE, UNSIGNED16* p)
     { if (p) *p = 0; return openads::AE_SUCCESS; }
-UNSIGNED32 AdsGetNumOpenTables(UNSIGNED16* p)
-    { if (p) *p = 0; return openads::AE_SUCCESS; }
+UNSIGNED32 AdsGetNumOpenTables(UNSIGNED16* p) {
+    if (p == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    *p = 0;
+    auto& s = state();
+    std::uint16_t count = 0;
+    s.registry.for_each_handle([&](Handle, HandleKind k, void*) {
+        if (k == HandleKind::Table || k == HandleKind::RemoteTable
+            || k == HandleKind::SqliteTable || k == HandleKind::MssqlTable
+            || k == HandleKind::MariadbTable || k == HandleKind::PostgresqlTable
+            || k == HandleKind::OdbcTable || k == HandleKind::FirebirdTable) {
+            ++count;
+        }
+    });
+    *p = count;
+    return ok();
+}
 UNSIGNED32 AdsGetRecord(ADSHANDLE, UNSIGNED8*, UNSIGNED32* p)
     { if (p) *p = 0; return openads::AE_FUNCTION_NOT_AVAILABLE; }
 UNSIGNED32 AdsGetRelKeyPos(ADSHANDLE h, double* p) {
@@ -18318,8 +18414,12 @@ UNSIGNED32 AdsGetTableAlias(ADSHANDLE, UNSIGNED8* p, UNSIGNED16* l)
     { if (l) { if (p && *l > 0) p[0] = 0; *l = 0; } return openads::AE_SUCCESS; }
 UNSIGNED32 AdsGetTableCharType(ADSHANDLE, UNSIGNED16* p)
     { if (p) *p = ADS_ANSI; return openads::AE_SUCCESS; }
-UNSIGNED32 AdsGetTableConType(ADSHANDLE, UNSIGNED16* p)
-    { if (p) *p = ADS_CDX; return openads::AE_SUCCESS; }
+UNSIGNED32 AdsGetTableConType(ADSHANDLE hTable, UNSIGNED16* p) {
+    if (p == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    // Delegate to AdsGetTableType which already maps file extensions
+    // to ACE table-type constants (CDX/NTX/ADT).
+    return AdsGetTableType(hTable, p);
+}
 UNSIGNED32 AdsGetTableConnection(ADSHANDLE, ADSHANDLE* p)
     { if (p) *p = 0; return openads::AE_SUCCESS; }
 UNSIGNED32 AdsIsConnectionAlive(ADSHANDLE, UNSIGNED16* p)
@@ -18347,8 +18447,24 @@ UNSIGNED32 AdsIsIndexUnique(ADSHANDLE hIndex, UNSIGNED16* p) {
     *p = idx->unique() ? 1 : 0;
     return openads::AE_SUCCESS;
 }
-UNSIGNED32 AdsIsNull(ADSHANDLE, UNSIGNED8*, UNSIGNED16* p)
-    { if (p) *p = 0; return openads::AE_SUCCESS; }
+UNSIGNED32 AdsIsNull(ADSHANDLE hTable, UNSIGNED8* pucField,
+                     UNSIGNED16* pbNull) {
+    if (pbNull == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    *pbNull = 0;
+    if (auto* rt = get_remote_table(hTable)) {
+        // Remote tables: nullability isn't exposed over the wire yet;
+        // conservatively report "not null" (same as legacy ACE).
+        return ok();
+    }
+    Table* t = get_table(hTable);
+    if (t == nullptr) return fail(openads::AE_INTERNAL_ERROR, "no table");
+    std::uint16_t idx = 0;
+    if (!resolve_field_index_h(hTable, t, pucField, &idx)) {
+        return fail(openads::AE_COLUMN_NOT_FOUND, "");
+    }
+    *pbNull = t->is_field_null(idx) ? 1 : 0;
+    return ok();
+}
 UNSIGNED32 AdsIsRecordInAOF(ADSHANDLE, UNSIGNED32, UNSIGNED16* p)
     { if (p) *p = 1; return openads::AE_SUCCESS; }
 // ulRecord == 0 means "the current record" (ACE convention). Reports
