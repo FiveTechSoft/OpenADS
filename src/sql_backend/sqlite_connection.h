@@ -41,6 +41,17 @@ public:
     util::Result<void> goto_bottom(SqliteTable* tbl);
     util::Result<void> skip(SqliteTable* tbl, std::int32_t step);
 
+    // Navigational write (mirrors MariaConnection/FirebirdConnection):
+    // append_blank stages a blank row, set_field stages one column,
+    // flush_record emits an INSERT (pending_append) or a rowid-keyed UPDATE,
+    // delete_record a rowid-keyed DELETE. SQLite rowid is the implicit key.
+    util::Result<void> append_blank(SqliteTable* tbl);
+    util::Result<void> set_field(SqliteTable* tbl,
+                                 const std::string& field_name,
+                                 const std::string& value);
+    util::Result<void> flush_record(SqliteTable* tbl);
+    util::Result<void> delete_record(SqliteTable* tbl);
+
     // Tier-2 push-down: install (where non-empty) or clear (where empty) a SQL
     // WHERE fragment and reload the rowid list so navigation walks only the
     // matching rows. `where` must be a trusted, already-translated SQL boolean

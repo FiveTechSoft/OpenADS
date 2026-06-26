@@ -48,6 +48,14 @@ struct SqliteTable {
 
     bool last_seek_found = false;
 
+    // Write staging (mirrors MariaTable/FirebirdTable): append_blank/set_field
+    // stage column values; flush_record emits an INSERT (pending_append) or a
+    // rowid-keyed UPDATE; delete_record a rowid-keyed DELETE.
+    std::vector<std::string> staging_row;
+    std::vector<bool>        staging_nulls;
+    bool                     pending_append = false;
+    bool                     row_dirty      = false;
+
     // Result-set cursor mode (AdsExecuteSQLDirect SELECT passthrough): rows are
     // materialized in memory instead of fetched per-rowid from a base table, so
     // navigation serves `current_row` straight from `result_rows[pos]`.
