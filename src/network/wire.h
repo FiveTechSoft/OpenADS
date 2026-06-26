@@ -167,7 +167,7 @@ enum class Opcode : std::uint8_t {
     FetchWhereAck      = 0xA5,
 
     // Tier-3 server-side aggregation. The server scans the whole table
-    // once, evaluating a Clipper-style FOR predicate per row, and folds
+    // once, evaluating an xBase-style FOR predicate per row, and folds
     // each matching row into the requested COUNT / SUM / AVG / MIN / MAX
     // accumulators — returning just the scalars instead of streaming
     // every matching row back. Collapses `COUNT FOR` / `SUM .. FOR` /

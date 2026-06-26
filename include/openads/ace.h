@@ -1854,7 +1854,7 @@ UNSIGNED32 ENTRYPOINT AdsFetchWhereApplyRow(ADSHANDLE hRes, UNSIGNED32 ulRow,
                                           ADSHANDLE hTbl);
 
 // ── Tier-3: AdsAggregate result API ──────────────────────────────────────────
-// Server-side aggregation.  `pszForCond` is a Clipper-style FOR predicate
+// Server-side aggregation.  `pszForCond` is an xBase-style FOR predicate
 // (empty = all rows).  `pszAggSpec` is a ';'-separated list of "FN:FIELD"
 // items, where FN is COUNT|SUM|AVG|MIN|MAX and FIELD is the column to fold
 // (empty for COUNT(*)), e.g. "COUNT:;SUM:QTY;MIN:NM".  The server scans the
