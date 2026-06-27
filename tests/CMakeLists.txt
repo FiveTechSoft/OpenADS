@@ -55,6 +55,7 @@ add_executable(openads_unit_tests
     unit/abi_aggregate_test.cpp
     unit/aof_eval_test.cpp
     unit/abi_aof_test.cpp
+    unit/abi_aof_order_walk_test.cpp
     unit/aes_test.cpp
     unit/dbt_memo_test.cpp
     unit/fpt_memo_test.cpp

@@ -268,6 +268,33 @@ void Table::set_recno_sequence(std::vector<std::uint32_t> seq) {
     sequence_idx_   = -1;
 }
 
+void Table::rebuild_aof_sequence_() {
+    if (!aof_active_) return;
+    std::vector<std::uint32_t> seq;
+    if (order_ && order_->index()) {
+        // Walk the active index in traversal order, keeping only AOF matches,
+        // so the sparse walk follows the index (not recno) order.
+        auto* idx = order_->index();
+        idx->invalidate_cursor();
+        const bool desc = order_->descending_traverse();
+        auto r = desc ? idx->seek_last() : idx->seek_first();
+        const std::uint32_t guard_max = driver_->record_count() + 1;
+        std::uint32_t guard = 0;
+        while (r && r.value().positioned && guard++ <= guard_max) {
+            const std::uint32_t rc = r.value().recno;
+            if (rc >= 1 && rc <= aof_bitmap_.size() && aof_bitmap_[rc - 1])
+                seq.push_back(rc);
+            r = desc ? idx->prev() : idx->next();
+        }
+        idx->invalidate_cursor();
+    } else {
+        seq.reserve(aof_bitmap_.size() / 4);
+        for (std::size_t i = 0; i < aof_bitmap_.size(); ++i)
+            if (aof_bitmap_[i]) seq.push_back(static_cast<std::uint32_t>(i + 1));
+    }
+    set_recno_sequence(std::move(seq));
+}
+
 util::Result<void> Table::goto_top() {
     // Absolute reposition: drop any read-ahead block so we observe
     // writes made through another handle and start the scan fresh.
@@ -1253,10 +1280,14 @@ void Table::set_order(std::unique_ptr<drivers::IIndex> idx) {
     bool desc = idx && idx->descending();
     order_.emplace(std::move(idx));
     if (desc) order_->set_descending_traverse(true);
+    // Keep any active AOF sparse sequence aligned to the new order so a
+    // filtered walk follows it (no-op when no AOF is active).
+    rebuild_aof_sequence_();
 }
 
 void Table::clear_order() {
     order_.reset();
+    rebuild_aof_sequence_();
 }
 
 std::unique_ptr<drivers::IIndex> Table::take_order() {

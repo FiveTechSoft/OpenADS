@@ -285,20 +285,12 @@ public:
             if (r == 0 || r > p->size()) return false;
             return static_cast<bool>((*p)[r - 1]);
         };
-        // M-AOF.5 — sparse-bitmap navigation. Translate the bitmap
-        // into the sorted recno sequence Table already uses to walk
-        // a precomputed visible set; goto_top / goto_bottom / skip
-        // then jump O(1) per step instead of iterating every recno
-        // checking the predicate. Result: Skip-through-visible-set
-        // becomes O(M) where M is the number of matching records,
-        // which is where the textbook Rushmore "10-100x" total
-        // speedup actually shows up.
-        std::vector<std::uint32_t> seq;
-        seq.reserve(p->size() / 4);     // typical AOF selectivities
-        for (std::size_t i = 0; i < p->size(); ++i) {
-            if ((*p)[i]) seq.push_back(static_cast<std::uint32_t>(i + 1));
-        }
-        set_recno_sequence(std::move(seq));
+        // M-AOF.5 — sparse-bitmap navigation. Translate the bitmap into the
+        // recno sequence Table already uses to walk a precomputed visible set
+        // so goto_top / goto_bottom / skip jump O(1) per step. The sequence is
+        // built in the ACTIVE INDEX order (recno order when no order is set) so
+        // an ordered walk under a filter follows the index, not recno order.
+        rebuild_aof_sequence_();
     }
     bool aof_active() const noexcept   { return aof_active_; }
 
@@ -411,6 +403,12 @@ private:
 
     bool key_in_top_scope_   (const std::string& key) const;
     bool key_in_bottom_scope_(const std::string& key) const;
+
+    // Rebuild the AOF sparse recno sequence (no-op when no AOF is active):
+    // in the active index order when an order is set, else recno order. Called
+    // on install_aof_bitmap and whenever the active order changes so the
+    // filtered walk always follows the active order.
+    void rebuild_aof_sequence_();
 
     TableTypeForLock to_lock_type_() const noexcept;
 
