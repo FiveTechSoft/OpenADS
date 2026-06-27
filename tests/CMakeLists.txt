@@ -102,6 +102,9 @@ add_executable(openads_unit_tests
     unit/cdx_reindex_char_test.cpp
     unit/cdx_prev_empty_leaf_test.cpp
     unit/cdx_empty_tree_test.cpp
+    unit/abi_cdx_ordinal_creation_order_test.cpp
+    unit/cdx_bulk_recno_repro_test.cpp
+    unit/abi_cdx_expr_reindex_order_repro_test.cpp
     unit/abi_ntx_numeric_edge_test.cpp
     unit/abi_memo_large_test.cpp
     unit/abi_ordsetfocus_test.cpp
