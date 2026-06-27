@@ -63,6 +63,33 @@ int age_now(ADSHANDLE hT) {
     REQUIRE(AdsGetField(hT, fld, buf, &cap, 0) == 0);
     return std::atoi(reinterpret_cast<char*>(buf));
 }
+std::string name_now(ADSHANDLE hT) {
+    UNSIGNED8 fld[8]; std::memcpy(fld, "NAME", 5);
+    UNSIGNED8 buf[32] = {0}; UNSIGNED32 cap = sizeof(buf);
+    REQUIRE(AdsGetField(hT, fld, buf, &cap, 0) == 0);
+    std::string s(reinterpret_cast<char*>(buf), cap);
+    while (!s.empty() && s.back() == ' ') s.pop_back();
+    return s;
+}
+std::vector<std::string> walk_names(ADSHANDLE hT) {
+    std::vector<std::string> got;
+    REQUIRE(AdsGotoTop(hT) == 0);
+    UNSIGNED16 eof = 0;
+    REQUIRE(AdsAtEOF(hT, &eof) == 0);
+    while (eof == 0 && got.size() < 50) {
+        got.push_back(name_now(hT));
+        REQUIRE(AdsSkip(hT, 1) == 0);
+        REQUIRE(AdsAtEOF(hT, &eof) == 0);
+    }
+    return got;
+}
+ADSHANDLE connect(const fs::path& dir) {
+    std::string srv = dir.string();
+    ADSHANDLE hConn = 0;
+    REQUIRE(AdsConnect60(reinterpret_cast<UNSIGNED8*>(srv.data()),
+                         ADS_LOCAL_SERVER, nullptr, nullptr, 0, &hConn) == 0);
+    return hConn;
+}
 std::vector<int> walk_ages(ADSHANDLE hT) {
     std::vector<int> got;
     REQUIRE(AdsGotoTop(hT) == 0);
@@ -82,10 +109,7 @@ TEST_CASE("ABI: ordered walk under an active AOF keeps the index order") {
     std::error_code ec; fs::remove_all(dir, ec);
     stage(dir);
 
-    UNSIGNED8 srv[256];
-    std::memcpy(srv, dir.string().c_str(), dir.string().size() + 1);
-    ADSHANDLE hConn = 0;
-    REQUIRE(AdsConnect60(srv, ADS_LOCAL_SERVER, nullptr, nullptr, 0, &hConn) == 0);
+    ADSHANDLE hConn = connect(dir);
     ADSHANDLE hT = 0;
     UNSIGNED8 nm[16] = "data";
     REQUIRE(AdsOpenTable(hConn, nm, nm, ADS_CDX, 1, 1, 0, 1, &hT) == 0);
@@ -108,6 +132,41 @@ TEST_CASE("ABI: ordered walk under an active AOF keeps the index order") {
     // Clearing the AOF restores the full table in index order.
     REQUIRE(AdsClearAOF(hT) == 0);
     CHECK(walk_ages(hT) == std::vector<int>{28, 30, 31, 35, 40, 45});
+
+    REQUIRE(AdsCloseTable(hT) == 0);
+    REQUIRE(AdsDisconnect(hConn) == 0);
+    fs::remove_all(dir, ec);
+}
+
+// An AOF combined with an index SCOPE must yield only rows that satisfy BOTH,
+// in index order. The sparse AOF sequence is walked without re-checking the
+// scope, so the rebuild must exclude out-of-scope rows up front.
+TEST_CASE("ABI: AOF + index scope yields only in-scope matching rows in order") {
+    auto dir = fs::temp_directory_path() / "openads_aof_scope_walk";
+    std::error_code ec; fs::remove_all(dir, ec);
+    stage(dir);  // names r1..r6, ages 40,30,45,28,35,31
+
+    ADSHANDLE hConn = connect(dir);
+    ADSHANDLE hT = 0;
+    UNSIGNED8 nm[16] = "data";
+    REQUIRE(AdsOpenTable(hConn, nm, nm, ADS_CDX, 1, 1, 0, 1, &hT) == 0);
+
+    ADSHANDLE hIdx = 0;
+    REQUIRE(AdsCreateIndex61(hT, (UNSIGNED8*)"data", (UNSIGNED8*)"TNAME",
+                            (UNSIGNED8*)"NAME", nullptr, nullptr, 0, 512, &hIdx) == 0);
+
+    // Scope NAME in [r2 .. r5] -> r2,r3,r4,r5 are in scope. Keys are passed at
+    // the full index width (NAME is C(10)) so the boundary compare is exact.
+    UNSIGNED8 top[16] = "r2        ", bot[16] = "r5        ";
+    REQUIRE(AdsSetScope(hIdx, ADS_TOP,    top, 10, ADS_STRINGKEY) == 0);
+    REQUIRE(AdsSetScope(hIdx, ADS_BOTTOM, bot, 10, ADS_STRINGKEY) == 0);
+
+    // AOF AGE>=30 drops r4 (28). In-scope AND matching: r2,r3,r5 (NAME order).
+    std::string cond = "AGE >= 30";
+    REQUIRE(AdsSetAOF(hT, (UNSIGNED8*)cond.data(), 0) == 0);
+
+    CHECK(walk_names(hT) ==
+          std::vector<std::string>{"r2", "r3", "r5"});
 
     REQUIRE(AdsCloseTable(hT) == 0);
     REQUIRE(AdsDisconnect(hConn) == 0);

@@ -269,11 +269,13 @@ void Table::set_recno_sequence(std::vector<std::uint32_t> seq) {
 }
 
 void Table::rebuild_aof_sequence_() {
-    if (!aof_active_) return;
+    if (!aof_active_ || driver_ == nullptr) return;
     std::vector<std::uint32_t> seq;
     if (order_ && order_->index()) {
-        // Walk the active index in traversal order, keeping only AOF matches,
-        // so the sparse walk follows the index (not recno) order.
+        // Walk the active index in traversal order, keeping only rows that are
+        // both inside the active scope and AOF matches, so the sparse walk
+        // follows the index order AND honours the scope (the sequence path
+        // does not re-check the scope per step).
         auto* idx = order_->index();
         idx->invalidate_cursor();
         const bool desc = order_->descending_traverse();
@@ -281,8 +283,14 @@ void Table::rebuild_aof_sequence_() {
         const std::uint32_t guard_max = driver_->record_count() + 1;
         std::uint32_t guard = 0;
         while (r && r.value().positioned && guard++ <= guard_max) {
+            const std::string key = idx->current_key();
+            // Stop once we cross the far scope boundary in the walk direction;
+            // every later key in this direction is also out of scope.
+            if (desc) { if (!key_in_top_scope_(key))    break; }
+            else      { if (!key_in_bottom_scope_(key)) break; }
             const std::uint32_t rc = r.value().recno;
-            if (rc >= 1 && rc <= aof_bitmap_.size() && aof_bitmap_[rc - 1])
+            if (key_in_top_scope_(key) && key_in_bottom_scope_(key) &&
+                rc >= 1 && rc <= aof_bitmap_.size() && aof_bitmap_[rc - 1])
                 seq.push_back(rc);
             r = desc ? idx->prev() : idx->next();
         }
@@ -1442,6 +1450,7 @@ util::Result<void> Table::set_scope(bool top, const std::string& key) {
     }
     if (top) order_->scope().top    = key;
     else     order_->scope().bottom = key;
+    rebuild_aof_sequence_();   // keep any AOF sparse set inside the new scope
     return {};
 }
 
@@ -1449,6 +1458,7 @@ util::Result<void> Table::clear_scope(bool top) {
     if (!order_) return {};
     if (top) order_->scope().top.reset();
     else     order_->scope().bottom.reset();
+    rebuild_aof_sequence_();
     return {};
 }
 
@@ -1456,6 +1466,7 @@ util::Result<void> Table::clear_scopes() {
     if (!order_) return {};
     order_->scope().top.reset();
     order_->scope().bottom.reset();
+    rebuild_aof_sequence_();
     return {};
 }
 
