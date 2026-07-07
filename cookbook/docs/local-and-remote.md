@@ -51,6 +51,12 @@ Optional:
 
 - `--http-port 6263` -- a small browser console for inspecting the server.
 - `--tls` flags -- enable the encrypted `tls://` transport.
+- `--data <dir>` -- jail remote `Connect` requests under this directory
+  (and, if `--http-port` is set, the directory the browser console
+  serves). Accepts more than one root separated by `;`
+  (e.g. `--data "C:\data;D:\more-data"`) when the tables you want to
+  serve live under different drives or shares -- a client path only has
+  to fall under one of the listed roots.
 
 The server can also be installed as a system service (a Windows service,
 a `systemd` unit, or a `launchd` job), but you do not need that to run the

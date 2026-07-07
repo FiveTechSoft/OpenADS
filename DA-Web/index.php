@@ -165,6 +165,16 @@
           <button type="button" class="toggle-btn" data-value="remote">Remote</button>
         </div>
       </div>
+      <div class="form-row" id="cdd-remote-fields" style="display:none">
+        <div class="form-group">
+          <label for="cdd-host">Server host <span class="opt">(blank = default)</span></label>
+          <input type="text" id="cdd-host" placeholder="127.0.0.1" autocomplete="off">
+        </div>
+        <div class="form-group narrow">
+          <label for="cdd-port">Port</label>
+          <input type="text" id="cdd-port" placeholder="16262" autocomplete="off" inputmode="numeric">
+        </div>
+      </div>
     </div>
     <div class="modal-footer">
       <button class="btn" id="cdd-cancel">Cancel</button>
@@ -201,6 +211,16 @@
           <button type="button" class="toggle-btn" data-value="remote">Remote</button>
         </div>
       </div>
+      <div class="form-row" id="odd-remote-fields" style="display:none">
+        <div class="form-group">
+          <label for="odd-host">Server host <span class="opt">(blank = default)</span></label>
+          <input type="text" id="odd-host" placeholder="127.0.0.1" autocomplete="off">
+        </div>
+        <div class="form-group narrow">
+          <label for="odd-port">Port</label>
+          <input type="text" id="odd-port" placeholder="16262" autocomplete="off" inputmode="numeric">
+        </div>
+      </div>
     </div>
     <div class="modal-footer">
       <button class="btn" id="odd-cancel">Cancel</button>
@@ -233,6 +253,16 @@
           <button type="button" class="toggle-btn" data-value="remote">Remote</button>
         </div>
       </div>
+      <div class="form-row" id="ft-remote-fields" style="display:none">
+        <div class="form-group">
+          <label for="ft-host">Server host <span class="opt">(blank = default)</span></label>
+          <input type="text" id="ft-host" placeholder="127.0.0.1" autocomplete="off">
+        </div>
+        <div class="form-group narrow">
+          <label for="ft-port">Port</label>
+          <input type="text" id="ft-port" placeholder="16262" autocomplete="off" inputmode="numeric">
+        </div>
+      </div>
     </div>
     <div class="modal-footer">
       <button class="btn" id="ft-cancel">Cancel</button>
@@ -263,6 +293,16 @@
         <div class="toggle-group" id="connect-conn-type">
           <button type="button" class="toggle-btn active" data-value="local">Local</button>
           <button type="button" class="toggle-btn" data-value="remote">Remote</button>
+        </div>
+      </div>
+      <div class="form-row" id="connect-remote-fields" style="display:none">
+        <div class="form-group">
+          <label for="connect-host">Server host <span class="opt">(blank = default)</span></label>
+          <input type="text" id="connect-host" placeholder="127.0.0.1" autocomplete="off">
+        </div>
+        <div class="form-group narrow">
+          <label for="connect-port">Port</label>
+          <input type="text" id="connect-port" placeholder="16262" autocomplete="off" inputmode="numeric">
         </div>
       </div>
     </div>
@@ -376,6 +416,16 @@
         <div class="toggle-group" id="props-conn-type">
           <button type="button" class="toggle-btn active" data-value="local">Local</button>
           <button type="button" class="toggle-btn" data-value="remote">Remote</button>
+        </div>
+      </div>
+      <div class="form-row" id="props-remote-fields" style="display:none">
+        <div class="form-group">
+          <label for="props-host">Server host <span class="opt">(blank = default)</span></label>
+          <input type="text" id="props-host" placeholder="127.0.0.1" autocomplete="off">
+        </div>
+        <div class="form-group narrow">
+          <label for="props-port">Port</label>
+          <input type="text" id="props-port" placeholder="16262" autocomplete="off" inputmode="numeric">
         </div>
       </div>
     </div>

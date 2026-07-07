@@ -212,7 +212,78 @@ enum class Opcode : std::uint8_t {
     GetKeyCount        = 0xB0,
     GetKeyCountAck     = 0xB1,
 
+    // M12.29 — AdsDD* Data Dictionary property API, phase 1. Previously
+    // every AdsDD* getter/setter silently returned empty/no-op over a
+    // remote connection (dd_from_handle() only resolves a LOCAL Connection
+    // handle) instead of erroring or forwarding — see docs/wire-protocol.md
+    // §9. These opcodes cover the ~19 Get/Set*Property functions (all share
+    // the same name[,subName]+propertyId+value shape — see DDObjectKind
+    // below) plus the exact create/drop calls DA-Web exercises today.
+    // Everything else in the AdsDD* surface (user/group/link/RI CRUD,
+    // permissions bitmask, index-file add/remove) is deferred to a phase 2
+    // — those already work remotely via SQL EXECUTE PROCEDURE in DA-Web.
+    //
+    // Request DDGetProperty:  [u8 objKind][u16 nameLen][name]
+    //                         [u16 subNameLen][subName][u16 propId]
+    // Reply DDGetPropertyAck: [u32 valLen][value bytes]
+    DDGetProperty      = 0xB2,
+    DDGetPropertyAck   = 0xB3,
+    // Request DDSetProperty:  [u8 objKind][u16 nameLen][name]
+    //                         [u16 subNameLen][subName][u16 propId]
+    //                         [u32 valLen][value bytes]
+    // Reply DDSetPropertyAck: (empty)
+    DDSetProperty      = 0xB4,
+    DDSetPropertyAck   = 0xB5,
+    // Request DDCreateProc: [u16 nameLen][name][u16 containerLen][container]
+    //   [u16 procNameLen][procName][u16 inParamsLen][inParams]
+    //   [u16 outParamsLen][outParams][u16 commentsLen][comments]
+    // Reply DDCreateProcAck: (empty)
+    DDCreateProc       = 0xB6,
+    DDCreateProcAck    = 0xB7,
+    // Request DDCreateFunction: [u16 nameLen][name][u16 containerLen][container]
+    //   [u16 implLen][implementation][u16 retTypeLen][retType]
+    //   [u16 inParamsLen][inParams][u16 commentLen][comment]
+    // Reply DDCreateFunctionAck: (empty)
+    DDCreateFunction   = 0xB8,
+    DDCreateFunctionAck= 0xB9,
+    // Request DDCreateTrigger: [u16 nameLen][name][u16 tableLen][table]
+    //   [u32 type][u16 containerLen][container][u16 procedureLen][procedure]
+    //   [u32 priority]
+    // Reply DDCreateTriggerAck: (empty)
+    DDCreateTrigger    = 0xBA,
+    DDCreateTriggerAck = 0xBB,
+    // Request DDDropTrigger: [u16 nameLen][name]
+    // Reply DDDropTriggerAck: (empty)
+    DDDropTrigger      = 0xBC,
+    DDDropTriggerAck   = 0xBD,
+    // Request DDDropView: [u16 nameLen][name]
+    // Reply DDDropViewAck: (empty)
+    DDDropView         = 0xBE,
+    DDDropViewAck      = 0xBF,
+    // Request DDDropLink: [u16 nameLen][name]
+    // Reply DDDropLinkAck: (empty)
+    DDDropLink         = 0xC0,
+    DDDropLinkAck      = 0xC1,
+
     Error              = 0xFF,
+};
+
+// M12.29 — object kind discriminator for DDGetProperty/DDSetProperty.
+// Every Get/Set*Property function in the AdsDD* ABI shares the same
+// name[,subName]+propertyId+value shape; this tags which local
+// AdsDDGet*Property/AdsDDSet*Property function the server should call.
+// subName is only meaningful for Field (the field name within the table
+// named by `name`); every other kind sends an empty subName.
+enum class DDObjectKind : std::uint8_t {
+    Database     = 1,
+    User         = 2,
+    Table        = 3,
+    Field        = 4,
+    Trigger      = 5,
+    Proc         = 6,
+    Function     = 7,
+    View         = 8,
+    RefIntegrity = 9,
 };
 
 // Request flags for FetchWhere (Opcode::FetchWhere = 0xA4).

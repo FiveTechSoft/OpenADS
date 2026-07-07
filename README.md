@@ -430,6 +430,11 @@ The bundled unit drops privileges (`User=openads`,
 families) and `Restart=on-failure`. Tweak the `--data` / `--port`
 flags inside the unit to match your deployment.
 
+`--data` accepts more than one directory, separated by `;`
+(e.g. `--data "C:\app\data;D:\more-data"`), when the tables you want
+to serve live under different drives or shares — a client's Connect
+path only has to fall under one of the listed roots.
+
 **macOS (launchd).** Drop the bundled plist into
 `/Library/LaunchDaemons/` for a system-wide service or
 `~/Library/LaunchAgents/` for a per-user one:

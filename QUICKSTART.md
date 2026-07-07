@@ -52,6 +52,11 @@ folder, auto-start) and write a config file:
 openads_serverd --setup
 ```
 
+> Serving tables that live under more than one drive or share? Answer the
+> "Data directory" prompt with a `;`-separated list, e.g.
+> `C:\app\data;D:\more-data` — a client only has to connect to a path under
+> one of them.
+
 Then run it from that file:
 
 ```

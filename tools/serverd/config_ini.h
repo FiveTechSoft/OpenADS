@@ -41,7 +41,9 @@ struct IniConfig {
 // Parse INI *text* (already loaded into memory). Returns true on success.
 // On failure returns false and sets `error` to a one-line, line-numbered
 // message (e.g. "line 4: unknown key 'foo'"). Recognised keys:
-//   host, port, backlog, http_port, data (alias: data_dir),
+//   host, port, backlog, http_port, data (alias: data_dir; may list
+//   several roots separated by ';', e.g. "C:\data;D:\more-data" — see
+//   Server::set_data_dir / platform::split_data_roots),
 //   http_user (value is user:password, repeatable).
 bool parse_ini(const std::string& text, IniConfig& out, std::string& error);
 

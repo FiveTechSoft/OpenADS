@@ -39,6 +39,9 @@ if ($method === 'POST') {
         $username  = trim($body['username']  ?? '');
         $connType  = strtolower(trim($body['connType']  ?? 'local'));
         $entryType = trim($body['entryType'] ?? 'dd');
+        $host      = trim($body['host'] ?? '');
+        $portRaw   = $body['port'] ?? '';
+        $port      = ($portRaw !== '' && $portRaw !== null && ctype_digit((string)$portRaw)) ? (int)$portRaw : null;
         if ($name === '' || $path === '') {
             api_error(400, 'name and path are required');
         }
@@ -53,8 +56,11 @@ if ($method === 'POST') {
                 exit;
             }
         }
-        $dicts[] = ['name' => $name, 'path' => $path, 'username' => $username,
-                    'connType' => $connType, 'entryType' => $entryType];
+        $entry = ['name' => $name, 'path' => $path, 'username' => $username,
+                   'connType' => $connType, 'entryType' => $entryType];
+        if ($host !== '') $entry['host'] = $host;
+        if ($port !== null) $entry['port'] = $port;
+        $dicts[] = $entry;
         saveDicts($configFile, $dicts);
         echo json_encode(['ok' => true]);
         exit;
@@ -65,6 +71,9 @@ if ($method === 'POST') {
         $path      = trim($body['path']      ?? '');
         $username  = trim($body['username']  ?? '');
         $connType  = strtolower(trim($body['connType']  ?? 'local'));
+        $host      = trim($body['host'] ?? '');
+        $portRaw   = $body['port'] ?? '';
+        $port      = ($portRaw !== '' && $portRaw !== null && ctype_digit((string)$portRaw)) ? (int)$portRaw : null;
         if ($name === '' || $path === '') {
             api_error(400, 'name and path are required');
         }
@@ -77,6 +86,8 @@ if ($method === 'POST') {
                 $d['path']     = $path;
                 $d['username'] = $username;
                 $d['connType'] = $connType;
+                if ($host !== '') { $d['host'] = $host; } else { unset($d['host']); }
+                if ($port !== null) { $d['port'] = $port; } else { unset($d['port']); }
                 $found = true;
                 break;
             }

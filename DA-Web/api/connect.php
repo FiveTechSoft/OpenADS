@@ -10,7 +10,13 @@ require_once __DIR__ . '/common.php';
 
 $configFile = __DIR__ . '/../config/dictionaries.json';
 
-function persistSuccessfulConnType(string $file, string $name, string $connType): void {
+/**
+ * Remember the connType/host/port that just worked, so the next Connect
+ * dialog for this DD is prefilled with it instead of the bare defaults.
+ * host/port are stored only when non-empty — a local connect (or a remote
+ * one that used the plain default) leaves them out of the JSON entirely.
+ */
+function persistSuccessfulConnMeta(string $file, string $name, string $connType, string $host, ?int $port): void {
     if ($name === '' || !file_exists($file)) return;
     $dicts = json_decode(file_get_contents($file), true);
     if (!is_array($dicts)) return;
@@ -19,6 +25,16 @@ function persistSuccessfulConnType(string $file, string $name, string $connType)
     foreach ($dicts as &$d) {
         if (($d['name'] ?? '') !== $name) continue;
         $d['connType'] = $connType;
+        if ($host !== '') {
+            $d['host'] = $host;
+        } else {
+            unset($d['host']);
+        }
+        if ($port !== null) {
+            $d['port'] = $port;
+        } else {
+            unset($d['port']);
+        }
         $changed = true;
         break;
     }
@@ -45,6 +61,9 @@ if ($action === 'connect') {
     $password = trim($body['password'] ?? '');
     $connType = strtolower(trim($body['connType'] ?? 'local'));
     if (!in_array($connType, ['local', 'remote'], true)) $connType = 'local';
+    $host     = trim($body['host'] ?? '');
+    $portRaw  = $body['port'] ?? '';
+    $port     = ($portRaw !== '' && $portRaw !== null && ctype_digit((string)$portRaw)) ? (int)$portRaw : null;
 
     if ($name === '' || $path === '') {
         http_response_code(400);
@@ -58,6 +77,8 @@ if ($action === 'connect') {
             'username' => $username,
             'password' => $password,
             'connType' => $connType,
+            'host' => $host,
+            'port' => $port,
         ]);
         $conn = AdsConnection::connect($opts);
         $conn->close();
@@ -66,6 +87,16 @@ if ($action === 'connect') {
         $needs_import = $e->getCode() === 5174 ||
             ($e->getCode() === 5103 && $ext === 'add');
         api_exception(401, $e, $needs_import ? ['path' => $path] : []);
+    }
+
+    // Remember exactly what connected (opts may hold a smart-parsed host/port
+    // even if the caller didn't supply one explicitly) so short-lived backend
+    // connections opened later in this session reuse the same target.
+    $effectiveHost = $host;
+    $effectivePort = $port;
+    if ($effectiveHost === '' && preg_match('#^(?:tcp|tls)://([^:/]+):(\d+)/#i', $opts['path'] ?? '', $m)) {
+        $effectiveHost = $m[1];
+        $effectivePort = (int)$m[2];
     }
 
     if (!isset($_SESSION['connections'])) {
@@ -77,8 +108,10 @@ if ($action === 'connect') {
         'username' => $username,
         'password' => $password,
         'connType' => $connType,
+        'host'     => $effectiveHost,
+        'port'     => $effectivePort,
     ];
-    persistSuccessfulConnType($configFile, $name, $connType);
+    persistSuccessfulConnMeta($configFile, $name, $connType, $effectiveHost, $effectivePort);
 
     echo json_encode(['ok' => true]);
     exit;

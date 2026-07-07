@@ -21,6 +21,9 @@ $name     = trim($body['name']     ?? '');
 $path     = trim($body['path']     ?? '');
 $password = $body['password']      ?? '';
 $connType = trim($body['connType'] ?? 'local');
+$host     = trim($body['host'] ?? '');
+$portRaw  = $body['port'] ?? '';
+$port     = ($portRaw !== '' && $portRaw !== null && ctype_digit((string)$portRaw)) ? (int)$portRaw : null;
 
 if ($name === '' || $path === '') {
     api_error(400, 'name and path are required');
@@ -58,13 +61,16 @@ foreach ($dicts as $d) {
     }
 }
 
-$dicts[] = [
+$entry = [
     'name'      => $name,
     'path'      => $path,
     'username'  => 'AdsSysAdmin',
     'connType'  => in_array($connType, ['local', 'remote'], true) ? $connType : 'local',
     'entryType' => 'dd',
 ];
+if ($host !== '') $entry['host'] = $host;
+if ($port !== null) $entry['port'] = $port;
+$dicts[] = $entry;
 file_put_contents($configFile,
     json_encode(array_values($dicts), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
 

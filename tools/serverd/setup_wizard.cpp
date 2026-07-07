@@ -188,7 +188,9 @@ bool run_setup_wizard(const std::string& exe_path, SetupResult& out) {
         break;
     }
 
-    if (!ask("Data directory (where tables live)", ".", data)) return false;
+    if (!ask("Data directory (where tables live; ';'-separate more than one)",
+             ".", data))
+        return false;
 
     bool studio = false;
     std::string http_port, http_user;

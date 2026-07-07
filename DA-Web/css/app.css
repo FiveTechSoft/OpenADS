@@ -566,6 +566,9 @@ html, body {
 }
 .form-group input:focus,
 .form-group select:focus { border-color: #89b4fa; }
+.form-row { display: flex; gap: 10px; }
+.form-row .form-group { flex: 1; margin-bottom: 12px; }
+.form-row .form-group.narrow { flex: 0 0 90px; }
 
 /* ── Message / alerts ─────────────────────────────────────────────────────── */
 .alert {

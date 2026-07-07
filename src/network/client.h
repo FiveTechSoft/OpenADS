@@ -79,6 +79,9 @@ public:
         std::uint32_t id = 0;
         std::string   tag;
         std::string   bag_path;  // production CDX/NTX/ADI filename
+        std::string   expression;
+        bool          is_unique = false;
+        bool          is_descending = false;
     };
     // M-AOF.6 — extended OpenTableAck carries production bag path.
     struct OpenTableResult {
@@ -136,6 +139,41 @@ public:
                                 open_index(std::uint32_t table_id,
                                            const std::string& path);
     util::Result<void>          close_index(std::uint32_t index_id);
+
+    // M12.29 — AdsDD* Data Dictionary property API, phase 1. `subName` is
+    // only meaningful for DDObjectKind::Field (the field name within the
+    // table named by `name`); pass "" for every other kind. See
+    // docs/wire-protocol.md §9 and wire.h for the wire payload formats.
+    util::Result<std::string>  dd_get_property(DDObjectKind kind,
+                                               const std::string& name,
+                                               const std::string& subName,
+                                               std::uint16_t propId);
+    util::Result<void>          dd_set_property(DDObjectKind kind,
+                                                const std::string& name,
+                                                const std::string& subName,
+                                                std::uint16_t propId,
+                                                const std::string& value);
+    util::Result<void>          dd_create_proc(const std::string& name,
+                                               const std::string& container,
+                                               const std::string& procName,
+                                               const std::string& inParams,
+                                               const std::string& outParams,
+                                               const std::string& comments);
+    util::Result<void>          dd_create_function(const std::string& name,
+                                                    const std::string& container,
+                                                    const std::string& implementation,
+                                                    const std::string& retType,
+                                                    const std::string& inParams,
+                                                    const std::string& comment);
+    util::Result<void>          dd_create_trigger(const std::string& name,
+                                                   const std::string& table,
+                                                   std::uint32_t type,
+                                                   const std::string& container,
+                                                   const std::string& procedure,
+                                                   std::uint32_t priority);
+    util::Result<void>          dd_drop_trigger(const std::string& name);
+    util::Result<void>          dd_drop_view(const std::string& name);
+    util::Result<void>          dd_drop_link(const std::string& name);
     util::Result<void>          set_order(std::uint32_t table_id,
                                           std::uint32_t index_id);
     util::Result<void>          set_order_by_name(std::uint32_t table_id,
@@ -336,6 +374,9 @@ struct RemoteIndex {
     std::uint32_t     tbl_id = 0;    // server-side table id this binds to
     std::string       tag_name;      // CDX/NTX tag (AdsGetIndexName / OrdName)
     std::string       bag_path;      // production CDX/NTX/ADI filename (AdsGetIndexFilename / OrdBagName)
+    std::string       expression;    // key expression (AdsGetIndexExpr)
+    bool              is_unique = false;      // AdsIsIndexUnique
+    bool              is_descending = false;  // AdsIsIndexDescending (physical flag)
     // M12.17 — back-pointer so AdsSeek / AdsSeekLast / AdsSkipUnique
     // can invalidate the parent table's row cache after the cursor
     // moves on the server side.

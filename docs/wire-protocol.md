@@ -224,6 +224,24 @@ milestones reused gaps left by earlier ones.
 | `FetchWhereAck`       | `0xA5` | S→C | Matching-row matrix + EOF flag  | Tier-2 |
 | `Aggregate`           | `0xA6` | C→S | Server-side COUNT/SUM/AVG/MIN/MAX | Tier-3 |
 | `AggregateAck`        | `0xA7` | S→C | One scalar per requested aggregate | Tier-3 |
+| `GetKeyCount`         | `0xB0` | C→S | Filtered key count (active order)  | M12.28 |
+| `GetKeyCountAck`      | `0xB1` | S→C |                                 | M12.28 |
+| `DDGetProperty`       | `0xB2` | C→S | Read an `AdsDD*Get*Property` value | M12.29 |
+| `DDGetPropertyAck`    | `0xB3` | S→C | Value bytes                     | M12.29 |
+| `DDSetProperty`       | `0xB4` | C→S | Write an `AdsDD*Set*Property` value | M12.29 |
+| `DDSetPropertyAck`    | `0xB5` | S→C |                                 | M12.29 |
+| `DDCreateProc`        | `0xB6` | C→S | `AdsDDCreateProcedure`          | M12.29 |
+| `DDCreateProcAck`     | `0xB7` | S→C |                                 | M12.29 |
+| `DDCreateFunction`    | `0xB8` | C→S | `AdsDDCreateFunction`           | M12.29 |
+| `DDCreateFunctionAck` | `0xB9` | S→C |                                 | M12.29 |
+| `DDCreateTrigger`     | `0xBA` | C→S | `AdsDDCreateTrigger`            | M12.29 |
+| `DDCreateTriggerAck`  | `0xBB` | S→C |                                 | M12.29 |
+| `DDDropTrigger`       | `0xBC` | C→S | `AdsDDDropTrigger`              | M12.29 |
+| `DDDropTriggerAck`    | `0xBD` | S→C |                                 | M12.29 |
+| `DDDropView`          | `0xBE` | C→S | `AdsDDDropView`                 | M12.29 |
+| `DDDropViewAck`       | `0xBF` | S→C |                                 | M12.29 |
+| `DDDropLink`          | `0xC0` | C→S | `AdsDDDropLink`                 | M12.29 |
+| `DDDropLinkAck`       | `0xC1` | S→C |                                 | M12.29 |
 | `Error`               | `0xFF` | S→C | Any failure (4-byte ACE-code prefix since M12.10) | M12.3 |
 
 ## 5. Payload formats
@@ -464,6 +482,75 @@ just the scalars.
   the Connect capability word; it must only send `0xA6` to a server that
   understands it (older servers never receive the frame).
 
+### 5.24 DDGetProperty / DDSetProperty / DDCreate* / DDDrop* (M12.29)
+
+Phase 1 of putting the `AdsDD*` Data Dictionary property API on the wire —
+see §9 for why this was needed. Every request runs against the session's
+lazily-created server-side ABI connection (`Session::ensure_abi_conn()`,
+the same one `ExecuteSQL` §5.6 uses), which owns a real local `DataDict`;
+the handler just calls the existing local `AdsDDGet*Property` /
+`AdsDDSet*Property` / `AdsDDCreate*` / `AdsDDDrop*` function and marshals
+the result. Failure uses the standard `Error` (`0xFF`) frame like every
+other opcode — there is no embedded status code in any `...Ack`.
+
+**`DDObjectKind`** (`src/network/wire.h`) tags which local function a
+`DDGetProperty`/`DDSetProperty` request targets — all `Get/Set*Property`
+functions share the same `name[, subName], propertyId, value` shape:
+
+| Value | Kind | Maps to |
+|-------|------|---------|
+| 1 | Database | `AdsDDGet/SetDatabaseProperty` (no name) |
+| 2 | User | `AdsDDGet/SetUserProperty` |
+| 3 | Table | `AdsDDGet/SetTableProperty` |
+| 4 | Field | `AdsDDGet/SetFieldProperty` (`name`=table, `subName`=field) |
+| 5 | Trigger | `AdsDDGet/SetTriggerProperty` |
+| 6 | Proc | `AdsDDGet/SetProcProperty` |
+| 7 | Function | `AdsDDGet/SetFunctionProperty` |
+| 8 | View | `AdsDDGet/SetViewProperty` |
+| 9 | RefIntegrity | `AdsDDGet/SetRefIntegrityProperty` |
+
+`subName` is only meaningful for `Field`; every other kind sends it empty.
+
+- `DDGetProperty`:
+  `[u8 objKind][u16 nameLen][name][u16 subNameLen][subName][u16 propId]`.
+- `DDGetPropertyAck`: `[u32 valLen][value bytes]`. `valLen` is bounded by
+  the underlying local `AdsDDGet*Property` signature's `u16` length (same
+  cap the local ABI has always had); `u32` here just leaves room if that
+  signature is ever widened without another wire bump.
+- `DDSetProperty`:
+  `[u8 objKind][u16 nameLen][name][u16 subNameLen][subName][u16 propId]
+  [u32 valLen][value bytes]`. `valLen` > 65535 is rejected with `Error`
+  (the local `AdsDDSet*Property` signature can't represent more).
+- `DDSetPropertyAck`: empty.
+- `DDCreateProc`: `[u16 nameLen][name][u16 containerLen][container]
+  [u16 procNameLen][procName][u16 inParamsLen][inParams]
+  [u16 outParamsLen][outParams][u16 commentsLen][comments]` →
+  `AdsDDCreateProcedure` (the ABI's `ulInvokeOption` param is unused
+  locally too — not sent).
+- `DDCreateFunction`: `[u16 nameLen][name][u16 containerLen][container]
+  [u16 implLen][implementation][u16 retTypeLen][retType]
+  [u16 inParamsLen][inParams][u16 commentLen][comment]` →
+  `AdsDDCreateFunction`.
+- `DDCreateTrigger`: `[u16 nameLen][name][u16 tableLen][table][u32 type]
+  [u16 containerLen][container][u16 procedureLen][procedure][u32 priority]`
+  → `AdsDDCreateTrigger` (`type` is the combined `ADS_*_INSERT/UPDATE/
+  DELETE` constant, decoded server-side exactly as the local function
+  already does).
+- `DDDropTrigger` / `DDDropView` / `DDDropLink`: `[u16 nameLen][name]` →
+  the matching local `AdsDDDrop*` function.
+- All create/drop acks: empty payload.
+
+**Deferred (not on the wire yet, still local-only / silently no-op
+remotely):** `CreateUser`/`DeleteUser`/`AddUserToGroup`/
+`RemoveUserFromGroup`, `CreateLink`/`ModifyLink`, `CreateRefIntegrity`/
+`RemoveRefIntegrity`, `CreateView`, `DropProcedure`/`DropFunction`,
+`AddIndexFile`/`RemoveIndexFile`, `GetIndexProperty`/`SetIndexProperty`,
+`GetUserTableRights`/`SetUserTableRights`, `GetPermissions`/
+`GrantPermission`/`RevokePermission`. DA-Web routes user/group/link/RI
+management through `ExecuteSQL` `EXECUTE PROCEDURE sp_*` calls today,
+which already work remotely — these are lower-traffic administrative
+calls, not a functional gap for existing clients.
+
 ## 6. Versioning
 
 - This spec covers OpenADS **v1.4.0**. Bumps append new
@@ -502,14 +589,23 @@ just the scalars.
 
 ## 9. Data Dictionary API
 
-The Data Dictionary (DD) layer sits **above** the wire — there are
-no dedicated DD wire opcodes. DD calls in the public ABI
-(`AdsDDCreate*`, `AdsDDGet/Set*Property`, etc.) operate on the
-server-side `engine::DataDict` object owned by the session's
-`Connection`, which loaded it from the `.add` file at `Connect`
-time. Over a remote connection the call is dispatched through the
-`AdsConnect60` dual-mode layer into the server process, which
-then mutates the in-memory DD and persists atomically.
+The Data Dictionary (DD) layer sits **above** the wire for a **local**
+connection: DD calls in the public ABI (`AdsDDCreate*`,
+`AdsDDGet/Set*Property`, etc.) operate directly on the `engine::DataDict`
+object owned by the local `Connection`, which loaded it from the `.add`
+file at `Connect` time.
+
+Over a **remote** connection, as of M12.29 (§5.24), the ~19
+`Get/Set*Property` functions plus `CreateProcedure`/`CreateFunction`/
+`CreateTrigger`/`DropTrigger`/`DropView`/`DropLink` are dispatched
+through dedicated `DD*` wire opcodes to a real local `DataDict` the
+server holds open for the session. **Everything else in this section is
+still ABI-only** — calling it over a remote connection silently resolves
+no attached `DataDict` and returns empty/no-op (getters report
+`*pusLen = 0` with `AE_SUCCESS`; setters return `AE_SUCCESS` without
+writing anything) rather than an error. The tables below document the
+full ABI surface regardless of transport; §5.24 lists exactly which
+functions currently have wire support.
 
 ### 9.1 Dictionary lifecycle
 

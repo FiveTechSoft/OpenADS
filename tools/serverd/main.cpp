@@ -14,6 +14,7 @@
 
 #include "network/server.h"
 #include "platform/dll.h"
+#include "platform/path.h"
 #include "tools/serverd/config_ini.h"
 #include "tools/serverd/setup_wizard.h"
 #if defined(OPENADS_WITH_HTTP)
@@ -52,7 +53,10 @@ void usage(const char* argv0) {
         "  --port       TCP wire port (default 6262, 0 = ephemeral)\n"
         "  --backlog    listen() backlog (default 16)\n"
         "  --http-port  if set, expose Studio web console on this port\n"
-        "  --data       data directory the HTTP console serves\n"
+        "  --data       data root(s) remote Connect requests are jailed\n"
+        "               under, and (the first one) the HTTP console\n"
+        "               serves. Semicolon-separated for more than one\n"
+        "               root, e.g. --data \"C:\\data;D:\\more-data\"\n"
         "               (default = current working directory)\n"
         "  --http-user  user:password — register a Studio login\n"
         "               (repeatable; if none given, console is open)\n"
@@ -213,6 +217,12 @@ int run_server(const Args& args, bool console) {
     openads::network::Server srv;
     if (!args.data_dir.empty() && args.data_dir != ".")
         srv.set_data_dir(args.data_dir);
+
+    // The HTTP Studio console browses one directory; when --data lists
+    // several roots (";"-separated, for the wire-protocol jail — see
+    // Server::set_data_dir), the console gets the first one.
+    auto data_roots = openads::platform::split_data_roots(args.data_dir);
+    const std::string http_data_dir = data_roots.empty() ? args.data_dir : data_roots.front();
     auto r = srv.start(args.host, args.port);
     if (!r) {
         std::fprintf(stderr, "server start failed: %s (sub=%d)\n",
@@ -247,13 +257,13 @@ int run_server(const Args& args, bool console) {
     openads::studio::HttpConsole http;
     for (auto& u : args.http_users) http.add_user(u.first, u.second);
     if (args.http_port != 0) {
-        if (!http.start(args.host, args.http_port, args.data_dir, &srv)) {
+        if (!http.start(args.host, args.http_port, http_data_dir, &srv)) {
             std::fprintf(stderr,
                 "Studio HTTP console: bind to %s:%u failed\n",
                 args.host.c_str(), args.http_port);
         } else if (console) {
             std::printf("Studio web console on http://%s:%u/  (data=%s)\n",
-                        args.host.c_str(), args.http_port, args.data_dir.c_str());
+                        args.host.c_str(), args.http_port, http_data_dir.c_str());
             std::fflush(stdout);
         }
     }

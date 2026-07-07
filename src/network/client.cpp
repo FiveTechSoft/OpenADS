@@ -33,6 +33,23 @@ inline std::uint16_t read_u16_le(const std::uint8_t* p) {
         (static_cast<std::uint16_t>(p[1]) << 8));
 }
 
+// M12.29 — [u16 len][bytes] string helpers shared by the DD RPC methods.
+inline void write_lstr16(const std::string& s, std::vector<std::uint8_t>& out) {
+    write_u16_le(static_cast<std::uint16_t>(s.size()), out);
+    out.insert(out.end(), s.begin(), s.end());
+}
+
+inline bool read_lstr16(const std::vector<std::uint8_t>& pl, std::size_t& off,
+                        std::string& out) {
+    if (off + 2 > pl.size()) return false;
+    std::uint16_t len = read_u16_le(pl.data() + off);
+    off += 2;
+    if (off + len > pl.size()) return false;
+    out.assign(reinterpret_cast<const char*>(pl.data() + off), len);
+    off += len;
+    return true;
+}
+
 } // namespace
 
 // M12.18 — parse the per-row trailer the server appends to every
@@ -1248,11 +1265,35 @@ RemoteConnection::open_index(std::uint32_t table_id,
             bag_path.assign(reinterpret_cast<const char*>(pl.data() + off),
                             blen);
         }
+        // Advance past the bag_path bytes. Previously missing: harmless
+        // while bag_path was the last field, but it left `off` pointing
+        // mid-string for anything parsed afterward — e.g. the per-tag
+        // expression/unique/descending block below.
+        off += blen;
     }
     // Propagate the bag path to every entry so the caller can store it
     // on each RemoteIndex without special-casing.
     if (!bag_path.empty()) {
         for (auto& e : out) e.bag_path = bag_path;
+    }
+    // Optional trailing per-tag metadata (expression, unique, descending),
+    // one triple per entry in the same order as the tag loop above. Added
+    // after bag_path so older servers that don't emit it still parse fine —
+    // the loop below simply finds no bytes left and leaves the defaults.
+    for (std::uint16_t i = 0; i < n; ++i) {
+        if (off + 2 > pl.size()) break;
+        std::uint16_t elen = read_u16_le(pl.data() + off);
+        off += 2;
+        if (off + elen > pl.size()) break;
+        if (elen > 0) {
+            out[i].expression.assign(
+                reinterpret_cast<const char*>(pl.data() + off), elen);
+        }
+        off += elen;
+        if (off + 2 > pl.size()) break;
+        out[i].is_unique     = pl[off]     != 0;
+        out[i].is_descending = pl[off + 1] != 0;
+        off += 2;
     }
     return out;
 }
@@ -1264,6 +1305,140 @@ util::Result<void> RemoteConnection::close_index(std::uint32_t index_id) {
     if (!rep) return rep.error();
     if (rep.value().opcode != Opcode::CloseIndexAck) {
         return util::Error{5000, 0, "CloseIndex: server error", ""};
+    }
+    return {};
+}
+
+// =====================================================================
+// M12.29 — AdsDD* Data Dictionary property API, phase 1.
+// =====================================================================
+
+util::Result<std::string> RemoteConnection::dd_get_property(
+    DDObjectKind kind, const std::string& name, const std::string& subName,
+    std::uint16_t propId) {
+    Frame req; req.opcode = Opcode::DDGetProperty;
+    req.payload.push_back(static_cast<std::uint8_t>(kind));
+    write_lstr16(name, req.payload);
+    write_lstr16(subName, req.payload);
+    write_u16_le(propId, req.payload);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::DDGetPropertyAck ||
+        rep.value().payload.size() < 4) {
+        return util::Error{5000, 0, "DDGetProperty: server error", name};
+    }
+    const auto& pl = rep.value().payload;
+    std::uint32_t len = read_u32_le(pl.data());
+    if (pl.size() < 4u + len) {
+        return util::Error{5000, 0, "DDGetProperty: short payload", name};
+    }
+    return std::string(reinterpret_cast<const char*>(pl.data() + 4), len);
+}
+
+util::Result<void> RemoteConnection::dd_set_property(
+    DDObjectKind kind, const std::string& name, const std::string& subName,
+    std::uint16_t propId, const std::string& value) {
+    Frame req; req.opcode = Opcode::DDSetProperty;
+    req.payload.push_back(static_cast<std::uint8_t>(kind));
+    write_lstr16(name, req.payload);
+    write_lstr16(subName, req.payload);
+    write_u16_le(propId, req.payload);
+    write_u32_le(static_cast<std::uint32_t>(value.size()), req.payload);
+    req.payload.insert(req.payload.end(), value.begin(), value.end());
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::DDSetPropertyAck) {
+        return util::Error{5000, 0, "DDSetProperty: server error", name};
+    }
+    return {};
+}
+
+util::Result<void> RemoteConnection::dd_create_proc(
+    const std::string& name, const std::string& container,
+    const std::string& procName, const std::string& inParams,
+    const std::string& outParams, const std::string& comments) {
+    Frame req; req.opcode = Opcode::DDCreateProc;
+    write_lstr16(name, req.payload);
+    write_lstr16(container, req.payload);
+    write_lstr16(procName, req.payload);
+    write_lstr16(inParams, req.payload);
+    write_lstr16(outParams, req.payload);
+    write_lstr16(comments, req.payload);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::DDCreateProcAck) {
+        return util::Error{5000, 0, "DDCreateProc: server error", name};
+    }
+    return {};
+}
+
+util::Result<void> RemoteConnection::dd_create_function(
+    const std::string& name, const std::string& container,
+    const std::string& implementation, const std::string& retType,
+    const std::string& inParams, const std::string& comment) {
+    Frame req; req.opcode = Opcode::DDCreateFunction;
+    write_lstr16(name, req.payload);
+    write_lstr16(container, req.payload);
+    write_lstr16(implementation, req.payload);
+    write_lstr16(retType, req.payload);
+    write_lstr16(inParams, req.payload);
+    write_lstr16(comment, req.payload);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::DDCreateFunctionAck) {
+        return util::Error{5000, 0, "DDCreateFunction: server error", name};
+    }
+    return {};
+}
+
+util::Result<void> RemoteConnection::dd_create_trigger(
+    const std::string& name, const std::string& table, std::uint32_t type,
+    const std::string& container, const std::string& procedure,
+    std::uint32_t priority) {
+    Frame req; req.opcode = Opcode::DDCreateTrigger;
+    write_lstr16(name, req.payload);
+    write_lstr16(table, req.payload);
+    write_u32_le(type, req.payload);
+    write_lstr16(container, req.payload);
+    write_lstr16(procedure, req.payload);
+    write_u32_le(priority, req.payload);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::DDCreateTriggerAck) {
+        return util::Error{5000, 0, "DDCreateTrigger: server error", name};
+    }
+    return {};
+}
+
+util::Result<void> RemoteConnection::dd_drop_trigger(const std::string& name) {
+    Frame req; req.opcode = Opcode::DDDropTrigger;
+    write_lstr16(name, req.payload);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::DDDropTriggerAck) {
+        return util::Error{5000, 0, "DDDropTrigger: server error", name};
+    }
+    return {};
+}
+
+util::Result<void> RemoteConnection::dd_drop_view(const std::string& name) {
+    Frame req; req.opcode = Opcode::DDDropView;
+    write_lstr16(name, req.payload);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::DDDropViewAck) {
+        return util::Error{5000, 0, "DDDropView: server error", name};
+    }
+    return {};
+}
+
+util::Result<void> RemoteConnection::dd_drop_link(const std::string& name) {
+    Frame req; req.opcode = Opcode::DDDropLink;
+    write_lstr16(name, req.payload);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::DDDropLinkAck) {
+        return util::Error{5000, 0, "DDDropLink: server error", name};
     }
     return {};
 }

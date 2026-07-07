@@ -61,8 +61,12 @@ public:
                         const std::string& password);
     bool require_auth() const noexcept;
 
-    // Set the data root directory. Relative paths from Connect frames
-    // are resolved under this directory.
+    // Set the data root directory (or directories). Relative paths from
+    // Connect frames are resolved under this directory; a Connect whose
+    // path escapes it is rejected. `dir` may list more than one root
+    // separated by ';' (e.g. "C:\data;D:\more-data") — a Connect path only
+    // has to fall under one of them. See platform::split_data_roots /
+    // platform::resolve_under_any_root.
     void set_data_dir(const std::string& dir) { data_dir_ = dir; }
 
     // Enterprise: cap on concurrent session threads (0 = unlimited). Overrides

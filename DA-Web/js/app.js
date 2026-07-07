@@ -135,6 +135,7 @@
         btn.addEventListener('click', () => {
           group.querySelectorAll('.toggle-btn').forEach(b => b.classList.remove('active'));
           btn.classList.add('active');
+          syncRemoteFieldsVisibility(group.id, btn.dataset.value);
         });
       });
     });
@@ -148,6 +149,75 @@
     const group = document.getElementById(groupId);
     if (!group) return;
     group.querySelectorAll('.toggle-btn').forEach((b, i) => b.classList.toggle('active', i === 0));
+    syncRemoteFieldsVisibility(groupId, 'local');
+  }
+
+  // Every "…-conn-type" toggle-group has a matching "…-remote-fields" row
+  // (Host/Port) that only makes sense when Remote is selected.
+  function syncRemoteFieldsVisibility(groupId, value) {
+    if (!groupId || !groupId.endsWith('-conn-type')) return;
+    const prefix = groupId.slice(0, -'-conn-type'.length);
+    const fields = document.getElementById(`${prefix}-remote-fields`);
+    if (fields) fields.style.display = value === 'remote' ? 'flex' : 'none';
+  }
+
+  // ── Smart path parsing ──────────────────────────────────────────────────────
+  // Recognises \\host:port\c$\rest\of\path (an admin-share path with an
+  // embedded server port) and splits it into host/port/server-path, the same
+  // way api_parse_smart_path() does server-side in common.php. A plain UNC
+  // path with no ":port" is left alone — that's an ordinary network share,
+  // not a request to dial a specific openads_serverd instance.
+  function parseSmartPath(rawPath) {
+    const result = { path: rawPath, host: null, port: null };
+    if (!rawPath || rawPath.length < 3 || rawPath[0] !== '\\' || rawPath[1] !== '\\') return result;
+
+    const parts = rawPath.slice(2).split('\\');
+    if (parts.length < 2) return result;
+
+    const hostPort = parts[0];
+    const driveMatch = /^([A-Za-z])\$$/.exec(parts[1]);
+    if (!hostPort || !driveMatch) return result;
+
+    const colonIdx = hostPort.indexOf(':');
+    if (colonIdx === -1) return result;
+
+    const host = hostPort.slice(0, colonIdx);
+    const portStr = hostPort.slice(colonIdx + 1);
+    if (!host || !/^\d+$/.test(portStr)) return result;
+
+    const tail = parts.slice(2);
+    result.path = driveMatch[1] + ':' + (tail.length ? '\\' + tail.join('\\') : '\\');
+    result.host = host;
+    result.port = parseInt(portStr, 10);
+    return result;
+  }
+
+  // Wire a Path field so that pasting/typing a \\host:port\c$\... path
+  // auto-switches the dialog to Remote and fills in Host/Port.
+  function wireSmartPathField(pathId, groupId, hostId, portId) {
+    const pathEl = document.getElementById(pathId);
+    if (!pathEl) return;
+    pathEl.addEventListener('blur', () => {
+      const parsed = parseSmartPath(pathEl.value.trim());
+      if (parsed.host === null) return;
+      pathEl.value = parsed.path;
+      const hostEl = document.getElementById(hostId);
+      const portEl = document.getElementById(portId);
+      if (hostEl) hostEl.value = parsed.host;
+      if (portEl) portEl.value = String(parsed.port);
+      const group = document.getElementById(groupId);
+      if (group) {
+        group.querySelectorAll('.toggle-btn').forEach(b => b.classList.toggle('active', b.dataset.value === 'remote'));
+        syncRemoteFieldsVisibility(groupId, 'remote');
+      }
+    });
+  }
+
+  function initSmartPathFields() {
+    wireSmartPathField('cdd-path',  'cdd-conn-type',  'cdd-host',  'cdd-port');
+    wireSmartPathField('odd-path',  'odd-conn-type',  'odd-host',  'odd-port');
+    wireSmartPathField('ft-path',   'ft-conn-type',   'ft-host',   'ft-port');
+    wireSmartPathField('props-path','props-conn-type','props-host','props-port');
   }
 
   // ── Split.js ───────────────────────────────────────────────────────────────
@@ -3868,6 +3938,8 @@
   function openCreateDDModal() {
     clearModalErr('cdd-err');
     resetToggleGroup('cdd-conn-type');
+    document.getElementById('cdd-host').value = '';
+    document.getElementById('cdd-port').value = '';
     openModal('modal-create-dd');
     setTimeout(() => document.getElementById('cdd-name')?.focus(), 50);
   }
@@ -3879,6 +3951,8 @@
     const path     = document.getElementById('cdd-path').value.trim();
     const password = document.getElementById('cdd-password').value;
     const connType = toggleGroupValue('cdd-conn-type');
+    const host     = document.getElementById('cdd-host').value.trim();
+    const port     = document.getElementById('cdd-port').value.trim();
     const errEl    = document.getElementById('cdd-err');
     errEl.textContent = '';
 
@@ -3888,12 +3962,14 @@
       await apiFetch('api/create_dd.php', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, path, password, connType }),
+        body: JSON.stringify({ name, path, password, connType, host, port }),
       });
       closeModal('modal-create-dd');
       document.getElementById('cdd-name').value = '';
       document.getElementById('cdd-path').value = '';
       document.getElementById('cdd-password').value = '';
+      document.getElementById('cdd-host').value = '';
+      document.getElementById('cdd-port').value = '';
       refreshTree();
       setStatus(`Created dictionary '${name}'`);
     } catch (err) {
@@ -3905,6 +3981,8 @@
   function openOpenDDModal() {
     clearModalErr('odd-err');
     resetToggleGroup('odd-conn-type');
+    document.getElementById('odd-host').value = '';
+    document.getElementById('odd-port').value = '';
     openModal('modal-open-dd');
     setTimeout(() => document.getElementById('odd-name')?.focus(), 50);
   }
@@ -3916,6 +3994,8 @@
     const path     = document.getElementById('odd-path').value.trim();
     const username = document.getElementById('odd-user').value.trim();
     const connType = toggleGroupValue('odd-conn-type');
+    const host     = document.getElementById('odd-host').value.trim();
+    const port     = document.getElementById('odd-port').value.trim();
     const errEl    = document.getElementById('odd-err');
     errEl.textContent = '';
 
@@ -3925,12 +4005,14 @@
       await apiFetch('api/dictionaries.php', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'add', name, path, username, connType, entryType: 'dd' }),
+        body: JSON.stringify({ action: 'add', name, path, username, connType, entryType: 'dd', host, port }),
       });
       closeModal('modal-open-dd');
       document.getElementById('odd-name').value = '';
       document.getElementById('odd-path').value = '';
       document.getElementById('odd-user').value = '';
+      document.getElementById('odd-host').value = '';
+      document.getElementById('odd-port').value = '';
       refreshTree();
       setStatus(`Added dictionary '${name}'`);
     } catch (err) {
@@ -3942,6 +4024,8 @@
   function openFreeTablesModal() {
     clearModalErr('ft-err');
     resetToggleGroup('ft-conn-type');
+    document.getElementById('ft-host').value = '';
+    document.getElementById('ft-port').value = '';
     openModal('modal-free-tables');
     setTimeout(() => document.getElementById('ft-name')?.focus(), 50);
   }
@@ -3952,6 +4036,8 @@
     const name     = document.getElementById('ft-name').value.trim();
     const path     = document.getElementById('ft-path').value.trim();
     const connType = toggleGroupValue('ft-conn-type');
+    const host     = document.getElementById('ft-host').value.trim();
+    const port     = document.getElementById('ft-port').value.trim();
     const errEl    = document.getElementById('ft-err');
     errEl.textContent = '';
 
@@ -3961,11 +4047,13 @@
       await apiFetch('api/dictionaries.php', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'add', name, path, username: '', connType, entryType: 'free' }),
+        body: JSON.stringify({ action: 'add', name, path, username: '', connType, entryType: 'free', host, port }),
       });
       closeModal('modal-free-tables');
       document.getElementById('ft-name').value = '';
       document.getElementById('ft-path').value = '';
+      document.getElementById('ft-host').value = '';
+      document.getElementById('ft-port').value = '';
       refreshTree();
       setStatus(`Added free tables directory '${name}'`);
     } catch (err) {
@@ -3997,7 +4085,7 @@
         await apiFetch('api/connect.php', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'connect', name: ddName, path: d.path, username: '', password: '', connType: savedConnType }),
+          body: JSON.stringify({ action: 'connect', name: ddName, path: d.path, username: '', password: '', connType: savedConnType, host: d.host ?? '', port: d.port ?? '' }),
         });
         state.openConnections.add(ddName);
         refreshTree();
@@ -4018,8 +4106,11 @@
     document.querySelectorAll('#connect-conn-type .toggle-btn').forEach(btn => {
       btn.classList.toggle('active', btn.dataset.value === savedConnType);
     });
+    syncRemoteFieldsVisibility('connect-conn-type', savedConnType);
     document.getElementById('connect-username').value = d.username || '';
     document.getElementById('connect-password').value = '';
+    document.getElementById('connect-host').value = d.host ?? '';
+    document.getElementById('connect-port').value = d.port ?? '';
     overlay.classList.add('open');
     setTimeout(() => document.getElementById('connect-password').focus(), 50);
   }
@@ -4035,6 +4126,8 @@
     const username = document.getElementById('connect-username').value.trim();
     const password = document.getElementById('connect-password').value;
     const connType = toggleGroupValue('connect-conn-type');
+    const host     = document.getElementById('connect-host').value.trim();
+    const port     = document.getElementById('connect-port').value.trim();
     const errEl    = document.getElementById('connect-err');
     errEl.textContent = '';
 
@@ -4042,7 +4135,7 @@
       await apiFetch('api/connect.php', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'connect', name: ddName, path, username, password, connType }),
+        body: JSON.stringify({ action: 'connect', name: ddName, path, username, password, connType, host, port }),
       });
       state.openConnections.add(ddName);
       overlay.classList.remove('open');
@@ -4348,10 +4441,14 @@
     document.getElementById('props-err').textContent         = '';
     // Username not meaningful for free tables
     document.getElementById('props-user-row').style.display  = isFree ? 'none' : '';
+    document.getElementById('props-host').value = d.host ?? '';
+    document.getElementById('props-port').value = d.port ?? '';
     resetToggleGroup('props-conn-type');
+    const propsConnType = (d.connType ?? 'local') === 'remote' ? 'remote' : 'local';
     document.querySelectorAll('#props-conn-type .toggle-btn').forEach(btn => {
-      btn.classList.toggle('active', btn.dataset.value === (d.connType ?? 'local'));
+      btn.classList.toggle('active', btn.dataset.value === propsConnType);
     });
+    syncRemoteFieldsVisibility('props-conn-type', propsConnType);
     openModal('modal-props');
     setTimeout(() => document.getElementById('props-path').focus(), 50);
   }
@@ -4363,6 +4460,8 @@
     const path     = document.getElementById('props-path').value.trim();
     const username = document.getElementById('props-username').value.trim();
     const connType = toggleGroupValue('props-conn-type');
+    const host     = document.getElementById('props-host').value.trim();
+    const port     = document.getElementById('props-port').value.trim();
     const errEl    = document.getElementById('props-err');
     errEl.textContent = '';
 
@@ -4372,7 +4471,7 @@
       await apiFetch('api/dictionaries.php', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'update', name, path, username, connType }),
+        body: JSON.stringify({ action: 'update', name, path, username, connType, host, port }),
       });
       closeModal('modal-props');
       // If currently connected with old path, update session by reconnecting silently
@@ -4380,7 +4479,7 @@
         await apiFetch('api/connect.php', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'connect', name, path, username, password: '', connType }),
+          body: JSON.stringify({ action: 'connect', name, path, username, password: '', connType, host, port }),
         }).catch(() => {});
       }
       refreshTree();
@@ -4641,6 +4740,7 @@
   // ── Boot ───────────────────────────────────────────────────────────────────
   document.addEventListener('DOMContentLoaded', async () => {
     initToggleGroups();
+    initSmartPathFields();
     initTree();
     await buildConnectionMenu();
     setStatus('Ready');

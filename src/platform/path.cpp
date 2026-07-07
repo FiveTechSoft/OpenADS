@@ -93,4 +93,32 @@ std::optional<std::string> resolve_under_root(const std::string& root,
     return canon_s;
 }
 
+std::vector<std::string> split_data_roots(const std::string& roots) {
+    std::vector<std::string> out;
+    std::size_t start = 0;
+    while (start <= roots.size()) {
+        std::size_t sep = roots.find(';', start);
+        std::string piece = roots.substr(start, sep == std::string::npos ? std::string::npos : sep - start);
+        // Trim surrounding whitespace so "a ; b" behaves the same as "a;b".
+        std::size_t first = piece.find_first_not_of(" \t\r\n");
+        if (first != std::string::npos) {
+            std::size_t last = piece.find_last_not_of(" \t\r\n");
+            out.push_back(piece.substr(first, last - first + 1));
+        }
+        if (sep == std::string::npos) break;
+        start = sep + 1;
+    }
+    return out;
+}
+
+std::optional<std::string> resolve_under_any_root(
+    const std::vector<std::string>& roots, const std::string& client_path) {
+    for (const auto& root : roots) {
+        if (auto resolved = resolve_under_root(root, client_path)) {
+            return resolved;
+        }
+    }
+    return std::nullopt;
+}
+
 } // namespace openads::platform

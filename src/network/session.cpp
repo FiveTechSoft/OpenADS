@@ -48,6 +48,113 @@ inline void write_u32_le(std::uint32_t v, std::vector<std::uint8_t>& out) {
     out.push_back(static_cast<std::uint8_t>((v >> 24) & 0xFFu));
 }
 
+inline void write_u16_le(std::uint16_t v, std::vector<std::uint8_t>& out) {
+    out.push_back(static_cast<std::uint8_t>( v       & 0xFFu));
+    out.push_back(static_cast<std::uint8_t>((v >> 8) & 0xFFu));
+}
+
+// M12.29 — [u16 len][bytes] string helpers shared by the DD opcode handlers.
+inline void write_lstr16(const std::string& s, std::vector<std::uint8_t>& out) {
+    write_u16_le(static_cast<std::uint16_t>(s.size()), out);
+    out.insert(out.end(), s.begin(), s.end());
+}
+
+// Parses a [u16 len][bytes] field starting at `off`, advancing `off` past
+// it. Returns false (payload too short) without touching `out` or `off`
+// further than what was already consumed.
+inline bool read_lstr16(const std::vector<std::uint8_t>& pl, std::size_t& off,
+                        std::string& out) {
+    if (off + 2 > pl.size()) return false;
+    std::uint16_t len = read_u16_le(pl.data() + off);
+    off += 2;
+    if (off + len > pl.size()) return false;
+    out.assign(reinterpret_cast<const char*>(pl.data() + off), len);
+    off += len;
+    return true;
+}
+
+// Null-terminated UNSIGNED8 buffer for a std::string — the AdsDD* ABI takes
+// mutable UNSIGNED8* name arguments (never written through) with no const
+// C signature available.
+inline std::vector<UNSIGNED8> to_cbuf(const std::string& s) {
+    std::vector<UNSIGNED8> b(s.size() + 1, 0);
+    if (!s.empty()) std::memcpy(b.data(), s.data(), s.size());
+    return b;
+}
+
+// M12.29 — dispatch a DDGetProperty/DDSetProperty request to the matching
+// existing local AdsDDGet*Property/AdsDDSet*Property ABI function. `hConn`
+// is the session's server-side abi_conn_ (a real local Connection with the
+// DD attached via Session::ensure_abi_conn()) — these calls already work
+// correctly locally; this only marshals which one to call.
+UNSIGNED32 dd_get_property_dispatch(ADSHANDLE hConn, DDObjectKind kind,
+                                    const std::string& name,
+                                    const std::string& subName,
+                                    UNSIGNED16 propId,
+                                    void* pBuf, UNSIGNED16* pusLen) {
+    std::vector<UNSIGNED8> nameBuf(name.size() + 1, 0);
+    if (!name.empty()) std::memcpy(nameBuf.data(), name.data(), name.size());
+    std::vector<UNSIGNED8> subBuf(subName.size() + 1, 0);
+    if (!subName.empty()) std::memcpy(subBuf.data(), subName.data(), subName.size());
+
+    switch (kind) {
+        case DDObjectKind::Database:
+            return AdsDDGetDatabaseProperty(hConn, propId, pBuf, pusLen);
+        case DDObjectKind::User:
+            return AdsDDGetUserProperty(hConn, nameBuf.data(), propId, pBuf, pusLen);
+        case DDObjectKind::Table:
+            return AdsDDGetTableProperty(hConn, nameBuf.data(), propId, pBuf, pusLen);
+        case DDObjectKind::Field:
+            return AdsDDGetFieldProperty(hConn, nameBuf.data(), subBuf.data(),
+                                         propId, pBuf, pusLen);
+        case DDObjectKind::Trigger:
+            return AdsDDGetTriggerProperty(hConn, nameBuf.data(), propId, pBuf, pusLen);
+        case DDObjectKind::Proc:
+            return AdsDDGetProcProperty(hConn, nameBuf.data(), propId, pBuf, pusLen);
+        case DDObjectKind::Function:
+            return AdsDDGetFunctionProperty(hConn, nameBuf.data(), propId, pBuf, pusLen);
+        case DDObjectKind::View:
+            return AdsDDGetViewProperty(hConn, nameBuf.data(), propId, pBuf, pusLen);
+        case DDObjectKind::RefIntegrity:
+            return AdsDDGetRefIntegrityProperty(hConn, nameBuf.data(), propId, pBuf, pusLen);
+    }
+    return openads::AE_FUNCTION_NOT_AVAILABLE;
+}
+
+UNSIGNED32 dd_set_property_dispatch(ADSHANDLE hConn, DDObjectKind kind,
+                                    const std::string& name,
+                                    const std::string& subName,
+                                    UNSIGNED16 propId,
+                                    void* pBuf, UNSIGNED16 usLen) {
+    std::vector<UNSIGNED8> nameBuf(name.size() + 1, 0);
+    if (!name.empty()) std::memcpy(nameBuf.data(), name.data(), name.size());
+    std::vector<UNSIGNED8> subBuf(subName.size() + 1, 0);
+    if (!subName.empty()) std::memcpy(subBuf.data(), subName.data(), subName.size());
+
+    switch (kind) {
+        case DDObjectKind::Database:
+            return AdsDDSetDatabaseProperty(hConn, propId, pBuf, usLen);
+        case DDObjectKind::User:
+            return AdsDDSetUserProperty(hConn, nameBuf.data(), propId, pBuf, usLen);
+        case DDObjectKind::Table:
+            return AdsDDSetTableProperty(hConn, nameBuf.data(), propId, pBuf, usLen);
+        case DDObjectKind::Field:
+            return AdsDDSetFieldProperty(hConn, nameBuf.data(), subBuf.data(),
+                                         propId, pBuf, usLen);
+        case DDObjectKind::Trigger:
+            return AdsDDSetTriggerProperty(hConn, nameBuf.data(), propId, pBuf, usLen);
+        case DDObjectKind::Proc:
+            return AdsDDSetProcProperty(hConn, nameBuf.data(), propId, pBuf, usLen);
+        case DDObjectKind::Function:
+            return AdsDDSetFunctionProperty(hConn, nameBuf.data(), propId, pBuf, usLen);
+        case DDObjectKind::View:
+            return AdsDDSetViewProperty(hConn, nameBuf.data(), propId, pBuf, usLen);
+        case DDObjectKind::RefIntegrity:
+            return AdsDDSetRefIntegrityProperty(hConn, nameBuf.data(), propId, pBuf, usLen);
+    }
+    return openads::AE_FUNCTION_NOT_AVAILABLE;
+}
+
 // M12.10 — Error frame payload:
 //   [u32 LE ace_code][message bytes]
 // Server-side handlers fold either a literal ACE code or a code
@@ -508,12 +615,16 @@ DispatchResult Session::dispatch(const Frame& f) {
                     break;
                 }
             }
-            // Resolve client paths under the server's data root and reject
-            // traversal attempts (e.g. "../../outside").
+            // Resolve client paths under one of the server's data roots and
+            // reject traversal attempts (e.g. "../../outside"). --data (or
+            // the ini `data=` key) may list several roots separated by ';'
+            // so one server can serve DDs living under different
+            // drives/shares; the client path just has to fall under any one
+            // of them.
             std::string resolved = dir;
             if (!srv_->data_dir_.empty()) {
-                auto jail = openads::platform::resolve_under_root(
-                    srv_->data_dir_, dir);
+                auto roots = openads::platform::split_data_roots(srv_->data_dir_);
+                auto jail = openads::platform::resolve_under_any_root(roots, dir);
                 if (!jail) {
                     reply = err("Connect: path outside data directory",
                                 openads::AE_ACCESS_DENIED);
@@ -1475,6 +1586,30 @@ DispatchResult Session::dispatch(const Frame& f) {
                 reply.payload.push_back(static_cast<std::uint8_t>((bn >> 8) & 0xFFu));
                 reply.payload.insert(reply.payload.end(),
                                      bag.begin(), bag.end());
+            }
+            // Extended per-tag metadata (expression, unique, descending),
+            // one triple per tag in the same order as the tag loop above.
+            // Lets remote AdsGetIndexExpr / AdsIsIndexUnique /
+            // AdsIsIndexDescending answer from the cached RemoteIndex
+            // instead of a lookup that only ever resolves local handles.
+            for (std::uint16_t i = 0; i < alen; ++i) {
+                UNSIGNED8 ebuf[1024] = {0};
+                UNSIGNED16 elen = static_cast<UNSIGNED16>(sizeof(ebuf) - 1);
+                std::string expr;
+                if (AdsGetIndexExpr(arr[i], ebuf, &elen) == 0 && elen > 0) {
+                    expr.assign(reinterpret_cast<char*>(ebuf), elen);
+                }
+                auto en = static_cast<std::uint16_t>(expr.size());
+                reply.payload.push_back(static_cast<std::uint8_t>( en       & 0xFFu));
+                reply.payload.push_back(static_cast<std::uint8_t>((en >> 8) & 0xFFu));
+                reply.payload.insert(reply.payload.end(),
+                                     expr.begin(), expr.end());
+
+                UNSIGNED16 uniq = 0, desc = 0;
+                AdsIsIndexUnique(arr[i], &uniq);
+                AdsIsIndexDescending(arr[i], &desc);
+                reply.payload.push_back(uniq != 0 ? 1 : 0);
+                reply.payload.push_back(desc != 0 ? 1 : 0);
             }
             break;
         }
@@ -2476,6 +2611,171 @@ DispatchResult Session::dispatch(const Frame& f) {
                     reply = err("unknown mg request kind");
                     break;
             }
+            break;
+        }
+        // M12.29 — AdsDD* Data Dictionary property API, phase 1. See
+        // docs/wire-protocol.md §9 / wire.h for the payload formats.
+        case Opcode::DDGetProperty: {
+            if (!ensure_abi_conn()) { reply = err("DDGetProperty: connect failed"); break; }
+            if (f.payload.empty()) { reply = err("DDGetProperty: bad payload"); break; }
+            auto kind = static_cast<DDObjectKind>(f.payload[0]);
+            std::size_t off = 1;
+            std::string name, subName;
+            if (!read_lstr16(f.payload, off, name) ||
+                !read_lstr16(f.payload, off, subName) ||
+                off + 2 > f.payload.size()) {
+                reply = err("DDGetProperty: bad payload"); break;
+            }
+            UNSIGNED16 propId = read_u16_le(f.payload.data() + off);
+            UNSIGNED16 len = 0;
+            UNSIGNED32 rc = dd_get_property_dispatch(abi_conn_, kind, name, subName,
+                                                      propId, nullptr, &len);
+            if (rc != 0) { reply = err("DDGetProperty", rc); break; }
+            std::vector<UNSIGNED8> buf(len > 0 ? len : 1);
+            UNSIGNED16 cap = len;
+            rc = dd_get_property_dispatch(abi_conn_, kind, name, subName, propId,
+                                           buf.data(), &cap);
+            if (rc != 0) { reply = err("DDGetProperty", rc); break; }
+            reply.opcode = Opcode::DDGetPropertyAck;
+            write_u32_le(cap, reply.payload);
+            reply.payload.insert(reply.payload.end(), buf.begin(), buf.begin() + cap);
+            break;
+        }
+        case Opcode::DDSetProperty: {
+            if (!ensure_abi_conn()) { reply = err("DDSetProperty: connect failed"); break; }
+            if (f.payload.empty()) { reply = err("DDSetProperty: bad payload"); break; }
+            auto kind = static_cast<DDObjectKind>(f.payload[0]);
+            std::size_t off = 1;
+            std::string name, subName;
+            if (!read_lstr16(f.payload, off, name) ||
+                !read_lstr16(f.payload, off, subName) ||
+                off + 2 > f.payload.size()) {
+                reply = err("DDSetProperty: bad payload"); break;
+            }
+            UNSIGNED16 propId = read_u16_le(f.payload.data() + off);
+            off += 2;
+            if (off + 4 > f.payload.size()) { reply = err("DDSetProperty: bad payload"); break; }
+            UNSIGNED32 valLen = read_u32_le(f.payload.data() + off);
+            off += 4;
+            if (off + valLen > f.payload.size()) { reply = err("DDSetProperty: bad payload"); break; }
+            // The underlying local AdsDDSet*Property signatures take a
+            // 16-bit length (the same cap ads_misc.c's PHP extension
+            // already applies for local calls) — not a wire limitation.
+            if (valLen > 0xFFFFu) { reply = err("DDSetProperty: value too large"); break; }
+            void* valPtr = valLen > 0
+                ? const_cast<std::uint8_t*>(f.payload.data() + off) : nullptr;
+            UNSIGNED32 rc = dd_set_property_dispatch(abi_conn_, kind, name, subName,
+                propId, valPtr, static_cast<UNSIGNED16>(valLen));
+            if (rc != 0) { reply = err("DDSetProperty", rc); break; }
+            reply.opcode = Opcode::DDSetPropertyAck;
+            break;
+        }
+        case Opcode::DDCreateProc: {
+            if (!ensure_abi_conn()) { reply = err("DDCreateProc: connect failed"); break; }
+            std::size_t off = 0;
+            std::string name, container, procName, inParams, outParams, comments;
+            if (!read_lstr16(f.payload, off, name) ||
+                !read_lstr16(f.payload, off, container) ||
+                !read_lstr16(f.payload, off, procName) ||
+                !read_lstr16(f.payload, off, inParams) ||
+                !read_lstr16(f.payload, off, outParams) ||
+                !read_lstr16(f.payload, off, comments)) {
+                reply = err("DDCreateProc: bad payload"); break;
+            }
+            auto nameBuf = to_cbuf(name), contBuf = to_cbuf(container),
+                 procBuf = to_cbuf(procName), inBuf = to_cbuf(inParams),
+                 outBuf = to_cbuf(outParams), cmtBuf = to_cbuf(comments);
+            UNSIGNED32 rc = AdsDDCreateProcedure(abi_conn_, nameBuf.data(),
+                contBuf.data(), procBuf.data(), 0, inBuf.data(), outBuf.data(),
+                cmtBuf.data());
+            if (rc != 0) { reply = err("DDCreateProc", rc); break; }
+            reply.opcode = Opcode::DDCreateProcAck;
+            break;
+        }
+        case Opcode::DDCreateFunction: {
+            if (!ensure_abi_conn()) { reply = err("DDCreateFunction: connect failed"); break; }
+            std::size_t off = 0;
+            std::string name, container, impl, retType, inParams, comment;
+            if (!read_lstr16(f.payload, off, name) ||
+                !read_lstr16(f.payload, off, container) ||
+                !read_lstr16(f.payload, off, impl) ||
+                !read_lstr16(f.payload, off, retType) ||
+                !read_lstr16(f.payload, off, inParams) ||
+                !read_lstr16(f.payload, off, comment)) {
+                reply = err("DDCreateFunction: bad payload"); break;
+            }
+            auto nameBuf = to_cbuf(name), contBuf = to_cbuf(container),
+                 implBuf = to_cbuf(impl), retBuf = to_cbuf(retType),
+                 inBuf = to_cbuf(inParams), cmtBuf = to_cbuf(comment);
+            UNSIGNED32 rc = AdsDDCreateFunction(abi_conn_, nameBuf.data(),
+                contBuf.data(), implBuf.data(), retBuf.data(), inBuf.data(),
+                cmtBuf.data());
+            if (rc != 0) { reply = err("DDCreateFunction", rc); break; }
+            reply.opcode = Opcode::DDCreateFunctionAck;
+            break;
+        }
+        case Opcode::DDCreateTrigger: {
+            if (!ensure_abi_conn()) { reply = err("DDCreateTrigger: connect failed"); break; }
+            std::size_t off = 0;
+            std::string name, table, container, procedure;
+            if (!read_lstr16(f.payload, off, name) ||
+                !read_lstr16(f.payload, off, table) ||
+                off + 4 > f.payload.size()) {
+                reply = err("DDCreateTrigger: bad payload"); break;
+            }
+            UNSIGNED32 type = read_u32_le(f.payload.data() + off);
+            off += 4;
+            if (!read_lstr16(f.payload, off, container) ||
+                !read_lstr16(f.payload, off, procedure) ||
+                off + 4 > f.payload.size()) {
+                reply = err("DDCreateTrigger: bad payload"); break;
+            }
+            UNSIGNED32 priority = read_u32_le(f.payload.data() + off);
+            auto nameBuf = to_cbuf(name), tblBuf = to_cbuf(table),
+                 contBuf = to_cbuf(container), procBuf = to_cbuf(procedure);
+            UNSIGNED32 rc = AdsDDCreateTrigger(abi_conn_, nameBuf.data(),
+                tblBuf.data(), type, 0, contBuf.data(), procBuf.data(), priority);
+            if (rc != 0) { reply = err("DDCreateTrigger", rc); break; }
+            reply.opcode = Opcode::DDCreateTriggerAck;
+            break;
+        }
+        case Opcode::DDDropTrigger: {
+            if (!ensure_abi_conn()) { reply = err("DDDropTrigger: connect failed"); break; }
+            std::size_t off = 0;
+            std::string name;
+            if (!read_lstr16(f.payload, off, name)) {
+                reply = err("DDDropTrigger: bad payload"); break;
+            }
+            auto nameBuf = to_cbuf(name);
+            UNSIGNED32 rc = AdsDDDropTrigger(abi_conn_, nameBuf.data());
+            if (rc != 0) { reply = err("DDDropTrigger", rc); break; }
+            reply.opcode = Opcode::DDDropTriggerAck;
+            break;
+        }
+        case Opcode::DDDropView: {
+            if (!ensure_abi_conn()) { reply = err("DDDropView: connect failed"); break; }
+            std::size_t off = 0;
+            std::string name;
+            if (!read_lstr16(f.payload, off, name)) {
+                reply = err("DDDropView: bad payload"); break;
+            }
+            auto nameBuf = to_cbuf(name);
+            UNSIGNED32 rc = AdsDDDropView(abi_conn_, nameBuf.data());
+            if (rc != 0) { reply = err("DDDropView", rc); break; }
+            reply.opcode = Opcode::DDDropViewAck;
+            break;
+        }
+        case Opcode::DDDropLink: {
+            if (!ensure_abi_conn()) { reply = err("DDDropLink: connect failed"); break; }
+            std::size_t off = 0;
+            std::string name;
+            if (!read_lstr16(f.payload, off, name)) {
+                reply = err("DDDropLink: bad payload"); break;
+            }
+            auto nameBuf = to_cbuf(name);
+            UNSIGNED32 rc = AdsDDDropLink(abi_conn_, nameBuf.data(), 0);
+            if (rc != 0) { reply = err("DDDropLink", rc); break; }
+            reply.opcode = Opcode::DDDropLinkAck;
             break;
         }
         default: {

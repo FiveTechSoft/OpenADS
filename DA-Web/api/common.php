@@ -5,9 +5,12 @@
 
 /** Maximum SQL payload length accepted by execute_sql (admin console). */
 const API_SQL_MAX_LENGTH = 1048576;
-/** RCB 06/30/2026: DA-Web defaults OpenADS remote connections to 6264 because
- * 6262 is commonly occupied by SAP ADS on administrator workstations. */
-const API_OPENADS_REMOTE_PORT = 6264;
+/** RCB 06/30/2026: DA-Web's fallback port for "Remote" connections when
+ * neither the Connect dialog nor a smart-parsed path (see
+ * api_parse_smart_path()) supplies one. 6262 is commonly occupied by SAP
+ * ADS on administrator workstations, so this local install's
+ * openads_serverd runs on 16262 instead — adjust to match your service. */
+const API_OPENADS_REMOTE_PORT = 16262;
 
 /**
  * Emit a JSON error response and exit.
@@ -121,10 +124,66 @@ function api_sql_quote(string $s): string
 }
 
 /**
+ * Recognise a Windows admin-share-style path with an embedded server port,
+ * e.g. \\localhost:16262\c$\Pmsys\data\pmsys_openads.add, and split it into
+ * the pieces a remote connect needs: host, port, and the server-side path
+ * (the drive-letter share rewritten back to a normal "c:\..." path).
+ *
+ * A plain UNC path with no ":port" (\\fileserver\share\...) is left alone —
+ * that's an ordinary network path, not a request to dial openads_serverd.
+ *
+ * Returns ['path' => string, 'host' => ?string, 'port' => ?int]. 'host' is
+ * null when the input doesn't match the pattern, in which case 'path' is
+ * returned unchanged.
+ */
+function api_parse_smart_path(string $rawPath): array
+{
+    $result = ['path' => $rawPath, 'host' => null, 'port' => null];
+
+    if (strlen($rawPath) < 3 || $rawPath[0] !== '\\' || $rawPath[1] !== '\\') {
+        return $result;
+    }
+
+    $parts = explode('\\', substr($rawPath, 2));
+    if (count($parts) < 2) {
+        return $result;
+    }
+
+    $hostPort = $parts[0];
+    $drivePart = $parts[1];
+    if ($hostPort === '' || !preg_match('/^([A-Za-z])\$$/', $drivePart, $m)) {
+        return $result;
+    }
+    // A bare host with no ":port" is an ordinary network share, not a
+    // request to dial a specific openads_serverd instance.
+    if (strpos($hostPort, ':') === false) {
+        return $result;
+    }
+
+    [$host, $portStr] = explode(':', $hostPort, 2);
+    if ($host === '' || !ctype_digit($portStr)) {
+        return $result;
+    }
+
+    $tail = array_slice($parts, 2);
+    $drive = $m[1];
+    $serverPath = $drive . ':' . (count($tail) ? '\\' . implode('\\', $tail) : '\\');
+
+    $result['path'] = $serverPath;
+    $result['host'] = $host;
+    $result['port'] = (int)$portStr;
+    return $result;
+}
+
+/**
  * Build php_openads connection options from a stored/session DD entry.
  *
  * DA-Web opens short-lived backend connections for most API calls, so the
  * selected local/remote mode has to travel with the session credentials.
+ *
+ * $c may carry explicit 'host' / 'port' overrides (e.g. typed into the
+ * Connect dialog); those win over both a smart-parsed path and the
+ * 127.0.0.1:API_OPENADS_REMOTE_PORT fallback.
  */
 function api_ads_connect_opts(array $c): array
 {
@@ -133,8 +192,24 @@ function api_ads_connect_opts(array $c): array
     if ($connType !== 'remote') {
         $connType = 'local';
     }
+
+    $host = trim((string)($c['host'] ?? ''));
+    $port = (isset($c['port']) && $c['port'] !== '' && $c['port'] !== null) ? (int)$c['port'] : null;
+
+    if (!preg_match('#^(tcp|tls)://#i', $path)) {
+        $smart = api_parse_smart_path($path);
+        if ($smart['host'] !== null) {
+            $connType = 'remote';
+            $path = $smart['path'];
+            if ($host === '') $host = $smart['host'];
+            if ($port === null) $port = $smart['port'];
+        }
+    }
+
     if ($connType === 'remote' && !preg_match('#^(tcp|tls)://#i', $path)) {
-        $path = 'tcp://127.0.0.1:' . API_OPENADS_REMOTE_PORT . '/' . $path;
+        if ($host === '') $host = '127.0.0.1';
+        if ($port === null) $port = API_OPENADS_REMOTE_PORT;
+        $path = 'tcp://' . $host . ':' . $port . '/' . $path;
     }
 
     $serverType = $connType === 'remote'

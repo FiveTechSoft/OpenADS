@@ -927,6 +927,17 @@ openads::network::RemoteIndex* get_remote_index(ADSHANDLE h) {
         h, HandleKind::RemoteIndex);
 }
 
+// M12.29 — same dispatch helper for remote-connection handles, used by the
+// AdsDD* Data Dictionary property functions. dd_from_handle() only ever
+// resolves a LOCAL Connection (see its definition below), so every AdsDD*
+// entrypoint checks this FIRST and routes through the wire protocol instead
+// of silently falling through to "no DD attached" behavior.
+openads::network::RemoteConnection* get_remote_connection(ADSHANDLE h) {
+    auto& s = state();
+    return s.registry.lookup<openads::network::RemoteConnection>(
+        h, HandleKind::RemoteConnection);
+}
+
 namespace {
 
 Handle handle_for_remote_table(openads::network::RemoteTable* rt) {
@@ -5866,10 +5877,18 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
     if (auto* rc = s.registry.lookup<openads::network::RemoteConnection>(
             hConnect, HandleKind::RemoteConnection)) {
         auto name = openads::abi::to_internal(pucName, 0);
-        // Callers (incl. X#'s ADSRDD) pass the bare table name without
-        // an extension; mirror the local path and default to .dbf so
-        // the server resolves it.
-        if (!std::filesystem::path(name).has_extension()) name += ".dbf";
+        // Callers (incl. X#'s ADSRDD) commonly pass the bare table name
+        // without an extension. Send it through unchanged — the server's
+        // Connection::resolve_table_file() already falls back from .dbf to
+        // .adt when the bare name has no matching .dbf on disk, exactly
+        // mirroring the LOCAL AdsOpenTable path a few hundred lines down
+        // (conn->open_table(name, ...)). Force-appending ".dbf" here (as a
+        // previous version of this code did) skipped that fallback on the
+        // server — resolve_table_file() only auto-detects when the name it
+        // receives has NO extension — so every ADT-format table (e.g. a DD
+        // migrated from SAP with Table_Type=ADT) failed to open remotely
+        // with AE_TABLE_CORRUPTED (5103), even though the identical bare
+        // name opens fine locally.
         auto otr = rc->open_table(name);
         if (!otr) return fail(otr.error());
         auto& ot = otr.value();
@@ -10995,8 +11014,11 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
             ri->id        = entries[i].id;
             ri->tbl_id    = rt->id;
             ri->parent    = rt;
-            ri->tag_name  = entries[i].tag;
-            ri->bag_path  = entries[i].bag_path;
+            ri->tag_name      = entries[i].tag;
+            ri->bag_path      = entries[i].bag_path;
+            ri->expression    = entries[i].expression;
+            ri->is_unique     = entries[i].is_unique;
+            ri->is_descending = entries[i].is_descending;
             Handle gh = s.registry.register_object(
                 HandleKind::RemoteIndex, ri.get());
             ahIndex[i] = gh;
@@ -12845,6 +12867,11 @@ UNSIGNED32 ENTRYPOINT AdsDDCreateLink(ADSHANDLE hConn, UNSIGNED8* pucAlias,
 
 UNSIGNED32 ENTRYPOINT AdsDDDropLink(ADSHANDLE hConn, UNSIGNED8* pucAlias,
                          UNSIGNED16 /*opt*/) {
+    if (auto* rc = get_remote_connection(hConn)) {
+        auto r = rc->dd_drop_link(openads::abi::to_internal(pucAlias, 0));
+        if (!r) return fail(r.error());
+        return ok();
+    }
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto alias = openads::abi::to_internal(pucAlias, 0);
@@ -12899,6 +12926,14 @@ UNSIGNED32 ENTRYPOINT AdsDDRemoveRefIntegrity(ADSHANDLE hConn, UNSIGNED8* pucNam
 
 UNSIGNED32 ENTRYPOINT AdsDDSetDatabaseProperty(ADSHANDLE hConn, UNSIGNED16 usProp,
                                     void* pBuf, UNSIGNED16 usLen) {
+    if (auto* rc = get_remote_connection(hConn)) {
+        std::string val = (pBuf != nullptr && usLen > 0)
+            ? std::string(reinterpret_cast<const char*>(pBuf), usLen) : std::string();
+        auto r = rc->dd_set_property(openads::network::DDObjectKind::Database,
+                                     "", "", usProp, val);
+        if (!r) return fail(r.error());
+        return ok();
+    }
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     std::string key = "prop_" + std::to_string(static_cast<unsigned>(usProp));
@@ -12914,6 +12949,17 @@ UNSIGNED32 ENTRYPOINT AdsDDSetDatabaseProperty(ADSHANDLE hConn, UNSIGNED16 usPro
 UNSIGNED32 ENTRYPOINT AdsDDGetDatabaseProperty(ADSHANDLE hConn, UNSIGNED16 usProp,
                                     void* pBuf, UNSIGNED16* pusLen) {
     if (pusLen == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    if (auto* rc = get_remote_connection(hConn)) {
+        auto r = rc->dd_get_property(openads::network::DDObjectKind::Database,
+                                     "", "", usProp);
+        UNSIGNED16 cap = *pusLen;
+        if (pBuf != nullptr && cap > 0) std::memset(pBuf, 0, cap);
+        if (!r) { *pusLen = 0; return fail(r.error()); }
+        UNSIGNED16 n = static_cast<UNSIGNED16>(std::min<std::size_t>(r.value().size(), cap));
+        if (pBuf != nullptr && n > 0) std::memcpy(pBuf, r.value().data(), n);
+        *pusLen = static_cast<UNSIGNED16>(r.value().size());
+        return ok();
+    }
     auto* dd = dd_from_handle(hConn);
     UNSIGNED16 cap = *pusLen;
     if (pBuf != nullptr && cap > 0) {
@@ -12933,6 +12979,18 @@ UNSIGNED32 ENTRYPOINT AdsDDGetUserProperty(ADSHANDLE hConn, UNSIGNED8* pucUser,
                                 UNSIGNED16 usProp, void* pBuf,
                                 UNSIGNED16* pusLen) {
     if (pusLen == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    if (auto* rc = get_remote_connection(hConn)) {
+        auto uname = openads::abi::to_internal(pucUser, 0);
+        auto r = rc->dd_get_property(openads::network::DDObjectKind::User,
+                                     uname, "", usProp);
+        UNSIGNED16 cap = *pusLen;
+        if (pBuf != nullptr && cap > 0) std::memset(pBuf, 0, cap);
+        if (!r) { *pusLen = 0; return fail(r.error()); }
+        UNSIGNED16 n = static_cast<UNSIGNED16>(std::min<std::size_t>(r.value().size(), cap));
+        if (pBuf != nullptr && n > 0) std::memcpy(pBuf, r.value().data(), n);
+        *pusLen = static_cast<UNSIGNED16>(r.value().size());
+        return ok();
+    }
     auto* dd = dd_from_handle(hConn);
     UNSIGNED16 cap = *pusLen;
     if (pBuf != nullptr && cap > 0) std::memset(pBuf, 0, cap);
@@ -12973,6 +13031,15 @@ UNSIGNED32 ENTRYPOINT AdsDDGetUserProperty(ADSHANDLE hConn, UNSIGNED8* pucUser,
 UNSIGNED32 ENTRYPOINT AdsDDSetUserProperty(ADSHANDLE hConn, UNSIGNED8* pucUser,
                                 UNSIGNED16 usProp, void* pvBuf,
                                 UNSIGNED16 usLen) {
+    if (auto* rc = get_remote_connection(hConn)) {
+        auto uname = openads::abi::to_internal(pucUser, 0);
+        std::string val = (pvBuf != nullptr && usLen > 0)
+            ? std::string(reinterpret_cast<const char*>(pvBuf), usLen) : std::string();
+        auto r = rc->dd_set_property(openads::network::DDObjectKind::User,
+                                     uname, "", usProp, val);
+        if (!r) return fail(r.error());
+        return ok();
+    }
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto user = openads::abi::to_internal(pucUser, 0);
@@ -13009,6 +13076,18 @@ UNSIGNED32 ENTRYPOINT AdsDDGetTableProperty(ADSHANDLE hConn, UNSIGNED8* pucTable
                                  UNSIGNED16* pusLen) {
     namespace fs = std::filesystem;
     if (pusLen == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    if (auto* rc = get_remote_connection(hConn)) {
+        auto tname = openads::abi::to_internal(pucTable, 0);
+        auto r = rc->dd_get_property(openads::network::DDObjectKind::Table,
+                                     tname, "", usProp);
+        UNSIGNED16 cap = *pusLen;
+        if (pBuf != nullptr && cap > 0) std::memset(pBuf, 0, cap);
+        if (!r) { *pusLen = 0; return fail(r.error()); }
+        UNSIGNED16 n = static_cast<UNSIGNED16>(std::min<std::size_t>(r.value().size(), cap));
+        if (pBuf != nullptr && n > 0) std::memcpy(pBuf, r.value().data(), n);
+        *pusLen = static_cast<UNSIGNED16>(r.value().size());
+        return ok();
+    }
     Connection* c = conn_from_handle(hConn);
     UNSIGNED16 cap = *pusLen;
     if (pBuf != nullptr && cap > 0) std::memset(pBuf, 0, cap);
@@ -13155,6 +13234,15 @@ UNSIGNED32 ENTRYPOINT AdsDDGetTableProperty(ADSHANDLE hConn, UNSIGNED8* pucTable
 UNSIGNED32 ENTRYPOINT AdsDDSetTableProperty(ADSHANDLE hConn, UNSIGNED8* pucTable,
                                  UNSIGNED16 usProp, void* pBuf,
                                  UNSIGNED16 usLen) {
+    if (auto* rc = get_remote_connection(hConn)) {
+        auto tname = openads::abi::to_internal(pucTable, 0);
+        std::string val = (pBuf != nullptr && usLen > 0)
+            ? std::string(reinterpret_cast<const char*>(pBuf), usLen) : std::string();
+        auto r = rc->dd_set_property(openads::network::DDObjectKind::Table,
+                                     tname, "", usProp, val);
+        if (!r) return fail(r.error());
+        return ok();
+    }
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto alias = openads::abi::to_internal(pucTable, 0);
@@ -13271,6 +13359,19 @@ UNSIGNED32 ENTRYPOINT AdsDDGetFieldProperty(ADSHANDLE hConn, UNSIGNED8* pucTable
                                   UNSIGNED8* pucField, UNSIGNED16 usProp,
                                   void* pBuf, UNSIGNED16* pusLen) {
     if (pusLen == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    if (auto* rc = get_remote_connection(hConn)) {
+        auto tname = openads::abi::to_internal(pucTable, 0);
+        auto fname = openads::abi::to_internal(pucField, 0);
+        auto r = rc->dd_get_property(openads::network::DDObjectKind::Field,
+                                     tname, fname, usProp);
+        UNSIGNED16 cap = *pusLen;
+        if (pBuf != nullptr && cap > 0) std::memset(pBuf, 0, cap);
+        if (!r) { *pusLen = 0; return fail(r.error()); }
+        UNSIGNED16 n = static_cast<UNSIGNED16>(std::min<std::size_t>(r.value().size(), cap));
+        if (pBuf != nullptr && n > 0) std::memcpy(pBuf, r.value().data(), n);
+        *pusLen = static_cast<UNSIGNED16>(r.value().size());
+        return ok();
+    }
     Connection* c = conn_from_handle(hConn);
     UNSIGNED16 cap = *pusLen;
     if (pBuf != nullptr && cap > 0) std::memset(pBuf, 0, cap);
@@ -13391,6 +13492,16 @@ UNSIGNED32 ENTRYPOINT AdsDDGetFieldProperty(ADSHANDLE hConn, UNSIGNED8* pucTable
 UNSIGNED32 ENTRYPOINT AdsDDSetFieldProperty(ADSHANDLE hConn, UNSIGNED8* pucTable,
                                   UNSIGNED8* pucField, UNSIGNED16 usProp,
                                   void* pBuf, UNSIGNED16 usLen) {
+    if (auto* rc = get_remote_connection(hConn)) {
+        auto tname = openads::abi::to_internal(pucTable, 0);
+        auto fname = openads::abi::to_internal(pucField, 0);
+        std::string val = (pBuf != nullptr && usLen > 0)
+            ? std::string(reinterpret_cast<const char*>(pBuf), usLen) : std::string();
+        auto r = rc->dd_set_property(openads::network::DDObjectKind::Field,
+                                     tname, fname, usProp, val);
+        if (!r) return fail(r.error());
+        return ok();
+    }
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto alias = openads::abi::to_internal(pucTable, 0);
@@ -13501,6 +13612,16 @@ UNSIGNED32 ENTRYPOINT AdsDDCreateTrigger(ADSHANDLE hConn, UNSIGNED8* pucName,
                                UNSIGNED8* pucTable, UNSIGNED32 ulType,
                                UNSIGNED32 /*ulOptions*/, UNSIGNED8* pucContainer,
                                UNSIGNED8* pucProcedure, UNSIGNED32 ulPriority) {
+    if (auto* rc = get_remote_connection(hConn)) {
+        auto r = rc->dd_create_trigger(
+            openads::abi::to_internal(pucName, 0),
+            openads::abi::to_internal(pucTable, 0), ulType,
+            pucContainer ? openads::abi::to_internal(pucContainer, 0) : "",
+            pucProcedure ? openads::abi::to_internal(pucProcedure, 0) : "",
+            ulPriority);
+        if (!r) return fail(r.error());
+        return ok();
+    }
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     openads::engine::DataDict::TriggerEntry e;
@@ -13536,6 +13657,11 @@ UNSIGNED32 ENTRYPOINT AdsDDCreateTrigger(ADSHANDLE hConn, UNSIGNED8* pucName,
 }
 
 UNSIGNED32 ENTRYPOINT AdsDDDropTrigger(ADSHANDLE hConn, UNSIGNED8* pucName) {
+    if (auto* rc = get_remote_connection(hConn)) {
+        auto r = rc->dd_drop_trigger(openads::abi::to_internal(pucName, 0));
+        if (!r) return fail(r.error());
+        return ok();
+    }
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto name = openads::abi::to_internal(pucName, 0);
@@ -13550,6 +13676,18 @@ UNSIGNED32 ENTRYPOINT AdsDDGetTriggerProperty(ADSHANDLE hConn, UNSIGNED8* pucNam
                                     UNSIGNED16 usProp, void* pBuf,
                                     UNSIGNED16* pusLen) {
     if (pusLen == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    if (auto* rc = get_remote_connection(hConn)) {
+        auto tname = openads::abi::to_internal(pucName, 0);
+        auto r = rc->dd_get_property(openads::network::DDObjectKind::Trigger,
+                                     tname, "", usProp);
+        UNSIGNED16 cap = *pusLen;
+        if (pBuf != nullptr && cap > 0) std::memset(pBuf, 0, cap);
+        if (!r) { *pusLen = 0; return fail(r.error()); }
+        UNSIGNED16 n = static_cast<UNSIGNED16>(std::min<std::size_t>(r.value().size(), cap));
+        if (pBuf != nullptr && n > 0) std::memcpy(pBuf, r.value().data(), n);
+        *pusLen = static_cast<UNSIGNED16>(r.value().size());
+        return ok();
+    }
     auto* dd = dd_from_handle(hConn);
     UNSIGNED16 cap = *pusLen;
     if (pBuf != nullptr && cap > 0) std::memset(pBuf, 0, cap);
@@ -13619,6 +13757,15 @@ UNSIGNED32 ENTRYPOINT AdsDDGetTriggerProperty(ADSHANDLE hConn, UNSIGNED8* pucNam
 UNSIGNED32 ENTRYPOINT AdsDDSetTriggerProperty(ADSHANDLE hConn, UNSIGNED8* pucName,
                                     UNSIGNED16 usProp, void* pBuf,
                                     UNSIGNED16 usLen) {
+    if (auto* rc = get_remote_connection(hConn)) {
+        auto tname = openads::abi::to_internal(pucName, 0);
+        std::string val = (pBuf != nullptr && usLen > 0)
+            ? std::string(reinterpret_cast<const char*>(pBuf), usLen) : std::string();
+        auto r = rc->dd_set_property(openads::network::DDObjectKind::Trigger,
+                                     tname, "", usProp, val);
+        if (!r) return fail(r.error());
+        return ok();
+    }
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto name = openads::abi::to_internal(pucName, 0);
@@ -13703,6 +13850,17 @@ UNSIGNED32 ENTRYPOINT AdsDDCreateProcedure(ADSHANDLE hConn, UNSIGNED8* pucName,
                                  UNSIGNED8* pucInParams,
                                  UNSIGNED8* pucOutParams,
                                  UNSIGNED8* pucComments) {
+    if (auto* rc = get_remote_connection(hConn)) {
+        auto r = rc->dd_create_proc(
+            openads::abi::to_internal(pucName, 0),
+            pucContainer ? openads::abi::to_internal(pucContainer, 0) : "",
+            pucProcName  ? openads::abi::to_internal(pucProcName,  0) : "",
+            pucInParams  ? openads::abi::to_internal(pucInParams,  0) : "",
+            pucOutParams ? openads::abi::to_internal(pucOutParams, 0) : "",
+            pucComments  ? openads::abi::to_internal(pucComments,  0) : "");
+        if (!r) return fail(r.error());
+        return ok();
+    }
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     openads::engine::DataDict::ProcEntry e;
@@ -13734,6 +13892,18 @@ UNSIGNED32 ENTRYPOINT AdsDDGetProcProperty(ADSHANDLE hConn, UNSIGNED8* pucName,
                                  UNSIGNED16 usProp, void* pBuf,
                                  UNSIGNED16* pusLen) {
     if (pusLen == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    if (auto* rc = get_remote_connection(hConn)) {
+        auto pname = openads::abi::to_internal(pucName, 0);
+        auto r = rc->dd_get_property(openads::network::DDObjectKind::Proc,
+                                     pname, "", usProp);
+        UNSIGNED16 cap = *pusLen;
+        if (pBuf != nullptr && cap > 0) std::memset(pBuf, 0, cap);
+        if (!r) { *pusLen = 0; return fail(r.error()); }
+        UNSIGNED16 n = static_cast<UNSIGNED16>(std::min<std::size_t>(r.value().size(), cap));
+        if (pBuf != nullptr && n > 0) std::memcpy(pBuf, r.value().data(), n);
+        *pusLen = static_cast<UNSIGNED16>(r.value().size());
+        return ok();
+    }
     auto* dd = dd_from_handle(hConn);
     UNSIGNED16 cap = *pusLen;
     if (pBuf != nullptr && cap > 0) std::memset(pBuf, 0, cap);
@@ -13773,6 +13943,15 @@ UNSIGNED32 ENTRYPOINT AdsDDGetProcProperty(ADSHANDLE hConn, UNSIGNED8* pucName,
 UNSIGNED32 ENTRYPOINT AdsDDSetProcProperty(ADSHANDLE hConn, UNSIGNED8* pucName,
                                  UNSIGNED16 usProp, void* pBuf,
                                  UNSIGNED16 usLen) {
+    if (auto* rc = get_remote_connection(hConn)) {
+        auto pname = openads::abi::to_internal(pucName, 0);
+        std::string val = (pBuf != nullptr && usLen > 0)
+            ? std::string(reinterpret_cast<const char*>(pBuf), usLen) : std::string();
+        auto r = rc->dd_set_property(openads::network::DDObjectKind::Proc,
+                                     pname, "", usProp, val);
+        if (!r) return fail(r.error());
+        return ok();
+    }
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto name = openads::abi::to_internal(pucName, 0);
@@ -13816,6 +13995,17 @@ UNSIGNED32 ENTRYPOINT AdsDDCreateFunction(ADSHANDLE hConn, UNSIGNED8* pucName,
                                 UNSIGNED8* pucRetType,
                                 UNSIGNED8* pucInParams,
                                 UNSIGNED8* pucComment) {
+    if (auto* rc = get_remote_connection(hConn)) {
+        auto r = rc->dd_create_function(
+            openads::abi::to_internal(pucName, 0),
+            pucContainer      ? openads::abi::to_internal(pucContainer,      0) : "",
+            pucImplementation ? openads::abi::to_internal(pucImplementation, 0) : "",
+            pucRetType        ? openads::abi::to_internal(pucRetType,        0) : "",
+            pucInParams       ? openads::abi::to_internal(pucInParams,       0) : "",
+            pucComment        ? openads::abi::to_internal(pucComment,        0) : "");
+        if (!r) return fail(r.error());
+        return ok();
+    }
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     openads::engine::DataDict::FunctionEntry e;
@@ -13847,6 +14037,18 @@ UNSIGNED32 ENTRYPOINT AdsDDGetFunctionProperty(ADSHANDLE hConn, UNSIGNED8* pucNa
                                      UNSIGNED16 usProp, void* pBuf,
                                      UNSIGNED16* pusLen) {
     if (pusLen == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    if (auto* rc = get_remote_connection(hConn)) {
+        auto fname = openads::abi::to_internal(pucName, 0);
+        auto r = rc->dd_get_property(openads::network::DDObjectKind::Function,
+                                     fname, "", usProp);
+        UNSIGNED16 cap = *pusLen;
+        if (pBuf != nullptr && cap > 0) std::memset(pBuf, 0, cap);
+        if (!r) { *pusLen = 0; return fail(r.error()); }
+        UNSIGNED16 n = static_cast<UNSIGNED16>(std::min<std::size_t>(r.value().size(), cap));
+        if (pBuf != nullptr && n > 0) std::memcpy(pBuf, r.value().data(), n);
+        *pusLen = static_cast<UNSIGNED16>(r.value().size());
+        return ok();
+    }
     auto* dd = dd_from_handle(hConn);
     UNSIGNED16 cap = *pusLen;
     if (pBuf != nullptr && cap > 0) std::memset(pBuf, 0, cap);
@@ -13876,6 +14078,15 @@ UNSIGNED32 ENTRYPOINT AdsDDGetFunctionProperty(ADSHANDLE hConn, UNSIGNED8* pucNa
 UNSIGNED32 ENTRYPOINT AdsDDSetFunctionProperty(ADSHANDLE hConn, UNSIGNED8* pucName,
                                      UNSIGNED16 usProp, void* pBuf,
                                      UNSIGNED16 usLen) {
+    if (auto* rc = get_remote_connection(hConn)) {
+        auto fname = openads::abi::to_internal(pucName, 0);
+        std::string val = (pBuf != nullptr && usLen > 0)
+            ? std::string(reinterpret_cast<const char*>(pBuf), usLen) : std::string();
+        auto r = rc->dd_set_property(openads::network::DDObjectKind::Function,
+                                     fname, "", usProp, val);
+        if (!r) return fail(r.error());
+        return ok();
+    }
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto name = openads::abi::to_internal(pucName, 0);
@@ -13917,6 +14128,11 @@ UNSIGNED32 ENTRYPOINT AdsDDCreateView(ADSHANDLE hConn, UNSIGNED8* pucName,
 }
 
 UNSIGNED32 ENTRYPOINT AdsDDDropView(ADSHANDLE hConn, UNSIGNED8* pucName) {
+    if (auto* rc = get_remote_connection(hConn)) {
+        auto r = rc->dd_drop_view(openads::abi::to_internal(pucName, 0));
+        if (!r) return fail(r.error());
+        return ok();
+    }
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto name = openads::abi::to_internal(pucName, 0);
@@ -14008,6 +14224,18 @@ UNSIGNED32 ENTRYPOINT AdsDDGetViewProperty(ADSHANDLE hConn, UNSIGNED8* pucName,
                                  UNSIGNED16 usProp, void* pBuf,
                                  UNSIGNED16* pusLen) {
     if (pusLen == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    if (auto* rc = get_remote_connection(hConn)) {
+        auto vname = openads::abi::to_internal(pucName, 0);
+        auto r = rc->dd_get_property(openads::network::DDObjectKind::View,
+                                     vname, "", usProp);
+        UNSIGNED16 cap = *pusLen;
+        if (pBuf != nullptr && cap > 0) std::memset(pBuf, 0, cap);
+        if (!r) { *pusLen = 0; return fail(r.error()); }
+        UNSIGNED16 n = static_cast<UNSIGNED16>(std::min<std::size_t>(r.value().size(), cap));
+        if (pBuf != nullptr && n > 0) std::memcpy(pBuf, r.value().data(), n);
+        *pusLen = static_cast<UNSIGNED16>(r.value().size());
+        return ok();
+    }
     auto* dd = dd_from_handle(hConn);
     UNSIGNED16 cap = *pusLen;
     if (pBuf != nullptr && cap > 0) std::memset(pBuf, 0, cap);
@@ -14034,6 +14262,15 @@ UNSIGNED32 ENTRYPOINT AdsDDGetViewProperty(ADSHANDLE hConn, UNSIGNED8* pucName,
 UNSIGNED32 ENTRYPOINT AdsDDSetViewProperty(ADSHANDLE hConn, UNSIGNED8* pucName,
                                  UNSIGNED16 usProp, void* pBuf,
                                  UNSIGNED16 usLen) {
+    if (auto* rc = get_remote_connection(hConn)) {
+        auto vname = openads::abi::to_internal(pucName, 0);
+        std::string val = (pBuf != nullptr && usLen > 0)
+            ? std::string(reinterpret_cast<const char*>(pBuf), usLen) : std::string();
+        auto r = rc->dd_set_property(openads::network::DDObjectKind::View,
+                                     vname, "", usProp, val);
+        if (!r) return fail(r.error());
+        return ok();
+    }
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto name = openads::abi::to_internal(pucName, 0);
@@ -14060,6 +14297,18 @@ UNSIGNED32 ENTRYPOINT AdsDDGetRefIntegrityProperty(ADSHANDLE hConn, UNSIGNED8* p
                                          UNSIGNED16 usProp, void* pBuf,
                                          UNSIGNED16* pusLen) {
     if (pusLen == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    if (auto* rc = get_remote_connection(hConn)) {
+        auto riname = openads::abi::to_internal(pucName, 0);
+        auto r = rc->dd_get_property(openads::network::DDObjectKind::RefIntegrity,
+                                     riname, "", usProp);
+        UNSIGNED16 cap = *pusLen;
+        if (pBuf != nullptr && cap > 0) std::memset(pBuf, 0, cap);
+        if (!r) { *pusLen = 0; return fail(r.error()); }
+        UNSIGNED16 n = static_cast<UNSIGNED16>(std::min<std::size_t>(r.value().size(), cap));
+        if (pBuf != nullptr && n > 0) std::memcpy(pBuf, r.value().data(), n);
+        *pusLen = static_cast<UNSIGNED16>(r.value().size());
+        return ok();
+    }
     auto* dd = dd_from_handle(hConn);
     UNSIGNED16 cap = *pusLen;
     if (pBuf != nullptr && cap > 0) std::memset(pBuf, 0, cap);
@@ -14107,6 +14356,15 @@ UNSIGNED32 ENTRYPOINT AdsDDGetRefIntegrityProperty(ADSHANDLE hConn, UNSIGNED8* p
 UNSIGNED32 ENTRYPOINT AdsDDSetRefIntegrityProperty(ADSHANDLE hConn, UNSIGNED8* pucName,
                                          UNSIGNED16 usProp, void* pBuf,
                                          UNSIGNED16 usLen) {
+    if (auto* rc = get_remote_connection(hConn)) {
+        auto riname = openads::abi::to_internal(pucName, 0);
+        std::string val = (pBuf != nullptr && usLen > 0)
+            ? std::string(reinterpret_cast<const char*>(pBuf), usLen) : std::string();
+        auto r = rc->dd_set_property(openads::network::DDObjectKind::RefIntegrity,
+                                     riname, "", usProp, val);
+        if (!r) return fail(r.error());
+        return ok();
+    }
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto name = openads::abi::to_internal(pucName, 0);
@@ -14391,6 +14649,10 @@ UNSIGNED32 ENTRYPOINT AdsGetIndexHandleByOrder(ADSHANDLE hTable, UNSIGNED16 usOr
 
 UNSIGNED32 ENTRYPOINT AdsGetIndexExpr(ADSHANDLE hIndex, UNSIGNED8* pucBuf,
                            UNSIGNED16* pusBufLen) {
+    if (auto* ri = get_remote_index(hIndex)) {
+        openads::abi::copy_to_caller(pucBuf, pusBufLen, ri->expression);
+        return ok();
+    }
     auto& m = index_bindings();
     auto it = m.find(hIndex);
     if (it == m.end()) {
@@ -25276,6 +25538,13 @@ UNSIGNED32 ENTRYPOINT AdsIsIndexCustom(ADSHANDLE, UNSIGNED16* p)
 UNSIGNED32 ENTRYPOINT AdsIsIndexDescending(ADSHANDLE hIndex, UNSIGNED16* p) {
     if (p == nullptr) return openads::AE_INTERNAL_ERROR;
     *p = 0;
+    if (auto* ri = get_remote_index(hIndex)) {
+        // Physical flag only — the dynamic AdsSetIndexDirection traversal
+        // override (see the LOCAL path below) isn't wired over the wire
+        // protocol yet.
+        *p = ri->is_descending ? 1 : 0;
+        return openads::AE_SUCCESS;
+    }
     // For the ACTIVE order, report the *effective* traversal direction —
     // the dynamic flag AdsSetIndexDirection toggles — not the index's baked
     // physical descending flag. rddads' OrdDescend() reads this to decide
@@ -25305,6 +25574,10 @@ UNSIGNED32 ENTRYPOINT AdsIsIndexDescending(ADSHANDLE hIndex, UNSIGNED16* p) {
 UNSIGNED32 ENTRYPOINT AdsIsIndexUnique(ADSHANDLE hIndex, UNSIGNED16* p) {
     if (p == nullptr) return openads::AE_INTERNAL_ERROR;
     *p = 0;
+    if (auto* ri = get_remote_index(hIndex)) {
+        *p = ri->is_unique ? 1 : 0;
+        return openads::AE_SUCCESS;
+    }
     auto* idx = iindex_for_handle(hIndex);
     if (idx == nullptr) return openads::AE_INTERNAL_ERROR;
     *p = idx->unique() ? 1 : 0;

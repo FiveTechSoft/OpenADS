@@ -167,8 +167,13 @@ Click a dictionary name in the tree. If it is not yet connected, a **Connect** d
 
 - **Username** — pre-filled with the registered default username
 - **Password** — enter the password; leave blank if the DD has none
+- **Server host / Port** *(Remote only)* — where to dial `openads_serverd`. Leave both blank to use the server default (`127.0.0.1` and the port set in `api/common.php`'s `API_OPENADS_REMOTE_PORT`). Fill them in to connect to a different host or a non-default port; the values you use are remembered in `config/dictionaries.json` for next time.
 
 After connecting, the tree node expands to show categories.
+
+#### Smart path parsing for remote connections
+
+When adding or editing a DD (New DD, Open DD, Free Tables, Properties), pasting a path in the admin-share form `\\host:port\c$\rest\of\path` — for example `\\localhost:16262\c$\Pmsys\data\pmsys_openads.add` — is recognised automatically: the dialog switches to **Remote**, fills in **Host**/**Port** from the string, and rewrites the Path field to the plain server-side path (`c:\Pmsys\data\pmsys_openads.add`). A plain UNC path with no `:port` (`\\fileserver\share\...`) is left alone, since that's an ordinary network path rather than a request to dial a specific `openads_serverd` instance. The same parsing runs server-side too, so it also works if you call the API directly.
 
 Alternatively, open the **Connection** menu — each registered DD appears with a status indicator:
 - **●** (filled dot) — connected; click to disconnect
@@ -715,6 +720,15 @@ Edited via the Manage Dictionaries dialog, but can also be edited manually:
     "username": "",
     "connType": "local",
     "entryType": "free"
+  },
+  {
+    "name": "Pmsys-Remote",
+    "path": "c:\\Pmsys\\data\\pmsys_openads.add",
+    "username": "adssys",
+    "connType": "remote",
+    "entryType": "dd",
+    "host": "192.168.1.50",
+    "port": 16262
   }
 ]
 ```
@@ -726,6 +740,10 @@ Edited via the Manage Dictionaries dialog, but can also be edited manually:
 | `username` | string or `""` | ADS username; blank = no authentication |
 | `connType` | `"local"` / `"remote"` | In-process or TCP server connection |
 | `entryType` | `"dd"` / `"free"` | Data Dictionary or free-table directory |
+| `host` | string *(optional)* | Remote-only. `openads_serverd` host; omitted = server default (`127.0.0.1`) |
+| `port` | number *(optional)* | Remote-only. `openads_serverd` port; omitted = server default (`API_OPENADS_REMOTE_PORT` in `api/common.php`) |
+
+`host`/`port` are written automatically the first time you connect successfully with an override (see [Connecting](#connecting)) and are only present on remote entries that use a non-default host or port.
 
 ### config/sql_scripts.json
 
