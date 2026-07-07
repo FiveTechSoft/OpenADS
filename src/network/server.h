@@ -109,6 +109,13 @@ public:
         // this session has processed, and how many frames that covers.
         std::uint64_t                                       total_op_micros = 0;
         std::uint64_t                                       op_count        = 0;
+        // True while this session's thread is inside dispatch() for the
+        // current frame — see MgThread::active.
+        bool                                                 executing = false;
+        // Text of the last ExecuteSQL frame processed (persists after it
+        // completes — see MgThread::sql) and when it started.
+        std::string                                          last_sql;
+        std::chrono::system_clock::time_point               last_sql_at{};
     };
     std::vector<SessionInfo> sessions_snapshot() const;
 
@@ -181,6 +188,11 @@ public:
     void          set_session_opcode(std::uint64_t id, std::uint16_t opcode);
     // Accumulate one frame's processing time for the session's AveCost.
     void          record_session_op_time(std::uint64_t id, std::uint64_t micros);
+    // Mark whether this session's thread is currently inside dispatch()
+    // — see MgThread::active / SessionInfo::executing.
+    void          set_session_executing(std::uint64_t id, bool executing);
+    // Record the text of an ExecuteSQL frame this session just received.
+    void          set_session_sql(std::uint64_t id, const std::string& sql);
     void          set_session_user(std::uint64_t id,
                                     const std::string& user,
                                     const std::string& data_dir);

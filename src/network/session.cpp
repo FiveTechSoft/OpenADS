@@ -242,11 +242,23 @@ bool Session::process_frame(const Frame& f) {
         mgst.bytes_in.fetch_add(f.payload.size() + 5,
                                 std::memory_order_relaxed);
     }
+    // Track the actual SQL text for the Active Queries "current query"
+    // detail view — mirrors SAP ARC's sp_GetSQLStatements() (see
+    // mgtscrn.pas/.dfm in the Advantage Data Architect source). The
+    // ExecuteSQL frame's raw payload IS the SQL string.
+    if (f.opcode == Opcode::ExecuteSQL) {
+        // Iterator-based ctor: payload.data() may be nullptr when empty,
+        // and std::string(nullptr, 0) is UB.
+        std::string sql(f.payload.begin(), f.payload.end());
+        srv_->set_session_sql(sid_, sql);
+    }
+    srv_->set_session_executing(sid_, true);
     auto t0 = std::chrono::steady_clock::now();
     auto res = dispatch(f);
     auto micros = std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now() - t0).count();
     srv_->record_session_op_time(sid_, static_cast<std::uint64_t>(micros));
+    srv_->set_session_executing(sid_, false);
     if (res.reply) {
         if (auto wr = write_frame(s_, *res.reply); !wr) return false;
         openads::mgmt::process_mg_stats()
@@ -2647,8 +2659,23 @@ DispatchResult Session::dispatch(const Frame& f) {
             break;
         }
         case Opcode::MgConnect: {
-            // Management handshake — no payload needed; reply with
-            // an ack so the client can register its mgmt handle.
+            // Management handshake. Optional [u16 ulen][user] payload —
+            // when a caller (e.g. DA-Web's Server Info tab) knows which DD
+            // user it's asking on behalf of, register this mgmt session
+            // under that name so it shows up as (say) "adssys" instead of
+            // "(anonymous)" in AdsMgGetUserNames / the Connected Users grid.
+            // Every accepted socket already gets a session (register_session
+            // in Session::run(), before any opcode is dispatched), so this
+            // mgmt-only connection is already tracked — it just never had a
+            // user name attached to it until now.
+            if (f.payload.size() >= 2) {
+                std::uint16_t ulen = static_cast<std::uint16_t>(f.payload[0]) |
+                    (static_cast<std::uint16_t>(f.payload[1]) << 8);
+                if (f.payload.size() >= static_cast<std::size_t>(2 + ulen) && ulen > 0) {
+                    std::string mgUser(reinterpret_cast<const char*>(f.payload.data() + 2), ulen);
+                    srv_->set_session_user(sid_, mgUser, "");
+                }
+            }
             reply.opcode = Opcode::MgConnectAck;
             std::string ok = "mg-ok";
             reply.payload.assign(ok.begin(), ok.end());

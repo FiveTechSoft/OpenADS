@@ -49,6 +49,15 @@ public:
     // instead of widening that struct. See AdsMgGetUserAvgCost.
     std::vector<std::uint32_t>            user_avg_costs() const;
 
+    // On-demand detail for one Active Queries row (see AdsMgGetThreadSql):
+    // the SQL text of the last ExecuteSQL frame `thread_no` processed, and
+    // when it started (0 if that thread is unknown or never ran SQL).
+    // A separate on-demand call rather than eagerly returned alongside
+    // worker_thread_activity() because SQL text is unbounded-length and
+    // usually only wanted for the one row the user clicked on.
+    std::string thread_sql(std::uint32_t thread_no) const;
+    std::chrono::system_clock::time_point thread_sql_at(std::uint32_t thread_no) const;
+
     // Returns the lock held on (conn-agnostic) `recno`; usConnNumber
     // is 0 and ulRecordNumber is 0 when no such lock exists.
     ADS_MGMT_LOCK_INFO lock_owner(std::uint32_t recno) const;

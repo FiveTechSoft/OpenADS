@@ -4771,6 +4771,24 @@
     }
   }
 
+  async function showQuerySql(dd, tabId, row) {
+    const box = document.getElementById('srvinfo-sql-detail-' + tabId);
+    if (!box) return;
+    box.textContent = 'Loading…';
+    try {
+      const r = await apiFetch('api/server_info.php', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'sql', dd, threadNo: row.threadNo }),
+      });
+      if (r.error) { box.textContent = `Error: ${r.error}`; return; }
+      if (!r.sql) { box.textContent = 'This thread has not run any SQL yet.'; return; }
+      const header = `-- Thread #${row.threadNo} · ${row.user || '(unknown)'}${r.startedAt ? ' · started ' + r.startedAt : ''}${row.active ? ' · still running' : ''}\n\n`;
+      box.textContent = header + r.sql;
+    } catch (err) {
+      box.textContent = `Error: ${err.message}`;
+    }
+  }
+
   function loadServerInfo(tabId, dd) {
     const container = document.getElementById('srvinfo-' + tabId);
     if (!container) return;
@@ -4817,8 +4835,12 @@
               <div id="srvinfo-tables-grid-${tabId}" class="health-grid" style="min-height:160px;"></div>
             </div>
             <div>
-              <div class="srvinfo-section-title">Active Queries</div>
+              <div class="srvinfo-section-title">Active Queries <span style="text-transform:none;font-weight:400;">(click a row to view its SQL below)</span></div>
               <div id="srvinfo-queries-grid-${tabId}" class="health-grid" style="min-height:160px;"></div>
+            </div>
+            <div>
+              <div class="srvinfo-section-title">Query Detail</div>
+              <pre id="srvinfo-sql-detail-${tabId}" style="background:#181825;border:1px solid #313244;border-radius:4px;padding:10px;min-height:70px;max-height:220px;overflow:auto;font-size:12px;color:#cdd6f4;white-space:pre-wrap;word-break:break-word;margin:0;">Select a row above to view its SQL.</pre>
             </div>
           </div>`;
 
@@ -4885,6 +4907,15 @@
           placeholder: 'No active queries',
           columns: [
             { title: 'Thread#',  field: 'threadNo', width: 80, hozAlign: 'right' },
+            // Rows can (and often will) show a completed operation, not
+            // one still running — same as SAP Data Architect's own Active
+            // Queries view (Advantage ARC's mgtscrn.pas/.dfm), which keeps
+            // showing the last query per connection with an Active flag
+            // rather than clearing the row once it finishes.
+            { title: 'Active', field: 'active', width: 70, hozAlign: 'center',
+              formatter: cell => cell.getValue()
+                ? '<span class="health-sev ok">yes</span>'
+                : '<span class="health-sev" style="background:#45475a;color:#a6adc8;">no</span>' },
             { title: 'Operation', field: 'opcode',  width: 130,
               formatter: cell => escHtml(opcodeLabel(cell.getValue())) },
             { title: 'User',     field: 'user',     widthGrow: 1 },
@@ -4892,6 +4923,7 @@
             { title: 'OS Login', field: 'osLogin',  widthGrow: 1 },
           ],
         });
+        queriesGrid.on('rowClick', (e, row) => showQuerySql(dd, tabId, row.getData()));
       })
       .catch(err => {
         container.innerHTML = `<div class="alert alert-error" style="margin:8px;">${escHtml(err.message)}</div>`;

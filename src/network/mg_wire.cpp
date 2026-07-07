@@ -30,6 +30,10 @@ struct Reader {
     std::size_t        pos = 0;
     bool               ok  = true;
 
+    std::uint8_t u8() {
+        if (pos + 1 > b.size()) { ok = false; return 0; }
+        return static_cast<std::uint8_t>(b[pos++]);
+    }
     std::uint16_t u16() {
         if (pos + 2 > b.size()) { ok = false; return 0; }
         std::uint16_t v = static_cast<std::uint16_t>(
@@ -163,6 +167,9 @@ std::string encode_mg_snapshot(const mgmt::MgSnapshot& s) {
         put_str(b, t.user);
         put_u16(b, t.conn_no);
         put_str(b, t.os_login);
+        b.push_back(static_cast<char>(t.active ? 1 : 0));
+        put_str(b, t.sql);
+        put_tp(b, t.sql_at);
     }
     return b;
 }
@@ -242,6 +249,9 @@ util::Result<mgmt::MgSnapshot> decode_mg_snapshot(
         t.user      = r.str();
         t.conn_no   = r.u16();
         t.os_login  = r.str();
+        t.active    = r.u8() != 0;
+        t.sql       = r.str();
+        t.sql_at    = get_tp(r);
         s.thread_list.push_back(std::move(t));
     }
     if (!r.ok)

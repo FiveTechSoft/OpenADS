@@ -258,6 +258,7 @@ EXPORTS
     AdsMgGetOpenIndexes
     AdsMgGetOpenTables
     AdsMgGetServerType
+    AdsMgGetThreadSql
     AdsMgGetUserAvgCost
     AdsMgGetUserNames
     AdsMgGetWorkerThreadActivity

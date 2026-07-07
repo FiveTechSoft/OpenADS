@@ -12,11 +12,16 @@
  *   no-op (AE_SUCCESS without effect); only remote (tcp://) connections
  *   actually disconnect a session.
  *
+ * POST {action:'sql', dd:<name>, threadNo:<n>}
+ *   Calls AdsMgGetThreadSql — on-demand SQL text + start time for one
+ *   queries[] row (threadNo comes from the GET response above).
+ *
  * Calls AdsMgConnect + AdsMgGetActivityInfo + AdsMgGetUserNames +
  * AdsMgGetUserAvgCost + AdsMgGetOpenTables + AdsMgGetWorkerThreadActivity +
- * AdsMgKillUser via PHP FFI against openace64.dll. The mgmt connection
- * targets the same host:port as the DD's own connection when it's remote,
- * so activity reflects the actual server the DD is talking to.
+ * AdsMgGetThreadSql + AdsMgKillUser via PHP FFI against openace64.dll. The
+ * mgmt connection targets the same host:port as the DD's own connection
+ * when it's remote, so activity reflects the actual server the DD is
+ * talking to.
  *
  * Requires: php.ini  ffi.enable=true  (or ffi.enable=preload)
  */
@@ -78,6 +83,7 @@ typedef unsigned long long ADSHANDLE;
 typedef unsigned short UNSIGNED16;
 typedef unsigned int   UNSIGNED32;
 typedef unsigned char  UNSIGNED8;
+typedef unsigned long long UNSIGNED64;
 
 typedef struct {
     UNSIGNED16 usDays;
@@ -153,6 +159,9 @@ UNSIGNED32 AdsMgKillUser(ADSHANDLE hMgmt, UNSIGNED8* pucUserName,
                          UNSIGNED16 usConnNumber);
 UNSIGNED32 AdsMgGetUserAvgCost(ADSHANDLE hMgmt, UNSIGNED32* pulCosts,
                               UNSIGNED16* pusCount, UNSIGNED16* pusSize);
+UNSIGNED32 AdsMgGetThreadSql(ADSHANDLE hMgmt, UNSIGNED32 ulThreadNumber,
+                             UNSIGNED8* pucBuf, UNSIGNED32* pulLen,
+                             UNSIGNED64* pullStartEpoch);
 ';
 
 try {
@@ -190,10 +199,15 @@ function ffiCStr(FFI $ffi, string $s): FFI\CData {
 // state). A remote DD (host:port from the session's own connection)
 // connects the mgmt handle to that same server, so activity/kill reflect
 // the server actually serving the DD instead of this PHP process.
+// Pass the DD's own connected username so this mgmt session registers
+// under that name instead of showing up as "(anonymous)" alongside the
+// user's real connections in the Connected Users / Active Queries grids.
 $hMgmt = $ffi->new('ADSHANDLE');
 $hMgmt->cdata = 0;
 $serverArg = $mgServer !== null ? ffiCStr($ffi, $mgServer) : null;
-$rc = $ffi->AdsMgConnect($serverArg, null, null, FFI::addr($hMgmt));
+$mgUsername = trim((string)($connInfo['username'] ?? ''));
+$userArg = $mgUsername !== '' ? ffiCStr($ffi, $mgUsername) : null;
+$rc = $ffi->AdsMgConnect($serverArg, $userArg, null, FFI::addr($hMgmt));
 if ($rc !== 0) {
     http_response_code(500);
     echo json_encode(['error' => "AdsMgConnect failed (rc=$rc)"]);
@@ -204,6 +218,39 @@ $h = $hMgmt->cdata;
 try {
     if ($method === 'POST') {
         $action = $body['action'] ?? '';
+
+        if ($action === 'sql') {
+            // On-demand detail for one Active Queries row — see
+            // AdsMgGetThreadSql. Caller passes the threadNo from a row in
+            // the queries[] array the last GET returned.
+            $threadNo = (int)($body['threadNo'] ?? 0);
+            if ($threadNo <= 0) {
+                http_response_code(400);
+                echo json_encode(['error' => 'threadNo is required']);
+                exit;
+            }
+            $cap = 65536;
+            $buf = $ffi->new("UNSIGNED8[$cap]");
+            $len = $ffi->new('UNSIGNED32');
+            $len->cdata = $cap;
+            $epoch = $ffi->new('UNSIGNED64');
+            $epoch->cdata = 0;
+            $rc = $ffi->AdsMgGetThreadSql($h, $threadNo, $buf, FFI::addr($len), FFI::addr($epoch));
+            if ($rc !== 0) {
+                echo json_encode(['error' => "AdsMgGetThreadSql failed (rc=$rc)"]);
+                exit;
+            }
+            $n = min((int)$len->cdata, $cap);
+            $sql = $n > 0 ? FFI::string($buf, $n) : '';
+            $epochVal = (int)$epoch->cdata;
+            echo json_encode([
+                'ok'        => true,
+                'sql'       => $sql,
+                'startedAt' => $epochVal > 0 ? date('Y-m-d H:i:s', $epochVal) : null,
+            ]);
+            exit;
+        }
+
         if ($action !== 'kill') {
             http_response_code(400);
             echo json_encode(['error' => 'unknown action']);
@@ -327,6 +374,11 @@ try {
             'user'     => ffiStr($t->aucUserName, 32),
             'connNo'   => (int)$t->usConnNumber,
             'osLogin'  => ffiStr($t->aucOSUserLoginName, 64),
+            // Non-SAP reuse of usReserved1: 1 while this thread is still
+            // inside dispatch() for usOpCode, 0 if it's the last
+            // *completed* operation. Stale rows are expected and fine —
+            // matches SAP Data Architect's own Active Queries view.
+            'active'   => ((int)$t->usReserved1) === 1,
         ];
     }
 

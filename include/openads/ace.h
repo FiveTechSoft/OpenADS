@@ -1495,6 +1495,14 @@ UNSIGNED32 ENTRYPOINT AdsMgGetWorkerThreadActivity(ADSHANDLE hMg, void* pInfo,
 UNSIGNED32 ENTRYPOINT AdsMgGetUserAvgCost  (ADSHANDLE hMg, UNSIGNED32* pulCosts,
                                              UNSIGNED16* pusCount,
                                              UNSIGNED16* pusSize);
+// OpenADS extension (not part of the SAP ACE surface): on-demand SQL text
+// + start time for one AdsMgGetWorkerThreadActivity row, looked up by
+// ulThreadNumber. Empty/0 if that thread never ran SQL. Call once with
+// *pulLen = 0 to size the buffer (as with AdsDDGetDatabaseProperty).
+UNSIGNED32 ENTRYPOINT AdsMgGetThreadSql    (ADSHANDLE hMg, UNSIGNED32 ulThreadNumber,
+                                             UNSIGNED8* pucBuf,
+                                             UNSIGNED32* pulLen,
+                                             UNSIGNED64* pullStartEpoch);
 UNSIGNED32 ENTRYPOINT AdsMgKillUser        (ADSHANDLE hMg, UNSIGNED8* pucUser,
                                              UNSIGNED16 usOption);
 UNSIGNED32 ENTRYPOINT AdsMgKillUser90      (ADSHANDLE hMg, UNSIGNED8* pucUser,

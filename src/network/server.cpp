@@ -197,6 +197,9 @@ mgmt::MgSnapshot Server::build_mg_snapshot() const {
             th.user      = u.name;
             th.conn_no   = u.conn_no;
             th.os_login  = u.name;
+            th.active    = s.executing;
+            th.sql       = s.last_sql;
+            th.sql_at    = s.last_sql_at;
             snap.thread_list.push_back(std::move(th));
         }
 
@@ -264,6 +267,21 @@ void Server::record_session_op_time(std::uint64_t id, std::uint64_t micros) {
     if (it == sessions_info_.end()) return;
     it->second.total_op_micros += micros;
     ++it->second.op_count;
+}
+
+void Server::set_session_executing(std::uint64_t id, bool executing) {
+    std::lock_guard<std::mutex> lk(info_mu_);
+    auto it = sessions_info_.find(id);
+    if (it == sessions_info_.end()) return;
+    it->second.executing = executing;
+}
+
+void Server::set_session_sql(std::uint64_t id, const std::string& sql) {
+    std::lock_guard<std::mutex> lk(info_mu_);
+    auto it = sessions_info_.find(id);
+    if (it == sessions_info_.end()) return;
+    it->second.last_sql    = sql;
+    it->second.last_sql_at = std::chrono::system_clock::now();
 }
 
 void Server::set_session_user(std::uint64_t id,

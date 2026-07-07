@@ -52,6 +52,20 @@ struct MgThread {
     std::string   user;
     std::uint16_t conn_no   = 0;
     std::string   os_login;
+    // True while this session's thread is still inside dispatch() for
+    // `opcode` at snapshot time — false means `opcode`/`sql` are the last
+    // completed operation, not a currently-running one. Mirrors SAP ARC's
+    // sp_GetSQLStatements() "Active" column (see mgtscrn.pas/.dfm in the
+    // Advantage Data Architect source) — stale rows are expected/useful,
+    // same as there.
+    bool          active = false;
+    // Text of the last ExecuteSQL frame this session processed, if any —
+    // persists across later non-SQL frames so a completed query's text
+    // stays visible ("Active" just goes false). Empty when this session
+    // has never run one.
+    std::string   sql;
+    // When `sql` started running.
+    std::chrono::system_clock::time_point sql_at{};
 };
 
 // Point-in-time raw telemetry. Built by collect_local_snapshot() in a

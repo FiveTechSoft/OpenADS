@@ -218,9 +218,29 @@ MgCollector::worker_thread_activity() const {
         put_field(i.aucUserName, sizeof(i.aucUserName), t.user);
         put_field(i.aucOSUserLoginName,
                   sizeof(i.aucOSUserLoginName), t.os_login);
+        // Non-SAP use of a documented-reserved field: 1 if this thread is
+        // still inside dispatch() for usOpCode at snapshot time, 0 if
+        // usOpCode/the SQL from AdsMgGetThreadSql is the last *completed*
+        // operation. See MgThread::active.
+        i.usReserved1 = t.active ? 1 : 0;
         out.push_back(i);
     }
     return out;
+}
+
+std::string MgCollector::thread_sql(std::uint32_t thread_no) const {
+    for (const auto& t : snapshot_.thread_list) {
+        if (t.thread_no == thread_no) return t.sql;
+    }
+    return {};
+}
+
+std::chrono::system_clock::time_point
+MgCollector::thread_sql_at(std::uint32_t thread_no) const {
+    for (const auto& t : snapshot_.thread_list) {
+        if (t.thread_no == thread_no) return t.sql_at;
+    }
+    return {};
 }
 
 ADS_MGMT_LOCK_INFO MgCollector::lock_owner(std::uint32_t recno) const {

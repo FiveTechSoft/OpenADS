@@ -26145,7 +26145,25 @@ struct MgBackend {
     bool          remote = false;
     std::string   host;       // remote only
     std::uint16_t port = 0;   // remote only
+    // DD user this mgmt handle is asking on behalf of, if AdsMgConnect's
+    // caller supplied one — carried on every later MgConnect/MgRequest
+    // round-trip so the mgmt session registers under a real name instead
+    // of "(anonymous)". Empty is still valid (pre-existing behavior).
+    std::string   mg_user;
 };
+
+// Optional [u16 ulen][user] MgConnect payload — empty when `user` is empty,
+// matching pre-existing "(anonymous)" behavior for callers that don't know
+// or care which DD user is asking.
+std::vector<std::uint8_t> build_mg_connect_payload(const std::string& user) {
+    std::vector<std::uint8_t> out;
+    if (user.empty()) return out;
+    auto ulen = static_cast<std::uint16_t>(user.size());
+    out.push_back(static_cast<std::uint8_t>(ulen & 0xFFu));
+    out.push_back(static_cast<std::uint8_t>((ulen >> 8) & 0xFFu));
+    out.insert(out.end(), user.begin(), user.end());
+    return out;
+}
 
 // Registry of open mgmt handles. ADSHANDLE values for mgmt start at a
 // high base so they never collide with table / connection handles.
@@ -26217,6 +26235,20 @@ fetch_mg_snapshot(const MgBackend& be) {
     if (!sock.has_value())
         return Error{1, 0, "mg connect failed", ""};
     openads::network::Socket s = sock.value();
+
+    // MgConnect handshake first, on this same socket, so the session this
+    // MgRequest travels on registers under be.mg_user instead of
+    // "(anonymous)" — AdsMgConnect's own reachability probe (above) uses a
+    // separate, immediately-closed socket, so its username never reaches
+    // whichever connection actually ends up carrying the MgRequest.
+    if (!be.mg_user.empty()) {
+        openads::network::Frame hello;
+        hello.opcode  = openads::network::Opcode::MgConnect;
+        hello.payload = build_mg_connect_payload(be.mg_user);
+        if (auto wr = openads::network::write_frame(s, hello); wr.has_value()) {
+            (void)openads::network::read_frame(s);  // drain MgConnectAck
+        }
+    }
 
     openads::network::Frame req;
     req.opcode = openads::network::Opcode::MgRequest;
@@ -26336,11 +26368,12 @@ bool send_mg_mutator(const MgBackend& be,
 // "local" server string yields a local-process backend; anything of
 // the form "host" or "host:port" yields a remote backend (default
 // port 16262, the OpenADS server port).
-UNSIGNED32 ENTRYPOINT AdsMgConnect(UNSIGNED8* pucServer, UNSIGNED8* /*pucUser*/,
+UNSIGNED32 ENTRYPOINT AdsMgConnect(UNSIGNED8* pucServer, UNSIGNED8* pucUser,
                         UNSIGNED8* /*pucPwd*/, ADSHANDLE* phMgmt) {
     if (phMgmt == nullptr) return openads::AE_INTERNAL_ERROR;
 
     MgBackend be;
+    be.mg_user = pucUser ? reinterpret_cast<const char*>(pucUser) : std::string();
     std::string srv = pucServer
         ? reinterpret_cast<const char*>(pucServer) : "";
     // Strip leading / trailing UNC slashes ("\\\\host\\").
@@ -26381,6 +26414,7 @@ UNSIGNED32 ENTRYPOINT AdsMgConnect(UNSIGNED8* pucServer, UNSIGNED8* /*pucUser*/,
         openads::network::Socket ps = probe.value();
         openads::network::Frame hello;
         hello.opcode = openads::network::Opcode::MgConnect;
+        hello.payload = build_mg_connect_payload(be.mg_user);
         if (!openads::network::write_frame(ps, hello).has_value()) {
             openads::network::sock_close(ps);
             return openads::AE_NO_CONNECTION;
@@ -26487,6 +26521,32 @@ UNSIGNED32 ENTRYPOINT AdsMgGetUserAvgCost(ADSHANDLE h, UNSIGNED32* p,
     auto col = mg_collector_for(h);
     if (!col.has_value()) return static_cast<UNSIGNED32>(col.error().code);
     return emit_mg_array(col.value().user_avg_costs(), p, c, sz);
+}
+// Non-SAP extension: on-demand detail for one Active Queries row (see
+// mgmt::MgCollector::thread_sql) — the SQL text of the last ExecuteSQL
+// frame `ulThreadNumber` processed, plus when it started, epoch seconds
+// (0 if unknown/never ran SQL). *pulLen is buffer capacity in, actual
+// text length out (truncated to capacity if longer, same convention as
+// AdsDDGetDatabaseProperty) — call once with a 0-capacity probe to size
+// the buffer, same as everywhere else in this ABI.
+UNSIGNED32 ENTRYPOINT AdsMgGetThreadSql(ADSHANDLE h, UNSIGNED32 ulThreadNumber,
+                                        UNSIGNED8* pucBuf, UNSIGNED32* pulLen,
+                                        UNSIGNED64* pullStartEpoch) {
+    if (pulLen == nullptr) return openads::AE_INTERNAL_ERROR;
+    auto col = mg_collector_for(h);
+    if (!col.has_value()) return static_cast<UNSIGNED32>(col.error().code);
+    std::string sql = col.value().thread_sql(ulThreadNumber);
+    UNSIGNED32 cap = *pulLen;
+    UNSIGNED32 n = static_cast<UNSIGNED32>(
+        sql.size() < cap ? sql.size() : cap);
+    if (pucBuf != nullptr && n > 0) std::memcpy(pucBuf, sql.data(), n);
+    *pulLen = static_cast<UNSIGNED32>(sql.size());
+    if (pullStartEpoch != nullptr) {
+        auto at = col.value().thread_sql_at(ulThreadNumber);
+        *pullStartEpoch = (at.time_since_epoch().count() == 0) ? 0
+            : static_cast<UNSIGNED64>(std::chrono::system_clock::to_time_t(at));
+    }
+    return openads::AE_SUCCESS;
 }
 UNSIGNED32 ENTRYPOINT AdsMgKillUser(ADSHANDLE h, UNSIGNED8* /*pucUser*/,
                          UNSIGNED16 usConnNo) {
