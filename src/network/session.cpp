@@ -2664,8 +2664,9 @@ DispatchResult Session::dispatch(const Frame& f) {
             // mgmt-only connection is already tracked — it just never had a
             // user name attached to it until now.
             if (f.payload.size() >= 2) {
-                std::uint16_t ulen = static_cast<std::uint16_t>(f.payload[0]) |
-                    (static_cast<std::uint16_t>(f.payload[1]) << 8);
+                std::uint16_t ulen = static_cast<std::uint16_t>(
+                    static_cast<unsigned>(f.payload[0]) |
+                    (static_cast<unsigned>(f.payload[1]) << 8));
                 if (f.payload.size() >= static_cast<std::size_t>(2 + ulen) && ulen > 0) {
                     std::string mgUser(reinterpret_cast<const char*>(f.payload.data() + 2), ulen);
                     srv_->set_session_user(sid_, mgUser, "");
