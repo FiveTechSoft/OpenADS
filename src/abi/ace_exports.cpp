@@ -12774,6 +12774,14 @@ openads::engine::DataDict* dd_from_handle(ADSHANDLE hConn) {
 UNSIGNED32 ENTRYPOINT AdsDDAddIndexFile(ADSHANDLE hConn,
                              UNSIGNED8* pucTable, UNSIGNED8* pucIndex,
                              UNSIGNED8* pucComment) {
+    if (auto* rc = get_remote_connection(hConn)) {
+        auto r = rc->dd_add_index_file(
+            openads::abi::to_internal(pucTable, 0),
+            openads::abi::to_internal(pucIndex, 0),
+            pucComment ? openads::abi::to_internal(pucComment, 0) : "");
+        if (!r) return fail(r.error());
+        return ok();
+    }
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto tbl  = openads::abi::to_internal(pucTable, 0);
@@ -12788,6 +12796,13 @@ UNSIGNED32 ENTRYPOINT AdsDDAddIndexFile(ADSHANDLE hConn,
 UNSIGNED32 ENTRYPOINT AdsDDRemoveIndexFile(ADSHANDLE hConn,
                                 UNSIGNED8* pucTable, UNSIGNED8* pucIndex,
                                 UNSIGNED16 /*opt*/) {
+    if (auto* rc = get_remote_connection(hConn)) {
+        auto r = rc->dd_remove_index_file(
+            openads::abi::to_internal(pucTable, 0),
+            openads::abi::to_internal(pucIndex, 0));
+        if (!r) return fail(r.error());
+        return ok();
+    }
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto tbl = openads::abi::to_internal(pucTable, 0);
@@ -12800,6 +12815,15 @@ UNSIGNED32 ENTRYPOINT AdsDDRemoveIndexFile(ADSHANDLE hConn,
 UNSIGNED32 ENTRYPOINT AdsDDCreateUser(ADSHANDLE hConn, UNSIGNED8* pucGroup,
                            UNSIGNED8* pucUser, UNSIGNED8* pucPwd,
                            UNSIGNED8* pucDesc) {
+    if (auto* rc = get_remote_connection(hConn)) {
+        auto r = rc->dd_create_user(
+            pucGroup ? openads::abi::to_internal(pucGroup, 0) : "",
+            openads::abi::to_internal(pucUser, 0),
+            pucPwd ? openads::abi::to_internal(pucPwd, 0) : "",
+            pucDesc ? openads::abi::to_internal(pucDesc, 0) : "");
+        if (!r) return fail(r.error());
+        return ok();
+    }
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto user = openads::abi::to_internal(pucUser, 0);
@@ -12821,6 +12845,12 @@ UNSIGNED32 ENTRYPOINT AdsDDCreateUser(ADSHANDLE hConn, UNSIGNED8* pucGroup,
 }
 
 UNSIGNED32 ENTRYPOINT AdsDDDeleteUser(ADSHANDLE hConn, UNSIGNED8* pucUser) {
+    if (auto* rc = get_remote_connection(hConn)) {
+        auto r = rc->dd_drop_object(openads::network::DDObjectKind::User,
+            openads::abi::to_internal(pucUser, 0));
+        if (!r) return fail(r.error());
+        return ok();
+    }
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto user = openads::abi::to_internal(pucUser, 0);
@@ -12831,6 +12861,13 @@ UNSIGNED32 ENTRYPOINT AdsDDDeleteUser(ADSHANDLE hConn, UNSIGNED8* pucUser) {
 
 UNSIGNED32 ENTRYPOINT AdsDDAddUserToGroup(ADSHANDLE hConn,
                                UNSIGNED8* pucGroup, UNSIGNED8* pucUser) {
+    if (auto* rc = get_remote_connection(hConn)) {
+        auto r = rc->dd_add_user_to_group(
+            openads::abi::to_internal(pucGroup, 0),
+            openads::abi::to_internal(pucUser, 0));
+        if (!r) return fail(r.error());
+        return ok();
+    }
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto group = openads::abi::to_internal(pucGroup, 0);
@@ -12842,6 +12879,13 @@ UNSIGNED32 ENTRYPOINT AdsDDAddUserToGroup(ADSHANDLE hConn,
 
 UNSIGNED32 ENTRYPOINT AdsDDRemoveUserFromGroup(ADSHANDLE hConn,
                                     UNSIGNED8* pucGroup, UNSIGNED8* pucUser) {
+    if (auto* rc = get_remote_connection(hConn)) {
+        auto r = rc->dd_remove_user_from_group(
+            openads::abi::to_internal(pucGroup, 0),
+            openads::abi::to_internal(pucUser, 0));
+        if (!r) return fail(r.error());
+        return ok();
+    }
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto group = openads::abi::to_internal(pucGroup, 0);
@@ -12854,6 +12898,15 @@ UNSIGNED32 ENTRYPOINT AdsDDRemoveUserFromGroup(ADSHANDLE hConn,
 UNSIGNED32 ENTRYPOINT AdsDDCreateLink(ADSHANDLE hConn, UNSIGNED8* pucAlias,
                            UNSIGNED8* pucPath, UNSIGNED8* pucUser,
                            UNSIGNED8* pucPwd, UNSIGNED16 /*opt*/) {
+    if (auto* rc = get_remote_connection(hConn)) {
+        auto r = rc->dd_create_link(
+            openads::abi::to_internal(pucAlias, 0),
+            openads::abi::to_internal(pucPath, 0),
+            pucUser ? openads::abi::to_internal(pucUser, 0) : "",
+            pucPwd ? openads::abi::to_internal(pucPwd, 0) : "");
+        if (!r) return fail(r.error());
+        return ok();
+    }
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto alias = openads::abi::to_internal(pucAlias, 0);
@@ -12883,6 +12936,15 @@ UNSIGNED32 ENTRYPOINT AdsDDDropLink(ADSHANDLE hConn, UNSIGNED8* pucAlias,
 UNSIGNED32 ENTRYPOINT AdsDDModifyLink(ADSHANDLE hConn, UNSIGNED8* pucAlias,
                            UNSIGNED8* pucPath, UNSIGNED8* pucUser,
                            UNSIGNED8* pucPwd, UNSIGNED16 /*opt*/) {
+    if (auto* rc = get_remote_connection(hConn)) {
+        auto r = rc->dd_modify_link(
+            openads::abi::to_internal(pucAlias, 0),
+            pucPath ? openads::abi::to_internal(pucPath, 0) : "",
+            pucUser ? openads::abi::to_internal(pucUser, 0) : "",
+            pucPwd ? openads::abi::to_internal(pucPwd, 0) : "");
+        if (!r) return fail(r.error());
+        return ok();
+    }
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto alias = openads::abi::to_internal(pucAlias, 0);
@@ -12899,6 +12961,18 @@ UNSIGNED32 ENTRYPOINT AdsDDCreateRefIntegrity(ADSHANDLE hConn,
                                    UNSIGNED8* pucParent, UNSIGNED8* pucParentTag,
                                    UNSIGNED8* pucChild, UNSIGNED8* pucChildTag,
                                    UNSIGNED16 usUpdate, UNSIGNED16 usDelete) {
+    if (auto* rc = get_remote_connection(hConn)) {
+        auto r = rc->dd_create_ref_integrity(
+            openads::abi::to_internal(pucName, 0),
+            pucFail ? openads::abi::to_internal(pucFail, 0) : "",
+            pucParent ? openads::abi::to_internal(pucParent, 0) : "",
+            pucParentTag ? openads::abi::to_internal(pucParentTag, 0) : "",
+            pucChild ? openads::abi::to_internal(pucChild, 0) : "",
+            pucChildTag ? openads::abi::to_internal(pucChildTag, 0) : "",
+            usUpdate, usDelete);
+        if (!r) return fail(r.error());
+        return ok();
+    }
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     openads::engine::DataDict::RiEntry e;
@@ -12916,6 +12990,12 @@ UNSIGNED32 ENTRYPOINT AdsDDCreateRefIntegrity(ADSHANDLE hConn,
 }
 
 UNSIGNED32 ENTRYPOINT AdsDDRemoveRefIntegrity(ADSHANDLE hConn, UNSIGNED8* pucName) {
+    if (auto* rc = get_remote_connection(hConn)) {
+        auto r = rc->dd_drop_object(openads::network::DDObjectKind::RefIntegrity,
+            openads::abi::to_internal(pucName, 0));
+        if (!r) return fail(r.error());
+        return ok();
+    }
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto name = openads::abi::to_internal(pucName, 0);
@@ -13328,6 +13408,19 @@ UNSIGNED32 ENTRYPOINT AdsDDSetTableProperty(ADSHANDLE hConn, UNSIGNED8* pucTable
 
 UNSIGNED32 ENTRYPOINT AdsDDSetUserTableRights(ADSHANDLE hConn, UNSIGNED8* pucTable,
                                    UNSIGNED8* pucUser, UNSIGNED32 ulLevel) {
+    if (auto* rc = get_remote_connection(hConn)) {
+        auto tname = openads::abi::to_internal(pucTable, 0);
+        auto uname = pucUser ? openads::abi::to_internal(pucUser, 0) : "";
+        std::string val(4, '\0');
+        val[0] = static_cast<char>( ulLevel        & 0xFFu);
+        val[1] = static_cast<char>((ulLevel >>  8) & 0xFFu);
+        val[2] = static_cast<char>((ulLevel >> 16) & 0xFFu);
+        val[3] = static_cast<char>((ulLevel >> 24) & 0xFFu);
+        auto r = rc->dd_set_property(openads::network::DDObjectKind::UserTableRights,
+                                     tname, uname, 0, val);
+        if (!r) return fail(r.error());
+        return ok();
+    }
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto tbl  = openads::abi::to_internal(pucTable, 0);
@@ -13342,6 +13435,19 @@ UNSIGNED32 ENTRYPOINT AdsDDSetUserTableRights(ADSHANDLE hConn, UNSIGNED8* pucTab
 UNSIGNED32 ENTRYPOINT AdsDDGetUserTableRights(ADSHANDLE hConn, UNSIGNED8* pucTable,
                                    UNSIGNED8* pucUser, UNSIGNED32* pulLevel) {
     if (pulLevel == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    if (auto* rc = get_remote_connection(hConn)) {
+        auto tname = openads::abi::to_internal(pucTable, 0);
+        auto uname = pucUser ? openads::abi::to_internal(pucUser, 0) : "";
+        auto r = rc->dd_get_property(openads::network::DDObjectKind::UserTableRights,
+                                     tname, uname, 0);
+        if (!r || r.value().size() < 4) { *pulLevel = 4; return ok(); }
+        const auto& v = r.value();
+        *pulLevel = static_cast<UNSIGNED32>(static_cast<std::uint8_t>(v[0]))        |
+                   (static_cast<UNSIGNED32>(static_cast<std::uint8_t>(v[1])) <<  8) |
+                   (static_cast<UNSIGNED32>(static_cast<std::uint8_t>(v[2])) << 16) |
+                   (static_cast<UNSIGNED32>(static_cast<std::uint8_t>(v[3])) << 24);
+        return ok();
+    }
     Connection* c = conn_from_handle(hConn);
     if (c == nullptr || !c->has_dd()) { *pulLevel = 4; return ok(); }
     auto tbl  = openads::abi::to_internal(pucTable, 0);
@@ -13538,6 +13644,19 @@ UNSIGNED32 ENTRYPOINT AdsDDGetIndexProperty(ADSHANDLE hConn, UNSIGNED8* pucTable
                                   UNSIGNED8* pucIndex, UNSIGNED16 usProp,
                                   void* pBuf, UNSIGNED16* pusLen) {
     if (pusLen == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    if (auto* rc = get_remote_connection(hConn)) {
+        auto tname = openads::abi::to_internal(pucTable, 0);
+        auto iname = openads::abi::to_internal(pucIndex, 0);
+        auto r = rc->dd_get_property(openads::network::DDObjectKind::Index,
+                                     tname, iname, usProp);
+        UNSIGNED16 cap = *pusLen;
+        if (pBuf != nullptr && cap > 0) std::memset(pBuf, 0, cap);
+        if (!r) { *pusLen = 0; return fail(r.error()); }
+        UNSIGNED16 n = static_cast<UNSIGNED16>(std::min<std::size_t>(r.value().size(), cap));
+        if (pBuf != nullptr && n > 0) std::memcpy(pBuf, r.value().data(), n);
+        *pusLen = static_cast<UNSIGNED16>(r.value().size());
+        return ok();
+    }
     Connection* c = conn_from_handle(hConn);
     UNSIGNED16 cap = *pusLen;
     if (pBuf != nullptr && cap > 0) std::memset(pBuf, 0, cap);
@@ -13878,6 +13997,12 @@ UNSIGNED32 ENTRYPOINT AdsDDCreateProcedure(ADSHANDLE hConn, UNSIGNED8* pucName,
 }
 
 UNSIGNED32 ENTRYPOINT AdsDDDropProcedure(ADSHANDLE hConn, UNSIGNED8* pucName) {
+    if (auto* rc = get_remote_connection(hConn)) {
+        auto r = rc->dd_drop_object(openads::network::DDObjectKind::Proc,
+            openads::abi::to_internal(pucName, 0));
+        if (!r) return fail(r.error());
+        return ok();
+    }
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto name = openads::abi::to_internal(pucName, 0);
@@ -14023,6 +14148,12 @@ UNSIGNED32 ENTRYPOINT AdsDDCreateFunction(ADSHANDLE hConn, UNSIGNED8* pucName,
 }
 
 UNSIGNED32 ENTRYPOINT AdsDDDropFunction(ADSHANDLE hConn, UNSIGNED8* pucName) {
+    if (auto* rc = get_remote_connection(hConn)) {
+        auto r = rc->dd_drop_object(openads::network::DDObjectKind::Function,
+            openads::abi::to_internal(pucName, 0));
+        if (!r) return fail(r.error());
+        return ok();
+    }
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto name = openads::abi::to_internal(pucName, 0);
@@ -14114,6 +14245,14 @@ UNSIGNED32 ENTRYPOINT AdsDDSetFunctionProperty(ADSHANDLE hConn, UNSIGNED8* pucNa
 
 UNSIGNED32 ENTRYPOINT AdsDDCreateView(ADSHANDLE hConn, UNSIGNED8* pucName,
                             UNSIGNED8* pucComments, UNSIGNED8* pucSQL) {
+    if (auto* rc = get_remote_connection(hConn)) {
+        auto r = rc->dd_create_view(
+            openads::abi::to_internal(pucName, 0),
+            pucComments ? openads::abi::to_internal(pucComments, 0) : "",
+            pucSQL ? openads::abi::to_internal(pucSQL, 0) : "");
+        if (!r) return fail(r.error());
+        return ok();
+    }
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     openads::engine::DataDict::ViewEntry e;
@@ -14183,6 +14322,14 @@ UNSIGNED32 ENTRYPOINT AdsDDGetPermissions(ADSHANDLE hConn,
                                 UNSIGNED32* pulPermissions) {
     if (pulPermissions == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
     *pulPermissions = 0;
+    if (auto* rc = get_remote_connection(hConn)) {
+        auto r = rc->dd_get_permissions(
+            openads::abi::to_internal(pucGrantee, 0), usObjectType,
+            openads::abi::to_internal(pucObjectName, 0), usGetInherited != 0);
+        if (!r) return fail(r.error());
+        *pulPermissions = r.value();
+        return ok();
+    }
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto grantee = openads::abi::to_internal(pucGrantee,     0);
@@ -14198,6 +14345,13 @@ UNSIGNED32 ENTRYPOINT AdsDDGrantPermission(ADSHANDLE  hConn,
                                  UNSIGNED8*  /*pucParentName*/,
                                  UNSIGNED8*  pucGrantee,
                                  UNSIGNED32  ulPermissions) {
+    if (auto* rc = get_remote_connection(hConn)) {
+        auto r = rc->dd_grant_permission(usObjectType,
+            openads::abi::to_internal(pucObjectName, 0),
+            openads::abi::to_internal(pucGrantee, 0), ulPermissions);
+        if (!r) return fail(r.error());
+        return ok();
+    }
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto objname = openads::abi::to_internal(pucObjectName, 0);

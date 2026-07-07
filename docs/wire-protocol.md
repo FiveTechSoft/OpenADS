@@ -242,6 +242,30 @@ milestones reused gaps left by earlier ones.
 | `DDDropViewAck`       | `0xBF` | S→C |                                 | M12.29 |
 | `DDDropLink`          | `0xC0` | C→S | `AdsDDDropLink`                 | M12.29 |
 | `DDDropLinkAck`       | `0xC1` | S→C |                                 | M12.29 |
+| `DDCreateUser`             | `0xC2` | C→S | `AdsDDCreateUser`               | M12.30 |
+| `DDCreateUserAck`          | `0xC3` | S→C |                                 | M12.30 |
+| `DDDropObject`             | `0xC4` | C→S | Generic drop-by-name (User/RefIntegrity/Proc/Function) | M12.30 |
+| `DDDropObjectAck`          | `0xC5` | S→C |                                 | M12.30 |
+| `DDAddUserToGroup`         | `0xC6` | C→S | `AdsDDAddUserToGroup`           | M12.30 |
+| `DDAddUserToGroupAck`      | `0xC7` | S→C |                                 | M12.30 |
+| `DDRemoveUserFromGroup`    | `0xC8` | C→S | `AdsDDRemoveUserFromGroup`      | M12.30 |
+| `DDRemoveUserFromGroupAck` | `0xC9` | S→C |                                 | M12.30 |
+| `DDCreateLink`             | `0xCA` | C→S | `AdsDDCreateLink`               | M12.30 |
+| `DDCreateLinkAck`          | `0xCB` | S→C |                                 | M12.30 |
+| `DDModifyLink`             | `0xCC` | C→S | `AdsDDModifyLink`               | M12.30 |
+| `DDModifyLinkAck`          | `0xCD` | S→C |                                 | M12.30 |
+| `DDCreateRefIntegrity`     | `0xCE` | C→S | `AdsDDCreateRefIntegrity`       | M12.30 |
+| `DDCreateRefIntegrityAck`  | `0xCF` | S→C |                                 | M12.30 |
+| `DDCreateView`             | `0xD0` | C→S | `AdsDDCreateView`               | M12.30 |
+| `DDCreateViewAck`          | `0xD1` | S→C |                                 | M12.30 |
+| `DDAddIndexFile`           | `0xD2` | C→S | `AdsDDAddIndexFile`             | M12.30 |
+| `DDAddIndexFileAck`        | `0xD3` | S→C |                                 | M12.30 |
+| `DDRemoveIndexFile`        | `0xD4` | C→S | `AdsDDRemoveIndexFile`          | M12.30 |
+| `DDRemoveIndexFileAck`     | `0xD5` | S→C |                                 | M12.30 |
+| `DDGetPermissions`         | `0xD6` | C→S | `AdsDDGetPermissions`           | M12.30 |
+| `DDGetPermissionsAck`      | `0xD7` | S→C | `[u32 permissions]`             | M12.30 |
+| `DDGrantPermission`        | `0xD8` | C→S | `AdsDDGrantPermission` (revoke = grant 0) | M12.30 |
+| `DDGrantPermissionAck`     | `0xD9` | S→C |                                 | M12.30 |
 | `Error`               | `0xFF` | S→C | Any failure (4-byte ACE-code prefix since M12.10) | M12.3 |
 
 ## 5. Payload formats
@@ -540,16 +564,78 @@ functions share the same `name[, subName], propertyId, value` shape:
   the matching local `AdsDDDrop*` function.
 - All create/drop acks: empty payload.
 
-**Deferred (not on the wire yet, still local-only / silently no-op
-remotely):** `CreateUser`/`DeleteUser`/`AddUserToGroup`/
-`RemoveUserFromGroup`, `CreateLink`/`ModifyLink`, `CreateRefIntegrity`/
-`RemoveRefIntegrity`, `CreateView`, `DropProcedure`/`DropFunction`,
-`AddIndexFile`/`RemoveIndexFile`, `GetIndexProperty`/`SetIndexProperty`,
-`GetUserTableRights`/`SetUserTableRights`, `GetPermissions`/
-`GrantPermission`/`RevokePermission`. DA-Web routes user/group/link/RI
-management through `ExecuteSQL` `EXECUTE PROCEDURE sp_*` calls today,
-which already work remotely — these are lower-traffic administrative
-calls, not a functional gap for existing clients.
+The remaining `AdsDD*` surface (`CreateUser`/`DeleteUser`/
+`AddUserToGroup`/`RemoveUserFromGroup`, `CreateLink`/`ModifyLink`,
+`CreateRefIntegrity`/`RemoveRefIntegrity`, `CreateView`,
+`DropProcedure`/`DropFunction`, `AddIndexFile`/`RemoveIndexFile`,
+`GetIndexProperty`, `GetUserTableRights`/`SetUserTableRights`,
+`GetPermissions`/`GrantPermission`/`RevokePermission`) is covered by
+phase 2 — see §5.25. `SetIndexProperty` is the one exception: it's a
+permanent local stub regardless of connection type (always returns
+`AE_FUNCTION_NOT_AVAILABLE`), so there's nothing to forward.
+
+### 5.25 Phase 2 — user/group/link/RI/view/index-file/permissions (M12.30)
+
+Same model as §5.24 (server dispatches to the existing local `AdsDD*`
+function via the session's ABI connection; failures use the generic
+`Error` frame). Two of the deferred functions turned out to already fit
+the `DDGetProperty`/`DDSetProperty` shape and reuse those phase-1
+opcodes via two new `DDObjectKind` values instead of getting their own:
+
+- **`DDObjectKind::Index = 10`** (`GetIndexProperty`): `name`=table,
+  `subName`=index. `SetIndexProperty` isn't wired (see above).
+- **`DDObjectKind::UserTableRights = 11`** (`GetUserTableRights`/
+  `SetUserTableRights`): `name`=table, `subName`=user, `propId`
+  unused, value = 4-byte LE access level. The underlying local
+  functions take/return a raw `UNSIGNED32` rather than a
+  property-id-keyed buffer, but the wire shape (name+subName+bytes)
+  is identical, so this reuses `DDGetProperty`/`DDSetProperty` instead
+  of adding two more opcodes.
+
+Everything else gets its own opcode, since the call shapes (number and
+order of string/numeric fields) don't collapse into a single generic
+shape the way plain property get/set does:
+
+- `DDCreateUser`: `[u16 groupLen][group][u16 userLen][user]
+  [u16 pwdLen][pwd][u16 descLen][desc]` → `AdsDDCreateUser`.
+- `DDDropObject`: `[u8 objKind][u16 nameLen][name]` — generic drop-by-
+  name, parallel to `DDGetProperty`'s kind tag. `objKind` must be
+  `User` (→ `AdsDDDeleteUser`), `RefIntegrity` (→
+  `AdsDDRemoveRefIntegrity`), `Proc` (→ `AdsDDDropProcedure`), or
+  `Function` (→ `AdsDDDropFunction`) — the four remaining plain
+  "drop by name" calls (`Trigger`/`View`/`Link` already have their own
+  phase-1 opcodes).
+- `DDAddUserToGroup` / `DDRemoveUserFromGroup`:
+  `[u16 groupLen][group][u16 userLen][user]` → the matching local
+  function.
+- `DDCreateLink` / `DDModifyLink`: `[u16 aliasLen][alias]
+  [u16 pathLen][path][u16 userLen][user][u16 pwdLen][pwd]` → the
+  matching local function (the ABI's trailing `opt` param is unused
+  locally too — not sent).
+- `DDCreateRefIntegrity`: `[u16 nameLen][name][u16 failLen][fail]
+  [u16 parentLen][parent][u16 parentTagLen][parentTag]
+  [u16 childLen][child][u16 childTagLen][childTag]
+  [u16 updateRule][u16 deleteRule]` → `AdsDDCreateRefIntegrity`.
+- `DDCreateView`: `[u16 nameLen][name][u16 commentsLen][comments]
+  [u32 sqlLen][sql]` (`u32`: view SQL can be long, unlike the short
+  identifier fields) → `AdsDDCreateView`.
+- `DDAddIndexFile`: `[u16 tableLen][table][u16 indexLen][index]
+  [u16 commentLen][comment]` → `AdsDDAddIndexFile`.
+- `DDRemoveIndexFile`: `[u16 tableLen][table][u16 indexLen][index]` →
+  `AdsDDRemoveIndexFile`.
+- `DDGetPermissions`: `[u16 granteeLen][grantee][u16 objType]
+  [u16 objNameLen][objName][u8 getInherited]` → `AdsDDGetPermissions`.
+  Reply `DDGetPermissionsAck`: `[u32 permissions]`.
+- `DDGrantPermission`: `[u16 objType][u16 objNameLen][objName]
+  [u16 granteeLen][grantee][u32 permissions]` → `AdsDDGrantPermission`.
+  `AdsDDRevokePermission` needs no opcode of its own — locally it's a
+  pure wrapper around `AdsDDGrantPermission(..., 0)`, so fixing Grant
+  fixes Revoke transitively (call `dd_grant_permission` with
+  `permissions=0`).
+- All create/add/drop/grant acks: empty payload.
+
+With phase 2, every `AdsDD*` function works identically over local and
+remote connections except the permanently-stubbed `SetIndexProperty`.
 
 ## 6. Versioning
 
@@ -595,17 +681,16 @@ connection: DD calls in the public ABI (`AdsDDCreate*`,
 object owned by the local `Connection`, which loaded it from the `.add`
 file at `Connect` time.
 
-Over a **remote** connection, as of M12.29 (§5.24), the ~19
-`Get/Set*Property` functions plus `CreateProcedure`/`CreateFunction`/
-`CreateTrigger`/`DropTrigger`/`DropView`/`DropLink` are dispatched
-through dedicated `DD*` wire opcodes to a real local `DataDict` the
-server holds open for the session. **Everything else in this section is
-still ABI-only** — calling it over a remote connection silently resolves
-no attached `DataDict` and returns empty/no-op (getters report
-`*pusLen = 0` with `AE_SUCCESS`; setters return `AE_SUCCESS` without
-writing anything) rather than an error. The tables below document the
-full ABI surface regardless of transport; §5.24 lists exactly which
-functions currently have wire support.
+Over a **remote** connection, as of M12.29/M12.30 (§5.24-§5.25), every
+function in this section is dispatched through a `DD*` wire opcode to a
+real local `DataDict` the server holds open for the session, **except**
+`AdsDDSetIndexProperty`, which is a permanent local stub regardless of
+connection type (always `AE_FUNCTION_NOT_AVAILABLE`) — there's nothing
+for the wire to forward. Before M12.29 the entire surface silently
+resolved no attached `DataDict` over remote and returned empty/no-op
+(getters reported `*pusLen = 0` with `AE_SUCCESS`; setters returned
+`AE_SUCCESS` without writing anything) rather than an error — if you're
+looking at an older build, check the git history for that behavior.
 
 ### 9.1 Dictionary lifecycle
 

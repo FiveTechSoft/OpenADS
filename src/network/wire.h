@@ -265,6 +265,80 @@ enum class Opcode : std::uint8_t {
     DDDropLink         = 0xC0,
     DDDropLinkAck      = 0xC1,
 
+    // M12.30 — AdsDD* Data Dictionary property API, phase 2. Covers the
+    // remaining CRUD calls deferred by phase 1 (M12.29, see wire-protocol.md
+    // §5.24/§5.25): user/group management, links, referential integrity
+    // create, views, index-file registration, and permissions. Two more of
+    // the deferred functions (GetIndexProperty, GetUserTableRights/
+    // SetUserTableRights) reuse the existing DDGetProperty/DDSetProperty
+    // opcodes via two new DDObjectKind values below — no new opcode needed
+    // for those. AdsDDRevokePermission is a pure local wrapper around
+    // AdsDDGrantPermission(..., 0) and needs no wire support of its own.
+    //
+    // Request DDCreateUser: [u16 groupLen][group][u16 userLen][user]
+    //   [u16 pwdLen][pwd][u16 descLen][desc]
+    // Reply DDCreateUserAck: (empty)
+    DDCreateUser        = 0xC2,
+    DDCreateUserAck     = 0xC3,
+    // Generic drop-by-name, parallel to DDGetProperty's DDObjectKind tag.
+    // Covers AdsDDDeleteUser(User), AdsDDRemoveRefIntegrity(RefIntegrity),
+    // AdsDDDropProcedure(Proc), AdsDDDropFunction(Function) — the four
+    // remaining plain "drop by name" calls (Trigger/View/Link already have
+    // their own phase-1 opcodes).
+    // Request DDDropObject: [u8 objKind][u16 nameLen][name]
+    // Reply DDDropObjectAck: (empty)
+    DDDropObject        = 0xC4,
+    DDDropObjectAck     = 0xC5,
+    // Request DDAddUserToGroup: [u16 groupLen][group][u16 userLen][user]
+    // Reply DDAddUserToGroupAck: (empty)
+    DDAddUserToGroup    = 0xC6,
+    DDAddUserToGroupAck = 0xC7,
+    // Request DDRemoveUserFromGroup: [u16 groupLen][group][u16 userLen][user]
+    // Reply DDRemoveUserFromGroupAck: (empty)
+    DDRemoveUserFromGroup    = 0xC8,
+    DDRemoveUserFromGroupAck = 0xC9,
+    // Request DDCreateLink: [u16 aliasLen][alias][u16 pathLen][path]
+    //   [u16 userLen][user][u16 pwdLen][pwd]
+    // Reply DDCreateLinkAck: (empty)
+    DDCreateLink        = 0xCA,
+    DDCreateLinkAck     = 0xCB,
+    // Request DDModifyLink: same payload as DDCreateLink.
+    // Reply DDModifyLinkAck: (empty)
+    DDModifyLink        = 0xCC,
+    DDModifyLinkAck     = 0xCD,
+    // Request DDCreateRefIntegrity: [u16 nameLen][name][u16 failLen][fail]
+    //   [u16 parentLen][parent][u16 parentTagLen][parentTag]
+    //   [u16 childLen][child][u16 childTagLen][childTag]
+    //   [u16 updateRule][u16 deleteRule]
+    // Reply DDCreateRefIntegrityAck: (empty)
+    DDCreateRefIntegrity    = 0xCE,
+    DDCreateRefIntegrityAck = 0xCF,
+    // Request DDCreateView: [u16 nameLen][name][u16 commentsLen][comments]
+    //   [u32 sqlLen][sql]  (u32: view SQL can be long, unlike short names)
+    // Reply DDCreateViewAck: (empty)
+    DDCreateView        = 0xD0,
+    DDCreateViewAck     = 0xD1,
+    // Request DDAddIndexFile: [u16 tableLen][table][u16 indexLen][index]
+    //   [u16 commentLen][comment]
+    // Reply DDAddIndexFileAck: (empty)
+    DDAddIndexFile      = 0xD2,
+    DDAddIndexFileAck   = 0xD3,
+    // Request DDRemoveIndexFile: [u16 tableLen][table][u16 indexLen][index]
+    // Reply DDRemoveIndexFileAck: (empty)
+    DDRemoveIndexFile      = 0xD4,
+    DDRemoveIndexFileAck   = 0xD5,
+    // Request DDGetPermissions: [u16 granteeLen][grantee][u16 objType]
+    //   [u16 objNameLen][objName][u8 getInherited]
+    // Reply DDGetPermissionsAck: [u32 permissions]
+    DDGetPermissions     = 0xD6,
+    DDGetPermissionsAck  = 0xD7,
+    // Request DDGrantPermission: [u16 objType][u16 objNameLen][objName]
+    //   [u16 granteeLen][grantee][u32 permissions]
+    // Reply DDGrantPermissionAck: (empty). Revoke = grant with permissions=0
+    // (matches AdsDDRevokePermission's local implementation).
+    DDGrantPermission     = 0xD8,
+    DDGrantPermissionAck  = 0xD9,
+
     Error              = 0xFF,
 };
 
@@ -274,16 +348,26 @@ enum class Opcode : std::uint8_t {
 // AdsDDGet*Property/AdsDDSet*Property function the server should call.
 // subName is only meaningful for Field (the field name within the table
 // named by `name`); every other kind sends an empty subName.
+//
+// M12.30 additions: Index (name=table, subName=index — GetIndexProperty
+// only; SetIndexProperty is a permanent local stub regardless of
+// connection type, so it isn't wired) and UserTableRights (name=table,
+// subName=user, propId unused, value = 4-byte LE access level — the
+// underlying local functions take/return a raw UNSIGNED32, not a
+// property-id-keyed buffer, but the wire shape is identical so it reuses
+// DDGetProperty/DDSetProperty instead of adding two more opcodes).
 enum class DDObjectKind : std::uint8_t {
-    Database     = 1,
-    User         = 2,
-    Table        = 3,
-    Field        = 4,
-    Trigger      = 5,
-    Proc         = 6,
-    Function     = 7,
-    View         = 8,
-    RefIntegrity = 9,
+    Database        = 1,
+    User            = 2,
+    Table           = 3,
+    Field           = 4,
+    Trigger         = 5,
+    Proc            = 6,
+    Function        = 7,
+    View            = 8,
+    RefIntegrity    = 9,
+    Index           = 10,
+    UserTableRights = 11,
 };
 
 // Request flags for FetchWhere (Opcode::FetchWhere = 0xA4).

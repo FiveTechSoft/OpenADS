@@ -1443,6 +1443,196 @@ util::Result<void> RemoteConnection::dd_drop_link(const std::string& name) {
     return {};
 }
 
+// =====================================================================
+// M12.30 — AdsDD* Data Dictionary property API, phase 2.
+// =====================================================================
+
+util::Result<void> RemoteConnection::dd_create_user(
+    const std::string& group, const std::string& user,
+    const std::string& pwd, const std::string& desc) {
+    Frame req; req.opcode = Opcode::DDCreateUser;
+    write_lstr16(group, req.payload);
+    write_lstr16(user, req.payload);
+    write_lstr16(pwd, req.payload);
+    write_lstr16(desc, req.payload);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::DDCreateUserAck) {
+        return util::Error{5000, 0, "DDCreateUser: server error", user};
+    }
+    return {};
+}
+
+util::Result<void> RemoteConnection::dd_drop_object(
+    DDObjectKind kind, const std::string& name) {
+    Frame req; req.opcode = Opcode::DDDropObject;
+    req.payload.push_back(static_cast<std::uint8_t>(kind));
+    write_lstr16(name, req.payload);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::DDDropObjectAck) {
+        return util::Error{5000, 0, "DDDropObject: server error", name};
+    }
+    return {};
+}
+
+util::Result<void> RemoteConnection::dd_add_user_to_group(
+    const std::string& group, const std::string& user) {
+    Frame req; req.opcode = Opcode::DDAddUserToGroup;
+    write_lstr16(group, req.payload);
+    write_lstr16(user, req.payload);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::DDAddUserToGroupAck) {
+        return util::Error{5000, 0, "DDAddUserToGroup: server error", user};
+    }
+    return {};
+}
+
+util::Result<void> RemoteConnection::dd_remove_user_from_group(
+    const std::string& group, const std::string& user) {
+    Frame req; req.opcode = Opcode::DDRemoveUserFromGroup;
+    write_lstr16(group, req.payload);
+    write_lstr16(user, req.payload);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::DDRemoveUserFromGroupAck) {
+        return util::Error{5000, 0, "DDRemoveUserFromGroup: server error", user};
+    }
+    return {};
+}
+
+util::Result<void> RemoteConnection::dd_create_link(
+    const std::string& alias, const std::string& path,
+    const std::string& user, const std::string& pwd) {
+    Frame req; req.opcode = Opcode::DDCreateLink;
+    write_lstr16(alias, req.payload);
+    write_lstr16(path, req.payload);
+    write_lstr16(user, req.payload);
+    write_lstr16(pwd, req.payload);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::DDCreateLinkAck) {
+        return util::Error{5000, 0, "DDCreateLink: server error", alias};
+    }
+    return {};
+}
+
+util::Result<void> RemoteConnection::dd_modify_link(
+    const std::string& alias, const std::string& path,
+    const std::string& user, const std::string& pwd) {
+    Frame req; req.opcode = Opcode::DDModifyLink;
+    write_lstr16(alias, req.payload);
+    write_lstr16(path, req.payload);
+    write_lstr16(user, req.payload);
+    write_lstr16(pwd, req.payload);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::DDModifyLinkAck) {
+        return util::Error{5000, 0, "DDModifyLink: server error", alias};
+    }
+    return {};
+}
+
+util::Result<void> RemoteConnection::dd_create_ref_integrity(
+    const std::string& name, const std::string& failTable,
+    const std::string& parent, const std::string& parentTag,
+    const std::string& child, const std::string& childTag,
+    std::uint16_t updateRule, std::uint16_t deleteRule) {
+    Frame req; req.opcode = Opcode::DDCreateRefIntegrity;
+    write_lstr16(name, req.payload);
+    write_lstr16(failTable, req.payload);
+    write_lstr16(parent, req.payload);
+    write_lstr16(parentTag, req.payload);
+    write_lstr16(child, req.payload);
+    write_lstr16(childTag, req.payload);
+    write_u16_le(updateRule, req.payload);
+    write_u16_le(deleteRule, req.payload);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::DDCreateRefIntegrityAck) {
+        return util::Error{5000, 0, "DDCreateRefIntegrity: server error", name};
+    }
+    return {};
+}
+
+util::Result<void> RemoteConnection::dd_create_view(
+    const std::string& name, const std::string& comments,
+    const std::string& sql) {
+    Frame req; req.opcode = Opcode::DDCreateView;
+    write_lstr16(name, req.payload);
+    write_lstr16(comments, req.payload);
+    write_u32_le(static_cast<std::uint32_t>(sql.size()), req.payload);
+    req.payload.insert(req.payload.end(), sql.begin(), sql.end());
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::DDCreateViewAck) {
+        return util::Error{5000, 0, "DDCreateView: server error", name};
+    }
+    return {};
+}
+
+util::Result<void> RemoteConnection::dd_add_index_file(
+    const std::string& table, const std::string& index,
+    const std::string& comment) {
+    Frame req; req.opcode = Opcode::DDAddIndexFile;
+    write_lstr16(table, req.payload);
+    write_lstr16(index, req.payload);
+    write_lstr16(comment, req.payload);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::DDAddIndexFileAck) {
+        return util::Error{5000, 0, "DDAddIndexFile: server error", table};
+    }
+    return {};
+}
+
+util::Result<void> RemoteConnection::dd_remove_index_file(
+    const std::string& table, const std::string& index) {
+    Frame req; req.opcode = Opcode::DDRemoveIndexFile;
+    write_lstr16(table, req.payload);
+    write_lstr16(index, req.payload);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::DDRemoveIndexFileAck) {
+        return util::Error{5000, 0, "DDRemoveIndexFile: server error", table};
+    }
+    return {};
+}
+
+util::Result<std::uint32_t> RemoteConnection::dd_get_permissions(
+    const std::string& grantee, std::uint16_t objType,
+    const std::string& objName, bool getInherited) {
+    Frame req; req.opcode = Opcode::DDGetPermissions;
+    write_lstr16(grantee, req.payload);
+    write_u16_le(objType, req.payload);
+    write_lstr16(objName, req.payload);
+    req.payload.push_back(getInherited ? 1 : 0);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::DDGetPermissionsAck ||
+        rep.value().payload.size() < 4) {
+        return util::Error{5000, 0, "DDGetPermissions: server error", objName};
+    }
+    return read_u32_le(rep.value().payload.data());
+}
+
+util::Result<void> RemoteConnection::dd_grant_permission(
+    std::uint16_t objType, const std::string& objName,
+    const std::string& grantee, std::uint32_t permissions) {
+    Frame req; req.opcode = Opcode::DDGrantPermission;
+    write_u16_le(objType, req.payload);
+    write_lstr16(objName, req.payload);
+    write_lstr16(grantee, req.payload);
+    write_u32_le(permissions, req.payload);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::DDGrantPermissionAck) {
+        return util::Error{5000, 0, "DDGrantPermission: server error", objName};
+    }
+    return {};
+}
+
 util::Result<void> RemoteConnection::set_order(std::uint32_t table_id,
                                                 std::uint32_t index_id) {
     Frame req; req.opcode = Opcode::SetOrder;

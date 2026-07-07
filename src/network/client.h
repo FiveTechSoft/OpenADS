@@ -174,6 +174,55 @@ public:
     util::Result<void>          dd_drop_trigger(const std::string& name);
     util::Result<void>          dd_drop_view(const std::string& name);
     util::Result<void>          dd_drop_link(const std::string& name);
+
+    // M12.30 — AdsDD* Data Dictionary property API, phase 2 (deferred
+    // user/group/link/RI/view/index-file/permissions calls). See
+    // docs/wire-protocol.md §5.25 and wire.h for the wire payload formats.
+    util::Result<void>          dd_create_user(const std::string& group,
+                                               const std::string& user,
+                                               const std::string& pwd,
+                                               const std::string& desc);
+    // `kind` must be User, RefIntegrity, Proc, or Function — the four
+    // plain "drop by name" calls not already covered by a phase-1 opcode.
+    util::Result<void>          dd_drop_object(DDObjectKind kind,
+                                               const std::string& name);
+    util::Result<void>          dd_add_user_to_group(const std::string& group,
+                                                      const std::string& user);
+    util::Result<void>          dd_remove_user_from_group(const std::string& group,
+                                                           const std::string& user);
+    util::Result<void>          dd_create_link(const std::string& alias,
+                                               const std::string& path,
+                                               const std::string& user,
+                                               const std::string& pwd);
+    util::Result<void>          dd_modify_link(const std::string& alias,
+                                               const std::string& path,
+                                               const std::string& user,
+                                               const std::string& pwd);
+    util::Result<void>          dd_create_ref_integrity(const std::string& name,
+                                                         const std::string& failTable,
+                                                         const std::string& parent,
+                                                         const std::string& parentTag,
+                                                         const std::string& child,
+                                                         const std::string& childTag,
+                                                         std::uint16_t updateRule,
+                                                         std::uint16_t deleteRule);
+    util::Result<void>          dd_create_view(const std::string& name,
+                                               const std::string& comments,
+                                               const std::string& sql);
+    util::Result<void>          dd_add_index_file(const std::string& table,
+                                                   const std::string& index,
+                                                   const std::string& comment);
+    util::Result<void>          dd_remove_index_file(const std::string& table,
+                                                      const std::string& index);
+    util::Result<std::uint32_t> dd_get_permissions(const std::string& grantee,
+                                                    std::uint16_t objType,
+                                                    const std::string& objName,
+                                                    bool getInherited);
+    util::Result<void>          dd_grant_permission(std::uint16_t objType,
+                                                     const std::string& objName,
+                                                     const std::string& grantee,
+                                                     std::uint32_t permissions);
+
     util::Result<void>          set_order(std::uint32_t table_id,
                                           std::uint32_t index_id);
     util::Result<void>          set_order_by_name(std::uint32_t table_id,

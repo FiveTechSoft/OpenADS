@@ -213,6 +213,7 @@ add_executable(openads_unit_tests
     unit/abi_dd_trigger_fire_test.cpp
     unit/abi_dd_proc_view_test.cpp
     unit/abi_dd_remote_test.cpp
+    unit/abi_dd_remote_phase2_test.cpp
     unit/abi_sql_system_tables_test.cpp
     unit/abi_sql_system_primarykeys_test.cpp
     unit/abi_sql_dd_sql_test.cpp

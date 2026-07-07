@@ -117,6 +117,31 @@ UNSIGNED32 dd_get_property_dispatch(ADSHANDLE hConn, DDObjectKind kind,
             return AdsDDGetViewProperty(hConn, nameBuf.data(), propId, pBuf, pusLen);
         case DDObjectKind::RefIntegrity:
             return AdsDDGetRefIntegrityProperty(hConn, nameBuf.data(), propId, pBuf, pusLen);
+        case DDObjectKind::Index:
+            return AdsDDGetIndexProperty(hConn, nameBuf.data(), subBuf.data(),
+                                         propId, pBuf, pusLen);
+        case DDObjectKind::UserTableRights: {
+            // Underlying local function returns a raw UNSIGNED32, not a
+            // property-id-keyed buffer — pack it into the same [value
+            // bytes] wire slot everything else uses (4-byte LE) so this
+            // reuses DDGetProperty instead of needing its own opcode.
+            UNSIGNED32 level = 0;
+            UNSIGNED32 rc = AdsDDGetUserTableRights(hConn, nameBuf.data(),
+                                                    subBuf.data(), &level);
+            if (rc != 0) return rc;
+            if (pusLen != nullptr) {
+                UNSIGNED16 cap = *pusLen;
+                if (pBuf != nullptr && cap >= 4) {
+                    auto* b = static_cast<std::uint8_t*>(pBuf);
+                    b[0] = static_cast<std::uint8_t>( level        & 0xFFu);
+                    b[1] = static_cast<std::uint8_t>((level >>  8) & 0xFFu);
+                    b[2] = static_cast<std::uint8_t>((level >> 16) & 0xFFu);
+                    b[3] = static_cast<std::uint8_t>((level >> 24) & 0xFFu);
+                }
+                *pusLen = 4;
+            }
+            return openads::AE_SUCCESS;
+        }
     }
     return openads::AE_FUNCTION_NOT_AVAILABLE;
 }
@@ -151,6 +176,21 @@ UNSIGNED32 dd_set_property_dispatch(ADSHANDLE hConn, DDObjectKind kind,
             return AdsDDSetViewProperty(hConn, nameBuf.data(), propId, pBuf, usLen);
         case DDObjectKind::RefIntegrity:
             return AdsDDSetRefIntegrityProperty(hConn, nameBuf.data(), propId, pBuf, usLen);
+        case DDObjectKind::Index:
+            // AdsDDSetIndexProperty is a permanent local stub regardless of
+            // connection type — nothing to forward.
+            return openads::AE_FUNCTION_NOT_AVAILABLE;
+        case DDObjectKind::UserTableRights: {
+            if (pBuf == nullptr || usLen < 4) {
+                return openads::AE_INTERNAL_ERROR;
+            }
+            auto* b = static_cast<const std::uint8_t*>(pBuf);
+            UNSIGNED32 level = static_cast<UNSIGNED32>(b[0]) |
+                              (static_cast<UNSIGNED32>(b[1]) <<  8) |
+                              (static_cast<UNSIGNED32>(b[2]) << 16) |
+                              (static_cast<UNSIGNED32>(b[3]) << 24);
+            return AdsDDSetUserTableRights(hConn, nameBuf.data(), subBuf.data(), level);
+        }
     }
     return openads::AE_FUNCTION_NOT_AVAILABLE;
 }
@@ -2776,6 +2816,242 @@ DispatchResult Session::dispatch(const Frame& f) {
             UNSIGNED32 rc = AdsDDDropLink(abi_conn_, nameBuf.data(), 0);
             if (rc != 0) { reply = err("DDDropLink", rc); break; }
             reply.opcode = Opcode::DDDropLinkAck;
+            break;
+        }
+        // M12.30 — AdsDD* Data Dictionary property API, phase 2. See
+        // docs/wire-protocol.md §5.25 / wire.h for the payload formats.
+        case Opcode::DDCreateUser: {
+            if (!ensure_abi_conn()) { reply = err("DDCreateUser: connect failed"); break; }
+            std::size_t off = 0;
+            std::string group, user, pwd, desc;
+            if (!read_lstr16(f.payload, off, group) ||
+                !read_lstr16(f.payload, off, user) ||
+                !read_lstr16(f.payload, off, pwd) ||
+                !read_lstr16(f.payload, off, desc)) {
+                reply = err("DDCreateUser: bad payload"); break;
+            }
+            auto groupBuf = to_cbuf(group), userBuf = to_cbuf(user),
+                 pwdBuf = to_cbuf(pwd), descBuf = to_cbuf(desc);
+            UNSIGNED32 rc = AdsDDCreateUser(abi_conn_, groupBuf.data(),
+                userBuf.data(), pwdBuf.data(), descBuf.data());
+            if (rc != 0) { reply = err("DDCreateUser", rc); break; }
+            reply.opcode = Opcode::DDCreateUserAck;
+            break;
+        }
+        case Opcode::DDDropObject: {
+            if (!ensure_abi_conn()) { reply = err("DDDropObject: connect failed"); break; }
+            if (f.payload.empty()) { reply = err("DDDropObject: bad payload"); break; }
+            auto kind = static_cast<DDObjectKind>(f.payload[0]);
+            std::size_t off = 1;
+            std::string name;
+            if (!read_lstr16(f.payload, off, name)) {
+                reply = err("DDDropObject: bad payload"); break;
+            }
+            auto nameBuf = to_cbuf(name);
+            UNSIGNED32 rc = openads::AE_FUNCTION_NOT_AVAILABLE;
+            switch (kind) {
+                case DDObjectKind::User:
+                    rc = AdsDDDeleteUser(abi_conn_, nameBuf.data()); break;
+                case DDObjectKind::RefIntegrity:
+                    rc = AdsDDRemoveRefIntegrity(abi_conn_, nameBuf.data()); break;
+                case DDObjectKind::Proc:
+                    rc = AdsDDDropProcedure(abi_conn_, nameBuf.data()); break;
+                case DDObjectKind::Function:
+                    rc = AdsDDDropFunction(abi_conn_, nameBuf.data()); break;
+                default: break;
+            }
+            if (rc != 0) { reply = err("DDDropObject", rc); break; }
+            reply.opcode = Opcode::DDDropObjectAck;
+            break;
+        }
+        case Opcode::DDAddUserToGroup: {
+            if (!ensure_abi_conn()) { reply = err("DDAddUserToGroup: connect failed"); break; }
+            std::size_t off = 0;
+            std::string group, user;
+            if (!read_lstr16(f.payload, off, group) ||
+                !read_lstr16(f.payload, off, user)) {
+                reply = err("DDAddUserToGroup: bad payload"); break;
+            }
+            auto groupBuf = to_cbuf(group), userBuf = to_cbuf(user);
+            UNSIGNED32 rc = AdsDDAddUserToGroup(abi_conn_, groupBuf.data(), userBuf.data());
+            if (rc != 0) { reply = err("DDAddUserToGroup", rc); break; }
+            reply.opcode = Opcode::DDAddUserToGroupAck;
+            break;
+        }
+        case Opcode::DDRemoveUserFromGroup: {
+            if (!ensure_abi_conn()) { reply = err("DDRemoveUserFromGroup: connect failed"); break; }
+            std::size_t off = 0;
+            std::string group, user;
+            if (!read_lstr16(f.payload, off, group) ||
+                !read_lstr16(f.payload, off, user)) {
+                reply = err("DDRemoveUserFromGroup: bad payload"); break;
+            }
+            auto groupBuf = to_cbuf(group), userBuf = to_cbuf(user);
+            UNSIGNED32 rc = AdsDDRemoveUserFromGroup(abi_conn_, groupBuf.data(), userBuf.data());
+            if (rc != 0) { reply = err("DDRemoveUserFromGroup", rc); break; }
+            reply.opcode = Opcode::DDRemoveUserFromGroupAck;
+            break;
+        }
+        case Opcode::DDCreateLink: {
+            if (!ensure_abi_conn()) { reply = err("DDCreateLink: connect failed"); break; }
+            std::size_t off = 0;
+            std::string alias, path, user, pwd;
+            if (!read_lstr16(f.payload, off, alias) ||
+                !read_lstr16(f.payload, off, path) ||
+                !read_lstr16(f.payload, off, user) ||
+                !read_lstr16(f.payload, off, pwd)) {
+                reply = err("DDCreateLink: bad payload"); break;
+            }
+            auto aliasBuf = to_cbuf(alias), pathBuf = to_cbuf(path),
+                 userBuf = to_cbuf(user), pwdBuf = to_cbuf(pwd);
+            UNSIGNED32 rc = AdsDDCreateLink(abi_conn_, aliasBuf.data(), pathBuf.data(),
+                                            userBuf.data(), pwdBuf.data(), 0);
+            if (rc != 0) { reply = err("DDCreateLink", rc); break; }
+            reply.opcode = Opcode::DDCreateLinkAck;
+            break;
+        }
+        case Opcode::DDModifyLink: {
+            if (!ensure_abi_conn()) { reply = err("DDModifyLink: connect failed"); break; }
+            std::size_t off = 0;
+            std::string alias, path, user, pwd;
+            if (!read_lstr16(f.payload, off, alias) ||
+                !read_lstr16(f.payload, off, path) ||
+                !read_lstr16(f.payload, off, user) ||
+                !read_lstr16(f.payload, off, pwd)) {
+                reply = err("DDModifyLink: bad payload"); break;
+            }
+            auto aliasBuf = to_cbuf(alias), pathBuf = to_cbuf(path),
+                 userBuf = to_cbuf(user), pwdBuf = to_cbuf(pwd);
+            UNSIGNED32 rc = AdsDDModifyLink(abi_conn_, aliasBuf.data(), pathBuf.data(),
+                                            userBuf.data(), pwdBuf.data(), 0);
+            if (rc != 0) { reply = err("DDModifyLink", rc); break; }
+            reply.opcode = Opcode::DDModifyLinkAck;
+            break;
+        }
+        case Opcode::DDCreateRefIntegrity: {
+            if (!ensure_abi_conn()) { reply = err("DDCreateRefIntegrity: connect failed"); break; }
+            std::size_t off = 0;
+            std::string name, failTbl, parent, parentTag, child, childTag;
+            if (!read_lstr16(f.payload, off, name) ||
+                !read_lstr16(f.payload, off, failTbl) ||
+                !read_lstr16(f.payload, off, parent) ||
+                !read_lstr16(f.payload, off, parentTag) ||
+                !read_lstr16(f.payload, off, child) ||
+                !read_lstr16(f.payload, off, childTag) ||
+                off + 4 > f.payload.size()) {
+                reply = err("DDCreateRefIntegrity: bad payload"); break;
+            }
+            UNSIGNED16 updateRule = read_u16_le(f.payload.data() + off); off += 2;
+            UNSIGNED16 deleteRule = read_u16_le(f.payload.data() + off); off += 2;
+            auto nameBuf = to_cbuf(name), failBuf = to_cbuf(failTbl),
+                 parentBuf = to_cbuf(parent), parentTagBuf = to_cbuf(parentTag),
+                 childBuf = to_cbuf(child), childTagBuf = to_cbuf(childTag);
+            UNSIGNED32 rc = AdsDDCreateRefIntegrity(abi_conn_, nameBuf.data(),
+                failBuf.data(), parentBuf.data(), parentTagBuf.data(),
+                childBuf.data(), childTagBuf.data(), updateRule, deleteRule);
+            if (rc != 0) { reply = err("DDCreateRefIntegrity", rc); break; }
+            reply.opcode = Opcode::DDCreateRefIntegrityAck;
+            break;
+        }
+        case Opcode::DDCreateView: {
+            if (!ensure_abi_conn()) { reply = err("DDCreateView: connect failed"); break; }
+            std::size_t off = 0;
+            std::string name, comments;
+            if (!read_lstr16(f.payload, off, name) ||
+                !read_lstr16(f.payload, off, comments) ||
+                off + 4 > f.payload.size()) {
+                reply = err("DDCreateView: bad payload"); break;
+            }
+            std::uint32_t sqlLen = read_u32_le(f.payload.data() + off);
+            off += 4;
+            if (off + sqlLen > f.payload.size()) {
+                reply = err("DDCreateView: bad payload"); break;
+            }
+            std::string sql(reinterpret_cast<const char*>(f.payload.data() + off), sqlLen);
+            off += sqlLen;
+            auto nameBuf = to_cbuf(name), commentsBuf = to_cbuf(comments),
+                 sqlBuf = to_cbuf(sql);
+            UNSIGNED32 rc = AdsDDCreateView(abi_conn_, nameBuf.data(),
+                commentsBuf.data(), sqlBuf.data());
+            if (rc != 0) { reply = err("DDCreateView", rc); break; }
+            reply.opcode = Opcode::DDCreateViewAck;
+            break;
+        }
+        case Opcode::DDAddIndexFile: {
+            if (!ensure_abi_conn()) { reply = err("DDAddIndexFile: connect failed"); break; }
+            std::size_t off = 0;
+            std::string table, index, comment;
+            if (!read_lstr16(f.payload, off, table) ||
+                !read_lstr16(f.payload, off, index) ||
+                !read_lstr16(f.payload, off, comment)) {
+                reply = err("DDAddIndexFile: bad payload"); break;
+            }
+            auto tableBuf = to_cbuf(table), indexBuf = to_cbuf(index),
+                 commentBuf = to_cbuf(comment);
+            UNSIGNED32 rc = AdsDDAddIndexFile(abi_conn_, tableBuf.data(),
+                indexBuf.data(), commentBuf.data());
+            if (rc != 0) { reply = err("DDAddIndexFile", rc); break; }
+            reply.opcode = Opcode::DDAddIndexFileAck;
+            break;
+        }
+        case Opcode::DDRemoveIndexFile: {
+            if (!ensure_abi_conn()) { reply = err("DDRemoveIndexFile: connect failed"); break; }
+            std::size_t off = 0;
+            std::string table, index;
+            if (!read_lstr16(f.payload, off, table) ||
+                !read_lstr16(f.payload, off, index)) {
+                reply = err("DDRemoveIndexFile: bad payload"); break;
+            }
+            auto tableBuf = to_cbuf(table), indexBuf = to_cbuf(index);
+            UNSIGNED32 rc = AdsDDRemoveIndexFile(abi_conn_, tableBuf.data(),
+                indexBuf.data(), 0);
+            if (rc != 0) { reply = err("DDRemoveIndexFile", rc); break; }
+            reply.opcode = Opcode::DDRemoveIndexFileAck;
+            break;
+        }
+        case Opcode::DDGetPermissions: {
+            if (!ensure_abi_conn()) { reply = err("DDGetPermissions: connect failed"); break; }
+            std::size_t off = 0;
+            std::string grantee;
+            if (!read_lstr16(f.payload, off, grantee) ||
+                off + 2 > f.payload.size()) {
+                reply = err("DDGetPermissions: bad payload"); break;
+            }
+            UNSIGNED16 objType = read_u16_le(f.payload.data() + off); off += 2;
+            std::string objName;
+            if (!read_lstr16(f.payload, off, objName) ||
+                off + 1 > f.payload.size()) {
+                reply = err("DDGetPermissions: bad payload"); break;
+            }
+            UNSIGNED16 getInherited = f.payload[off]; off += 1;
+            auto granteeBuf = to_cbuf(grantee), objNameBuf = to_cbuf(objName);
+            UNSIGNED32 permissions = 0;
+            UNSIGNED32 rc = AdsDDGetPermissions(abi_conn_, granteeBuf.data(),
+                objType, objNameBuf.data(), nullptr, getInherited, &permissions);
+            if (rc != 0) { reply = err("DDGetPermissions", rc); break; }
+            reply.opcode = Opcode::DDGetPermissionsAck;
+            write_u32_le(permissions, reply.payload);
+            break;
+        }
+        case Opcode::DDGrantPermission: {
+            if (!ensure_abi_conn()) { reply = err("DDGrantPermission: connect failed"); break; }
+            std::size_t off = 0;
+            if (off + 2 > f.payload.size()) {
+                reply = err("DDGrantPermission: bad payload"); break;
+            }
+            UNSIGNED16 objType = read_u16_le(f.payload.data() + off); off += 2;
+            std::string objName, grantee;
+            if (!read_lstr16(f.payload, off, objName) ||
+                !read_lstr16(f.payload, off, grantee) ||
+                off + 4 > f.payload.size()) {
+                reply = err("DDGrantPermission: bad payload"); break;
+            }
+            std::uint32_t permissions = read_u32_le(f.payload.data() + off);
+            auto objNameBuf = to_cbuf(objName), granteeBuf = to_cbuf(grantee);
+            UNSIGNED32 rc = AdsDDGrantPermission(abi_conn_, objType, objNameBuf.data(),
+                nullptr, granteeBuf.data(), permissions);
+            if (rc != 0) { reply = err("DDGrantPermission", rc); break; }
+            reply.opcode = Opcode::DDGrantPermissionAck;
             break;
         }
         default: {
