@@ -122,7 +122,7 @@
       case 'disconnect':   disconnectDD(el.dataset.dd);   break;
       case 'open-sql':     openSqlTab();                  break;
       case 'import-sap-dd': openImportSapDDModal();         break;
-      case 'server-info':  openServerInfoModal();          break;
+      case 'server-info':  openServerInfoTab();             break;
       case 'refresh-tree': refreshTree();                  break;
       case 'about':        openAboutModal();               break;
     }
@@ -2356,6 +2356,8 @@
           panel.innerHTML = `<div class="data-panel" id="dbprops-${tab.id}" style="display:flex;flex-direction:column;flex:1;overflow:hidden;overflow-y:auto;"><div class="alert alert-info" style="margin:8px;">Loading…</div></div>`;
         } else if (tab.type === 'health') {
           panel.innerHTML = `<div class="data-panel" id="health-${tab.id}" style="display:flex;flex-direction:column;flex:1;overflow:hidden;overflow-y:auto;"><div class="alert alert-info" style="margin:8px;">Loading...</div></div>`;
+        } else if (tab.type === 'srvinfo') {
+          panel.innerHTML = `<div class="data-panel" id="srvinfo-${tab.id}" style="display:flex;flex-direction:column;flex:1;overflow:hidden;overflow-y:auto;"><div class="alert alert-info" style="margin:8px;">Loading…</div></div>`;
         } else if (tab.type === 'table_props') {
           panel.innerHTML = `<div class="data-panel" id="table-props-${tab.id}" style="display:flex;flex-direction:column;flex:1;overflow:hidden;overflow-y:auto;"><div class="alert alert-info" style="margin:8px;">Loading…</div></div>`;
         } else if (tab.type === 'view') {
@@ -4681,61 +4683,218 @@
     }
   });
 
-  // ── Server Info modal ──────────────────────────────────────────────────────
-  async function loadServerInfo() {
-    const errEl   = document.getElementById('srvinfo-err');
-    const summary = document.getElementById('srvinfo-summary');
-    const usersEl = document.getElementById('srvinfo-users-body');
-    const tablesEl= document.getElementById('srvinfo-tables-body');
-    errEl.textContent = '';
-    summary.innerHTML = '<span style="color:#a6adc8;font-size:12px;">Loading…</span>';
-    usersEl.innerHTML  = '';
-    tablesEl.innerHTML = '';
+  // ── Server Info tab ───────────────────────────────────────────────────────
+  // Mirrors the wire protocol's Opcode enum (src/network/wire.h) — the
+  // "current operation" a connection's thread last processed. Unmapped
+  // values (rare DD-property opcodes, etc.) fall back to a hex number.
+  const OPCODE_LABELS = {
+    0x01: 'Hello', 0x02: 'Hello',
+    0x10: 'Connect', 0x11: 'Connect', 0x12: 'Disconnect',
+    0x20: 'OpenTable', 0x21: 'OpenTable', 0x22: 'CloseTable', 0x23: 'CloseTable',
+    0x30: 'ExecuteSQL', 0x31: 'ExecuteSQL', 0x32: 'Fetch', 0x33: 'Fetch',
+    0x40: 'GotoTop', 0x41: 'GotoTop', 0x42: 'Skip', 0x43: 'Skip',
+    0x44: 'GetField', 0x45: 'GetField', 0x46: 'GetRecordCount', 0x47: 'GetRecordCount',
+    0x48: 'AtEOF', 0x49: 'AtEOF', 0x4A: 'DescribeTable', 0x4B: 'DescribeTable',
+    0x4C: 'AtBOF', 0x4D: 'AtBOF', 0x4E: 'GetRecordNum', 0x4F: 'GetRecordNum',
+    0x50: 'AppendBlank', 0x51: 'AppendBlank', 0x52: 'SetField', 0x53: 'SetField',
+    0x54: 'DeleteRecord', 0x55: 'DeleteRecord', 0x56: 'RecallRecord', 0x57: 'RecallRecord',
+    0x58: 'GotoRecord', 0x59: 'GotoRecord', 0x5A: 'FlushTable', 0x5B: 'FlushTable',
+    0x60: 'Reindex', 0x61: 'Reindex',
+    0x62: 'IsRecordDeleted', 0x63: 'IsRecordDeleted', 0x64: 'GotoBottom', 0x65: 'GotoBottom',
+    0x66: 'IsFound', 0x67: 'IsFound', 0x68: 'RefreshRecord', 0x69: 'RefreshRecord',
+    0x6A: 'GetTableType', 0x6B: 'GetTableType', 0x6C: 'GetRecordLength', 0x6D: 'GetRecordLength',
+    0x6E: 'GetNumIndexes', 0x6F: 'GetNumIndexes', 0x70: 'GetLastAutoinc', 0x71: 'GetLastAutoinc',
+    0x72: 'LockRecord', 0x73: 'LockRecord', 0x74: 'UnlockRecord', 0x75: 'UnlockRecord',
+    0x76: 'LockTable', 0x77: 'LockTable', 0x78: 'UnlockTable', 0x79: 'UnlockTable',
+    0x7A: 'PackTable', 0x7B: 'PackTable', 0x7C: 'ZapTable', 0x7D: 'ZapTable',
+    0x7E: 'FlushFileBuffers', 0x7F: 'FlushFileBuffers',
+    0x80: 'CloseAllIndexes', 0x81: 'CloseAllIndexes', 0x82: 'SetAOF', 0x83: 'SetAOF',
+    0x84: 'ClearAOF', 0x85: 'ClearAOF', 0x86: 'GetAOFOptLevel', 0x87: 'GetAOFOptLevel',
+    0x88: 'OpenIndex', 0x89: 'OpenIndex', 0x8A: 'CloseIndex', 0x8B: 'CloseIndex',
+    0x8C: 'SetOrder', 0x8D: 'SetOrder', 0x8E: 'SetOrderByName', 0x8F: 'SetOrderByName',
+    0x90: 'Seek', 0x91: 'Seek', 0x92: 'SeekLast', 0x93: 'SeekLast',
+    0x94: 'CreateIndex', 0x95: 'CreateIndex', 0x96: 'SkipUnique', 0x97: 'SkipUnique',
+    0x98: 'SetScope', 0x99: 'SetScope', 0x9A: 'ClearScope', 0x9B: 'ClearScope',
+    0x9C: 'FetchCurrentRow', 0x9D: 'FetchCurrentRow',
+    0x9E: 'GetLastTableUpdate', 0x9F: 'GetLastTableUpdate',
+    0xA0: 'MgConnect', 0xA1: 'MgConnect', 0xA2: 'MgRequest (Server Info)', 0xA3: 'MgRequest (Server Info)',
+    0xA4: 'FetchWhere', 0xA5: 'FetchWhere', 0xA6: 'Aggregate', 0xA7: 'Aggregate',
+    0xA8: 'GetRecord', 0xA9: 'GetRecord', 0xAA: 'SetRecord', 0xAB: 'SetRecord',
+    0xAC: 'CustomizeAOF', 0xAD: 'CustomizeAOF', 0xAE: 'GetRecordCRC', 0xAF: 'GetRecordCRC',
+    0xB0: 'GetKeyCount', 0xB1: 'GetKeyCount',
+    0xB2: 'DD: GetProperty', 0xB3: 'DD: GetProperty', 0xB4: 'DD: SetProperty', 0xB5: 'DD: SetProperty',
+    0xB6: 'DD: CreateProc', 0xB7: 'DD: CreateProc', 0xB8: 'DD: CreateFunction', 0xB9: 'DD: CreateFunction',
+    0xBA: 'DD: CreateTrigger', 0xBB: 'DD: CreateTrigger', 0xBC: 'DD: DropTrigger', 0xBD: 'DD: DropTrigger',
+    0xBE: 'DD: DropView', 0xBF: 'DD: DropView', 0xC0: 'DD: DropLink', 0xC1: 'DD: DropLink',
+    0xC2: 'DD: CreateUser', 0xC3: 'DD: CreateUser', 0xC4: 'DD: DropObject', 0xC5: 'DD: DropObject',
+    0xC6: 'DD: AddUserToGroup', 0xC7: 'DD: AddUserToGroup',
+    0xC8: 'DD: RemoveUserFromGroup', 0xC9: 'DD: RemoveUserFromGroup',
+    0xCA: 'DD: CreateLink', 0xCB: 'DD: CreateLink', 0xCC: 'DD: ModifyLink', 0xCD: 'DD: ModifyLink',
+    0xCE: 'DD: CreateRefIntegrity', 0xCF: 'DD: CreateRefIntegrity',
+    0xD0: 'DD: CreateView', 0xD1: 'DD: CreateView',
+    0xD2: 'DD: AddIndexFile', 0xD3: 'DD: AddIndexFile',
+    0xD4: 'DD: RemoveIndexFile', 0xD5: 'DD: RemoveIndexFile',
+    0xD6: 'DD: GetPermissions', 0xD7: 'DD: GetPermissions',
+    0xD8: 'DD: GrantPermission', 0xD9: 'DD: GrantPermission',
+    0xFF: 'Error',
+  };
+  function opcodeLabel(op) {
+    if (op === 0 || op === null || op === undefined) return 'idle';
+    return OPCODE_LABELS[op] || `0x${Number(op).toString(16).toUpperCase().padStart(2, '0')}`;
+  }
 
+  function openServerInfoTab() {
     const dd = state.selectedDD || [...state.openConnections][0] || '';
-    if (!dd) { errEl.textContent = 'No active connection.'; summary.innerHTML = ''; return; }
+    if (!dd) { setStatus('No active connection'); return; }
+    const existing = state.tabs.find(t => t.type === 'srvinfo' && t.dd === dd);
+    if (existing) { activateTab(existing.id); loadServerInfo(existing.id, dd); return; }
+    const id = 'tab-' + (state.nextTabId++);
+    state.tabs.push({ id, title: `Server Info: ${dd}`, type: 'srvinfo', dd });
+    renderTabs();
+    activateTab(id);
+    loadServerInfo(id, dd);
+  }
 
+  async function killServerUser(dd, tabId, row) {
+    const label = row.name || row.authUser || `conn #${row.connNo}`;
+    if (!confirm(`Disconnect user "${label}" (conn #${row.connNo})?`)) return;
     try {
-      const data = await apiFetch(`api/server_info.php?dd=${encodeURIComponent(dd)}`);
-
-      const a = data.activity;
-      const counters = [
-        { label: 'Users',    value: a.users.inUse },
-        { label: 'Conns',    value: a.connections.inUse },
-        { label: 'Tables',   value: a.tables.inUse },
-        { label: 'Indexes',  value: a.indexes.inUse },
-        { label: 'Locks',    value: a.locks.inUse },
-      ];
-      summary.innerHTML = counters.map(c => `
-        <div style="background:#313244;border-radius:6px;padding:8px;text-align:center;">
-          <div style="font-size:22px;font-weight:700;color:#cba6f7;">${c.value}</div>
-          <div style="font-size:11px;color:#a6adc8;">${c.label}</div>
-        </div>`).join('');
-
-      const row = (cells) => '<tr>' + cells.map(v =>
-        `<td style="padding:3px 6px;border-bottom:1px solid #313244;">${escHtml(String(v ?? ''))}</td>`
-      ).join('') + '</tr>';
-
-      usersEl.innerHTML = data.users.length
-        ? data.users.map(u => row([u.name, u.authUser, u.address, u.connNo])).join('')
-        : '<tr><td colspan="4" style="padding:6px;color:#585b70;text-align:center;">No connected users</td></tr>';
-
-      tablesEl.innerHTML = data.tables.length
-        ? data.tables.map(t => row([t.name, t.user, t.connNo])).join('')
-        : '<tr><td colspan="3" style="padding:6px;color:#585b70;text-align:center;">No open tables</td></tr>';
-
+      const r = await apiFetch('api/server_info.php', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'kill', dd, connNo: row.connNo, user: row.name }),
+      });
+      if (r.error) { setStatus(`Disconnect failed: ${r.error}`); return; }
+      setStatus(r.note || `Disconnected ${label}`);
+      loadServerInfo(tabId, dd);
     } catch (err) {
-      errEl.textContent = err.message;
-      summary.innerHTML = '';
+      setStatus(`Disconnect failed: ${err.message}`);
     }
   }
 
-  function openServerInfoModal() {
-    document.getElementById('modal-server-info').classList.add('open');
-    loadServerInfo();
-  }
+  function loadServerInfo(tabId, dd) {
+    const container = document.getElementById('srvinfo-' + tabId);
+    if (!container) return;
+    container.innerHTML = `<div class="alert alert-info" style="margin:8px;">Loading…</div>`;
 
-  document.getElementById('srvinfo-refresh').addEventListener('click', loadServerInfo);
+    Promise.all([
+      apiFetch(`api/server_info.php?dd=${encodeURIComponent(dd)}`),
+      apiFetch(`api/db_props.php?dd=${encodeURIComponent(dd)}`).catch(() => null),
+    ])
+      .then(([resp, props]) => {
+        if (resp.error) {
+          container.innerHTML = `<div class="alert alert-error" style="margin:8px;">${escHtml(resp.error)}</div>`;
+          return;
+        }
+        const a = resp.activity;
+        const countBox = (label, value) =>
+          `<div class="health-count"><span>${escHtml(label)}</span><strong>${Number(value || 0)}</strong></div>`;
+        const isLocal = resp.connType !== 'remote';
+        const loginsDisabled = !!(props && !props.error && props.loginsDisabled);
+        container.innerHTML = `
+          <div class="health-panel">
+            <div class="health-toolbar">
+              <button class="btn btn-sm" id="srvinfo-refresh-${tabId}">Refresh</button>
+              <span>${escHtml(dd)}</span>
+              <span class="health-note" style="color:#a6adc8;">Up ${a.upTime.days}d ${a.upTime.hours}h ${a.upTime.minutes}m ${a.upTime.seconds}s</span>
+              ${isLocal ? '<span class="health-note">local connection — Disconnect is a no-op</span>' : ''}
+              ${loginsDisabled ? '<span class="health-note" style="color:#f38ba8;">Logins disabled</span>' : ''}
+              <span class="health-note" id="srvinfo-filter-note-${tabId}" style="display:none;color:#89b4fa;"></span>
+            </div>
+            <div class="health-summary" style="grid-template-columns:repeat(6,minmax(100px,1fr));">
+              ${countBox('Users', a.users.inUse)}
+              ${countBox('Connections', a.connections.inUse)}
+              ${countBox('Tables', a.tables.inUse)}
+              ${countBox('Indexes', a.indexes.inUse)}
+              ${countBox('Data Locks', a.locks.inUse)}
+              ${countBox('Worker Threads', a.workerThreads.inUse)}
+            </div>
+            <div>
+              <div class="srvinfo-section-title">Connected Users <span style="text-transform:none;font-weight:400;">(click a row to filter tables/queries below)</span></div>
+              <div id="srvinfo-users-grid-${tabId}" class="health-grid" style="min-height:160px;"></div>
+            </div>
+            <div>
+              <div class="srvinfo-section-title">Open Tables</div>
+              <div id="srvinfo-tables-grid-${tabId}" class="health-grid" style="min-height:160px;"></div>
+            </div>
+            <div>
+              <div class="srvinfo-section-title">Active Queries</div>
+              <div id="srvinfo-queries-grid-${tabId}" class="health-grid" style="min-height:160px;"></div>
+            </div>
+          </div>`;
+
+        document.getElementById('srvinfo-refresh-' + tabId)?.addEventListener('click', () => loadServerInfo(tabId, dd));
+
+        /* global Tabulator */
+        let filterConnNo = null;
+        const filterNote = document.getElementById('srvinfo-filter-note-' + tabId);
+
+        const applyFilter = () => {
+          if (filterConnNo === null) {
+            tablesGrid.clearFilter();
+            queriesGrid.clearFilter();
+            if (filterNote) filterNote.style.display = 'none';
+          } else {
+            tablesGrid.setFilter('connNo', '=', filterConnNo);
+            queriesGrid.setFilter('connNo', '=', filterConnNo);
+            if (filterNote) {
+              filterNote.style.display = '';
+              filterNote.textContent = `Filtered to conn #${filterConnNo} — click the row again to clear`;
+            }
+          }
+        };
+
+        const usersGrid = new Tabulator('#srvinfo-users-grid-' + tabId, {
+          data: resp.users,
+          layout: 'fitColumns',
+          placeholder: 'No connected users',
+          columns: [
+            { title: 'User',    field: 'name',     widthGrow: 1 },
+            { title: 'Auth',    field: 'authUser', widthGrow: 1 },
+            { title: 'Address', field: 'address',  widthGrow: 1 },
+            { title: 'Conn#',   field: 'connNo',   width: 70, hozAlign: 'right' },
+            { title: '', width: 110, hozAlign: 'center', headerSort: false,
+              formatter: () => `<button class="btn btn-sm btn-danger">Disconnect</button>`,
+              cellClick: (e, cell) => { e.stopPropagation(); killServerUser(dd, tabId, cell.getRow().getData()); } },
+          ],
+        });
+        // Tabulator 6's Interaction module only fires row-click callbacks
+        // registered via .on() — a constructor-level `rowClick` option is
+        // silently ignored in this build.
+        usersGrid.on('rowClick', (e, row) => {
+          const connNo = row.getData().connNo;
+          filterConnNo = (filterConnNo === connNo) ? null : connNo;
+          applyFilter();
+        });
+
+        const tablesGrid = new Tabulator('#srvinfo-tables-grid-' + tabId, {
+          data: resp.tables,
+          layout: 'fitColumns',
+          placeholder: 'No open tables',
+          columns: [
+            { title: 'Table', field: 'name',   widthGrow: 2 },
+            { title: 'User',  field: 'user',   widthGrow: 1 },
+            { title: 'Conn#', field: 'connNo', width: 70, hozAlign: 'right' },
+          ],
+        });
+
+        const queriesGrid = new Tabulator('#srvinfo-queries-grid-' + tabId, {
+          data: resp.queries,
+          layout: 'fitColumns',
+          placeholder: 'No active queries',
+          columns: [
+            { title: 'Thread#',  field: 'threadNo', width: 80, hozAlign: 'right' },
+            { title: 'Operation', field: 'opcode',  width: 130,
+              formatter: cell => escHtml(opcodeLabel(cell.getValue())) },
+            { title: 'User',     field: 'user',     widthGrow: 1 },
+            { title: 'Conn#',    field: 'connNo',   width: 70, hozAlign: 'right' },
+            { title: 'OS Login', field: 'osLogin',  widthGrow: 1 },
+          ],
+        });
+      })
+      .catch(err => {
+        container.innerHTML = `<div class="alert alert-error" style="margin:8px;">${escHtml(err.message)}</div>`;
+      });
+  }
 
   // ── Boot ───────────────────────────────────────────────────────────────────
   document.addEventListener('DOMContentLoaded', async () => {

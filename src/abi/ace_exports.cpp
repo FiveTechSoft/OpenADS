@@ -7765,6 +7765,11 @@ UNSIGNED32 ENTRYPOINT AdsCloseTable(ADSHANDLE hTable) {
         t->ri_snapshot().clear();
         connect101_option_tables().erase(hTable);
         if (owning) owning->close_table_ptr(t);
+        // Safety net: a client that disconnects without an explicit
+        // unlock would otherwise leak its entry in the global lock
+        // registry forever (or until another Table happens to reuse
+        // this same heap address).
+        openads::mgmt::LockRegistry::instance().remove_all_for_table(t);
     }
     cursor_projections().erase(hTable);
     s.registry.release(hTable);
@@ -10532,7 +10537,9 @@ UNSIGNED32 ENTRYPOINT AdsLockRecord(ADSHANDLE hTable, UNSIGNED32 ulRecord) {
     // the file/table lock byte (FILE_BASE) when recno would be 0.
     std::uint32_t rec = (ulRecord == 0) ? t->recno() : ulRecord;
     return lock_with_retry([t, rec]() {
-        return t->try_lock_record_excl(rec);
+        auto r = t->try_lock_record_excl(rec);
+        if (r) openads::mgmt::LockRegistry::instance().add_record_lock(t, rec);
+        return r;
     });
 }
 
@@ -10601,6 +10608,7 @@ UNSIGNED32 ENTRYPOINT AdsUnlockRecord(ADSHANDLE hTable, UNSIGNED32 ulRecord) {
     std::uint32_t rec = (ulRecord == 0) ? t->recno() : ulRecord;
     auto r = t->unlock_record(rec);
     if (!r) return fail(r.error());
+    openads::mgmt::LockRegistry::instance().remove_record_lock(t, rec);
     return ok();
 }
 
@@ -10666,7 +10674,11 @@ UNSIGNED32 ENTRYPOINT AdsLockTable(ADSHANDLE hTable) {
 #endif
     Table* t = get_table(hTable);
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
-    return lock_with_retry([t]() { return t->try_lock_table_excl(); });
+    return lock_with_retry([t]() {
+        auto r = t->try_lock_table_excl();
+        if (r) openads::mgmt::LockRegistry::instance().add_table_lock(t);
+        return r;
+    });
 }
 
 UNSIGNED32 ENTRYPOINT AdsUnlockTable(ADSHANDLE hTable) {
@@ -10733,6 +10745,7 @@ UNSIGNED32 ENTRYPOINT AdsUnlockTable(ADSHANDLE hTable) {
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
     auto r = t->unlock_table();
     if (!r) return fail(r.error());
+    openads::mgmt::LockRegistry::instance().remove_table_lock(t);
     return ok();
 }
 
@@ -26120,21 +26133,30 @@ fetch_mg_snapshot(const MgBackend& be) {
     if (!be.remote) {
         // Local mode: report this process by enumerating the ABI
         // handle registry for real open-connection / open-table
-        // counts. The per-table list stays empty in local mode —
-        // counts are what the management surface needs; resolving
-        // each handle to a table name would require engine::Table
-        // introspection that is out of scope here.
+        // counts, resolving each Table handle to its real path so the
+        // "Open Tables" management surface isn't always empty locally.
         openads::mgmt::MgSnapshot snap;
         snap.server_type = 0;   // 0 = local
         std::uint32_t conns = 0, tbls = 0;
         state().registry.for_each_handle(
-            [&](Handle, HandleKind k, void*) {
+            [&](Handle, HandleKind k, void* p) {
                 if (k == HandleKind::Connection ||
-                    k == HandleKind::RemoteConnection)
+                    k == HandleKind::RemoteConnection) {
                     ++conns;
-                else if (k == HandleKind::Table ||
-                         k == HandleKind::RemoteTable)
+                } else if (k == HandleKind::Table ||
+                           k == HandleKind::RemoteTable) {
                     ++tbls;
+                    if (k == HandleKind::Table) {
+                        auto* tp = static_cast<Table*>(p);
+                        if (tp != nullptr) {
+                            openads::mgmt::MgTable t;
+                            t.name    = tp->path();
+                            t.user    = "(local)";
+                            t.conn_no = 1;
+                            snap.table_list.push_back(std::move(t));
+                        }
+                    }
+                }
             });
         snap.connections = conns;
         snap.tables      = tbls;
@@ -26146,6 +26168,18 @@ fetch_mg_snapshot(const MgBackend& be) {
         u.conn_no = 1;
         snap.user_list.push_back(u);
         snap.rss_bytes = openads::platform::process_rss_bytes();
+
+        // Real currently-held record/table locks. The thread-local
+        // LockOwner is only ever set by network sessions (session.cpp),
+        // so local-mode entries default it to "(local)"/1, matching
+        // every other local-mode mgmt entry above.
+        snap.locks     = openads::mgmt::LockRegistry::instance().count();
+        snap.lock_list = openads::mgmt::LockRegistry::instance().snapshot();
+        for (auto& l : snap.lock_list) {
+            if (l.user.empty()) l.user = "(local)";
+            if (l.conn_no == 0)  l.conn_no = 1;
+        }
+
         openads::mgmt::capture_mg_stats(
             snap, openads::mgmt::process_mg_stats());
         return snap;

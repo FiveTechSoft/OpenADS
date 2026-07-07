@@ -413,6 +413,14 @@ html, body {
 .health-sev.info { background: #89b4fa; }
 .health-sev.ok { background: #a6e3a1; }
 
+.srvinfo-section-title {
+  font-size: 11px;
+  color: #a6adc8;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  margin-bottom: 4px;
+}
+
 .import-history {
   margin-top: 12px;
   border-top: 1px solid #313244;

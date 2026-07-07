@@ -97,9 +97,17 @@ try {
         if ($wantLogin) {
             $currentLoginReq = readU16($dict, 5) !== 0;
             if (!$currentLoginReq) {
+                // A SQL query() on the same connection/handle that has
+                // already been used for an AdsDictionary property read
+                // (e.g. the readU16($dict, 5) just above) fails remote
+                // connections with "ExecuteSQL: server-side exec failed" —
+                // a real engine/binding bug, isolated 2026-07-07. Use a
+                // dedicated connection for this query so the guard doesn't
+                // depend on tracking down that interaction first.
                 $hasPassword = false;
                 try {
-                    $stmt = $conn->query("SELECT user_name FROM system.users");
+                    $userCheckConn = AdsConnection::connect($opts);
+                    $stmt = $userCheckConn->query("SELECT user_name FROM system.users");
                     $rows = $stmt->fetchAll();
                     $stmt->close();
                     foreach ($rows as $row) {
@@ -110,6 +118,7 @@ try {
                             if ($pwd !== '') { $hasPassword = true; break; }
                         } catch (Throwable) {}
                     }
+                    $userCheckConn->close();
                 } catch (Throwable) {}
 
                 if (!$hasPassword) {

@@ -126,6 +126,7 @@ DA-Web/config/dictionaries.json
 /todo.local.md
 /ACE64_API_COMPAT_REPORT.local.md
 /chm_extract.local/
+/chm_extract/
 
 # SAP proprietary documentation — local reference only, never committed
 /advantage.chm

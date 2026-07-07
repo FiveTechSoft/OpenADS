@@ -94,8 +94,26 @@ public:
         std::uint64_t                                       frames_in   = 0;
         std::uint64_t                                       frames_out  = 0;
         std::uint32_t                                       open_tables = 0;
+        // Real table names behind the `open_tables` count, for the
+        // management "Open Tables" surface (AdsMgGetOpenTables). Only
+        // OpenTable/CloseTable opcodes populate this — SQL result cursors
+        // (ExecuteSQL) aren't tracked here, matching real ADS semantics
+        // (open tables, not query result sets).
+        std::vector<std::string>                            open_table_names;
+        // Last wire Opcode this session's thread processed — the closest
+        // available proxy for "current operation" (AdsMgGetWorkerThreadActivity)
+        // since sessions run one dedicated thread per connection.
+        std::uint16_t                                       current_opcode = 0;
     };
     std::vector<SessionInfo> sessions_snapshot() const;
+
+    // 1-based position of this session in sessions_snapshot() order — the
+    // same volatile position-based numbering used for MgUser::conn_no and
+    // kill_session_by_conn_no. Returns 0 if the session is gone. May shift
+    // as other sessions connect/disconnect between calls; only meant for
+    // attributing a lock to "whichever conn_no this session currently
+    // reports as" at the moment the lock is taken.
+    std::uint16_t conn_no_for_session(std::uint64_t id) const;
 
     // M9.25 — build a management telemetry snapshot from the live
     // session registry. Used by the MgRequest opcode handler.
@@ -155,11 +173,13 @@ public:
     void          unregister_session(std::uint64_t id);
     void          touch_session(std::uint64_t id, bool inbound,
                                  bool outbound);
+    void          set_session_opcode(std::uint64_t id, std::uint16_t opcode);
     void          set_session_user(std::uint64_t id,
                                     const std::string& user,
                                     const std::string& data_dir);
     void          add_session_table(std::uint64_t id,
-                                     std::int32_t delta);
+                                     std::int32_t delta,
+                                     const std::string& table_name = std::string());
 
     // studio.web.0.11 — drop a single session by id (closes its
     // socket; the session_loop's next read_frame returns and the

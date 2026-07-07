@@ -14,6 +14,7 @@
 #include "session/connection.h"
 #include "sql_backend/enterprise_config.h"
 
+#include <algorithm>
 #include <cstring>
 #include <filesystem>
 #include <memory>
@@ -143,6 +144,14 @@ std::vector<Server::SessionInfo> Server::sessions_snapshot() const {
     return out;
 }
 
+std::uint16_t Server::conn_no_for_session(std::uint64_t id) const {
+    auto sessions = sessions_snapshot();
+    for (std::size_t i = 0; i < sessions.size(); ++i) {
+        if (sessions[i].id == id) return static_cast<std::uint16_t>(i + 1);
+    }
+    return 0;
+}
+
 mgmt::MgSnapshot Server::build_mg_snapshot() const {
     mgmt::MgSnapshot snap;
     auto sessions = sessions_snapshot();
@@ -166,6 +175,28 @@ mgmt::MgSnapshot Server::build_mg_snapshot() const {
         u.os_login     = u.name;
         u.conn_no      = static_cast<std::uint16_t>(conn_no);
         u.connected_at = s.connected_at;
+
+        for (const auto& tname : s.open_table_names) {
+            mgmt::MgTable t;
+            t.name    = tname;
+            t.user    = u.name;
+            t.conn_no = u.conn_no;
+            snap.table_list.push_back(std::move(t));
+        }
+
+        // One "thread" entry per session — sessions run one dedicated
+        // thread per connection here, so the session's last-processed
+        // wire opcode is the closest real proxy for "current operation".
+        {
+            mgmt::MgThread th;
+            th.thread_no = static_cast<std::uint32_t>(s.id);
+            th.opcode    = s.current_opcode;
+            th.user      = u.name;
+            th.conn_no   = u.conn_no;
+            th.os_login  = u.name;
+            snap.thread_list.push_back(std::move(th));
+        }
+
         snap.user_list.push_back(std::move(u));
 
         snap.tables    += s.open_tables;
@@ -173,6 +204,13 @@ mgmt::MgSnapshot Server::build_mg_snapshot() const {
         ++conn_no;
     }
     snap.users = static_cast<std::uint32_t>(snap.user_list.size());
+
+    // Real currently-held record/table locks, attributed via the
+    // thread-local LockOwner each session sets right before its own
+    // LockRecord/LockTable opcode calls (see session.cpp).
+    snap.locks     = mgmt::LockRegistry::instance().count();
+    snap.lock_list = mgmt::LockRegistry::instance().snapshot();
+
     // Fold in this server's cumulative MgStats (uptime, comm totals,
     // high-water marks) so it travels the wire with the live counts.
     mgmt::capture_mg_stats(snap, mgmt::process_mg_stats());
@@ -210,6 +248,13 @@ void Server::touch_session(std::uint64_t id, bool inbound, bool outbound) {
     if (outbound) ++it->second.frames_out;
 }
 
+void Server::set_session_opcode(std::uint64_t id, std::uint16_t opcode) {
+    std::lock_guard<std::mutex> lk(info_mu_);
+    auto it = sessions_info_.find(id);
+    if (it == sessions_info_.end()) return;
+    it->second.current_opcode = opcode;
+}
+
 void Server::set_session_user(std::uint64_t id,
                                const std::string& user,
                                const std::string& data_dir) {
@@ -220,7 +265,8 @@ void Server::set_session_user(std::uint64_t id,
     it->second.data_dir = data_dir;
 }
 
-void Server::add_session_table(std::uint64_t id, std::int32_t delta) {
+void Server::add_session_table(std::uint64_t id, std::int32_t delta,
+                                const std::string& table_name) {
     std::lock_guard<std::mutex> lk(info_mu_);
     auto it = sessions_info_.find(id);
     if (it == sessions_info_.end()) return;
@@ -228,8 +274,16 @@ void Server::add_session_table(std::uint64_t id, std::int32_t delta) {
     if (delta < 0) {
         std::uint32_t d = static_cast<std::uint32_t>(-delta);
         n = (n > d) ? n - d : 0;
+        if (!table_name.empty()) {
+            auto& names = it->second.open_table_names;
+            auto nit = std::find(names.begin(), names.end(), table_name);
+            if (nit != names.end()) names.erase(nit);
+        }
     } else {
         n += static_cast<std::uint32_t>(delta);
+        if (!table_name.empty()) {
+            it->second.open_table_names.push_back(table_name);
+        }
     }
 }
 

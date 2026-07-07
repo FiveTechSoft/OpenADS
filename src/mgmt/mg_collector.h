@@ -4,6 +4,10 @@
 #include "mgmt/mg_stats.h"
 #include "openads/ace.h"
 
+#include <cstdint>
+#include <mutex>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace openads::mgmt {
@@ -46,6 +50,65 @@ public:
 
 private:
     MgSnapshot snapshot_;
+};
+
+// One session's identity, for attributing locks taken on its thread.
+struct LockOwner {
+    std::string   user;
+    std::uint16_t conn_no = 0;
+};
+
+// Thread-local "who is running on this thread right now". Deep engine
+// lock calls (LockMgr/Table) only see a raw Table*, not a user or
+// connection — each network session sets this once, right after
+// Connect, on its own dedicated thread, so AdsLockRecord/AdsLockTable's
+// local branch (which also runs server-side for remote sessions — see
+// the session.cpp opcode handlers that call it) can attribute a lock
+// without threading a parameter through every call site. True local-mode
+// (embedded DLL) callers never set this; lock attribution there falls
+// back to the default LockOwner{}, resolved to "(local)"/1 by the caller,
+// matching the rest of local-mode mgmt (see fetch_mg_snapshot in
+// ace_exports.cpp).
+void       set_current_lock_owner(const std::string& user, std::uint16_t conn_no);
+LockOwner  current_lock_owner();
+
+// Process-global registry of currently-held record/table locks, keyed by
+// the owning Table's address (stable for the table's lifetime; entries
+// are dropped by AdsCloseTable so a later allocation reusing the address
+// can't inherit stale locks). ADS_MGMT_LOCK_INFO/MgLock carry no table
+// name, matching SAP's own struct — only user/conn_no/recno.
+class LockRegistry {
+public:
+    static LockRegistry& instance();
+
+    void add_record_lock(const void* table_key, std::uint32_t recno);
+    void remove_record_lock(const void* table_key, std::uint32_t recno);
+    void add_table_lock(const void* table_key);
+    void remove_table_lock(const void* table_key);
+    // Safety net for abrupt disconnects that skip explicit unlocks.
+    void remove_all_for_table(const void* table_key);
+
+    std::uint32_t     count() const;
+    std::vector<MgLock> snapshot() const;
+
+private:
+    struct RecKey {
+        const void*   table;
+        std::uint32_t recno;
+        bool operator==(const RecKey& o) const noexcept {
+            return table == o.table && recno == o.recno;
+        }
+    };
+    struct RecKeyHash {
+        std::size_t operator()(const RecKey& k) const noexcept {
+            return std::hash<const void*>()(k.table) ^
+                   (std::hash<std::uint32_t>()(k.recno) << 1);
+        }
+    };
+
+    mutable std::mutex                                    mu_;
+    std::unordered_map<RecKey, LockOwner, RecKeyHash>     record_locks_;
+    std::unordered_map<const void*, LockOwner>            table_locks_;
 };
 
 }  // namespace openads::mgmt

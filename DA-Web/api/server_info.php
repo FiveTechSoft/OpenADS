@@ -4,10 +4,19 @@
  *
  * GET  ?dd=<name>
  *   Returns:
- *     { ok:true, users:[...], tables:[...], activity:{...} }
+ *     { ok:true, connType:'local'|'remote', users:[...], tables:[...],
+ *       queries:[...], activity:{...} }
+ *
+ * POST {action:'kill', dd:<name>, connNo:<n>, user:<name>}
+ *   Calls AdsMgKillUser. Local connections are a documented engine
+ *   no-op (AE_SUCCESS without effect); only remote (tcp://) connections
+ *   actually disconnect a session.
  *
  * Calls AdsMgConnect + AdsMgGetActivityInfo + AdsMgGetUserNames +
- * AdsMgGetOpenTables via PHP FFI against the local openace64.dll.
+ * AdsMgGetOpenTables + AdsMgGetWorkerThreadActivity + AdsMgKillUser via
+ * PHP FFI against openace64.dll. The mgmt connection targets the same
+ * host:port as the DD's own connection when it's remote, so activity
+ * reflects the actual server the DD is talking to.
  *
  * Requires: php.ini  ffi.enable=true  (or ffi.enable=preload)
  */
@@ -17,12 +26,26 @@ require_once __DIR__ . '/common.php';
 
 api_require_session();
 
-$ddName = trim($_GET['dd'] ?? '');
+$method = $_SERVER['REQUEST_METHOD'];
+if ($method === 'POST') {
+    $body   = json_decode(file_get_contents('php://input'), true) ?? [];
+    $ddName = trim($body['dd'] ?? '');
+} else {
+    $body   = [];
+    $ddName = trim($_GET['dd'] ?? '');
+}
+
 if ($ddName === '' || !isset($_SESSION['connections'][$ddName])) {
     http_response_code(401);
     echo json_encode(['error' => "Not connected to '$ddName'"]);
     exit;
 }
+
+$connInfo = $_SESSION['connections'][$ddName];
+$connType = strtolower($connInfo['connType'] ?? 'local') === 'remote' ? 'remote' : 'local';
+$mgServer = ($connType === 'remote' && !empty($connInfo['host']) && !empty($connInfo['port']))
+    ? ($connInfo['host'] . ':' . $connInfo['port'])
+    : null;
 
 // ── Locate openace64.dll ──────────────────────────────────────────────────────
 if (!extension_loaded('ffi')) {
@@ -102,6 +125,15 @@ typedef struct {
     UNSIGNED16 usLockType;
 } ADS_MGMT_TABLE_INFO;
 
+typedef struct {
+    UNSIGNED32 ulThreadNumber;
+    UNSIGNED16 usOpCode;
+    UNSIGNED8  aucUserName        [32];
+    UNSIGNED16 usConnNumber;
+    UNSIGNED16 usReserved1;
+    UNSIGNED8  aucOSUserLoginName [64];
+} ADS_MGMT_THREAD_ACTIVITY;
+
 UNSIGNED32 AdsMgConnect(UNSIGNED8* pucServer, UNSIGNED8* pucUser,
                         UNSIGNED8* pucPassword, ADSHANDLE* phMgmt);
 UNSIGNED32 AdsMgDisconnect(ADSHANDLE hMgmt);
@@ -114,6 +146,11 @@ UNSIGNED32 AdsMgGetOpenTables(ADSHANDLE hMgmt, UNSIGNED8* pucUserName,
                               UNSIGNED16 usConnNumber,
                               ADS_MGMT_TABLE_INFO* pstTableInfo,
                               UNSIGNED16* pusArrayLen, UNSIGNED16* pusStructSize);
+UNSIGNED32 AdsMgGetWorkerThreadActivity(ADSHANDLE hMgmt,
+                              ADS_MGMT_THREAD_ACTIVITY* pstThreadInfo,
+                              UNSIGNED16* pusArrayLen, UNSIGNED16* pusStructSize);
+UNSIGNED32 AdsMgKillUser(ADSHANDLE hMgmt, UNSIGNED8* pucUserName,
+                         UNSIGNED16 usConnNumber);
 ';
 
 try {
@@ -135,13 +172,26 @@ function ffiStr(FFI\CData $arr, int $maxLen): string {
     return empty($bytes) ? '' : pack('C*', ...$bytes);
 }
 
+// Build a NUL-terminated UNSIGNED8[] buffer from a PHP string, for
+// out-parameters typed UNSIGNED8* (FFI's automatic char*<->string
+// marshalling only applies to the literal `char*` type, not typedefs
+// of it, so ADS_MGMT strings need an explicit byte buffer).
+function ffiCStr(FFI $ffi, string $s): FFI\CData {
+    $buf = $ffi->new('UNSIGNED8[' . (strlen($s) + 1) . ']');
+    FFI::memcpy($buf, $s, strlen($s));
+    $buf[strlen($s)] = 0;
+    return $buf;
+}
+
 // ── Connect to management interface ──────────────────────────────────────────
-// Empty server string → local-mode management (reports this process's state).
-// For a remote DD hosted on a TCP server, we would extract the host from the
-// path; for now only local-mode is supported.
+// Empty server string → local-mode management (reports this process's
+// state). A remote DD (host:port from the session's own connection)
+// connects the mgmt handle to that same server, so activity/kill reflect
+// the server actually serving the DD instead of this PHP process.
 $hMgmt = $ffi->new('ADSHANDLE');
 $hMgmt->cdata = 0;
-$rc = $ffi->AdsMgConnect(null, null, null, FFI::addr($hMgmt));
+$serverArg = $mgServer !== null ? ffiCStr($ffi, $mgServer) : null;
+$rc = $ffi->AdsMgConnect($serverArg, null, null, FFI::addr($hMgmt));
 if ($rc !== 0) {
     http_response_code(500);
     echo json_encode(['error' => "AdsMgConnect failed (rc=$rc)"]);
@@ -150,6 +200,35 @@ if ($rc !== 0) {
 $h = $hMgmt->cdata;
 
 try {
+    if ($method === 'POST') {
+        $action = $body['action'] ?? '';
+        if ($action !== 'kill') {
+            http_response_code(400);
+            echo json_encode(['error' => 'unknown action']);
+            exit;
+        }
+        $connNo = (int)($body['connNo'] ?? 0);
+        $user   = trim((string)($body['user'] ?? ''));
+        if ($connNo <= 0 && $user === '') {
+            http_response_code(400);
+            echo json_encode(['error' => 'connNo or user is required']);
+            exit;
+        }
+        $userArg = $user !== '' ? ffiCStr($ffi, $user) : null;
+        $rc = $ffi->AdsMgKillUser($h, $userArg, $connNo);
+        if ($rc !== 0) {
+            echo json_encode(['error' => "AdsMgKillUser failed (rc=$rc)"]);
+            exit;
+        }
+        echo json_encode([
+            'ok'   => true,
+            'note' => $connType === 'local'
+                ? 'Local connections cannot be disconnected (engine reports success but takes no action).'
+                : null,
+        ]);
+        exit;
+    }
+
     // ── Activity info (counts) ────────────────────────────────────────────────
     $actInfo  = $ffi->new('ADS_MGMT_ACTIVITY_INFO');
     $actSize  = $ffi->new('UNSIGNED16');
@@ -214,11 +293,35 @@ try {
         ];
     }
 
+    // ── Active queries (worker thread activity) ──────────────────────────────
+    $maxThreads = 256;
+    $thrArr     = $ffi->new("ADS_MGMT_THREAD_ACTIVITY[$maxThreads]");
+    $thrCount   = $ffi->new('UNSIGNED16');
+    $thrCount->cdata = $maxThreads;
+    $thrSize    = $ffi->new('UNSIGNED16');
+    $thrSize->cdata  = (int)FFI::sizeof($ffi->new('ADS_MGMT_THREAD_ACTIVITY'));
+    $ffi->AdsMgGetWorkerThreadActivity($h, $thrArr, FFI::addr($thrCount), FFI::addr($thrSize));
+
+    $queries = [];
+    $nq = (int)$thrCount->cdata;
+    for ($i = 0; $i < $nq && $i < $maxThreads; $i++) {
+        $t = $thrArr[$i];
+        $queries[] = [
+            'threadNo' => (int)$t->ulThreadNumber,
+            'opcode'   => (int)$t->usOpCode,
+            'user'     => ffiStr($t->aucUserName, 32),
+            'connNo'   => (int)$t->usConnNumber,
+            'osLogin'  => ffiStr($t->aucOSUserLoginName, 64),
+        ];
+    }
+
     echo json_encode([
         'ok'       => true,
+        'connType' => $connType,
         'activity' => $activity,
         'users'    => $users,
         'tables'   => $tables,
+        'queries'  => $queries,
     ]);
 
 } finally {

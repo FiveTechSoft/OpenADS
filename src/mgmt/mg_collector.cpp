@@ -235,4 +235,76 @@ MgStats& process_mg_stats() {
     return g_stats;
 }
 
+namespace {
+thread_local LockOwner g_current_lock_owner;
+}  // namespace
+
+void set_current_lock_owner(const std::string& user, std::uint16_t conn_no) {
+    g_current_lock_owner.user    = user;
+    g_current_lock_owner.conn_no = conn_no;
+}
+
+LockOwner current_lock_owner() { return g_current_lock_owner; }
+
+LockRegistry& LockRegistry::instance() {
+    static LockRegistry g_registry;
+    return g_registry;
+}
+
+void LockRegistry::add_record_lock(const void* table_key, std::uint32_t recno) {
+    std::lock_guard<std::mutex> lk(mu_);
+    record_locks_[RecKey{table_key, recno}] = current_lock_owner();
+}
+
+void LockRegistry::remove_record_lock(const void* table_key, std::uint32_t recno) {
+    std::lock_guard<std::mutex> lk(mu_);
+    record_locks_.erase(RecKey{table_key, recno});
+}
+
+void LockRegistry::add_table_lock(const void* table_key) {
+    std::lock_guard<std::mutex> lk(mu_);
+    table_locks_[table_key] = current_lock_owner();
+}
+
+void LockRegistry::remove_table_lock(const void* table_key) {
+    std::lock_guard<std::mutex> lk(mu_);
+    table_locks_.erase(table_key);
+}
+
+void LockRegistry::remove_all_for_table(const void* table_key) {
+    std::lock_guard<std::mutex> lk(mu_);
+    table_locks_.erase(table_key);
+    for (auto it = record_locks_.begin(); it != record_locks_.end(); ) {
+        if (it->first.table == table_key) it = record_locks_.erase(it);
+        else ++it;
+    }
+}
+
+std::uint32_t LockRegistry::count() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return static_cast<std::uint32_t>(record_locks_.size() + table_locks_.size());
+}
+
+std::vector<MgLock> LockRegistry::snapshot() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<MgLock> out;
+    out.reserve(record_locks_.size() + table_locks_.size());
+    for (const auto& [key, owner] : record_locks_) {
+        MgLock l;
+        l.user   = owner.user;
+        l.conn_no = owner.conn_no;
+        l.recno  = key.recno;
+        out.push_back(std::move(l));
+    }
+    for (const auto& [key, owner] : table_locks_) {
+        (void)key;
+        MgLock l;
+        l.user    = owner.user;
+        l.conn_no = owner.conn_no;
+        l.recno   = 0;  // whole-table lock
+        out.push_back(std::move(l));
+    }
+    return out;
+}
+
 }  // namespace openads::mgmt

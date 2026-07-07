@@ -232,6 +232,7 @@ Session::~Session() {
 
 bool Session::process_frame(const Frame& f) {
     srv_->touch_session(sid_, true, false);
+    srv_->set_session_opcode(sid_, static_cast<std::uint16_t>(f.opcode));
     {
         // M9.25 — inbound comm telemetry. +5 accounts for the 4-byte
         // length prefix + 1-byte opcode of the wire framing.
@@ -742,7 +743,7 @@ DispatchResult Session::dispatch(const Frame& f) {
             std::uint32_t id = next_id_++;
             tbls_.emplace(id, th.value());
             tbl_open_paths_.emplace(id, rel);
-            srv_->add_session_table(sid_, +1);
+            srv_->add_session_table(sid_, +1, rel);
             reply.opcode = Opcode::OpenTableAck;
             write_u32_le(id, reply.payload);
             // M-AOF.6 mirror: detect the production CDX/ADI on the server
@@ -812,7 +813,10 @@ DispatchResult Session::dispatch(const Frame& f) {
             if (it != tbls_.end()) {
                 sess_conn_->close_table(it->second);
                 tbls_.erase(it);
-                srv_->add_session_table(sid_, -1);
+                std::string tname;
+                if (auto pit = tbl_open_paths_.find(id); pit != tbl_open_paths_.end())
+                    tname = pit->second;
+                srv_->add_session_table(sid_, -1, tname);
             }
             tbl_open_paths_.erase(id);
             tbls_h_.erase(id);
@@ -1409,6 +1413,12 @@ DispatchResult Session::dispatch(const Frame& f) {
                 h = ensure_abi_handle(id);
             }
             if (h != 0) {
+                // Attribute whatever lock this call takes to this
+                // session, so the mgmt Data Locks surface can report who
+                // holds it — see mg_collector.h's LockRegistry.
+                openads::mgmt::set_current_lock_owner(
+                    session_user_.empty() ? "(anonymous)" : session_user_,
+                    srv_->conn_no_for_session(sid_));
                 if (f.opcode == Opcode::LockRecord) {
                     AdsLockRecord(h, rn);
                 } else {
@@ -1433,6 +1443,9 @@ DispatchResult Session::dispatch(const Frame& f) {
                 h = ensure_abi_handle(id);
             }
             if (h != 0) {
+                openads::mgmt::set_current_lock_owner(
+                    session_user_.empty() ? "(anonymous)" : session_user_,
+                    srv_->conn_no_for_session(sid_));
                 if (f.opcode == Opcode::LockTable) {
                     AdsLockTable(h);
                 } else {
