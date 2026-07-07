@@ -238,7 +238,11 @@ TEST_CASE("remote prefetch: a write mid-scan hits the logical record, not the la
     // Write the current record. Without the consumed-counter resync this
     // lands on the lagging server cursor (recno 2), corrupting the wrong
     // row.
+    // Since 6df3f38a, writes to a pre-existing (non-append) record require
+    // an explicit lock — AdsLockRecord takes an absolute recno and is
+    // forwarded straight to the server, independent of cursor position.
     UNSIGNED8 valf[] = "VAL";
+    REQUIRE(AdsLockRecord(hTable, 10) == 0);
     REQUIRE(AdsSetDouble(hTable, valf, 999.0) == 0);
     REQUIRE(AdsWriteRecord(hTable) == 0);
 
