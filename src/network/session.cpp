@@ -54,11 +54,6 @@ inline void write_u16_le(std::uint16_t v, std::vector<std::uint8_t>& out) {
 }
 
 // M12.29 — [u16 len][bytes] string helpers shared by the DD opcode handlers.
-inline void write_lstr16(const std::string& s, std::vector<std::uint8_t>& out) {
-    write_u16_le(static_cast<std::uint16_t>(s.size()), out);
-    out.insert(out.end(), s.begin(), s.end());
-}
-
 // Parses a [u16 len][bytes] field starting at `off`, advancing `off` past
 // it. Returns false (payload too short) without touching `out` or `off`
 // further than what was already consumed.
