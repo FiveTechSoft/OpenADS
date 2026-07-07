@@ -5547,6 +5547,37 @@ UNSIGNED32 ENTRYPOINT AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 usServerType
     // the supplied credentials before registering the connection.
     if (raw->has_dd()) {
         auto* dd = raw->dd();
+        std::string user = pucUser ? openads::abi::to_internal(pucUser, 0)
+                                   : std::string();
+        std::string pwd  = pucPwd  ? openads::abi::to_internal(pucPwd, 0)
+                                   : std::string();
+
+        // Logins-disabled: a stricter, all-connections-rejected gate than
+        // LOG_IN_REQUIRED below — even a valid user/password normally can't
+        // connect while this is set. Reads "prop_16", DA-Web's own numbering
+        // for ADS_DD_LOGINS_DISABLED (api/db_props.php) — NOT ace.h's
+        // ADS_DD_LOGINS_DISABLED macro (=14), which collides with this
+        // engine's VERSION_MAJOR slot at prop_14. Mirrored in
+        // network/session.cpp's Connect handler for remote connections.
+        //
+        // Admin bypass: without this, setting the flag would be a one-way
+        // door — nobody, not even the admin trying to undo it, could ever
+        // reconnect to flip it back off. openads::mgmt::kAdminBypassUser
+        // ("adssys", ADS's own conventional admin username) with a correct
+        // per-user password (prop_1101) is exempted.
+        std::string logins_disabled = dd->get_db_property("prop_16");
+        bool disabled_raw_zero = (logins_disabled.size() >= 2 &&
+            static_cast<unsigned char>(logins_disabled[0]) == 0 &&
+            static_cast<unsigned char>(logins_disabled[1]) == 0);
+        bool logins_are_disabled = (!logins_disabled.empty() &&
+            logins_disabled != "0" && logins_disabled != "False" &&
+            !disabled_raw_zero);
+        if (logins_are_disabled &&
+            !openads::mgmt::is_admin_bypass(dd, user, pwd)) {
+            return fail(openads::AE_LOGIN_FAILED,
+                        "logins are disabled for this dictionary");
+        }
+
         std::string login_req = dd->get_db_property("prop_5");
         // Stored as decimal string by import tool and UI: "0" = not required,
         // "1" = required.  Keep raw-byte fallback for any old imports.
@@ -5555,10 +5586,6 @@ UNSIGNED32 ENTRYPOINT AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 usServerType
                             static_cast<unsigned char>(login_req[1]) == 0);
         bool require_login = (!login_req.empty() && login_req != "0" &&
                               login_req != "False" && !is_raw_zero);
-        std::string user = pucUser ? openads::abi::to_internal(pucUser, 0)
-                                   : std::string();
-        std::string pwd  = pucPwd  ? openads::abi::to_internal(pucPwd, 0)
-                                   : std::string();
         if (require_login) {
             if (user.empty())
                 return fail(openads::AE_LOGIN_FAILED,
@@ -26450,6 +26477,16 @@ UNSIGNED32 ENTRYPOINT AdsMgGetWorkerThreadActivity(ADSHANDLE h, void* p, UNSIGNE
     auto col = mg_collector_for(h);
     if (!col.has_value()) return static_cast<UNSIGNED32>(col.error().code);
     return emit_mg_array(col.value().worker_thread_activity(), p, c, sz);
+}
+// Non-SAP extension: one average per-frame cost (microseconds) per user,
+// in the same order/count AdsMgGetUserNames just returned — pair them up
+// by index. Not part of the SAP-compatible surface; ADS_MGMT_USER_INFO's
+// fixed layout has no room for this.
+UNSIGNED32 ENTRYPOINT AdsMgGetUserAvgCost(ADSHANDLE h, UNSIGNED32* p,
+                                          UNSIGNED16* c, UNSIGNED16* sz) {
+    auto col = mg_collector_for(h);
+    if (!col.has_value()) return static_cast<UNSIGNED32>(col.error().code);
+    return emit_mg_array(col.value().user_avg_costs(), p, c, sz);
 }
 UNSIGNED32 ENTRYPOINT AdsMgKillUser(ADSHANDLE h, UNSIGNED8* /*pucUser*/,
                          UNSIGNED16 usConnNo) {

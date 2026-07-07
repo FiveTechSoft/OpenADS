@@ -10,6 +10,8 @@
 #include <unordered_map>
 #include <vector>
 
+namespace openads::engine { class DataDict; }
+
 namespace openads::mgmt {
 
 // Copy the live MgStats counters (uptime origin, cumulative comm
@@ -39,6 +41,13 @@ public:
     std::vector<ADS_MGMT_INDEX_INFO>      open_indexes() const;
     std::vector<ADS_MGMT_LOCK_INFO>       locks() const;
     std::vector<ADS_MGMT_THREAD_ACTIVITY> worker_thread_activity() const;
+
+    // Non-SAP extension: one average per-frame cost (microseconds) per
+    // user, same order/count as user_names() (both walk the same
+    // snapshot_.user_list) — there's no room in ADS_MGMT_USER_INFO's
+    // fixed SAP layout for this, so it's exposed via a parallel array
+    // instead of widening that struct. See AdsMgGetUserAvgCost.
+    std::vector<std::uint32_t>            user_avg_costs() const;
 
     // Returns the lock held on (conn-agnostic) `recno`; usConnNumber
     // is 0 and ulRecordNumber is 0 when no such lock exists.
@@ -110,5 +119,19 @@ private:
     std::unordered_map<RecKey, LockOwner, RecKeyHash>     record_locks_;
     std::unordered_map<const void*, LockOwner>            table_locks_;
 };
+
+// Reserved admin username exempted from the ADS_DD_LOGINS_DISABLED gate
+// (see ace_exports.cpp's AdsConnect / session.cpp's Connect handler) so
+// setting that flag is never a one-way door. "adssys" is ADS's own
+// conventional administrator username, already used as the default admin
+// user throughout this project's test dictionaries and config.
+constexpr const char* kAdminBypassUser = "adssys";
+
+// True if `user`/`pwd` are the reserved admin user's real credentials for
+// `dd` — i.e. this connection should be let through even when
+// ADS_DD_LOGINS_DISABLED is set. Case-insensitive on the username, to
+// match how it's conventionally typed ("adssys", "AdsSys", ...).
+bool is_admin_bypass(openads::engine::DataDict* dd,
+                     const std::string& user, const std::string& pwd);
 
 }  // namespace openads::mgmt

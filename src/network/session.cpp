@@ -16,6 +16,7 @@
 #include "session/connection.h"
 #include "sql_backend/enterprise_config.h"
 
+#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <memory>
@@ -241,7 +242,11 @@ bool Session::process_frame(const Frame& f) {
         mgst.bytes_in.fetch_add(f.payload.size() + 5,
                                 std::memory_order_relaxed);
     }
+    auto t0 = std::chrono::steady_clock::now();
     auto res = dispatch(f);
+    auto micros = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - t0).count();
+    srv_->record_session_op_time(sid_, static_cast<std::uint64_t>(micros));
     if (res.reply) {
         if (auto wr = write_frame(s_, *res.reply); !wr) return false;
         openads::mgmt::process_mg_stats()
@@ -680,6 +685,33 @@ DispatchResult Session::dispatch(const Frame& f) {
             // connection all represent the same authenticated DD user.
             if (co.value().has_dd()) {
                 auto* dd = co.value().dd();
+                // Logins-disabled: a stricter, all-connections-rejected gate
+                // than LOG_IN_REQUIRED below — even a valid user/password
+                // normally can't connect while this is set. Reads "prop_16",
+                // DA-Web's own numbering for ADS_DD_LOGINS_DISABLED
+                // (api/db_props.php) — NOT ace.h's ADS_DD_LOGINS_DISABLED
+                // macro (=14), which collides with this engine's
+                // VERSION_MAJOR slot at prop_14.
+                //
+                // Admin bypass: without this, setting the flag would be a
+                // one-way door — nobody, not even the admin trying to undo
+                // it, could ever reconnect to flip it back off. See
+                // mgmt::is_admin_bypass / mgmt::kAdminBypassUser, mirrored
+                // in ace_exports.cpp's AdsConnect for local connections.
+                std::string logins_disabled = dd->get_db_property("prop_16");
+                bool disabled_raw_zero = (logins_disabled.size() >= 2 &&
+                    static_cast<unsigned char>(logins_disabled[0]) == 0 &&
+                    static_cast<unsigned char>(logins_disabled[1]) == 0);
+                bool logins_are_disabled = (!logins_disabled.empty() &&
+                    logins_disabled != "0" && logins_disabled != "False" &&
+                    !disabled_raw_zero);
+                if (logins_are_disabled &&
+                    !openads::mgmt::is_admin_bypass(dd, user, pw)) {
+                    reply = err("Connect: logins are disabled for this dictionary",
+                                openads::AE_LOGIN_FAILED);
+                    break;
+                }
+
                 std::string login_req = dd->get_db_property("prop_5");
                 bool is_raw_zero = (login_req.size() >= 2 &&
                     static_cast<unsigned char>(login_req[0]) == 0 &&

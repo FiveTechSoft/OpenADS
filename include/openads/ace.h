@@ -1489,6 +1489,12 @@ UNSIGNED32 ENTRYPOINT AdsMgGetUserNames    (ADSHANDLE hMg,
 UNSIGNED32 ENTRYPOINT AdsMgGetWorkerThreadActivity(ADSHANDLE hMg, void* pInfo,
                                              UNSIGNED16* pusCount,
                                              UNSIGNED16* pusSize);
+// OpenADS extension (not part of the SAP ACE surface): average per-frame
+// processing cost in microseconds, one value per user in the same
+// order/count AdsMgGetUserNames just returned for the same hMg.
+UNSIGNED32 ENTRYPOINT AdsMgGetUserAvgCost  (ADSHANDLE hMg, UNSIGNED32* pulCosts,
+                                             UNSIGNED16* pusCount,
+                                             UNSIGNED16* pusSize);
 UNSIGNED32 ENTRYPOINT AdsMgKillUser        (ADSHANDLE hMg, UNSIGNED8* pucUser,
                                              UNSIGNED16 usOption);
 UNSIGNED32 ENTRYPOINT AdsMgKillUser90      (ADSHANDLE hMg, UNSIGNED8* pucUser,

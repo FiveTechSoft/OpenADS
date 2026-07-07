@@ -1,6 +1,8 @@
 #include "mgmt/mg_collector.h"
+#include "engine/data_dict.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstring>
 
@@ -148,6 +150,13 @@ std::vector<ADS_MGMT_USER_INFO> MgCollector::user_names() const {
         i.usConnNumber = u.conn_no;
         out.push_back(i);
     }
+    return out;
+}
+
+std::vector<std::uint32_t> MgCollector::user_avg_costs() const {
+    std::vector<std::uint32_t> out;
+    out.reserve(snapshot_.user_list.size());
+    for (const auto& u : snapshot_.user_list) out.push_back(u.avg_cost_micros);
     return out;
 }
 
@@ -305,6 +314,16 @@ std::vector<MgLock> LockRegistry::snapshot() const {
         out.push_back(std::move(l));
     }
     return out;
+}
+
+bool is_admin_bypass(openads::engine::DataDict* dd,
+                     const std::string& user, const std::string& pwd) {
+    if (dd == nullptr || user.empty() || pwd.empty()) return false;
+    std::string lower = user;
+    for (auto& ch : lower) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    if (lower != kAdminBypassUser) return false;
+    if (!dd->has_user(user)) return false;
+    return dd->get_user_property(user, "prop_1101") == pwd;
 }
 
 }  // namespace openads::mgmt

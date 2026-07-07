@@ -14,6 +14,12 @@ struct MgUser {
     std::string                           os_login;
     std::uint16_t                         conn_no = 0;
     std::chrono::system_clock::time_point  connected_at{};
+    // Running average wall-clock time to process one wire frame on this
+    // session's thread, in microseconds. Not part of the SAP-compatible
+    // ADS_MGMT_USER_INFO surface (which has no room for it) — exposed via
+    // the separate AdsMgGetUserAvgCost export instead. 0 for local mode
+    // (no per-session frame loop to time there).
+    std::uint32_t                         avg_cost_micros = 0;
 };
 
 // One open table in a session.

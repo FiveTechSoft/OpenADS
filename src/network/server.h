@@ -104,6 +104,11 @@ public:
         // available proxy for "current operation" (AdsMgGetWorkerThreadActivity)
         // since sessions run one dedicated thread per connection.
         std::uint16_t                                       current_opcode = 0;
+        // Running total for a per-session average "cost" (AdsMgGetUserAvgCost):
+        // wall-clock microseconds spent inside dispatch() across every frame
+        // this session has processed, and how many frames that covers.
+        std::uint64_t                                       total_op_micros = 0;
+        std::uint64_t                                       op_count        = 0;
     };
     std::vector<SessionInfo> sessions_snapshot() const;
 
@@ -174,6 +179,8 @@ public:
     void          touch_session(std::uint64_t id, bool inbound,
                                  bool outbound);
     void          set_session_opcode(std::uint64_t id, std::uint16_t opcode);
+    // Accumulate one frame's processing time for the session's AveCost.
+    void          record_session_op_time(std::uint64_t id, std::uint64_t micros);
     void          set_session_user(std::uint64_t id,
                                     const std::string& user,
                                     const std::string& data_dir);

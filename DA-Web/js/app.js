@@ -4852,6 +4852,8 @@
             { title: 'Auth',    field: 'authUser', widthGrow: 1 },
             { title: 'Address', field: 'address',  widthGrow: 1 },
             { title: 'Conn#',   field: 'connNo',   width: 70, hozAlign: 'right' },
+            { title: 'Avg Cost (ms)', field: 'avgCostMs', width: 110, hozAlign: 'right',
+              formatter: cell => { const v = cell.getValue(); return (v === undefined || v === null) ? '' : Number(v).toFixed(3); } },
             { title: '', width: 110, hozAlign: 'center', headerSort: false,
               formatter: () => `<button class="btn btn-sm btn-danger">Disconnect</button>`,
               cellClick: (e, cell) => { e.stopPropagation(); killServerUser(dd, tabId, cell.getRow().getData()); } },

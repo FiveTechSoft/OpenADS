@@ -305,6 +305,7 @@ EXPORTS
     AdsMgGetOpenTables@24       = AdsMgGetOpenTables
     AdsMgGetOpenTables2@24      = AdsMgGetOpenTables2
     AdsMgGetServerType@8        = AdsMgGetServerType
+    AdsMgGetUserAvgCost@16      = AdsMgGetUserAvgCost
     AdsMgGetUserNames@20        = AdsMgGetUserNames
     AdsMgGetWorkerThreadActivity@16 = AdsMgGetWorkerThreadActivity
     AdsMgKillUser@12            = AdsMgKillUser

@@ -123,6 +123,7 @@ tests/tools/crack_out.txt
 # Local environment config (server IPs, credentials)
 .env.local
 DA-Web/config/dictionaries.json
+DA-Web/config/sql_scripts.json
 /todo.local.md
 /ACE64_API_COMPAT_REPORT.local.md
 /chm_extract.local/

@@ -175,6 +175,9 @@ mgmt::MgSnapshot Server::build_mg_snapshot() const {
         u.os_login     = u.name;
         u.conn_no      = static_cast<std::uint16_t>(conn_no);
         u.connected_at = s.connected_at;
+        u.avg_cost_micros = s.op_count > 0
+            ? static_cast<std::uint32_t>(s.total_op_micros / s.op_count)
+            : 0;
 
         for (const auto& tname : s.open_table_names) {
             mgmt::MgTable t;
@@ -253,6 +256,14 @@ void Server::set_session_opcode(std::uint64_t id, std::uint16_t opcode) {
     auto it = sessions_info_.find(id);
     if (it == sessions_info_.end()) return;
     it->second.current_opcode = opcode;
+}
+
+void Server::record_session_op_time(std::uint64_t id, std::uint64_t micros) {
+    std::lock_guard<std::mutex> lk(info_mu_);
+    auto it = sessions_info_.find(id);
+    if (it == sessions_info_.end()) return;
+    it->second.total_op_micros += micros;
+    ++it->second.op_count;
 }
 
 void Server::set_session_user(std::uint64_t id,

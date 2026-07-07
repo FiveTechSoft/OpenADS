@@ -13,10 +13,10 @@
  *   actually disconnect a session.
  *
  * Calls AdsMgConnect + AdsMgGetActivityInfo + AdsMgGetUserNames +
- * AdsMgGetOpenTables + AdsMgGetWorkerThreadActivity + AdsMgKillUser via
- * PHP FFI against openace64.dll. The mgmt connection targets the same
- * host:port as the DD's own connection when it's remote, so activity
- * reflects the actual server the DD is talking to.
+ * AdsMgGetUserAvgCost + AdsMgGetOpenTables + AdsMgGetWorkerThreadActivity +
+ * AdsMgKillUser via PHP FFI against openace64.dll. The mgmt connection
+ * targets the same host:port as the DD's own connection when it's remote,
+ * so activity reflects the actual server the DD is talking to.
  *
  * Requires: php.ini  ffi.enable=true  (or ffi.enable=preload)
  */
@@ -151,6 +151,8 @@ UNSIGNED32 AdsMgGetWorkerThreadActivity(ADSHANDLE hMgmt,
                               UNSIGNED16* pusArrayLen, UNSIGNED16* pusStructSize);
 UNSIGNED32 AdsMgKillUser(ADSHANDLE hMgmt, UNSIGNED8* pucUserName,
                          UNSIGNED16 usConnNumber);
+UNSIGNED32 AdsMgGetUserAvgCost(ADSHANDLE hMgmt, UNSIGNED32* pulCosts,
+                              UNSIGNED16* pusCount, UNSIGNED16* pusSize);
 ';
 
 try {
@@ -261,15 +263,28 @@ try {
     $userSize->cdata  = (int)FFI::sizeof($ffi->new('ADS_MGMT_USER_INFO'));
     $ffi->AdsMgGetUserNames($h, null, $userArr, FFI::addr($userCount), FFI::addr($userSize));
 
+    // Average per-frame cost (microseconds), same order/count as the user
+    // list just fetched above — a non-SAP extension (AdsMgGetUserAvgCost),
+    // since ADS_MGMT_USER_INFO's fixed layout has no room for it.
+    $costArr   = $ffi->new("UNSIGNED32[$maxUsers]");
+    $costCount = $ffi->new('UNSIGNED16');
+    $costCount->cdata = $maxUsers;
+    $costSize  = $ffi->new('UNSIGNED16');
+    $costSize->cdata  = (int)FFI::sizeof($ffi->new('UNSIGNED32'));
+    $ffi->AdsMgGetUserAvgCost($h, $costArr, FFI::addr($costCount), FFI::addr($costSize));
+
     $users = [];
     $n = (int)$userCount->cdata;
+    $nc = (int)$costCount->cdata;
     for ($i = 0; $i < $n && $i < $maxUsers; $i++) {
         $u = $userArr[$i];
+        $avgCostMicros = ($i < $nc) ? (int)$costArr[$i] : 0;
         $users[] = [
             'name'     => ffiStr($u->aucUserName,         32),
             'address'  => ffiStr($u->aucAddress,          64),
             'authUser' => ffiStr($u->aucAuthUserName,     64),
             'connNo'   => (int)$u->usConnNumber,
+            'avgCostMs' => round($avgCostMicros / 1000, 3),
         ];
     }
 

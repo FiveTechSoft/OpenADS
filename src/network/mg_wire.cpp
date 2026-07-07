@@ -134,6 +134,7 @@ std::string encode_mg_snapshot(const mgmt::MgSnapshot& s) {
         put_str(b, u.os_login);
         put_u16(b, u.conn_no);
         put_tp(b, u.connected_at);
+        put_u32(b, u.avg_cost_micros);
     }
     put_u32(b, static_cast<std::uint32_t>(s.table_list.size()));
     for (const auto& t : s.table_list) {
@@ -204,6 +205,7 @@ util::Result<mgmt::MgSnapshot> decode_mg_snapshot(
         u.os_login     = r.str();
         u.conn_no      = r.u16();
         u.connected_at = get_tp(r);
+        u.avg_cost_micros = r.u32();
         s.user_list.push_back(std::move(u));
     }
     std::uint32_t nt = r.u32();
