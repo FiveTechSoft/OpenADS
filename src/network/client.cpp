@@ -33,23 +33,6 @@ inline std::uint16_t read_u16_le(const std::uint8_t* p) {
         (static_cast<std::uint16_t>(p[1]) << 8));
 }
 
-// M12.29 — [u16 len][bytes] string helpers shared by the DD RPC methods.
-inline void write_lstr16(const std::string& s, std::vector<std::uint8_t>& out) {
-    write_u16_le(static_cast<std::uint16_t>(s.size()), out);
-    out.insert(out.end(), s.begin(), s.end());
-}
-
-inline bool read_lstr16(const std::vector<std::uint8_t>& pl, std::size_t& off,
-                        std::string& out) {
-    if (off + 2 > pl.size()) return false;
-    std::uint16_t len = read_u16_le(pl.data() + off);
-    off += 2;
-    if (off + len > pl.size()) return false;
-    out.assign(reinterpret_cast<const char*>(pl.data() + off), len);
-    off += len;
-    return true;
-}
-
 } // namespace
 
 // M12.18 — parse the per-row trailer the server appends to every

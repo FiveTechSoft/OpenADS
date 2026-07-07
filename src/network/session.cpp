@@ -49,11 +49,6 @@ inline void write_u32_le(std::uint32_t v, std::vector<std::uint8_t>& out) {
     out.push_back(static_cast<std::uint8_t>((v >> 24) & 0xFFu));
 }
 
-inline void write_u16_le(std::uint16_t v, std::vector<std::uint8_t>& out) {
-    out.push_back(static_cast<std::uint8_t>( v       & 0xFFu));
-    out.push_back(static_cast<std::uint8_t>((v >> 8) & 0xFFu));
-}
-
 // M12.29 — [u16 len][bytes] string helpers shared by the DD opcode handlers.
 // Parses a [u16 len][bytes] field starting at `off`, advancing `off` past
 // it. Returns false (payload too short) without touching `out` or `off`
