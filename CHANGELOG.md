@@ -1,3 +1,21 @@
+## 1.8.1 — 2026-07-08
+
+### ABI — `OrdScope` / `AdsSetScope` string key padding
+
+Harbour `rddads` passes scope strings at trimmed length (`hb_itemGetCLen`),
+but CDX index keys are space-padded to `key_length`. An unpadded scope on
+a wide character field (e.g. work-order `C(10)` with `setScopeTop` /
+`setScopeBottom` on the same `cWrkord`) made `key <= bottom` fail for every
+matching row — `GotoTop` landed at EOF on **both local and remote**.
+
+Fix: pad string/RAW scope keys to the active index `key_length` in
+`AdsSetScope`, matching `relation_child_key()` and native ACE behaviour.
+
+Test: `QA-D: character ordScope honours unpadded scope on wide key` in
+`abi_qa_repro_test.cpp`.
+
+Reported-by: production work-order labour-items filter.
+
 ## 1.8.0 — 2026-07-08
 
 ### CDX — NTXPL852 / PL852 OEM collation (#127)

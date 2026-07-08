@@ -6,7 +6,7 @@ nav_order: 9
 
 # Known issues — current
 
-Status as of **v1.8.0** (2026-07-08).
+Status as of **v1.8.1** (2026-07-08).
 
 ## Open
 
@@ -77,6 +77,10 @@ backend execution hooks are not wired yet.
 
 ## Closed recently
 
+- **`OrdScope` / `AdsSetScope` on character fields** — fixed v1.8.1:
+  unpadded scope strings (Harbour `hb_itemGetCLen`) are now space-padded to
+  index `key_length` before comparison — work-order `setScopeTop` /
+  `setScopeBottom` + `gotop` on local and remote.
 - **NTXPL852 / PL852 OEM collation** — fixed v1.8.0: CDX build, seek,
   insert, and reindex honour the PL852 sort table; `AdsSetCollation`
   accepts `NTXPL852` / `PL852`.

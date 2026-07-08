@@ -103,7 +103,7 @@ generated baseline; OpenADS clears every line of the regenerated
 ADS-flavoured baseline. The session that closed the last gap is
 recorded across 28 incremental commits ending at `28be1be`.
 
-**Current release: [v1.8.0](https://github.com/FiveTechSoft/OpenADS/releases/tag/v1.8.0) (2026-07-08).**
+**Current release: [v1.8.1](https://github.com/FiveTechSoft/OpenADS/releases/tag/v1.8.1) (2026-07-08).**
 Harbour `rddads` + FiveWin `TDataBase` / `xBrowse` over `tcp://` is
 production-ready: remote scope (`OrdScope`), index navigation, key counts,
 date fields, and field I/O by ordinal all work end-to-end. Full Data
@@ -128,6 +128,7 @@ Release timeline:
 
 | Tag       | Date       | Highlights |
 |-----------|------------|-----------|
+| **v1.8.1** | 2026-07-08 | **`OrdScope` string key padding** — `setScopeTop`/`setScopeBottom` on character fields (work-order filters) honour scoped `GotoTop`/`Skip` on local and remote. |
 | **v1.8.0** | 2026-07-08 | **NTXPL852 / PL852 OEM collation** — Polish CP-852 index sort (Ł between L and M); CDX bulk `REINDEX`; 19 new unit tests. |
 | **v1.7.0** | 2026-07-08 | **REMOTE `AdsSetScope` / `OrdScope`** — `GotoTop`/`Skip` honour scoped key ranges over `tcp://` (Harbour labour-item / work-order filters). Docs: CDX rollback warning (SAP ACE error 7017). |
 | **v1.6.5** | 2026-07-07 | **REMOTE xBrowse blockers** — `OrdKeyCount()` wire opcode `GetKeyCount`; `AdsGetDate()` no longer crashes when rddads passes a `RemoteIndex` handle on `ADS_DATE` columns. |

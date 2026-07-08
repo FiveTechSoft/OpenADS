@@ -6,11 +6,22 @@ nav_order: 0
 permalink: /es/novedades/
 ---
 
-# Novedades (v1.0.0-rc29 → v1.8.0)
+# Novedades (v1.0.0-rc29 → v1.8.1)
 
 Esta página resume los cambios más destacados desde la versión
 v1.0.0-rc29. Para el historial completo de commits, consulta el
 [CHANGELOG](https://github.com/FiveTechSoft/OpenADS/blob/main/CHANGELOG.md).
+
+---
+
+## Destacados v1.8.1
+
+### ABI — relleno de claves `OrdScope` en campos carácter
+
+Harbour envía el ámbito con longitud recortada, pero las claves CDX van
+rellenadas con espacios. `setScopeTop` / `setScopeBottom` en un campo de
+orden de trabajo podía dejar `GotoTop` en EOF en **local y remoto**.
+`AdsSetScope` ahora rellena hasta `key_length`. Prueba: `QA-D`.
 
 ---
 

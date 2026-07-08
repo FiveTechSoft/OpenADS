@@ -6,11 +6,23 @@ nav_order: 0
 permalink: /en/whatsnew/
 ---
 
-# What's New (v1.0.0-rc29 → v1.8.0)
+# What's New (v1.0.0-rc29 → v1.8.1)
 
 This page summarises the most notable changes since the
 v1.0.0-rc29 release. For the full commit-by-commit history see
 the [CHANGELOG](https://github.com/FiveTechSoft/OpenADS/blob/main/CHANGELOG.md).
+
+---
+
+## v1.8.1 Highlights
+
+### ABI — `OrdScope` string key padding
+
+Harbour passes scope strings at trimmed length, but CDX keys are
+space-padded. `setScopeTop` / `setScopeBottom` on a character work-order
+field (top == bottom) could land `GotoTop` at EOF on **local and remote**.
+`AdsSetScope` now pads to index `key_length`. Test: `QA-D` in
+`abi_qa_repro_test.cpp`.
 
 ---
 
