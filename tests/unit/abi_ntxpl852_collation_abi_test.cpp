@@ -29,7 +29,7 @@ void connect_with_collation(const fs::path& dir, const char* coll_name,
 void seed_polish_rows(ADSHANDLE hT) {
     const char* rows[] = {
         "LACAAAAA",
-        "\x9D""ABBBBBB",
+        "\x9DABBBBBB",  // ŁAB...
         "MADCCCCC",
         "ZBYDDDDD",
     };

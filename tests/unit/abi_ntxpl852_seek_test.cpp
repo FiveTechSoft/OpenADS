@@ -34,7 +34,7 @@ TEST_CASE("NTXPL852 soft seek positions M after L-stroke block") {
     struct Row { const char* name; };
     const Row rows[] = {
         {"LACAAAAA"},
-        { "\x9D""ABBBBBB" },  // ŁAB...
+        { "\x9DABBBBBB" },  // ŁAB...
         {"MADCCCCC"},
         {"ZBYDDDDD"},
     };
@@ -106,7 +106,7 @@ TEST_CASE("NTXPL852 hard seek requires exact key match") {
     REQUIRE(AdsCreateTable(hConn, tname, nullptr, ADS_CDX,
                            0, 0, 0, 0, def, &hT) == 0);
 
-    const char* rows[] = {"LACAAAAA", "\x9D""ABBBBBB", "MADCCCCC"};
+    const char* rows[] = {"LACAAAAA", "\x9DABBBBBB", "MADCCCCC"};
     UNSIGNED8 fName[] = "NAME";
     for (const char* row : rows) {
         REQUIRE(AdsAppendRecord(hT) == 0);

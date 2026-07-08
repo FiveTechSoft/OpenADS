@@ -161,7 +161,7 @@ jobs:
           "ASSET=$stage.zip" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Upload artifact (workflow run)
-        if: always()
+        if: always() && env.ASSET != ''
         uses: actions/upload-artifact@v4
         with:
           name: openads-${{ runner.os }}-${{ matrix.arch }}
