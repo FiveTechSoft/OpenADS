@@ -1,4 +1,5 @@
 #include "doctest.h"
+#include "fixtures/polish_oem_fixture.h"
 #include "drivers/cdx/cdx_index.h"
 #include "engine/oem_collation.h"
 
@@ -40,7 +41,7 @@ TEST_CASE("CDX build_bulk sorts keys with NTXPL852 collation") {
     std::vector<std::pair<std::string, std::uint32_t>> keys = {
         {pad8("ZBYDDDDD"), 4},
         {pad8("LACAAAAA"), 1},
-        {pad8("\x9D\x41BBBBBB"), 2},
+        {pad8(openads::test::kPolishLabRow8), 2},
         {pad8("MADCCCCC"), 3},
     };
     REQUIRE(ix.build_bulk(std::move(keys)).has_value());
@@ -85,7 +86,7 @@ TEST_CASE("CDX build_bulk without collation keeps binary byte order") {
     std::vector<std::pair<std::string, std::uint32_t>> keys = {
         {pad8("ZBYDDDDD"), 4},
         {pad8("LACAAAAA"), 1},
-        {pad8("\x9D\x41BBBBBB"), 2},
+        {pad8(openads::test::kPolishLabRow8), 2},
         {pad8("MADCCCCC"), 3},
     };
     REQUIRE(ix.build_bulk(std::move(keys)).has_value());
@@ -125,7 +126,7 @@ TEST_CASE("CDX soft seek under PL852 skips L-stroke for M prefix") {
 
     std::vector<std::pair<std::string, std::uint32_t>> keys = {
         {pad8("LACAAAAA"), 1},
-        {pad8("\x9D\x41BBBBBB"), 2},
+        {pad8(openads::test::kPolishLabRow8), 2},
         {pad8("MADCCCCC"), 3},
         {pad8("ZBYDDDDD"), 4},
     };
@@ -164,7 +165,7 @@ TEST_CASE("CDX insert after PL852 bulk keeps collation walk order") {
         {pad8("MADCCCCC"), 3},
     };
     REQUIRE(ix.build_bulk(std::move(keys)).has_value());
-    REQUIRE(ix.insert(2u, pad8("\x9D\x41BBBBBB")).has_value());
+    REQUIRE(ix.insert(2u, pad8(openads::test::kPolishLabRow8)).has_value());
     REQUIRE(ix.flush().has_value());
 
     auto s = ix.seek_first();

@@ -1,4 +1,5 @@
 #include "doctest.h"
+#include "fixtures/polish_oem_fixture.h"
 #include "engine/oem_collation.h"
 
 #include <cstring>
@@ -32,7 +33,7 @@ TEST_CASE("compare_oem_keys honours collation over raw memcmp") {
     const auto* c = lookup_oem_collation("NTXPL852");
     REQUIRE(c != nullptr);
     const char* lac = "LAC";
-    const char* lab = "\x9D\x41B";
+    const char* lab = openads::test::kPolishLab3;
     const char* mad = "MAD";
     // Binary: 0x9D (157) sorts after 'Z' (90).
     CHECK(std::memcmp(lab, mad, 1) > 0);

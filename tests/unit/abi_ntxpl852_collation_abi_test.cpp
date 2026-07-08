@@ -1,4 +1,5 @@
 #include "doctest.h"
+#include "fixtures/polish_oem_fixture.h"
 #include "openads/ace.h"
 
 #include <cstring>
@@ -29,7 +30,7 @@ void connect_with_collation(const fs::path& dir, const char* coll_name,
 void seed_polish_rows(ADSHANDLE hT) {
     const char* rows[] = {
         "LACAAAAA",
-        "\x9D\x41BBBBBB",  // ŁAB...
+        openads::test::kPolishLabRow8,
         "MADCCCCC",
         "ZBYDDDDD",
     };

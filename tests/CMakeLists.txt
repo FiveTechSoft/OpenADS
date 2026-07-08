@@ -325,6 +325,7 @@ target_include_directories(openads_unit_tests SYSTEM PRIVATE
 target_include_directories(openads_unit_tests PRIVATE
     ${CMAKE_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/tests
 )
 
 target_link_libraries(openads_unit_tests PRIVATE openads_core)
