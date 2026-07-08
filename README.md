@@ -103,20 +103,22 @@ generated baseline; OpenADS clears every line of the regenerated
 ADS-flavoured baseline. The session that closed the last gap is
 recorded across 28 incremental commits ending at `28be1be`.
 
-**Current release: v1.4.0 (2026-06-26).** Full Data Dictionary
-engine enforcement, DA-Web management UI, SAP DD import, TCP
-remote server, SQL backends (PostgreSQL / MariaDB / MSSQL / ODBC /
-SQLite), and deferred-flush bulk-insert (528× speedup) are all in
-production. `openads_serverd` serves the OpenADS wire protocol;
-clients connect with `AdsConnect60("tcp://host:port/path.add", ...)`
-and no application code changes. The `php_openads` native Zend
-extension (`bindings/php_ext/`) powers DA-Web and is also available
-as a standalone PHP 8.x extension for applications migrating from
-SAP's now-obsolete `php_ads.dll`. The wire protocol covers **read**,
-**write**, **SQL exec**, **credential auth**, **ACE error-code
-propagation**, **batched row fetch**, and **real TLS** (vendored
-mbedtls 3.6, client side). `docs/wire-protocol.md` is the formal
-spec for non-C++ clients (Python, Go, Rust, Harbour AEP).
+**Current release: [v1.7.0](https://github.com/FiveTechSoft/OpenADS/releases/tag/v1.7.0) (2026-07-08).**
+Harbour `rddads` + FiveWin `TDataBase` / `xBrowse` over `tcp://` is
+production-ready: remote scope (`OrdScope`), index navigation, key counts,
+date fields, and field I/O by ordinal all work end-to-end. Full Data
+Dictionary enforcement, Studio web console, SAP DD import, SQL backends
+(PostgreSQL / MariaDB / MSSQL / ODBC / SQLite), and CDX bulk-load index
+build are in production. `openads_serverd` serves the OpenADS wire
+protocol; clients connect with
+`AdsConnect60("tcp://host:port/path.add", ...)` and no application code
+changes. Docs:
+[English](https://fivetechsoft.github.io/OpenADS/en/) ·
+[Español](https://fivetechsoft.github.io/OpenADS/es/) ·
+[Português](https://fivetechsoft.github.io/OpenADS/pt/) —
+including [migrating from ADS](https://fivetechsoft.github.io/OpenADS/en/migrating-from-ads/)
+(CDX rollback / error 7017 caveat). `docs/wire-protocol.md` is the
+formal spec for non-C++ clients (Python, Go, Rust, Harbour AEP).
 
 Cross-platform CI is **green on all three runners**
 (`ubuntu-24.04 / ninja-clang`, `macos-14 / default`,
@@ -126,6 +128,13 @@ Release timeline:
 
 | Tag       | Date       | Highlights |
 |-----------|------------|-----------|
+| **v1.7.0** | 2026-07-08 | **REMOTE `AdsSetScope` / `OrdScope`** — `GotoTop`/`Skip` honour scoped key ranges over `tcp://` (Harbour labour-item / work-order filters). Docs: CDX rollback warning (SAP ACE error 7017). |
+| **v1.6.5** | 2026-07-07 | **REMOTE xBrowse blockers** — `OrdKeyCount()` wire opcode `GetKeyCount`; `AdsGetDate()` no longer crashes when rddads passes a `RemoteIndex` handle on `ADS_DATE` columns. |
+| **v1.6.4** | 2026-07-05 | **REMOTE FiveWin / TDataBase** — date `FieldGet`, ordinal-as-pointer safety, unlocked-write `EG_UNLOCKED` parity (`AE_RECORD_NOT_LOCKED`), lock forwarding on ABI handles. |
+| **v1.6.3** | 2026-07-04 | **REMOTE xBrowse navigation** — `AdsKeyNo` logical position, bookmark `GotoRecord` ABI sync, `AdsAtBOF` at first key. |
+| **v1.6.0** | 2026-07-01 | **REMOTE production CDX** — `AdsGetNumIndexes`, implicit GoTop after open, numeric `dbSeek` / aliased CDX tags, `abi_remote_prodcdx_test`. |
+| **v1.5.2** | 2026-06-27 | Windows **x86 (32-bit) release ZIP** restored; Harbour smoke green in CI. |
+| **v1.5.1** | 2026-06-27 | **Security & remote hardening** — path jail, nested unlock, TLS verify-by-default; remote `AdsSetRelation` / `AdsSetRecord` / `AdsCustomizeAOF`; SQLite + MSSQL navigational write. |
 | **v1.4.0** | 2026-06-26 | **ADS dialect compat for ERP Harbour/FiveWin** — N-way comma join (3+ tables), `<alias>.*` wildcard, `UPPER()` in WHERE, table aliases, bracket free-table names, `{d}` temporal literals, constant folding. **CDX bulk-load index builder** (~10× faster `CREATE INDEX`), O(1) browse position cache, FOR-index persist+apply, flush-skip. **Wire: `FetchWhere`** server-side filtered scan. **Enterprise: sharded-reactor connection pool**, `EnterpriseConfig` singleton, session reaping + max-sessions. **SQL backends:** PostgreSQL column metadata via information_schema, stmt_map concurrency safety, SQLite WAL + busy-timeout, CREATE TABLE table type. **ADT:** correct companion stream count. xBase++ smoke test, FiveWin ORM cookbook. |
 | **v1.2.2** | 2026-06-24 | CDX empty-leaf walk fix (skip holes after `erase`); CDX leaf recno bits sized from `max_rec` + prefix-seek fix; MSSQL backward SKIP off-by-one; ABI typed getters + `AdsGetIndexHandle` for SQL backends; NTX numeric-key edge-case tests; CDX empty-tree + prefix-seek edge tests. Full suite **738/738**. |
 | **v1.2.1** | 2026-06-24 | NTX numeric key format fix — keys stored in native xBase zero-padded + complement form so native `dbSeek(<number>)` matches on-disk layout. adm_memo, codepage, maria_uri, postgres_uri, proc, sqlite_uri unit tests added. Remote benchmark docs (iMac WiFi 784K rec/s, SSH tunnel 676K rec/s). Suite 720/720. |
