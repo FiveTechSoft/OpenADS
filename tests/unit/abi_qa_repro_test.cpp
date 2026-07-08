@@ -129,3 +129,63 @@ TEST_CASE("QA-C: numeric index ordScope returns in-range rows") {
     AdsClearScope(hIdx, ADS_BOTTOM);
     AdsCloseTable(hTable);
 }
+
+// D — character ordScope: Harbour passes trimmed scope strings; the
+// index stores space-padded keys. Top == bottom on an unpadded value
+// must still return every row in that key group.
+TEST_CASE("QA-D: character ordScope honours unpadded scope on wide key") {
+    const auto dir = fs::temp_directory_path() / "openads_qa_d";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir, ec);
+
+    UNSIGNED8 srv[260]{};
+    std::memcpy(srv, dir.string().c_str(), dir.string().size());
+    ADSHANDLE hConn = 0;
+    REQUIRE(AdsConnect60(srv, ADS_LOCAL_SERVER, nullptr, nullptr, 0, &hConn)
+            == AE_SUCCESS);
+
+    UNSIGNED8 tbl[] = "qa_d.dbf";
+    UNSIGNED8 flddef[] = "WO,Character,10;DATA,Character,8";
+    ADSHANDLE hTable = 0;
+    REQUIRE(AdsCreateTable(hConn, tbl, nullptr, ADS_CDX, ADS_ANSI, 0, 0, 0,
+                           flddef, &hTable) == AE_SUCCESS);
+
+    struct Row { const char* wo; const char* data; };
+    const Row rows[] = {
+        {"WO1", "a1"}, {"WO2", "b1"}, {"WO1", "a2"}, {"WO1", "a3"},
+    };
+    for (const auto& r : rows) {
+        REQUIRE(AdsAppendRecord(hTable) == AE_SUCCESS);
+        UNSIGNED8 fwo[] = "WO";
+        UNSIGNED8 fdt[] = "DATA";
+        REQUIRE(AdsSetString(hTable, fwo, (UNSIGNED8*)r.wo,
+                             static_cast<UNSIGNED32>(std::strlen(r.wo)))
+                == AE_SUCCESS);
+        REQUIRE(AdsSetString(hTable, fdt, (UNSIGNED8*)r.data,
+                             static_cast<UNSIGNED32>(std::strlen(r.data)))
+                == AE_SUCCESS);
+        REQUIRE(AdsWriteRecord(hTable) == AE_SUCCESS);
+    }
+
+    UNSIGNED8 idxfile[] = "qa_d.cdx";
+    UNSIGNED8 idxname[] = "BYWO";
+    UNSIGNED8 expr[]    = "WO";
+    ADSHANDLE hIdx = 0;
+    REQUIRE(AdsCreateIndex61(hTable, idxfile, idxname, expr,
+                             nullptr, nullptr, 0, 0, &hIdx) == AE_SUCCESS);
+
+    // Mirrors ordScope(0,cWrkord) / ordScope(1,cWrkord): trimmed len.
+    UNSIGNED8 scope[] = "WO1";
+    REQUIRE(AdsSetScope(hIdx, ADS_TOP, scope, 3, ADS_STRINGKEY) == AE_SUCCESS);
+    REQUIRE(AdsSetScope(hIdx, ADS_BOTTOM, scope, 3, ADS_STRINGKEY)
+            == AE_SUCCESS);
+
+    UNSIGNED32 inScope = walk_count(hTable);
+    INFO("rows within WO1 scope = ", inScope, " (expected 3)");
+    CHECK(inScope == 3u);
+
+    AdsClearScope(hIdx, ADS_TOP);
+    AdsClearScope(hIdx, ADS_BOTTOM);
+    AdsCloseTable(hTable);
+}
