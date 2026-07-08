@@ -6,11 +6,30 @@ nav_order: 0
 permalink: /es/novedades/
 ---
 
-# Novedades (v1.0.0-rc29 → v1.7.0)
+# Novedades (v1.0.0-rc29 → v1.8.0)
 
 Esta página resume los cambios más destacados desde la versión
 v1.0.0-rc29. Para el historial completo de commits, consulta el
 [CHANGELOG](https://github.com/FiveTechSoft/OpenADS/blob/main/CHANGELOG.md).
+
+---
+
+## Destacados v1.8.0
+
+### CDX — colación OEM NTXPL852 / PL852
+
+`AdsSetCollation` acepta `NTXPL852` y `PL852` para ordenar índices CDX
+según CP-852 polaco. Ł (0x9D) queda entre L y M en build, seek, insert
+y reindex.
+
+### CDX — `REINDEX` en bloque
+
+`Table::reindex()` en tags CDX usa `build_bulk()` (misma ruta rápida que
+`CREATE INDEX`).
+
+### Pruebas
+
+19 pruebas unitarias nuevas (motor, driver CDX y ABI).
 
 ---
 

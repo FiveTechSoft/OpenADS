@@ -57,6 +57,11 @@ public:
     KeyEncoding key_encoding() const override { return key_enc_; }
     void set_key_encoding(KeyEncoding e) override { key_enc_ = e; }
 
+    // OEM national collation sort table (NTXPL852 / PL852). nullptr = binary.
+    void set_oem_sort_table(const std::uint8_t* sort) noexcept {
+        oem_sort_ = sort;
+    }
+
     void invalidate_cursor() override {
         cur_state_ = CurState::Initial;
         cur_index_ = -1;
@@ -214,6 +219,9 @@ private:
 
     util::Result<void> rewrite_header_();
 
+    int compare_keys_(const char* a, const char* b,
+                      std::size_t len) const noexcept;
+
     // Allocate a fresh 512-byte page at the next free offset for this
     // CDX file. Compound files host several sub-tags; every sub-tag's
     // CdxIndex shares one allocator keyed by path so their page
@@ -232,6 +240,7 @@ private:
     bool                                    unique_    = false;
     bool                                    descend_   = false;
     KeyEncoding                             key_enc_   = KeyEncoding::Text;
+    const std::uint8_t*                     oem_sort_  = nullptr;
     std::string                             key_expr_;
     std::string                             for_expr_;
     std::string                             tag_name_;

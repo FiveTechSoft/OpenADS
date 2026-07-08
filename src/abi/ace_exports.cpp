@@ -18,6 +18,7 @@
 #include "sql_backend/sql_ddl.h"
 #include "sql_backend/sql_system_catalog.h"
 #include "engine/index_expr.h"
+#include "engine/oem_collation.h"
 #include "engine/record_crc.h"
 #include "engine/table.h"
 
@@ -10940,6 +10941,16 @@ void mark_cdx_key_encoding(Table* t, openads::drivers::IIndex* idx) {
     }
 }
 
+// Stamp OEM national collation onto a CDX index from the table's connection.
+void apply_cdx_oem_collation(Table* t, openads::drivers::IIndex* idx) {
+    if (t == nullptr || idx == nullptr) return;
+    auto* cdx = dynamic_cast<openads::drivers::cdx::CdxIndex*>(idx);
+    if (cdx == nullptr) return;
+    const std::uint8_t* sort = nullptr;
+    if (auto* conn = t->owner()) sort = conn->oem_sort_table();
+    cdx->set_oem_sort_table(sort);
+}
+
 // Re-mark a reopened NTX index NtxNumeric so a later append writes the native
 // zero-padded numeric key. The create path marks it via set_numeric_format; a
 // reopen through AdsOpenIndex must restore the flag (open() already reads the
@@ -11231,6 +11242,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
                 return fail(r.error());
             }
             mark_cdx_key_encoding(t, idx.get());
+            apply_cdx_oem_collation(t, idx.get());
             sub = std::move(idx);
         }
         ADSHANDLE h = next_index_handle();
@@ -11888,6 +11900,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
     if (cdx_numeric_key && idx_owner) {
         idx_owner->set_key_encoding(openads::drivers::KeyEncoding::FoxNumeric);
     }
+    if (idx_owner) apply_cdx_oem_collation(t, idx_owner.get());
     auto rec_count = t->record_count();
     // Fast path: for CDX, collect the whole key stream and bulk-load the
     // B+tree in one bottom-up pass (sort -> pack leaves -> branch levels)
@@ -11982,6 +11995,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
                         openads::drivers::IndexOpenMode::Shared,
                         sib); !r0) continue;
                 mark_cdx_key_encoding(t, sub.get());
+                apply_cdx_oem_collation(t, sub.get());
                 // The sibling lost its binding (rddads ORDLSTCLEAR) but its
                 // on-disk B+tree is already current when it was built earlier
                 // in this same INDEX / REINDEX run — the common case, since a
@@ -14787,6 +14801,7 @@ extern "C++" std::vector<ADSHANDLE> ordered_index_handles_for(Table* t) {
                             openads::drivers::IndexOpenMode::Shared,
                             tag); !r) continue;
                     mark_cdx_key_encoding(t, sub.get());
+                    apply_cdx_oem_collation(t, sub.get());
                     ADSHANDLE nh = next_index_handle();
                     openads::drivers::IIndex* raw = sub.get();
                     m[nh] = IndexBinding{t, tag, std::move(sub), bag_path};
@@ -16822,11 +16837,19 @@ UNSIGNED32 ENTRYPOINT AdsSetCollation(ADSHANDLE hConnect, UNSIGNED8* pucName) {
         std::toupper(static_cast<unsigned char>(ch))));
     if (upper == "BINARY") {
         c->set_collation(Connection::Collation::Binary);
+        c->set_oem_sort_table(nullptr);
     } else if (upper == "NOCASE") {
         c->set_collation(Connection::Collation::NoCase);
+        c->set_oem_sort_table(nullptr);
     } else {
-        return fail(openads::AE_FUNCTION_NOT_AVAILABLE,
-                    "unknown collation name (expected BINARY / NOCASE)");
+        const auto* oem = openads::engine::lookup_oem_collation(name.c_str());
+        if (oem == nullptr) {
+            return fail(openads::AE_FUNCTION_NOT_AVAILABLE,
+                        "unknown collation name (expected BINARY / NOCASE / "
+                        "NTXPL852 / PL852)");
+        }
+        c->set_collation(Connection::Collation::Binary);
+        c->set_oem_sort_table(oem->sort);
     }
     return ok();
 }

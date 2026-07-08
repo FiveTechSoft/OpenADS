@@ -6,11 +6,31 @@ nav_order: 0
 permalink: /en/whatsnew/
 ---
 
-# What's New (v1.0.0-rc29 → v1.7.0)
+# What's New (v1.0.0-rc29 → v1.8.0)
 
 This page summarises the most notable changes since the
 v1.0.0-rc29 release. For the full commit-by-commit history see
 the [CHANGELOG](https://github.com/FiveTechSoft/OpenADS/blob/main/CHANGELOG.md).
+
+---
+
+## v1.8.0 Highlights
+
+### CDX — NTXPL852 / PL852 OEM collation
+
+`AdsSetCollation` accepts `NTXPL852` and `PL852` for Polish CP-852 index
+sorting. Ł (0x9D) sorts between L and M on CDX build, seek, insert, and
+reindex — matching Harbour / Clipper local-server behaviour.
+
+### CDX — bulk `REINDEX`
+
+`Table::reindex()` for CDX tags uses the same bottom-up `build_bulk()`
+path as `CREATE INDEX`, replacing the slow erase-then-insert walk.
+
+### Tests
+
+19 new unit tests cover engine collation weights, CDX driver bulk sort,
+and ABI soft/hard seek + index walk.
 
 ---
 

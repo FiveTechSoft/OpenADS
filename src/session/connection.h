@@ -141,6 +141,15 @@ public:
     void       set_collation(Collation c) noexcept { collation_ = c; }
     Collation  collation() const noexcept { return collation_; }
 
+    // OEM national collation for CDX/NTX index keys (NTXPL852, PL852, …).
+    // nullptr = raw byte order. Set via AdsSetCollation.
+    const std::uint8_t* oem_sort_table() const noexcept {
+        return oem_sort_;
+    }
+    void set_oem_sort_table(const std::uint8_t* tab) noexcept {
+        oem_sort_ = tab;
+    }
+
     // DD authentication: set after credential validation in AdsConnect60.
     // RCB 2026-06-27: Keep the connection username normalized so every
     // conn->username() permission check sees one canonical DD user name.
@@ -187,6 +196,8 @@ private:
     // M11.7 — string compare collation (default = byte-exact).
     Collation                                                  collation_ =
         Collation::Binary;
+    const std::uint8_t*                                        oem_sort_ =
+        nullptr;
     // Authenticated username (empty = anonymous / unauthenticated).
     std::string                                                username_;
     // Per-connection trigger disable flag (sp_DisableTriggers / sp_EnableTriggers

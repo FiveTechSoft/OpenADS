@@ -46,6 +46,7 @@ add_library(openads_core STATIC
     engine/data_dict.cpp
     engine/fts.cpp
     engine/codepage.cpp
+    engine/oem_collation.cpp
     sql/parser.cpp
     drivers/dbf_common.cpp
     drivers/cache/cached_driver.cpp

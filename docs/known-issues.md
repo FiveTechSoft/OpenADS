@@ -6,7 +6,7 @@ nav_order: 9
 
 # Known issues — current
 
-Status as of **v1.7.0** (2026-07-08).
+Status as of **v1.8.0** (2026-07-08).
 
 ## Open
 
@@ -27,23 +27,19 @@ recognize that header and returns **error 7017** (*Corrupt .ADI, .CDX, or
 before migration, or delete and rebuild all tags under SAP after reverting.
 See [Migrating from ADS](en/migrating-from-ads/) for the full checklist.
 
-### OEM national collations (NTXPL852 and related)
+### OEM national collations beyond PL852
 
-`AdsSetCollation` today accepts only `BINARY` and `NOCASE`. Clipper/Harbour
-apps that set `OEM_CHAR_SET=NTXPL852` (Polish CP852) or other national
-collation tables in `adslocal.cfg` expect index build and soft `dbSeek` to
-sort by collation weight (e.g. Ł between L and M). OpenADS currently uses
-binary byte order for those paths — mis-positioned seeks and wrong reindex
-order on Central/Eastern-European datasets. Tracked as
+`AdsSetCollation` accepts `BINARY`, `NOCASE`, `NTXPL852`, and `PL852`
+(v1.8.0). Other national collation tables from `adslocal.cfg` (e.g.
+MAZOVIA, additional NTX* variants) are not implemented yet. Tracked as
 [issue #127](https://github.com/FiveTechSoft/OpenADS/issues/127).
 
 ### CDX `INDEX ON` write performance
 
-Full CDX rebuilds on large production tables can be significantly slower
-than SAP ACE 11.10 on the same hardware (reports of ~11× on multi-tag
-`INDEX ON` workloads). A bulk-load B+tree path exists for `CREATE INDEX` /
-`REINDEX`, but real-world parity is still under investigation. Tracked as
-[issue #128](https://github.com/FiveTechSoft/OpenADS/issues/128).
+CDX `REINDEX` now uses the bulk bottom-up path (v1.8.0). Multi-tag
+`INDEX ON` on very large production tables may still be slower than SAP
+ACE 11.10 on the same hardware — real-world parity is under investigation.
+Tracked as [issue #128](https://github.com/FiveTechSoft/OpenADS/issues/128).
 
 ### SAP-imported Data Dictionary permissions
 
@@ -81,6 +77,11 @@ backend execution hooks are not wired yet.
 
 ## Closed recently
 
+- **NTXPL852 / PL852 OEM collation** — fixed v1.8.0: CDX build, seek,
+  insert, and reindex honour the PL852 sort table; `AdsSetCollation`
+  accepts `NTXPL852` / `PL852`.
+- **CDX `REINDEX` per-record rebuild** — improved v1.8.0: bulk
+  `build_bulk()` path for CDX tags.
 - **Remote `AdsSetScope` / `OrdScope` ignored** — fixed v1.7.0:
   `GotoTop`/`Skip` now honour scoped key ranges over `tcp://`.
 - **Remote `OrdKeyCount()` returns 0** — fixed v1.6.5: new `GetKeyCount`

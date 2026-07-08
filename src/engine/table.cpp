@@ -8,6 +8,7 @@
 #include "drivers/adt/adt_driver.h"
 #include "drivers/cache/cached_driver.h"
 #include "drivers/cdx/cdx_driver.h"
+#include "drivers/cdx/cdx_index.h"
 #include "drivers/ntx/ntx_driver.h"
 
 #include <algorithm>
@@ -1166,10 +1167,64 @@ util::Result<void> Table::reindex() {
     }
     if (driver_ == nullptr) return {};
 
-    // 1) Clear every bound index. Re-using the same erase walk that
-    //    zap() uses keeps the IIndex file structurally intact.
-    auto erase_all = [&](drivers::IIndex* idx) -> util::Result<void> {
-        if (idx == nullptr) return {};
+    std::vector<drivers::IIndex*> indexes;
+    if (order_ && order_->index()) indexes.push_back(order_->index());
+    for (auto* x : extra_index_views_) {
+        if (x != nullptr) indexes.push_back(x);
+    }
+    if (indexes.empty()) {
+        state_ = State::Bof;
+        recno_ = 0;
+        return {};
+    }
+
+    const std::uint8_t* conn_sort =
+        owner_ != nullptr ? owner_->oem_sort_table() : nullptr;
+    const auto rec_count = driver_->record_count();
+
+    auto rebuild_cdx = [&](drivers::cdx::CdxIndex* cdx)
+        -> util::Result<void> {
+        cdx->set_oem_sort_table(conn_sort);
+        const std::string& for_expr = cdx->condition();
+        const std::string& expr    = cdx->expression();
+        const std::uint16_t klen   = cdx->key_length();
+        const bool fox = cdx->key_encoding() == drivers::KeyEncoding::FoxNumeric;
+        std::vector<std::pair<std::string, std::uint32_t>> keys;
+        keys.reserve(rec_count);
+        for (std::uint32_t r = 1; r <= rec_count; ++r) {
+            if (auto g = goto_record(r); !g) return g.error();
+            if (is_deleted()) continue;
+            if (!for_expr.empty() &&
+                !evaluate_index_expr_truthy(*this, for_expr)) {
+                continue;
+            }
+            std::string kbytes;
+            if (fox) {
+                double dv = 0.0;
+                if (!evaluate_index_expr_number(*this, expr, dv)) {
+                    return util::Error{5000, 0,
+                        "failed to evaluate numeric index expression", ""};
+                }
+                kbytes = fox_numeric_key(dv);
+            } else {
+                auto k = evaluate_index_expr(*this, expr, klen);
+                if (!k) return k.error();
+                kbytes = std::move(k).value();
+            }
+            keys.emplace_back(std::move(kbytes), r);
+        }
+        if (auto cl = cdx->clear_data(); !cl) return cl.error();
+        if (auto b = cdx->build_bulk(std::move(keys)); !b) return b.error();
+        return {};
+    };
+
+    // CDX: bulk bottom-up rebuild per tag (same fast path as CREATE INDEX).
+    // NTX / ADI: legacy erase-then-insert walk.
+    for (auto* idx : indexes) {
+        if (auto* cdx = dynamic_cast<drivers::cdx::CdxIndex*>(idx)) {
+            if (auto r = rebuild_cdx(cdx); !r) return r.error();
+            continue;
+        }
         std::vector<std::pair<std::uint32_t, std::string>> entries;
         auto seek = idx->seek_first();
         while (seek && seek.value().positioned) {
@@ -1179,66 +1234,22 @@ util::Result<void> Table::reindex() {
         for (auto& [rec, key] : entries) {
             (void)idx->erase(rec, key);
         }
-        return {};
-    };
-    if (order_ && order_->index()) {
-        if (auto r = erase_all(order_->index()); !r) return r.error();
-    }
-    for (auto* x : extra_index_views_) {
-        if (auto r = erase_all(x); !r) return r.error();
-    }
-
-    // 2) Walk every live record and re-insert into each index using
-    //    its current key expression. Snapshot is built with empty
-    //    prev_keys so sync_all_indexes_ skips the (unneeded) erase
-    //    pass and performs only the insert.
-    std::vector<std::pair<drivers::IIndex*, std::string>> snap;
-    if (order_ && order_->index()) snap.emplace_back(order_->index(),
-                                                     std::string{});
-    for (auto* x : extra_index_views_) {
-        if (x) snap.emplace_back(x, std::string{});
-    }
-    // A conditional (FOR) tag must only hold records that pass its
-    // predicate; reindexing must re-apply that filter, not rebuild the
-    // tag unconditional. Capture each index's FOR clause once.
-    std::vector<std::string> snap_for;
-    snap_for.reserve(snap.size());
-    for (auto& [idx, prev] : snap) {
-        (void)prev;
-        snap_for.push_back(idx ? idx->condition() : std::string{});
-    }
-    bool any_for = false;
-    for (auto& f : snap_for) if (!f.empty()) { any_for = true; break; }
-
-    // Hoisted out of the per-record loop to avoid a heap allocation on every
-    // record of a large table; cleared and refilled each iteration.
-    std::vector<std::pair<drivers::IIndex*, std::string>> pass;
-    if (any_for) pass.reserve(snap.size());
-
-    auto rec_count = driver_->record_count();
-    for (std::uint32_t r = 1; r <= rec_count; ++r) {
-        if (auto g = goto_record(r); !g) return g.error();
-        if (is_deleted()) continue;
-        if (!any_for) {
-            if (auto s = sync_all_indexes_(snap); !s) return s.error();
-            continue;
-        }
-        // Re-insert only into the indexes whose FOR clause this record
-        // passes (an empty FOR is unconditional).
-        pass.clear();
-        for (std::size_t i = 0; i < snap.size(); ++i) {
-            if (snap_for[i].empty() ||
-                evaluate_index_expr_truthy(*this, snap_for[i])) {
-                pass.push_back(snap[i]);
+        std::vector<std::pair<drivers::IIndex*, std::string>> snap{
+            {idx, std::string{}}};
+        const std::string for_expr = idx->condition();
+        for (std::uint32_t r = 1; r <= rec_count; ++r) {
+            if (auto g = goto_record(r); !g) return g.error();
+            if (is_deleted()) continue;
+            if (!for_expr.empty() &&
+                !evaluate_index_expr_truthy(*this, for_expr)) {
+                continue;
             }
-        }
-        if (!pass.empty()) {
-            if (auto s = sync_all_indexes_(pass); !s) return s.error();
+            if (auto s = sync_all_indexes_(snap); !s) return s.error();
         }
     }
 
-    // 3) Flush every index so the rebuilt entries hit disk before the
-    //    caller resumes work.
+    // Flush every index so the rebuilt entries hit disk before the
+    // caller resumes work.
     if (order_ && order_->index()) {
         if (auto r = order_->index()->flush(); !r) return r.error();
     }

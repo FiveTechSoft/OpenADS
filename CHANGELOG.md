@@ -1,3 +1,29 @@
+## 1.8.0 — 2026-07-08
+
+### CDX — NTXPL852 / PL852 OEM collation (#127)
+
+Polish CP-852 national collation for CDX index build, soft/hard seek,
+insert, and reindex. `AdsSetCollation` now accepts `NTXPL852` and
+`PL852` (case-insensitive aliases) in addition to `BINARY` / `NOCASE`.
+Ł (0x9D) sorts between L and M, matching Harbour / Clipper / SAP ACE
+local-server behaviour on Central-European datasets.
+
+- New engine module `oem_collation` (256-byte PL852 sort table).
+- `CdxIndex::compare_keys_()` honours the connection's OEM sort weights.
+- `apply_cdx_oem_collation()` stamps collation on create/open/reindex.
+
+### CDX — bulk `REINDEX` path (#128)
+
+`Table::reindex()` for CDX tags now uses `clear_data()` +
+`build_bulk()` (same fast bottom-up path as `CREATE INDEX`) instead of
+erase-then-per-record insert.
+
+### Tests
+
+19 new unit tests across engine, CDX driver, and ABI layers
+(`oem_collation_test`, `cdx_build_bulk_collation_test`,
+`abi_ntxpl852_seek_test`, `abi_ntxpl852_collation_abi_test`).
+
 ## 1.7.0 — 2026-07-08
 
 ### REMOTE — AdsSetScope / OrdScope navigation fix

@@ -188,6 +188,10 @@ add_executable(openads_unit_tests
     unit/abi_sql_null_window_test.cpp
     unit/network_wire_test.cpp
     unit/abi_collation_codepage_test.cpp
+    unit/oem_collation_test.cpp
+    unit/cdx_build_bulk_collation_test.cpp
+    unit/abi_ntxpl852_seek_test.cpp
+    unit/abi_ntxpl852_collation_abi_test.cpp
     unit/network_socket_test.cpp
     unit/network_server_test.cpp
     unit/network_pool_test.cpp

@@ -1,5 +1,7 @@
 #include "drivers/cdx/cdx_index.h"
 
+#include "engine/oem_collation.h"
+
 #include <algorithm>
 #include <cstring>
 #include <filesystem>
@@ -699,6 +701,11 @@ util::Result<void> CdxIndex::skip_empty_leaves_left_(
     }
 }
 
+int CdxIndex::compare_keys_(const char* a, const char* b,
+                            std::size_t len) const noexcept {
+    return openads::engine::compare_oem_keys(oem_sort_, a, b, len);
+}
+
 util::Result<SeekOutcome> CdxIndex::seek_first() {
     cur_leaf_   = 0;
     cur_index_  = -1;
@@ -798,8 +805,8 @@ CdxIndex::seek_key(const std::string& key, bool soft) {
 
     while (true) {
         for (std::size_t i = 0; i < cur_decoded_.size(); ++i) {
-            int cmp = std::memcmp(padded.data(), cur_decoded_[i].first.data(),
-                                  cmp_len);
+            int cmp = compare_keys_(padded.data(),
+                                    cur_decoded_[i].first.data(), cmp_len);
             if (cmp == 0) {
                 cur_index_ = static_cast<std::int32_t>(i);
                 cur_state_ = CurState::Positioned;
@@ -1004,11 +1011,13 @@ CdxIndex::insert_into_subtree_(std::uint32_t      subtree_root,
         // smaller recno; lower_bound landed BEFORE them, which
         // reversed the recno order and made seek_key surface the
         // last-inserted recno.
+        const std::uint8_t* sort = oem_sort_;
         auto pos = std::upper_bound(keys.begin(), keys.end(),
             std::pair<std::string, std::uint32_t>{padded, recno},
-            [](const auto& a, const auto& b) {
-                int c = std::memcmp(a.first.data(), b.first.data(),
-                                     std::min(a.first.size(), b.first.size()));
+            [sort](const auto& a, const auto& b) {
+                const auto len = std::min(a.first.size(), b.first.size());
+                int c = openads::engine::compare_oem_keys(
+                    sort, a.first.data(), b.first.data(), len);
                 if (c != 0) return c < 0;
                 return a.second < b.second;
             });
@@ -1099,7 +1108,8 @@ CdxIndex::insert_into_subtree_(std::uint32_t      subtree_root,
     // Pick the first entry whose key >= padded; if none, use last.
     std::size_t idx = 0;
     while (idx < entries.size() &&
-           std::memcmp(entries[idx].key.data(), padded.data(), key_size_) < 0) {
+           compare_keys_(entries[idx].key.data(), padded.data(),
+                         key_size_) < 0) {
         ++idx;
     }
     if (idx == entries.size()) idx = entries.size() - 1;
@@ -1116,8 +1126,8 @@ CdxIndex::insert_into_subtree_(std::uint32_t      subtree_root,
         // No structural change. But the entry's key may need refresh
         // if the inserted key is larger than the subtree's prior max.
         if (idx == entries.size() - 1) {
-            if (std::memcmp(padded.data(), entries[idx].key.data(),
-                            key_size_) > 0) {
+            if (compare_keys_(padded.data(), entries[idx].key.data(),
+                              key_size_) > 0) {
                 entries[idx].key   = padded;
                 entries[idx].recno = recno;
                 auto epg = get_page_(subtree_root);
@@ -1263,11 +1273,13 @@ CdxIndex::build_bulk(std::vector<std::pair<std::string, std::uint32_t>> keys) {
         else if (kv.first.size() > key_size_)
             kv.first.resize(key_size_);
     }
+    const std::uint8_t* sort = oem_sort_;
     std::sort(keys.begin(), keys.end(),
-        [](const std::pair<std::string, std::uint32_t>& a,
-           const std::pair<std::string, std::uint32_t>& b) {
-            int c = std::memcmp(a.first.data(), b.first.data(),
-                                std::min(a.first.size(), b.first.size()));
+        [sort](const std::pair<std::string, std::uint32_t>& a,
+               const std::pair<std::string, std::uint32_t>& b) {
+            const auto len = std::min(a.first.size(), b.first.size());
+            int c = openads::engine::compare_oem_keys(
+                sort, a.first.data(), b.first.data(), len);
             if (c != 0) return c < 0;
             return a.second < b.second;
         });
