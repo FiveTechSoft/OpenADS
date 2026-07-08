@@ -135,6 +135,11 @@ public:
     void set_show_deleted(bool v) noexcept { show_deleted_ = v; }
     bool owns_table_ptr(const engine::Table* t) const;
 
+    // Application ID set via sp_SetApplicationID / read back with
+    // sp_GetApplicationID. Free-form client-supplied label; empty until set.
+    const std::string& application_id() const noexcept { return app_id_; }
+    void set_application_id(std::string v) { app_id_ = std::move(v); }
+
     // M11.7 — string-compare collation. `Binary` (default) compares
     // raw bytes; `NoCase` lowercases ASCII A-Z before compare.
     enum class Collation { Binary, NoCase };
@@ -203,6 +208,8 @@ private:
     // Per-connection trigger disable flag (sp_DisableTriggers / sp_EnableTriggers
     // with CURRENT USER scope). Not persisted; reset when the connection closes.
     bool                                                       triggers_disabled_ = false;
+    // sp_SetApplicationID / sp_GetApplicationID label.
+    std::string                                                app_id_;
 
 public:
     // Trigger disable / enable for this connection (current-user scope).

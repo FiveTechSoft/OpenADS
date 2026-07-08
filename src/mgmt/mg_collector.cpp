@@ -266,7 +266,34 @@ MgStats& process_mg_stats() {
 
 namespace {
 thread_local LockOwner g_current_lock_owner;
+
+// Guarded by their own mutex: set once by Server::start()/stop(), read
+// per sp_mg* dispatch. Copied out under the lock so a concurrent stop()
+// can't invalidate a provider mid-call.
+std::mutex        g_provider_mu;
+SnapshotProvider  g_snapshot_provider;
+KillUserFn        g_kill_user_fn;
 }  // namespace
+
+void set_process_snapshot_provider(SnapshotProvider fn) {
+    std::lock_guard<std::mutex> lk(g_provider_mu);
+    g_snapshot_provider = std::move(fn);
+}
+
+SnapshotProvider process_snapshot_provider() {
+    std::lock_guard<std::mutex> lk(g_provider_mu);
+    return g_snapshot_provider;
+}
+
+void set_process_kill_user(KillUserFn fn) {
+    std::lock_guard<std::mutex> lk(g_provider_mu);
+    g_kill_user_fn = std::move(fn);
+}
+
+KillUserFn process_kill_user() {
+    std::lock_guard<std::mutex> lk(g_provider_mu);
+    return g_kill_user_fn;
+}
 
 void set_current_lock_owner(const std::string& user, std::uint16_t conn_no) {
     g_current_lock_owner.user    = user;

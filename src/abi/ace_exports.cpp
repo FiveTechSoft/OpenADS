@@ -2,6 +2,11 @@
 #include "openads/error.h"
 
 #include <atomic>
+#include <condition_variable>
+#include <deque>
+#include <functional>
+#include <map>
+#include <optional>
 
 #include "abi/backend_table_ops.h"
 #include "abi/backend_registry.h"
@@ -5741,6 +5746,12 @@ UNSIGNED32 ENTRYPOINT AdsConnect101(UNSIGNED8* pucConnectString,
     return ok();
 }
 
+// Forward decl: sp_CreateEvent registry cleanup, defined with the sp_*
+// system-procedure machinery further down (namespace spproc).
+extern "C++" {
+namespace spproc { void drop_all_events_for(const void* conn); }
+}
+
 UNSIGNED32 ENTRYPOINT AdsDisconnect(ADSHANDLE hConnect) {
     {
         auto& s_local = state();
@@ -5855,6 +5866,9 @@ UNSIGNED32 ENTRYPOINT AdsDisconnect(ADSHANDLE hConnect) {
     // entry that owned the Table and leave dangling pointers behind.
     Connection* c = s.registry.lookup<Connection>(hConnect, HandleKind::Connection);
     if (c != nullptr) {
+        // Drop this connection's sp_CreateEvent registrations so the
+        // global event map can't hold a dangling Connection key.
+        spproc::drop_all_events_for(c);
         // Collect this connection's still-open Table handles. `s.conns.erase`
         // below frees the Connection — and with it every Table it owns — so
         // any registry slot still pointing at one of those Tables would dangle.
@@ -17495,6 +17509,97 @@ extract_system_table_filter_(const openads::sql::SelectStmt& st) {
 
 } // namespace
 
+extern "C++" {
+
+// Column spec shared by the system.* virtual tables and the sp_* system
+// procedure result sets.
+struct SpCol {
+    const char*    colname;
+    char           type;      // 'C' (CiCharacter), 'N' (int32), 'L' (logical)
+    std::uint16_t  length;
+    std::uint8_t   decimals;
+};
+
+// Builds a read-only memory table with ADT-compatible full-length field
+// names. `tag` names the memory:// path for diagnostics only. Shared by
+// build_system_table (system.* SELECT targets) and dispatch_sp_builtin_cursor
+// (EXECUTE PROCEDURE sp_* result sets).
+openads::util::Result<Table>
+build_memory_result(const std::string& tag,
+                    const std::vector<SpCol>& cols,
+                    const std::vector<std::vector<std::string>>& rows) {
+    std::vector<openads::drivers::DbfField> fields;
+    fields.reserve(cols.size());
+    std::uint32_t rlen = 1;  // 1 byte delete flag
+    for (const auto& col : cols) {
+        openads::drivers::DbfField f;
+        f.name = col.colname;
+        f.decimals = col.decimals;
+        f.record_offset = static_cast<std::uint16_t>(rlen);
+        if (col.type == 'N') {
+            f.raw_type = 11;
+            f.type = openads::drivers::DbfFieldType::Integer;
+            f.length = 4;
+        } else if (col.type == 'L') {
+            f.raw_type = 1;
+            f.type = openads::drivers::DbfFieldType::Logical;
+            f.length = 1;
+        } else {
+            f.raw_type = 20;
+            f.type = openads::drivers::DbfFieldType::CiCharacter;
+            f.length = col.length;
+        }
+        rlen += f.length;
+        if (rlen > 0xFFFFu) {
+            return openads::util::Error{openads::AE_INTERNAL_ERROR, 0,
+                                        "result table record too large", tag};
+        }
+        fields.push_back(std::move(f));
+    }
+
+    std::vector<std::vector<std::uint8_t>> records;
+    records.reserve(rows.size());
+    for (const auto& row : rows) {
+        std::vector<std::uint8_t> rec(rlen, 0x20u);  // space-fill
+        rec[0] = ' ';
+        for (std::size_t ci = 0; ci < cols.size(); ++ci) {
+            const std::string& val = ci < row.size() ? row[ci] : "";
+            const auto& f = fields[ci];
+            std::uint8_t* dst = rec.data() + f.record_offset;
+            if (f.type == openads::drivers::DbfFieldType::Integer) {
+                std::int32_t iv = val.empty() ? 0
+                    : static_cast<std::int32_t>(std::stol(val));
+                auto uiv = static_cast<std::uint32_t>(iv);
+                dst[0] = static_cast<std::uint8_t>( uiv        & 0xFFu);
+                dst[1] = static_cast<std::uint8_t>((uiv >>  8) & 0xFFu);
+                dst[2] = static_cast<std::uint8_t>((uiv >> 16) & 0xFFu);
+                dst[3] = static_cast<std::uint8_t>((uiv >> 24) & 0xFFu);
+            } else if (f.type == openads::drivers::DbfFieldType::Logical) {
+                dst[0] = (val == "1" || val == "T" || val == "t") ? 'T' : 'F';
+            } else {  // CICHAR: space-padded
+                std::size_t n2 = std::min<std::size_t>(val.size(), f.length);
+                std::memcpy(dst, val.data(), n2);
+            }
+        }
+        records.push_back(std::move(rec));
+    }
+
+    char nb[96];
+    std::snprintf(nb, sizeof(nb), "memory://%s/%llx",
+        tag.c_str(),
+        static_cast<unsigned long long>(
+            openads::platform::monotonic_nanos()));
+    auto drv = std::make_unique<openads::drivers::memory::MemoryDriver>(
+        nb, std::move(fields), std::move(records),
+        static_cast<std::uint16_t>(rlen));
+    return Table::from_driver(std::move(drv), nb,
+                              openads::engine::TableType::Adt,
+                              openads::engine::OpenMode::Read,
+                              openads::engine::LockingMode::Compatible);
+}
+
+}  // extern "C++"
+
 // Build a read-only memory table that materialises one of the system.*
 // virtual tables from the connection's DataDict state. `sys_name` is the part
 // after "system." (already lower-cased by the caller).
@@ -17511,85 +17616,12 @@ build_system_table(Connection* c, std::string sys_name,
 
     namespace fs = std::filesystem;
 
-    struct Col {
-        const char*    colname;
-        char           type;      // 'C', 'N', 'L'
-        std::uint16_t  length;
-        std::uint8_t   decimals;
-    };
+    using Col = SpCol;
 
-    // Builds a memory table with ADT-compatible full-length field names.
     auto build = [&](const std::vector<Col>& cols,
                      const std::vector<std::vector<std::string>>& rows)
                      -> openads::util::Result<Table> {
-        std::vector<openads::drivers::DbfField> fields;
-        fields.reserve(cols.size());
-        std::uint32_t rlen = 1;  // 1 byte delete flag
-        for (const auto& col : cols) {
-            openads::drivers::DbfField f;
-            f.name = col.colname;
-            f.decimals = col.decimals;
-            f.record_offset = static_cast<std::uint16_t>(rlen);
-            if (col.type == 'N') {
-                f.raw_type = 11;
-                f.type = openads::drivers::DbfFieldType::Integer;
-                f.length = 4;
-            } else if (col.type == 'L') {
-                f.raw_type = 1;
-                f.type = openads::drivers::DbfFieldType::Logical;
-                f.length = 1;
-            } else {
-                f.raw_type = 20;
-                f.type = openads::drivers::DbfFieldType::CiCharacter;
-                f.length = col.length;
-            }
-            rlen += f.length;
-            if (rlen > 0xFFFFu) {
-                return openads::util::Error{openads::AE_INTERNAL_ERROR, 0,
-                                            "system table record too large", sys_name};
-            }
-            fields.push_back(std::move(f));
-        }
-
-        std::vector<std::vector<std::uint8_t>> records;
-        records.reserve(rows.size());
-        for (const auto& row : rows) {
-            std::vector<std::uint8_t> rec(rlen, 0x20u);  // space-fill
-            rec[0] = ' ';
-            for (std::size_t ci = 0; ci < cols.size(); ++ci) {
-                const std::string& val = ci < row.size() ? row[ci] : "";
-                const auto& f = fields[ci];
-                std::uint8_t* dst = rec.data() + f.record_offset;
-                if (f.type == openads::drivers::DbfFieldType::Integer) {
-                    std::int32_t iv = val.empty() ? 0
-                        : static_cast<std::int32_t>(std::stol(val));
-                    auto uiv = static_cast<std::uint32_t>(iv);
-                    dst[0] = static_cast<std::uint8_t>( uiv        & 0xFFu);
-                    dst[1] = static_cast<std::uint8_t>((uiv >>  8) & 0xFFu);
-                    dst[2] = static_cast<std::uint8_t>((uiv >> 16) & 0xFFu);
-                    dst[3] = static_cast<std::uint8_t>((uiv >> 24) & 0xFFu);
-                } else if (f.type == openads::drivers::DbfFieldType::Logical) {
-                    dst[0] = (val == "1" || val == "T" || val == "t") ? 'T' : 'F';
-                } else {  // CICHAR: space-padded
-                    std::size_t n2 = std::min<std::size_t>(val.size(), f.length);
-                    std::memcpy(dst, val.data(), n2);
-                }
-            }
-            records.push_back(std::move(rec));
-        }
-
-        char nb[64];
-        std::snprintf(nb, sizeof(nb), "memory://system.%s/%llx",
-            sys_name.c_str(),
-            static_cast<unsigned long long>(
-                openads::platform::monotonic_nanos()));
-        auto drv = std::make_unique<openads::drivers::memory::MemoryDriver>(
-            nb, std::move(fields), std::move(records),
-            static_cast<std::uint16_t>(rlen));
-        return Table::from_driver(std::move(drv), nb,
-                                  openads::engine::TableType::Adt,
-                                  openads::engine::OpenMode::Read,
-                                  openads::engine::LockingMode::Compatible);
+        return build_memory_result("system." + sys_name, cols, rows);
     };
 
     if (sys_name == "tables") {
@@ -18483,6 +18515,81 @@ build_system_table(Connection* c, std::string sys_name,
 
 } // extern "C++"
 
+// ---------------------------------------------------------------------------
+// sp_* system-procedure support machinery (M14): named events, LIKE-style
+// pattern matching, and process snapshot access shared by the non-cursor
+// (dispatch_sp_builtin) and cursor (dispatch_sp_builtin_cursor) dispatchers.
+// ---------------------------------------------------------------------------
+extern "C++" {
+namespace spproc {
+
+// -- Named events (sp_CreateEvent / sp_SignalEvent / sp_WaitForEvent...) ----
+// Registrations are per (connection, event-name): every connection that
+// created an event gets its own pending-signal counter and data queue, so
+// one waiter consuming a signal doesn't starve another — mirroring SAP's
+// per-connection event registration model. Signals from any connection in
+// this process reach all registrations of that name (remote clients' SQL
+// executes inside the server process, so cross-client signaling works).
+struct EventReg {
+    std::uint32_t           pending  = 0;   // signals not yet consumed
+    std::uint64_t           consumed = 0;   // signal sequence number
+    bool                    with_data = false;
+    std::deque<std::string> data;
+};
+
+inline std::mutex& ev_mu() { static std::mutex m; return m; }
+inline std::condition_variable& ev_cv() {
+    static std::condition_variable cv; return cv;
+}
+inline std::map<std::pair<const void*, std::string>, EventReg>& ev_map() {
+    static std::map<std::pair<const void*, std::string>, EventReg> m;
+    return m;
+}
+
+inline std::string lower(std::string s) {
+    for (auto& ch : s) ch = static_cast<char>(
+        std::tolower(static_cast<unsigned char>(ch)));
+    return s;
+}
+
+// Case-insensitive SQL LIKE match with % and _ wildcards. An empty
+// pattern matches everything (SAP treats empty/NULL pattern as "all").
+inline bool like_match(const std::string& pattern, const std::string& text) {
+    if (pattern.empty()) return true;
+    std::string p = lower(pattern), t = lower(text);
+    std::size_t pi = 0, ti = 0, star = std::string::npos, mark = 0;
+    while (ti < t.size()) {
+        if (pi < p.size() && (p[pi] == '_' || p[pi] == t[ti])) {
+            ++pi; ++ti;
+        } else if (pi < p.size() && p[pi] == '%') {
+            star = pi++; mark = ti;
+        } else if (star != std::string::npos) {
+            pi = star + 1; ti = ++mark;
+        } else {
+            return false;
+        }
+    }
+    while (pi < p.size() && p[pi] == '%') ++pi;
+    return pi == p.size();
+}
+
+// Treat a textual NULL argument the same as an omitted one.
+inline bool is_null_arg(const std::string& s) {
+    return s.empty() || lower(s) == "null";
+}
+
+void drop_all_events_for(const void* conn) {
+    std::lock_guard<std::mutex> lk(ev_mu());
+    auto& m = ev_map();
+    for (auto it = m.begin(); it != m.end(); ) {
+        if (it->first.first == conn) it = m.erase(it);
+        else ++it;
+    }
+}
+
+}  // namespace spproc
+}  // extern "C++"
+
 // Dispatch for ADS built-in sp_* stored procedures. Returns true and sets *prc
 // if the name was recognized; caller falls through to the DLL path otherwise.
 extern "C++" bool dispatch_sp_builtin(
@@ -18698,8 +18805,1383 @@ extern "C++" bool dispatch_sp_builtin(
         if (auto r = dd->set_db_property(key, arg(1)); !r) { *prc = fail(r.error()); return true; }
         *prc = ok(); return true;
     }
+
+    // ---- M14: remaining SAP system procedures (non-cursor group) -----------
+
+    // Truthy logical argument ('T', 'TRUE', '1', numeric non-zero).
+    auto arg_bool = [&](std::size_t i) -> bool {
+        if (i < args.size() && args[i].is_numeric) return args[i].number != 0.0;
+        std::string v = spproc::lower(arg(i));
+        return v == "t" || v == "true" || v == "1" || v == ".t.";
+    };
+
+    // Open a table by DD alias or path, run `fn`, close it again.
+    auto with_table = [&](const std::string& tname,
+                          openads::engine::OpenMode mode,
+                          const std::function<UNSIGNED32(
+                              openads::engine::Table&)>& fn) -> UNSIGNED32 {
+        auto th = c->open_table(tname, openads::engine::TableType::Cdx, mode);
+        if (!th) return fail(th.error());
+        openads::engine::Table* t = c->lookup_table(th.value());
+        if (!t) {
+            c->close_table(th.value());
+            return fail(openads::AE_INTERNAL_ERROR, "post-open");
+        }
+        UNSIGNED32 rc = fn(*t);
+        c->close_table(th.value());
+        return rc;
+    };
+
+    auto unsupported = [&](const char* what) {
+        *prc = fail(openads::AE_FUNCTION_NOT_AVAILABLE, what);
+        return true;
+    };
+
+    // -- Table maintenance ---------------------------------------------------
+    if (uname == "SP_PACKTABLE" || uname == "SP_PACKTABLEONLINE") {
+        // MemoBlockSize / Options arguments are accepted and ignored.
+        *prc = with_table(arg(0), openads::engine::OpenMode::Exclusive,
+            [&](openads::engine::Table& t) -> UNSIGNED32 {
+                auto r = t.pack();
+                return r ? ok() : fail(r.error());
+            });
+        return true;
+    }
+    if (uname == "SP_PACKALLTABLESONLINE") {
+        if (!dd) { *prc = fail(openads::AE_FUNCTION_NOT_AVAILABLE, "no DD"); return true; }
+        for (const auto& kv : dd->tables()) {
+            UNSIGNED32 rc = with_table(kv.second,
+                openads::engine::OpenMode::Exclusive,
+                [&](openads::engine::Table& t) -> UNSIGNED32 {
+                    auto r = t.pack();
+                    return r ? ok() : fail(r.error());
+                });
+            if (rc != openads::AE_SUCCESS) { *prc = rc; return true; }
+        }
+        *prc = ok(); return true;
+    }
+    if (uname == "SP_REINDEX" || uname == "SP_REINDEXONLINE") {
+        // PageSize / Options arguments are accepted and ignored.
+        *prc = with_table(arg(0), openads::engine::OpenMode::Exclusive,
+            [&](openads::engine::Table& t) -> UNSIGNED32 {
+                auto r = t.reindex();
+                return r ? ok() : fail(r.error());
+            });
+        return true;
+    }
+    if (uname == "SP_ZAPTABLE") {
+        *prc = with_table(arg(0), openads::engine::OpenMode::Exclusive,
+            [&](openads::engine::Table& t) -> UNSIGNED32 {
+                auto r = t.zap();
+                return r ? ok() : fail(r.error());
+            });
+        return true;
+    }
+    if (uname == "SP_CREATEINDEX" || uname == "SP_CREATEINDEX90") {
+        // (TableName, FileName, TagName, Expression, Condition, Options,
+        //  PageSize[, Collation]) — mirrors the CREATE INDEX SQL path:
+        // resolve this Connection's ADSHANDLE, open the table, and reuse
+        // AdsCreateIndex61. The optional sp_CreateIndex90 collation
+        // argument is accepted and ignored (index collation follows the
+        // connection's collation).
+        auto& s = state();
+        ADSHANDLE conn_h = 0;
+        s.registry.for_each_handle([&](Handle h, HandleKind k, void* p) {
+            if (k != HandleKind::Connection) return;
+            if (static_cast<Connection*>(p) == c) conn_h = h;
+        });
+        if (conn_h == 0) {
+            *prc = fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
+            return true;
+        }
+        std::string tname = arg(0);
+        std::vector<UNSIGNED8> name_buf(tname.size() + 1, 0);
+        std::memcpy(name_buf.data(), tname.data(), tname.size());
+        ADSHANDLE hTable = 0;
+        if (auto rc = AdsOpenTable(conn_h, name_buf.data(), name_buf.data(),
+                                   ADS_CDX, 1, 1, 0, 1, &hTable);
+            rc != openads::AE_SUCCESS) { *prc = rc; return true; }
+
+        namespace fs = std::filesystem;
+        std::string file = spproc::is_null_arg(arg(1)) ? "" : arg(1);
+        if (file.empty()) {
+            fs::path tbl_path(c->data_dir());
+            tbl_path /= tname;
+            if (!tbl_path.has_extension()) tbl_path.replace_extension(".dbf");
+            fs::path bag = tbl_path;
+            bag.replace_extension(
+                spproc::lower(tbl_path.extension().string()) == ".adt"
+                    ? ".adi" : ".cdx");
+            file = bag.string();
+        }
+        std::string tag  = spproc::is_null_arg(arg(2)) ? "" : arg(2);
+        std::string expr = arg(3);
+        std::string cond = spproc::is_null_arg(arg(4)) ? "" : arg(4);
+        auto opts     = static_cast<UNSIGNED32>(ri_int(5));
+        auto pagesize = static_cast<UNSIGNED32>(ri_int(6));
+        if (pagesize == 0) pagesize = 512;
+
+        std::vector<UNSIGNED8> file_buf(file.size() + 1, 0);
+        std::memcpy(file_buf.data(), file.data(), file.size());
+        std::vector<UNSIGNED8> tag_buf(tag.size() + 1, 0);
+        std::memcpy(tag_buf.data(), tag.data(), tag.size());
+        std::vector<UNSIGNED8> expr_buf(expr.size() + 1, 0);
+        std::memcpy(expr_buf.data(), expr.data(), expr.size());
+        std::vector<UNSIGNED8> cond_buf(cond.size() + 1, 0);
+        std::memcpy(cond_buf.data(), cond.data(), cond.size());
+
+        ADSHANDLE hIdx = 0;
+        UNSIGNED32 rc = AdsCreateIndex61(
+            hTable, file_buf.data(),
+            tag.empty() ? nullptr : tag_buf.data(),
+            expr_buf.data(),
+            cond.empty() ? nullptr : cond_buf.data(),
+            nullptr, opts, static_cast<UNSIGNED16>(pagesize), &hIdx);
+        AdsCloseTable(hTable);
+        *prc = rc;
+        return true;
+    }
+    if (uname == "SP_REMOVEINDEXFILE") {
+        if (!dd) { *prc = fail(openads::AE_FUNCTION_NOT_AVAILABLE, "no DD"); return true; }
+        if (auto r = dd->remove_index_file(arg(0), arg(1)); !r) {
+            *prc = fail(r.error()); return true;
+        }
+        if (arg_bool(2)) {
+            namespace fs = std::filesystem;
+            std::error_code ec;
+            fs::path p(arg(1));
+            if (p.is_relative()) p = fs::path(c->data_dir()) / p;
+            fs::remove(p, ec);
+        }
+        *prc = ok(); return true;
+    }
+    if (uname == "SP_MODIFYINDEXPROPERTY") {
+        // Same property-bag persistence pattern as SP_MODIFYTABLEPROPERTY.
+        if (!dd) { *prc = fail(openads::AE_FUNCTION_NOT_AVAILABLE, "no DD"); return true; }
+        dd->set_db_property(
+            "INDEXPROP." + arg(0) + "." + arg(1) + "." + arg(2), arg(3));
+        *prc = ok(); return true;
+    }
+
+    // -- Encryption ------------------------------------------------------------
+    if (uname == "SP_ENCRYPTTABLE") {
+        if (!spproc::is_null_arg(arg(1))) c->set_encryption_password(arg(1));
+        if (!c->has_encryption_key()) {
+            return unsupported("sp_EncryptTable: no encryption password "
+                               "(pass one, or AdsSetEncryptionPassword first)");
+        }
+        *prc = with_table(arg(0), openads::engine::OpenMode::Exclusive,
+            [&](openads::engine::Table& t) -> UNSIGNED32 {
+                auto* cdx = dynamic_cast<openads::drivers::cdx::CdxDriver*>(
+                    t.driver() ? t.driver()->unwrap() : nullptr);
+                if (!cdx) {
+                    return fail(openads::AE_FUNCTION_NOT_AVAILABLE,
+                                "encryption supported on CdxDriver tables only");
+                }
+                auto r = cdx->encrypt_in_place(c->encryption_key());
+                if (!r) return fail(r.error());
+                if (auto fl = t.flush(); !fl) return fail(fl.error());
+                return ok();
+            });
+        return true;
+    }
+    if (uname == "SP_DECRYPTTABLE") {
+        // Matches AdsDecryptTable: pending ADS encryption-mode RE.
+        return unsupported("sp_DecryptTable pending ADS encryption-mode RE");
+    }
+    if (uname == "SP_SETDDENCRYPTIONTYPE") {
+        return unsupported("sp_SetDDEncryptionType: dictionary encryption "
+                           "is not supported by OpenADS");
+    }
+
+    // -- Connection/session tuning --------------------------------------------
+    if (uname == "SP_SETAPPLICATIONID") {
+        c->set_application_id(arg(0));
+        *prc = ok(); return true;
+    }
+    if (uname == "SP_IGNORETRANSACTIONS" ||
+        uname == "SP_IGNORETABLETRANSACTIONS") {
+        // Accepted no-op: OpenADS keeps every table transactional. The
+        // procedure is a performance hint, so honoring it lazily is safe.
+        *prc = ok(); return true;
+    }
+    if (uname == "SP_SETREQUESTPRIORITY") {
+        std::string p = spproc::lower(arg(0));
+        if (p != "low" && p != "normal" && p != "high" && p != "critical") {
+            *prc = fail(openads::AE_INTERNAL_ERROR,
+                        "priority must be low|normal|high|critical");
+            return true;
+        }
+        // Accepted no-op: OpenADS has no request priority queue yet.
+        *prc = ok(); return true;
+    }
+    if (uname == "SP_SETSTATEMENTLIMIT") {
+        // Accepted no-op: OpenADS does not cap open statements.
+        *prc = ok(); return true;
+    }
+    if (uname == "SP_CANCELQUERY") {
+        return unsupported("sp_CancelQuery is not supported by OpenADS");
+    }
+    if (uname == "SP_CHANGECURRENTUSERPASSWORD") {
+        if (!dd) { *prc = fail(openads::AE_FUNCTION_NOT_AVAILABLE, "no DD"); return true; }
+        const std::string& user = c->username();
+        if (user.empty()) {
+            *prc = fail(openads::AE_FUNCTION_NOT_AVAILABLE,
+                        "no authenticated dictionary user");
+            return true;
+        }
+        std::string current = dd->get_user_property(user, "prop_1101");
+        if (!current.empty() && current != arg(0)) {
+            *prc = fail(openads::AE_ACCESS_DENIED, "old password mismatch");
+            return true;
+        }
+        if (auto r = dd->set_user_property(user, "prop_1101", arg(1)); !r) {
+            *prc = fail(r.error()); return true;
+        }
+        *prc = ok(); return true;
+    }
+
+    // -- DD object management ---------------------------------------------------
+    if (uname == "SP_RENAMEDDOBJECT") {
+        if (!dd) { *prc = fail(openads::AE_FUNCTION_NOT_AVAILABLE, "no DD"); return true; }
+        const std::string& oldn = arg(0);
+        const std::string& newn = arg(1);
+        std::int32_t objtype = ri_int(2);
+        const bool keep_file = ri_int(3) == 1;  // ADS_KEEP_TABLE_FILE_NAME
+        switch (objtype) {
+            case 1: {  // table
+                std::string rel;
+                for (const auto& kv : dd->tables()) {
+                    if (spproc::lower(kv.first) == spproc::lower(oldn)) {
+                        rel = kv.second; break;
+                    }
+                }
+                if (rel.empty()) {
+                    *prc = fail(openads::AE_NO_FILE_FOUND, oldn.c_str());
+                    return true;
+                }
+                namespace fs = std::filesystem;
+                std::string new_rel = rel;
+                if (!keep_file) {
+                    fs::path oldp(rel);
+                    if (oldp.is_relative())
+                        oldp = fs::path(c->data_dir()) / oldp;
+                    fs::path newp = oldp;
+                    newp.replace_filename(newn + oldp.extension().string());
+                    std::error_code ec;
+                    fs::rename(oldp, newp, ec);
+                    if (ec) {
+                        *prc = fail(openads::AE_INTERNAL_ERROR,
+                                    "table file rename failed");
+                        return true;
+                    }
+                    // Sidecars follow the stem.
+                    for (const char* ext : {".cdx", ".adi", ".fpt",
+                                            ".dbt", ".adm", ".ntx"}) {
+                        fs::path so = oldp; so.replace_extension(ext);
+                        fs::path sn = newp; sn.replace_extension(ext);
+                        if (fs::exists(so, ec)) fs::rename(so, sn, ec);
+                    }
+                    fs::path nr(rel);
+                    nr.replace_filename(newn + fs::path(rel).extension().string());
+                    new_rel = nr.string();
+                }
+                if (auto r = dd->add_table(newn, new_rel); !r) {
+                    *prc = fail(r.error()); return true;
+                }
+                if (auto r = dd->remove_table(oldn); !r) {
+                    *prc = fail(r.error()); return true;
+                }
+                *prc = ok(); return true;
+            }
+            case 6: {  // view
+                auto it = dd->views().find(oldn);
+                if (it == dd->views().end()) {
+                    *prc = fail(openads::AE_NO_FILE_FOUND, oldn.c_str());
+                    return true;
+                }
+                auto e = it->second;
+                e.name = newn;
+                if (auto r = dd->create_view(e); !r) { *prc = fail(r.error()); return true; }
+                if (auto r = dd->drop_view(oldn); !r) { *prc = fail(r.error()); return true; }
+                *prc = ok(); return true;
+            }
+            case 10: {  // stored procedure definition
+                auto it = dd->procs().find(oldn);
+                if (it == dd->procs().end()) {
+                    *prc = fail(openads::AE_NO_FILE_FOUND, oldn.c_str());
+                    return true;
+                }
+                auto e = it->second;
+                e.name = newn;
+                if (auto r = dd->create_proc(e); !r) { *prc = fail(r.error()); return true; }
+                if (auto r = dd->drop_proc(oldn); !r) { *prc = fail(r.error()); return true; }
+                *prc = ok(); return true;
+            }
+            default:
+                return unsupported("sp_RenameDDObject: only TABLE (1), "
+                                   "VIEW (6) and PROCEDURE (10) objects "
+                                   "can be renamed");
+        }
+    }
+    if (uname == "SP_MOVEDDOBJECTFILE") {
+        return unsupported("sp_MoveDDObjectFile is not supported by OpenADS");
+    }
+    if (uname == "SP_MODIFYPROCEDUREPROPERTY") {
+        if (!dd) { *prc = fail(openads::AE_FUNCTION_NOT_AVAILABLE, "no DD"); return true; }
+        auto it = dd->procs().find(arg(0));
+        if (it == dd->procs().end()) {
+            *prc = fail(openads::AE_NO_FILE_FOUND, arg(0).c_str());
+            return true;
+        }
+        auto e = it->second;
+        std::string p = spproc::lower(arg(1));
+        if      (p == "comment")            e.comment       = arg(2);
+        else if (p == "input_parameters"  ||
+                 p == "procedure_input")    e.input_params  = arg(2);
+        else if (p == "output_parameters" ||
+                 p == "procedure_output")   e.output_params = arg(2);
+        else if (p == "container"        ||
+                 p == "procedure_container") e.container    = arg(2);
+        else if (p == "procedure_name" || p == "script")
+                                            e.procedure     = arg(2);
+        else {
+            *prc = fail(openads::AE_INTERNAL_ERROR, "unknown procedure property");
+            return true;
+        }
+        if (auto r = dd->drop_proc(e.name); !r) { *prc = fail(r.error()); return true; }
+        if (auto r = dd->create_proc(e); !r) { *prc = fail(r.error()); return true; }
+        *prc = ok(); return true;
+    }
+    if (uname == "SP_MODIFYVIEWPROPERTY") {
+        if (!dd) { *prc = fail(openads::AE_FUNCTION_NOT_AVAILABLE, "no DD"); return true; }
+        auto it = dd->views().find(arg(0));
+        if (it == dd->views().end()) {
+            *prc = fail(openads::AE_NO_FILE_FOUND, arg(0).c_str());
+            return true;
+        }
+        auto e = it->second;
+        std::string p = spproc::lower(arg(1));
+        if      (p == "comment")                       e.comment = arg(2);
+        else if (p == "statement" || p == "view_stmt" ||
+                 p == "sql")                           e.sql     = arg(2);
+        else {
+            *prc = fail(openads::AE_INTERNAL_ERROR, "unknown view property");
+            return true;
+        }
+        if (auto r = dd->drop_view(e.name); !r) { *prc = fail(r.error()); return true; }
+        if (auto r = dd->create_view(e); !r) { *prc = fail(r.error()); return true; }
+        *prc = ok(); return true;
+    }
+    if (uname == "SP_MODIFYLINK") {
+        // (Name, Dictionary, StaticPath, AuthenticateActiveUser, UserName,
+        //  Password) — recreate the link with the new settings.
+        if (!dd) { *prc = fail(openads::AE_FUNCTION_NOT_AVAILABLE, "no DD"); return true; }
+        if (auto r = dd->drop_link(arg(0)); !r) { *prc = fail(r.error()); return true; }
+        if (auto r = dd->create_link(arg(0), arg(1), arg(4), arg(5)); !r) {
+            *prc = fail(r.error()); return true;
+        }
+        *prc = ok(); return true;
+    }
+
+    // -- Named events -----------------------------------------------------------
+    if (uname == "SP_CREATEEVENT") {
+        std::lock_guard<std::mutex> lk(spproc::ev_mu());
+        auto& reg = spproc::ev_map()[{c, spproc::lower(arg(0))}];
+        reg.with_data = (ri_int(1) & 2) != 0;  // ADS_EVENT_WITH_DATA
+        *prc = ok(); return true;
+    }
+    if (uname == "SP_DROPEVENT") {
+        std::lock_guard<std::mutex> lk(spproc::ev_mu());
+        spproc::ev_map().erase({c, spproc::lower(arg(0))});
+        *prc = ok(); return true;
+    }
+    if (uname == "SP_DROPALLEVENTS") {
+        spproc::drop_all_events_for(c);
+        *prc = ok(); return true;
+    }
+    if (uname == "SP_SIGNALEVENT") {
+        // (EventName, WaitForCommit, Options[, EventData]). WaitForCommit
+        // is accepted but signals immediately — commit-deferred signaling
+        // needs transaction hooks that don't exist yet.
+        std::string name = spproc::lower(arg(0));
+        {
+            std::lock_guard<std::mutex> lk(spproc::ev_mu());
+            for (auto& [key, reg] : spproc::ev_map()) {
+                if (key.second != name) continue;
+                ++reg.pending;
+                if (reg.with_data) {
+                    if (reg.data.size() < 1000) reg.data.push_back(arg(3));
+                }
+            }
+        }
+        spproc::ev_cv().notify_all();
+        *prc = ok(); return true;
+    }
+
+    // -- Server management (no result set) ---------------------------------------
+    if (uname == "SP_MGKILLUSER") {
+        if (auto kill = openads::mgmt::process_kill_user()) {
+            kill(arg(0), 0);
+        }
+        // Local mode: documented engine no-op, same as AdsMgKillUser.
+        *prc = ok(); return true;
+    }
+    if (uname == "SP_MGRESETCOMMSTATS") {
+        openads::mgmt::process_mg_stats().reset_comm();
+        *prc = ok(); return true;
+    }
+
+    // -- Recognized but unsupported feature groups. Returning a specific
+    //    error beats "procedure not found": clients learn the call reached
+    //    a real engine that simply doesn't ship the feature.
+    if (uname == "SP_CREATEARTICLE" || uname == "SP_DROPARTICLE" ||
+        uname == "SP_CREATEPUBLICATION" || uname == "SP_DROPPUBLICATION" ||
+        uname == "SP_CREATESUBSCRIPTION" || uname == "SP_DROPSUBSCRIPTION" ||
+        uname == "SP_MODIFYARTICLEPROPERTY" ||
+        uname == "SP_MODIFYPUBLICATIONPROPERTY" ||
+        uname == "SP_MODIFYSUBSCRIPTIONPROPERTY" ||
+        uname == "SP_DELETEREPLICATIONENTRY" ||
+        uname == "SP_GETREPLICATIONENTRYDETAILS" ||
+        uname == "SP_PROCESSREPLICATIONQUEUES" ||
+        uname == "SP_TESTREPLICATIONCONNECTION") {
+        return unsupported("replication is not supported by OpenADS");
+    }
+    if (uname == "SP_BACKUPDATABASE" || uname == "SP_BACKUPFREETABLES" ||
+        uname == "SP_RESTOREDATABASE" || uname == "SP_RESTOREFREETABLES") {
+        return unsupported("online backup/restore is not supported by "
+                           "OpenADS; copy the files with the tables closed");
+    }
+    if (uname == "SP_ENABLEQUERYLOGGING" || uname == "SP_DISABLEQUERYLOGGING" ||
+        uname == "SP_GETQUERYLOGGINGRESULTS" || uname == "SP_VIEWQUERYLOGGING") {
+        return unsupported("query logging is not supported by OpenADS");
+    }
+
     return false;
 }
+
+// ---------------------------------------------------------------------------
+// M14: sp_* system procedures that return a result set.
+// ---------------------------------------------------------------------------
+extern "C++" {
+
+// In-process telemetry for the local (embedded DLL) case: enumerate the ABI
+// handle registry for real connection/table counts and fold in the process
+// MgStats. Shared with AdsMg*'s local backend (fetch_mg_snapshot).
+openads::mgmt::MgSnapshot collect_local_abi_snapshot() {
+    openads::mgmt::MgSnapshot snap;
+    snap.server_type = 0;   // 0 = local
+    std::uint32_t conns = 0, tbls = 0;
+    state().registry.for_each_handle(
+        [&](Handle, HandleKind k, void* p) {
+            if (k == HandleKind::Connection ||
+                k == HandleKind::RemoteConnection) {
+                ++conns;
+            } else if (k == HandleKind::Table ||
+                       k == HandleKind::RemoteTable) {
+                ++tbls;
+                if (k == HandleKind::Table) {
+                    auto* tp = static_cast<Table*>(p);
+                    if (tp != nullptr) {
+                        openads::mgmt::MgTable t;
+                        t.name    = tp->path();
+                        t.user    = "(local)";
+                        t.conn_no = 1;
+                        snap.table_list.push_back(std::move(t));
+                    }
+                }
+            }
+        });
+    snap.connections = conns;
+    snap.tables      = tbls;
+    snap.workareas   = tbls;
+    snap.users = 1;
+    openads::mgmt::MgUser u;
+    u.name    = "(local)";
+    u.conn_no = 1;
+    snap.user_list.push_back(u);
+    snap.rss_bytes = openads::platform::process_rss_bytes();
+
+    snap.locks     = openads::mgmt::LockRegistry::instance().count();
+    snap.lock_list = openads::mgmt::LockRegistry::instance().snapshot();
+    for (auto& l : snap.lock_list) {
+        if (l.user.empty()) l.user = "(local)";
+        if (l.conn_no == 0)  l.conn_no = 1;
+    }
+
+    openads::mgmt::capture_mg_stats(
+        snap, openads::mgmt::process_mg_stats());
+    return snap;
+}
+
+namespace spproc {
+
+// The snapshot the sp_mg* procedures report: the network Server's when this
+// SQL runs inside the daemon (provider hook), else this process's own.
+inline openads::mgmt::MgSnapshot current_snapshot() {
+    if (auto prov = openads::mgmt::process_snapshot_provider()) return prov();
+    return collect_local_abi_snapshot();
+}
+
+// NUL-terminated fixed char array -> std::string.
+inline std::string mgstr(const UNSIGNED8* a, std::size_t n) {
+    std::size_t len = 0;
+    while (len < n && a[len] != 0) ++len;
+    return std::string(reinterpret_cast<const char*>(a), len);
+}
+
+inline std::string i2s(std::uint64_t v) {
+    if (v > 0x7FFFFFFFull) v = 0x7FFFFFFFull;   // 'N' columns are int32
+    return std::to_string(v);
+}
+
+// "computer" or "computer\oslogin" (trailing '\' ignored) against a MgUser.
+inline bool user_matches(const openads::mgmt::MgUser& u, std::string want) {
+    while (!want.empty() && want.back() == '\\') want.pop_back();
+    if (want.empty()) return false;
+    std::string w = lower(want);
+    if (w == lower(u.name)) return true;
+    return w == lower(u.name + "\\" + u.os_login);
+}
+
+// Table-path match: full path or basename, case-insensitive.
+inline bool table_matches(const std::string& open_name,
+                          const std::string& want) {
+    if (want.empty()) return true;
+    if (lower(open_name) == lower(want)) return true;
+    namespace fs = std::filesystem;
+    return lower(fs::path(open_name).filename().string()) ==
+           lower(fs::path(want).filename().string());
+}
+
+inline std::string fmt_time(std::chrono::system_clock::time_point tp) {
+    if (tp.time_since_epoch().count() == 0) return "";
+    std::time_t tt = std::chrono::system_clock::to_time_t(tp);
+    std::tm tmv{};
+#ifdef _WIN32
+    localtime_s(&tmv, &tt);
+#else
+    localtime_r(&tt, &tmv);
+#endif
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d",
+                  tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+                  tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
+    return buf;
+}
+
+}  // namespace spproc
+
+// Dispatch for built-in sp_* procedures that produce a cursor. Returns true
+// and fills *out (a table or an error) when the name is recognized; the
+// caller adopts the table and registers the cursor handle. Runs WITHOUT the
+// global ABI mutex held — sp_WaitForEvent blocks, and the signaling
+// connection needs that mutex to get its EXECUTE PROCEDURE through.
+bool dispatch_sp_builtin_cursor(
+        Connection* c,
+        const std::string& uname,
+        const std::vector<openads::sql::ExecuteProcedureArg>& args,
+        std::optional<openads::util::Result<Table>>* out) {
+    using openads::util::Error;
+    namespace fs = std::filesystem;
+
+    // Everything except the blocking event waits touches shared engine
+    // state (connection tables, DD, handle registry) — serialize on the
+    // global ABI mutex like every other SQL statement branch. The waits
+    // stay lock-free: they only use `c` as an opaque registry key, and
+    // the signaling connection needs this mutex to make progress.
+    std::unique_lock<std::recursive_mutex> abi_lk;
+    if (uname != "SP_WAITFOREVENT" && uname != "SP_WAITFORANYEVENT")
+        abi_lk = std::unique_lock<std::recursive_mutex>(state().mu);
+
+    auto arg = [&](std::size_t i) -> const std::string& {
+        static const std::string empty;
+        return (i < args.size()) ? args[i].text : empty;
+    };
+    auto arg_int = [&](std::size_t i) -> std::int64_t {
+        if (i >= args.size()) return 0;
+        if (args[i].is_numeric)
+            return static_cast<std::int64_t>(args[i].number);
+        return std::atoll(args[i].text.c_str());
+    };
+    auto emit = [&](const char* tag, const std::vector<SpCol>& cols,
+                    const std::vector<std::vector<std::string>>& rows) {
+        *out = build_memory_result(tag, cols, rows);
+        return true;
+    };
+    auto err = [&](std::int32_t code, const std::string& msg) {
+        *out = openads::util::Result<Table>(Error{code, 0, msg, ""});
+        return true;
+    };
+
+    // -- sp_mg* management result sets ---------------------------------------
+    static const std::vector<SpCol> kUserCols = {
+        {"UserName",        'C', 64, 0},
+        {"ConnNumber",      'N',  5, 0},
+        {"DictionaryUser",  'C', 64, 0},
+        {"Address",         'C', 64, 0},
+        {"OSUserLoginName", 'C', 64, 0},
+        {"TSAddress",       'C', 64, 0},
+    };
+    auto user_row = [](const openads::mgmt::MgUser& u) {
+        return std::vector<std::string>{
+            u.name, std::to_string(u.conn_no), u.name, u.address,
+            u.os_login, ""};
+    };
+
+    if (uname == "SP_MGGETACTIVITYINFO") {
+        auto snap = spproc::current_snapshot();
+        openads::mgmt::MgCollector col(snap);
+        auto ai = col.activity_info();
+        char up[40];
+        std::snprintf(up, sizeof(up), "%u days %02u:%02u:%02u",
+                      ai.stUpTime.usDays, ai.stUpTime.usHours,
+                      ai.stUpTime.usMinutes, ai.stUpTime.usSeconds);
+        return emit("sp_mgGetActivityInfo",
+            {{"Operations",      'N', 10, 0},
+             {"LoggedErrors",    'N', 10, 0},
+             {"UpTime",          'C', 40, 0},
+             {"EQThreshold",     'N', 10, 0},
+             {"EQActiveThreads", 'N', 10, 0},
+             {"EQOperations",    'N', 10, 0}},
+            {{spproc::i2s(ai.ulOperations), spproc::i2s(ai.ulLoggedErrors),
+              up, "0", "0", "0"}});
+    }
+    if (uname == "SP_MGGETUSAGEINFO") {
+        auto snap = spproc::current_snapshot();
+        openads::mgmt::MgCollector col(snap);
+        auto ai = col.activity_info();
+        auto row = [](const char* item, const ADS_MGMT_USAGE_STRUCT& u) {
+            return std::vector<std::string>{
+                item, spproc::i2s(u.ulInUse), spproc::i2s(u.ulMaxUsed),
+                "0", spproc::i2s(u.ulRejected)};
+        };
+        return emit("sp_mgGetUsageInfo",
+            {{"Item",       'C', 30, 0},
+             {"InUse",      'N', 10, 0},
+             {"MaxUsed",    'N', 10, 0},
+             {"Configured", 'N', 10, 0},
+             {"Rejected",   'N', 10, 0}},
+            {row("Users",                ai.stUsers),
+             row("Connections",          ai.stConnections),
+             row("Work Areas",           ai.stWorkAreas),
+             row("Tables",               ai.stTables),
+             row("Indexes",              ai.stIndexes),
+             row("Locks",                ai.stLocks),
+             row("TPS Header Elems",     ai.stTpsHeaderElems),
+             row("TPS Visibility Elems", ai.stTpsVisElems),
+             row("TPS Memo Elems",       ai.stTpsMemoElems),
+             row("Worker Threads",       ai.stWorkerThreads)});
+    }
+    if (uname == "SP_MGGETCONNECTEDUSERS") {
+        auto snap = spproc::current_snapshot();
+        std::vector<std::vector<std::string>> rows;
+        for (const auto& u : snap.user_list) {
+            rows.push_back({u.name, std::to_string(u.conn_no), u.name,
+                            u.address, u.os_login, "", "",
+                            spproc::i2s(u.avg_cost_micros)});
+        }
+        return emit("sp_mgGetConnectedUsers",
+            {{"UserName",        'C', 64, 0},
+             {"ConnNumber",      'N',  5, 0},
+             {"DictionaryUser",  'C', 64, 0},
+             {"Address",         'C', 64, 0},
+             {"OSUserLoginName", 'C', 64, 0},
+             {"TSAddress",       'C', 64, 0},
+             {"ApplicationID",   'C', 70, 0},
+             {"AverageCost",     'N', 10, 0}},
+            rows);
+    }
+    if (uname == "SP_MGGETTABLEUSERS") {
+        auto snap = spproc::current_snapshot();
+        std::vector<std::vector<std::string>> rows;
+        for (const auto& t : snap.table_list) {
+            if (!spproc::table_matches(t.name, arg(0))) continue;
+            bool found = false;
+            for (const auto& u : snap.user_list) {
+                if (u.conn_no == t.conn_no) {
+                    rows.push_back(user_row(u));
+                    found = true;
+                    break;
+                }
+            }
+            if (!found)
+                rows.push_back({t.user, std::to_string(t.conn_no),
+                                t.user, "", "", ""});
+        }
+        return emit("sp_mgGetTableUsers", kUserCols, rows);
+    }
+    if (uname == "SP_MGGETINDEXUSERS") {
+        // Open indexes are not tracked per-session yet; empty result.
+        return emit("sp_mgGetIndexUsers", kUserCols, {});
+    }
+    if (uname == "SP_MGGETUSERTABLES" || uname == "SP_MGGETALLTABLES") {
+        bool by_user = (uname == "SP_MGGETUSERTABLES");
+        auto snap = spproc::current_snapshot();
+        std::vector<std::vector<std::string>> rows;
+        for (const auto& t : snap.table_list) {
+            if (by_user) {
+                bool match = false;
+                for (const auto& u : snap.user_list) {
+                    if (u.conn_no == t.conn_no &&
+                        spproc::user_matches(u, arg(0))) {
+                        match = true;
+                        break;
+                    }
+                }
+                if (!match) continue;
+            }
+            // LockType per SAP: ADS(1) proprietary, CDX(2), NTX(3), ADT(4).
+            std::string ext = spproc::lower(
+                fs::path(t.name).extension().string());
+            std::uint16_t ltv = (ext == ".adt") ? 4u
+                              : (ext == ".ntx") ? 3u : 2u;
+            static const char* kLt[] = {"", "ADS", "CDX", "NTX", "ADT"};
+            rows.push_back({t.name, kLt[ltv], std::to_string(ltv)});
+        }
+        return emit(by_user ? "sp_mgGetUserTables" : "sp_mgGetAllTables",
+            {{"TableName",     'C', 260, 0},
+             {"LockType",      'C',   3, 0},
+             {"LockTypeValue", 'N',   5, 0}},
+            rows);
+    }
+    if (uname == "SP_MGGETALLINDEXES" || uname == "SP_MGGETTABLEINDEXES" ||
+        uname == "SP_MGGETUSERINDEXES") {
+        // Open indexes are not tracked in the management snapshot yet;
+        // shape matches SAP so callers see an empty grid, not an error.
+        return emit("sp_mgGetIndexes", {{"IndexName", 'C', 260, 0}}, {});
+    }
+    if (uname == "SP_MGGETALLLOCKS" || uname == "SP_MGGETUSERLOCKS") {
+        // MgLock carries no table name (SAP's struct doesn't either), so
+        // the TableName argument cannot narrow the result; all locks held
+        // in this process/server are listed.
+        bool by_user = (uname == "SP_MGGETUSERLOCKS");
+        auto snap = spproc::current_snapshot();
+        std::vector<std::vector<std::string>> rows;
+        for (const auto& l : snap.lock_list) {
+            if (by_user) {
+                bool match = spproc::lower(l.user) == spproc::lower(arg(1));
+                if (!match) {
+                    for (const auto& u : snap.user_list) {
+                        if (u.conn_no == l.conn_no &&
+                            spproc::user_matches(u, arg(1))) {
+                            match = true;
+                            break;
+                        }
+                    }
+                }
+                if (!match) continue;
+            }
+            rows.push_back({std::to_string(l.recno)});
+        }
+        return emit("sp_mgGetLocks", {{"LockedRecNo", 'N', 10, 0}}, rows);
+    }
+    if (uname == "SP_MGGETLOCKOWNER") {
+        auto snap = spproc::current_snapshot();
+        auto want = static_cast<std::uint32_t>(arg_int(1));
+        std::vector<std::vector<std::string>> rows;
+        for (const auto& l : snap.lock_list) {
+            if (l.recno != want) continue;
+            std::string addr, oslogin;
+            for (const auto& u : snap.user_list) {
+                if (u.conn_no == l.conn_no) {
+                    addr = u.address;
+                    oslogin = u.os_login;
+                    break;
+                }
+            }
+            rows.push_back({l.user, std::to_string(l.conn_no), l.user, addr,
+                            want == 0 ? "File Lock" : "Record Lock",
+                            oslogin, ""});
+            break;
+        }
+        if (rows.empty())
+            rows.push_back({"", "0", "", "", "No Lock", "", ""});
+        return emit("sp_mgGetLockOwner",
+            {{"UserName",        'C', 64, 0},
+             {"ConnNumber",      'N',  5, 0},
+             {"DictionaryUser",  'C', 64, 0},
+             {"Address",         'C', 64, 0},
+             {"LockType",        'C', 12, 0},
+             {"OSUserLoginName", 'C', 64, 0},
+             {"TSAddress",       'C', 64, 0}},
+            rows);
+    }
+    if (uname == "SP_MGGETWORKERTHREADACTIVITY") {
+        auto snap = spproc::current_snapshot();
+        std::vector<std::vector<std::string>> rows;
+        for (const auto& t : snap.thread_list) {
+            rows.push_back({spproc::i2s(t.thread_no),
+                            std::to_string(t.opcode), t.user,
+                            std::to_string(t.conn_no), t.os_login});
+        }
+        return emit("sp_mgGetWorkerThreadActivity",
+            {{"ThreadNumber",    'N', 10, 0},
+             {"OpCode",          'N',  5, 0},
+             {"UserName",        'C', 64, 0},
+             {"ConnNumber",      'N',  5, 0},
+             {"OSUserLoginName", 'C', 64, 0}},
+            rows);
+    }
+    if (uname == "SP_MGGETCOMMSTATS") {
+        auto snap = spproc::current_snapshot();
+        openads::mgmt::MgCollector col(snap);
+        auto cs = col.comm_stats();
+        char pct[24];
+        std::snprintf(pct, sizeof(pct), "%.2f", cs.dPercentCheckSums);
+        return emit("sp_mgGetCommStats",
+            {{"PercentCheckSums",  'C', 12, 0},
+             {"TotalPackets",      'N', 10, 0},
+             {"RcvPktOutOfSeq",    'N', 10, 0},
+             {"NotLoggedIn",       'N', 10, 0},
+             {"RcvReqOutOfSeq",    'N', 10, 0},
+             {"CheckSumFailures",  'N', 10, 0},
+             {"DisconnectedUsers", 'N', 10, 0},
+             {"PartialConnects",   'N', 10, 0},
+             {"InvalidPackets",    'N', 10, 0},
+             {"RcvFromErrors",     'N', 10, 0},
+             {"SendToErrors",      'N', 10, 0}},
+            {{pct, spproc::i2s(cs.ulTotalPackets),
+              spproc::i2s(cs.ulRcvPktOutOfSeq), spproc::i2s(cs.ulNotLoggedIn),
+              spproc::i2s(cs.ulRcvReqOutOfSeq),
+              spproc::i2s(cs.ulCheckSumFailures),
+              spproc::i2s(cs.ulDisconnectedUsers),
+              spproc::i2s(cs.ulPartialConnects),
+              spproc::i2s(cs.ulInvalidPackets),
+              spproc::i2s(cs.ulRecvFromErrors),
+              spproc::i2s(cs.ulSendToErrors)}});
+    }
+    if (uname == "SP_MGGETCONFIGINFO") {
+        auto snap = spproc::current_snapshot();
+        openads::mgmt::MgCollector col(snap);
+        auto cp = col.config_params();
+        std::vector<std::vector<std::string>> rows = {
+            {"Stat Dump Interval",   spproc::i2s(cp.ulStatDumpInterval)},
+            {"Error Log Max",        spproc::i2s(cp.ulErrorLogMax)},
+            {"Error Log Path",       spproc::mgstr(cp.aucErrorLog, 256)},
+            {"Burst Packets",        std::to_string(cp.usNumBurstPackets)},
+            {"Sort Buffer",          spproc::i2s(cp.ulSortBuffSize)},
+            {"Sent IP Port",         std::to_string(cp.usSendIPPort)},
+            {"Receive IP Port",      std::to_string(cp.usReceiveIPPort)},
+            {"Semaphore File Path",  spproc::mgstr(cp.aucSemaphore, 256)},
+            {"Transaction Log Path", spproc::mgstr(cp.aucTransaction, 256)},
+            {"SQL Statement Limit",  "0"},
+            {"User SQL Statement Limit", "0"},
+        };
+        return emit("sp_mgGetConfigInfo",
+            {{"Item", 'C', 30, 0}, {"Value", 'C', 260, 0}}, rows);
+    }
+    if (uname == "SP_MGGETCONFIGMEMORY") {
+        auto snap = spproc::current_snapshot();
+        openads::mgmt::MgCollector col(snap);
+        auto cp = col.config_params();
+        auto cm = col.config_memory();
+        std::vector<std::vector<std::string>> rows = {
+            {"Connections",    spproc::i2s(cp.ulNumConnections),
+                               spproc::i2s(cm.ulConnectionMem)},
+            {"Work Areas",     spproc::i2s(cp.ulNumWorkAreas),
+                               spproc::i2s(cm.ulWorkAreaMem)},
+            {"Tables",         spproc::i2s(cp.ulNumTables),
+                               spproc::i2s(cm.ulTableMem)},
+            {"Indexes",        spproc::i2s(cp.ulNumIndexes),
+                               spproc::i2s(cm.ulIndexMem)},
+            {"Locks",          spproc::i2s(cp.ulNumLocks),
+                               spproc::i2s(cm.ulLockMem)},
+            {"User Buffer Size", spproc::i2s(cp.ulUserBufferSize),
+                               spproc::i2s(cm.ulUserBufferMem)},
+            {"Worker Threads", std::to_string(cp.usNumWorkerThreads),
+                               spproc::i2s(cm.ulWorkerThreadMem)},
+            {"Total Memory",   "",
+                               spproc::i2s(static_cast<std::uint64_t>(
+                                   cm.ulTotalConfigMem))},
+        };
+        return emit("sp_mgGetConfigMemory",
+            {{"Item",   'C', 30, 0},
+             {"Value",  'C', 20, 0},
+             {"Memory", 'N', 10, 0}},
+            rows);
+    }
+    if (uname == "SP_MGGETINSTALLINFO") {
+        auto snap = spproc::current_snapshot();
+        openads::mgmt::MgCollector col(snap);
+        auto ii = col.install_info();
+        return emit("sp_mgGetInstallInfo",
+            {{"Owner",              'C', 128, 0},
+             {"SerialNumber",       'C',  32, 0},
+             {"UserOption",         'N',  10, 0},
+             {"Version",            'C',  16, 0},
+             {"InstallDate",        'C',  32, 0},
+             {"EvalExpireDate",     'C',  32, 0},
+             {"ANSI",               'C',  32, 0},
+             {"OEM",                'C',  32, 0},
+             {"ReplicationEnabled", 'L',   1, 0},
+             {"MaxStatefulUsers",   'N',  10, 0},
+             {"MaxStatelessUsers",  'N',  10, 0}},
+            {{spproc::mgstr(ii.aucRegisteredOwner, 128),
+              spproc::mgstr(ii.aucSerialNumber, 32),
+              spproc::i2s(ii.ulUserOption),
+              spproc::mgstr(ii.aucVersionStr, 16),
+              spproc::mgstr(ii.aucInstallDate, 32),
+              spproc::mgstr(ii.aucEvalExpireDate, 32),
+              spproc::mgstr(ii.aucAnsiCharName, 32),
+              spproc::mgstr(ii.aucOemCharName, 32),
+              "F", "0", "0"}});
+    }
+    if (uname == "SP_MGGETSERVERTYPE") {
+        auto snap = spproc::current_snapshot();
+        std::uint16_t stv;
+        const char* stn;
+        if (snap.server_type == 0) {
+            stv = 3; stn = "Local Server";
+        } else {
+#ifdef _WIN32
+            stv = 7; stn = "Windows 64-bit";
+#else
+            stv = 8; stn = "Linux 64-bit";
+#endif
+        }
+        return emit("sp_mgGetServerType",
+            {{"ServerType",      'C', 20, 0},
+             {"ServerTypeValue", 'N',  5, 0},
+             {"OSMajor",         'N',  5, 0},
+             {"OSMinor",         'N',  5, 0}},
+            {{stn, std::to_string(stv), "0", "0"}});
+    }
+    if (uname == "SP_MGGETCRASHDUMPINFO") {
+        return emit("sp_mgGetCrashDumpInfo",
+            {{"CrashDumpName", 'C', 260, 0},
+             {"CreationTime",  'C',  25, 0},
+             {"FileSize",      'N',  10, 0}},
+            {});
+    }
+    if (uname == "SP_MGGETERRORLOG") {
+        // OpenADS does not maintain ads_err.adt/.dbf; SAP-shaped empty set.
+        return emit("sp_mgGetErrorLog",
+            {{"Error_Number", 'N',  10, 0},
+             {"DateTime",     'C',  25, 0},
+             {"Error_Code",   'N',  10, 0},
+             {"Ads_Source",   'C', 100, 0},
+             {"src_Line",     'N',  10, 0},
+             {"FileName",     'C', 260, 0}},
+            {});
+    }
+    if (uname == "SP_MGSETCONFIGVALUE") {
+        return emit("sp_mgSetConfigValue",
+            {{"OldValue",   'C', 256, 0},
+             {"Result",     'N',   5, 0},
+             {"ResultText", 'C', 100, 0}},
+            {{"", "3", "Modifying this setting via this stored procedure "
+                       "is not supported."}});
+    }
+    if (uname == "SP_GETSQLSTATEMENTS") {
+        auto snap = spproc::current_snapshot();
+        std::vector<std::vector<std::string>> rows;
+        for (const auto& t : snap.thread_list) {
+            if (t.sql.empty() && !t.active) continue;
+            rows.push_back({spproc::i2s(t.thread_no),
+                            t.active ? "T" : "F",
+                            t.active ? "0" : "100",
+                            t.user, t.user, "",
+                            t.sql.substr(0, 1024),
+                            "F", "",
+                            spproc::fmt_time(t.sql_at),
+                            "0", ""});
+        }
+        return emit("sp_GetSQLStatements",
+            {{"Query Number",           'N',   10, 0},
+             {"Active",                 'L',    1, 0},
+             {"Percent Complete",       'N',   10, 0},
+             {"Connection Name",        'C',  100, 0},
+             {"Database User",          'C',  100, 0},
+             {"Database",               'C',  255, 0},
+             {"Query",                  'C', 1024, 0},
+             {"Is Script",              'L',    1, 0},
+             {"Full Script",            'C',  100, 0},
+             {"Start Time",             'C',   25, 0},
+             {"Seconds Until Finished", 'N',   10, 0},
+             {"ApplicationID",          'C',   70, 0}},
+            rows);
+    }
+
+    // -- Metadata / catalog ----------------------------------------------------
+    if (uname == "SP_GETTABLES") {
+        // (catalog, schemaPattern, tableNamePattern, Types)
+        const std::string& pat = spproc::is_null_arg(arg(2)) ? "" : arg(2);
+        std::string types = spproc::lower(arg(3));
+        auto type_wanted = [&](const char* t) {
+            return types.empty() || spproc::is_null_arg(types) ||
+                   types.find(spproc::lower(t)) != std::string::npos;
+        };
+        std::vector<std::vector<std::string>> rows;
+        auto* dd = c->has_dd() ? c->dd() : nullptr;
+        if (dd) {
+            if (type_wanted("TABLE")) {
+                for (const auto& kv : dd->tables()) {
+                    if (!dd_can_view_object_metadata(c, kv.first)) continue;
+                    if (!spproc::like_match(pat, kv.first)) continue;
+                    rows.push_back({"", "", kv.first, "TABLE", ""});
+                }
+            }
+            if (type_wanted("VIEW")) {
+                for (const auto& kv : dd->views()) {
+                    if (!spproc::like_match(pat, kv.first)) continue;
+                    rows.push_back({"", "", kv.first, "VIEW",
+                                    kv.second.comment});
+                }
+            }
+        } else if (type_wanted("TABLE")) {
+            // Free connection: enumerate table files in the data directory.
+            std::error_code ec;
+            for (const auto& de :
+                 fs::directory_iterator(c->data_dir(), ec)) {
+                if (!de.is_regular_file(ec)) continue;
+                std::string ext = spproc::lower(
+                    de.path().extension().string());
+                if (ext != ".dbf" && ext != ".adt") continue;
+                std::string stem = de.path().stem().string();
+                if (!spproc::like_match(pat, stem)) continue;
+                rows.push_back({"", "", stem, "TABLE", ""});
+            }
+        }
+        return emit("sp_GetTables",
+            {{"TABLE_CAT",   'C', 200, 0},
+             {"TABLE_SCHEM", 'C', 200, 0},
+             {"TABLE_NAME",  'C', 255, 0},
+             {"TABLE_TYPE",  'C',  17, 0},
+             {"REMARKS",     'C', 200, 0}},
+            rows);
+    }
+    if (uname == "SP_GETCOLUMNS") {
+        // (catalog, schemaPattern, tableNamePattern, columnNamePattern)
+        const std::string& tpat = spproc::is_null_arg(arg(2)) ? "" : arg(2);
+        const std::string& cpat = spproc::is_null_arg(arg(3)) ? "" : arg(3);
+
+        // DbfFieldType -> (ODBC DATA_TYPE, TYPE_NAME, default display size)
+        auto odbc_of = [](openads::drivers::DbfFieldType t,
+                          const openads::drivers::DbfField& fd)
+            -> std::tuple<int, const char*, int> {
+            using FT = openads::drivers::DbfFieldType;
+            switch (t) {
+                case FT::Character:    return {1,  "CHAR",      fd.length};
+                case FT::CiCharacter:  return {1,  "CICHAR",    fd.length};
+                case FT::Varchar:      return {12, "VARCHAR",   fd.length};
+                case FT::Numeric:      return {2,  "NUMERIC",   fd.length};
+                case FT::Float:        return {8,  "DOUBLE",    15};
+                case FT::Double:       return {8,  "DOUBLE",    15};
+                case FT::Integer:      return {4,  "INTEGER",   10};
+                case FT::ShortInt:     return {5,  "SHORT",     5};
+                case FT::AutoInc:      return {4,  "AUTOINC",   10};
+                case FT::Logical:      return {-7, "LOGICAL",   1};
+                case FT::Date:         return {91, "DATE",      10};
+                case FT::AdtDate:      return {91, "DATE",      10};
+                case FT::Time:         return {92, "TIME",      8};
+                case FT::DateTime:     return {93, "TIMESTAMP", 22};
+                case FT::AdtTimestamp: return {93, "TIMESTAMP", 22};
+                case FT::ModTime:      return {93, "MODTIME",   22};
+                case FT::Memo:         return {-1, "MEMO",      0};
+                case FT::Binary:       return {-4, "BLOB",      0};
+                case FT::Varbinary:    return {-4, "VARBINARY", fd.length};
+                case FT::Currency:     return {2,  "MONEY",     18};
+                case FT::AdtMoney:     return {2,  "MONEY",     18};
+                case FT::RowVersion:   return {-5, "ROWVERSION", 8};
+                default:               return {1,  "CHAR",      fd.length};
+            }
+        };
+
+        std::vector<std::pair<std::string, std::string>> targets;
+        auto* dd = c->has_dd() ? c->dd() : nullptr;
+        if (dd) {
+            for (const auto& kv : dd->tables()) {
+                if (!dd_can_view_object_metadata(c, kv.first)) continue;
+                if (!spproc::like_match(tpat, kv.first)) continue;
+                targets.emplace_back(kv.first, kv.second);
+            }
+        } else {
+            std::error_code ec;
+            for (const auto& de :
+                 fs::directory_iterator(c->data_dir(), ec)) {
+                if (!de.is_regular_file(ec)) continue;
+                std::string ext = spproc::lower(
+                    de.path().extension().string());
+                if (ext != ".dbf" && ext != ".adt") continue;
+                std::string stem = de.path().stem().string();
+                if (!spproc::like_match(tpat, stem)) continue;
+                targets.emplace_back(stem, de.path().filename().string());
+            }
+        }
+
+        std::vector<std::vector<std::string>> rows;
+        for (const auto& [alias, rel] : targets) {
+            auto th = c->open_table(rel, openads::engine::TableType::Cdx,
+                                    openads::engine::OpenMode::Read);
+            if (!th) continue;
+            openads::engine::Table* tbl = c->lookup_table(th.value());
+            if (tbl) {
+                std::uint16_t nf = tbl->field_count();
+                for (std::uint16_t i = 0; i < nf; ++i) {
+                    const auto& fd = tbl->field_descriptor(i);
+                    if (!spproc::like_match(cpat, fd.name)) continue;
+                    auto [dtype, tname, size] = odbc_of(fd.type, fd);
+                    rows.push_back({
+                        "", "", alias, fd.name,
+                        std::to_string(dtype), tname,
+                        std::to_string(size),
+                        std::to_string(fd.length),
+                        std::to_string(fd.decimals),
+                        "10", "1", "", "",
+                        std::to_string(dtype), "0",
+                        std::to_string(fd.length),
+                        std::to_string(i + 1), "YES", "0"});
+                }
+            }
+            c->close_table(th.value());
+        }
+        return emit("sp_GetColumns",
+            {{"TABLE_CAT",         'C', 200, 0},
+             {"TABLE_SCHEM",       'C', 200, 0},
+             {"TABLE_NAME",        'C', 255, 0},
+             {"COLUMN_NAME",       'C', 200, 0},
+             {"DATA_TYPE",         'N',   5, 0},
+             {"TYPE_NAME",         'C',  20, 0},
+             {"COLUMN_SIZE",       'N',  10, 0},
+             {"BUFFER_LENGTH",     'N',  10, 0},
+             {"DECIMAL_DIGITS",    'N',   5, 0},
+             {"NUM_PREC_RADIX",    'N',   5, 0},
+             {"NULLABLE",          'N',   5, 0},
+             {"REMARKS",           'C', 100, 0},
+             {"COLUMN_DEF",        'C', 100, 0},
+             {"SQL_DATA_TYPE",     'N',  10, 0},
+             {"SQL_DATETIME_SUB",  'N',  10, 0},
+             {"CHAR_OCTET_LENGTH", 'N',  10, 0},
+             {"ORDINAL_POSITION",  'N',  10, 0},
+             {"IS_NULLABLE",       'C',   4, 0},
+             {"NOCPTRANS",         'N',   5, 0}},
+            rows);
+    }
+    if (uname == "SP_GETSQLKEYWORDS") {
+        static const char* kKeywords[] = {
+            "ADD", "ALL", "ALTER", "AND", "ANY", "AS", "ASC", "AVG",
+            "BEGIN", "BETWEEN", "BOOLEAN", "BOTH", "BY", "CASE", "CAST",
+            "CHAR", "CHECK", "COLUMN", "COMMIT", "CONSTRAINT", "COUNT",
+            "CREATE", "CURRENT_DATE", "CURRENT_TIME", "CURRENT_TIMESTAMP",
+            "CURSOR", "DATABASE", "DATE", "DECLARE", "DEFAULT", "DELETE",
+            "DESC", "DISTINCT", "DOUBLE", "DROP", "ELSE", "END", "ESCAPE",
+            "EXECUTE", "EXISTS", "FETCH", "FOR", "FOREIGN", "FROM",
+            "FUNCTION", "GRANT", "GROUP", "HAVING", "IF", "IIF", "IN",
+            "INDEX", "INNER", "INSERT", "INTEGER", "INTO", "IS", "JOIN",
+            "KEY", "LEADING", "LEFT", "LIKE", "LIMIT", "LOGICAL", "MAX",
+            "MEMO", "MIN", "MONEY", "NOT", "NULL", "NUMERIC", "ON", "OR",
+            "ORDER", "OUTER", "OUTPUT", "PRIMARY", "PROCEDURE", "REFERENCES",
+            "RESTRICT", "REVOKE", "RIGHT", "ROLLBACK", "ROWID", "SELECT",
+            "SET", "SHORT", "SUM", "TABLE", "THEN", "TIME", "TIMESTAMP",
+            "TO", "TOP", "TRAILING", "TRANSACTION", "TRIGGER", "UNION",
+            "UNIQUE", "UPDATE", "VALUES", "VARCHAR", "VIEW", "WHEN",
+            "WHERE", "WHILE", "WITH",
+        };
+        std::vector<std::vector<std::string>> rows;
+        for (const char* k : kKeywords) rows.push_back({k});
+        return emit("sp_GetSQLKeywords", {{"Keyword", 'C', 30, 0}}, rows);
+    }
+    if (uname == "SP_GETLINKS") {
+        auto* dd = c->has_dd() ? c->dd() : nullptr;
+        if (!dd) return err(openads::AE_FUNCTION_NOT_AVAILABLE, "no DD");
+        std::vector<std::vector<std::string>> rows;
+        for (const auto& kv : dd->links())
+            rows.push_back({kv.second.alias, kv.second.path});
+        return emit("sp_GetLinks",
+            {{"LinkAlias", 'C', 200, 0}, {"Path", 'C', 260, 0}}, rows);
+    }
+    if (uname == "SP_GETAPPLICATIONID") {
+        return emit("sp_GetApplicationID",
+            {{"ApplicationID", 'C', 255, 0}},
+            {{c->application_id()}});
+    }
+    if (uname == "SP_GETSECURITYINFO") {
+        bool server_side =
+            static_cast<bool>(openads::mgmt::process_snapshot_provider());
+        return emit("sp_GetSecurityInfo",
+            {{"FIPSMode",            'L',  1, 0},
+             {"EncryptionType",      'C', 10, 0},
+             {"DictionaryEncrypted", 'L',  1, 0},
+             {"CommType",            'C', 10, 0},
+             {"TLSCipher",           'C', 20, 0},
+             {"TLSVersion",          'C', 20, 0}},
+            {{"F", "RC4", "F", server_side ? "TCP_IP" : "LOCAL", "", ""}});
+    }
+    if (uname == "SP_GETTABLEENCRYPTIONTYPE") {
+        auto th = c->open_table(arg(0), openads::engine::TableType::Cdx,
+                                openads::engine::OpenMode::Read);
+        if (!th) return err(openads::AE_NO_FILE_FOUND, arg(0));
+        std::string enc;
+        if (openads::engine::Table* t = c->lookup_table(th.value())) {
+            auto* cdx = dynamic_cast<openads::drivers::cdx::CdxDriver*>(
+                t->driver() ? t->driver()->unwrap() : nullptr);
+            if (cdx && (cdx->encrypted() || cdx->partial_encrypted()))
+                enc = "AES256";
+        }
+        c->close_table(th.value());
+        return emit("sp_GetTableEncryptionType",
+            {{"EncryptionType", 'C', 10, 0}}, {{enc}});
+    }
+    if (uname == "SP_GETTABLESIZEINFO") {
+        auto th = c->open_table(arg(0), openads::engine::TableType::Cdx,
+                                openads::engine::OpenMode::Read);
+        if (!th) return err(openads::AE_NO_FILE_FOUND, arg(0));
+        std::vector<std::vector<std::string>> rows;
+        if (openads::engine::Table* t = c->lookup_table(th.value())) {
+            std::uint32_t rlen  = static_cast<std::uint32_t>(
+                t->record_buffer().size());
+            std::uint32_t nf    = t->field_count();
+            std::string ext = spproc::lower(
+                fs::path(t->path()).extension().string());
+            std::uint32_t header = (ext == ".adt")
+                ? 400u + 200u * nf
+                : 32u + 32u * nf + 1u;
+            rows.push_back({spproc::i2s(header), spproc::i2s(rlen),
+                            spproc::i2s(t->record_count()),
+                            "0", "0", "0", "0"});
+        }
+        c->close_table(th.value());
+        return emit("sp_GetTableSizeInfo",
+            {{"TableHeaderSize",    'N', 10, 0},
+             {"RecordLength",       'N', 10, 0},
+             {"RawRecordCount",     'N', 10, 0},
+             {"DeletedRecordCount", 'N', 10, 0},
+             {"MemoHeaderSize",     'N', 10, 0},
+             {"MemoBlockSize",      'N', 10, 0},
+             {"MemoBlockCount",     'N', 10, 0}},
+            rows);
+    }
+    if (uname == "SP_GETRECORDCRC") {
+        auto th = c->open_table(arg(0), openads::engine::TableType::Cdx,
+                                openads::engine::OpenMode::Read);
+        if (!th) return err(openads::AE_NO_FILE_FOUND, arg(0));
+        std::optional<std::uint32_t> crc;
+        if (openads::engine::Table* t = c->lookup_table(th.value())) {
+            auto recno = static_cast<std::uint32_t>(arg_int(1));
+            if (auto g = t->goto_record(recno); g) {
+                crc = openads::engine::crc32_record(t->record_buffer());
+            }
+        }
+        c->close_table(th.value());
+        if (!crc) return err(openads::AE_INTERNAL_ERROR, "record not found");
+        return emit("sp_GetRecordCRC",
+            {{"CRCInteger", 'N', 10, 0}, {"CRCString", 'C', 12, 0}},
+            {{std::to_string(static_cast<std::int32_t>(*crc)),
+              std::to_string(*crc)}});
+    }
+    if (uname == "SP_GETCOLLATIONS") {
+        std::vector<std::vector<std::string>> rows;
+        for (const char* name : {"PL852", "NTXPL852"}) {
+            if (!spproc::is_null_arg(arg(0)) &&
+                !spproc::like_match(arg(0), name)) continue;
+            rows.push_back({name, "PL852", "Polish CP-852 OEM collation",
+                            "1", "852", "F", "", "F"});
+        }
+        return emit("sp_GetCollations",
+            {{"Name",          'C', 100, 0},
+             {"ShortName",     'C',   8, 0},
+             {"Description",   'C', 100, 0},
+             {"Version",       'N',   5, 0},
+             {"CodePage",      'N',   5, 0},
+             {"FoxCompat",     'L',   1, 0},
+             {"UnicodeLocale", 'C',  16, 0},
+             {"AllowMultiple", 'L',   1, 0}},
+            rows);
+    }
+    if (uname == "SP_GETCOLLATIONTABLE") {
+        std::string want = spproc::is_null_arg(arg(0)) ? arg(1) : arg(0);
+        std::vector<std::vector<std::string>> rows;
+        if (openads::engine::lookup_oem_collation(want.c_str()) != nullptr) {
+            rows.push_back({"1", spproc::lower(want) == "ntxpl852"
+                                     ? "NTXPL852" : "PL852",
+                            "PL852", "1", "852", "", "", "", "0", "", "F"});
+        }
+        return emit("sp_GetCollationTable",
+            {{"CollationID",     'N',   5, 0},
+             {"Name",            'C', 100, 0},
+             {"ShortName",       'C',   8, 0},
+             {"Version",         'N',   5, 0},
+             {"CodePage",        'N',   5, 0},
+             {"CE",              'C',   1, 0},
+             {"Upper",           'C',   1, 0},
+             {"Lower",           'C',   1, 0},
+             {"NumContractions", 'N',   5, 0},
+             {"Contractions",    'C',   1, 0},
+             {"AllowMultiple",   'L',   1, 0}},
+            rows);
+    }
+    if (uname == "SP_ALLOWMULTIPLECOLLATIONS") {
+        // Accepted no-op: OpenADS opens one collation per index today.
+        return emit("sp_AllowMultipleCollations",
+            {{"Result", 'N', 5, 0}}, {{"0"}});
+    }
+
+    // -- Named-event waits -------------------------------------------------------
+    if (uname == "SP_WAITFOREVENT" || uname == "SP_WAITFORANYEVENT") {
+        const bool any = (uname == "SP_WAITFORANYEVENT");
+        std::string name = any ? "" : spproc::lower(arg(0));
+        std::int64_t timeout_ms = arg_int(any ? 0 : 1);
+
+        std::unique_lock<std::mutex> lk(spproc::ev_mu());
+        auto& m = spproc::ev_map();
+        if (!any && m.find({c, name}) == m.end()) {
+            lk.unlock();
+            return err(openads::AE_NO_FILE_FOUND,
+                       "event not registered on this connection: " + arg(0));
+        }
+        auto find_signaled =
+            [&]() -> std::pair<const std::string*, spproc::EventReg*> {
+            for (auto& [key, reg] : m) {
+                if (key.first != c) continue;
+                if (!any && key.second != name) continue;
+                if (reg.pending > 0) return {&key.second, &reg};
+            }
+            return {nullptr, nullptr};
+        };
+
+        auto pred = [&] { return find_signaled().second != nullptr; };
+        if (!pred()) {
+            if (timeout_ms < 0) {
+                spproc::ev_cv().wait(lk, pred);
+            } else if (timeout_ms > 0) {
+                spproc::ev_cv().wait_for(
+                    lk, std::chrono::milliseconds(timeout_ms), pred);
+            }
+        }
+
+        auto [signaled_name, reg] = find_signaled();
+        std::string out_name, out_data;
+        std::uint64_t out_count = 0;
+        if (reg != nullptr) {
+            out_name = *signaled_name;
+            if (reg->with_data) {
+                --reg->pending;
+                ++reg->consumed;
+                out_count = reg->consumed;
+                if (!reg->data.empty()) {
+                    out_data = reg->data.front();
+                    reg->data.pop_front();
+                }
+            } else {
+                out_count = reg->pending;
+                reg->pending = 0;
+            }
+        } else if (!any) {
+            out_name = name;   // timed out: EventCount 0 per SAP docs
+        }
+        lk.unlock();
+        return emit("sp_WaitForEvent",
+            {{"EventName",  'C',  200, 0},
+             {"EventCount", 'N',   10, 0},
+             {"StringData", 'C', 1024, 0}},
+            {{out_name, spproc::i2s(out_count), out_data}});
+    }
+
+    return false;
+}
+
+}  // extern "C++"
 
 } // extern "C"  — temporarily closed so proc:: helpers get C++ linkage
 
@@ -20000,7 +21482,6 @@ UNSIGNED32 ENTRYPOINT AdsExecuteSQLDirect(ADSHANDLE hStatement, UNSIGNED8* pucSQ
     // DLL entry point registered via CREATE PROCEDURE.
     if (openads::sql::sql_is_execute_procedure(sql)) {
         auto& s = state();
-        std::lock_guard<std::recursive_mutex> lk(s.mu);
         auto ep = openads::sql::parse_execute_procedure(sql);
         if (!ep) return fail(ep.error());
         // Check for sp_* built-in first.
@@ -20008,12 +21489,31 @@ UNSIGNED32 ENTRYPOINT AdsExecuteSQLDirect(ADSHANDLE hStatement, UNSIGNED8* pucSQ
         for (auto& ch : uname) ch = static_cast<char>(
             std::toupper(static_cast<unsigned char>(ch)));
         if (uname.size() > 3 && uname[0]=='S' && uname[1]=='P' && uname[2]=='_') {
+            // Cursor-producing built-ins run WITHOUT s.mu: sp_WaitForEvent
+            // blocks until another connection's sp_SignalEvent — which
+            // needs this same mutex — fires or the timeout lapses.
+            std::optional<openads::util::Result<Table>> spt;
+            if (dispatch_sp_builtin_cursor(c, uname, ep.value().args, &spt)) {
+                if (!spt->has_value()) return fail(spt->error());
+                std::lock_guard<std::recursive_mutex> lk(s.mu);
+                auto th = c->adopt_table(std::move(*spt).value(),
+                                         "#" + ep.value().name);
+                if (!th) return fail(th.error());
+                openads::engine::Table* tbl = c->lookup_table(th.value());
+                if (!tbl) return fail(openads::AE_INTERNAL_ERROR, "sp adopt");
+                ADSHANDLE gh = s.registry.register_object(
+                    HandleKind::Table, tbl);
+                *phCursor = gh;
+                return ok();
+            }
+            std::lock_guard<std::recursive_mutex> lk(s.mu);
             UNSIGNED32 brc = ok();
             if (dispatch_sp_builtin(c, uname, ep.value().args, &brc)) {
                 *phCursor = 0;
                 return brc;
             }
         }
+        std::lock_guard<std::recursive_mutex> lk(s.mu);
         std::string packed;
         for (std::size_t i = 0; i < ep.value().args.size(); ++i) {
             if (i != 0) packed.push_back('\x1f');
@@ -26213,57 +27713,9 @@ fetch_mg_snapshot(const MgBackend& be) {
     using openads::util::Error;
     if (!be.remote) {
         // Local mode: report this process by enumerating the ABI
-        // handle registry for real open-connection / open-table
-        // counts, resolving each Table handle to its real path so the
-        // "Open Tables" management surface isn't always empty locally.
-        openads::mgmt::MgSnapshot snap;
-        snap.server_type = 0;   // 0 = local
-        std::uint32_t conns = 0, tbls = 0;
-        state().registry.for_each_handle(
-            [&](Handle, HandleKind k, void* p) {
-                if (k == HandleKind::Connection ||
-                    k == HandleKind::RemoteConnection) {
-                    ++conns;
-                } else if (k == HandleKind::Table ||
-                           k == HandleKind::RemoteTable) {
-                    ++tbls;
-                    if (k == HandleKind::Table) {
-                        auto* tp = static_cast<Table*>(p);
-                        if (tp != nullptr) {
-                            openads::mgmt::MgTable t;
-                            t.name    = tp->path();
-                            t.user    = "(local)";
-                            t.conn_no = 1;
-                            snap.table_list.push_back(std::move(t));
-                        }
-                    }
-                }
-            });
-        snap.connections = conns;
-        snap.tables      = tbls;
-        snap.workareas   = tbls;
-        // The calling process always counts as one "user".
-        snap.users = 1;
-        openads::mgmt::MgUser u;
-        u.name    = "(local)";
-        u.conn_no = 1;
-        snap.user_list.push_back(u);
-        snap.rss_bytes = openads::platform::process_rss_bytes();
-
-        // Real currently-held record/table locks. The thread-local
-        // LockOwner is only ever set by network sessions (session.cpp),
-        // so local-mode entries default it to "(local)"/1, matching
-        // every other local-mode mgmt entry above.
-        snap.locks     = openads::mgmt::LockRegistry::instance().count();
-        snap.lock_list = openads::mgmt::LockRegistry::instance().snapshot();
-        for (auto& l : snap.lock_list) {
-            if (l.user.empty()) l.user = "(local)";
-            if (l.conn_no == 0)  l.conn_no = 1;
-        }
-
-        openads::mgmt::capture_mg_stats(
-            snap, openads::mgmt::process_mg_stats());
-        return snap;
+        // handle registry — shared with the sp_mg* SQL procedures
+        // (see collect_local_abi_snapshot near dispatch_sp_builtin_cursor).
+        return collect_local_abi_snapshot();
     }
     // Remote mode: open a socket, ship one MgRequest, read the reply.
     openads::network::network_init();

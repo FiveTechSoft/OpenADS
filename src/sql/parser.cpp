@@ -1844,6 +1844,19 @@ parse_execute_procedure(const std::string& sql) {
                 if (!s) return s.error();
                 a.text       = std::move(s).value();
                 a.is_numeric = false;
+            } else if (c.match_keyword("NULL")) {
+                // NULL argument: empty text, non-numeric — the sp_*
+                // dispatchers treat it the same as an omitted argument.
+                a.text       = "";
+                a.is_numeric = false;
+            } else if (c.match_keyword("TRUE")) {
+                a.text       = "true";
+                a.is_numeric = true;
+                a.number     = 1.0;
+            } else if (c.match_keyword("FALSE")) {
+                a.text       = "false";
+                a.is_numeric = true;
+                a.number     = 0.0;
             } else {
                 auto n = c.read_numeric_literal();
                 if (!n) return n.error();

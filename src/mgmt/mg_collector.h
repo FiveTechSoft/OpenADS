@@ -5,6 +5,7 @@
 #include "openads/ace.h"
 
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -19,6 +20,22 @@ namespace openads::mgmt {
 // process builds the snapshot — server or local DLL — so the
 // cumulative telemetry travels the wire alongside the live counts.
 void capture_mg_stats(MgSnapshot& snap, const MgStats& stats);
+
+// Process-wide snapshot provider for the sp_mg* SQL system procedures.
+// The network Server registers its own build_mg_snapshot() at start()
+// (and clears it at stop()) so SQL executed inside the daemon reports
+// real sessions/threads/locks; when unset (embedded DLL use) callers
+// fall back to their local-process snapshot. Same pattern for kill:
+// the Server registers a by-name/conn-no session killer so
+// `EXECUTE PROCEDURE sp_mgKillUser(...)` works server-side; unset means
+// local mode, where kill is a documented engine no-op.
+using SnapshotProvider = std::function<MgSnapshot()>;
+using KillUserFn       = std::function<bool(const std::string& user_or_star,
+                                            std::uint16_t conn_no)>;
+void             set_process_snapshot_provider(SnapshotProvider fn);
+SnapshotProvider process_snapshot_provider();
+void             set_process_kill_user(KillUserFn fn);
+KillUserFn       process_kill_user();
 
 // Formats a raw MgSnapshot into the SAP-canonical ADS_MGMT_* structs
 // declared in include/openads/ace.h. Pure: holds a copy of the

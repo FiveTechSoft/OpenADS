@@ -374,6 +374,26 @@ util::Result<void> Server::start(const std::string& host,
     // M9.25 — fix the telemetry uptime origin at server start.
     openads::mgmt::process_mg_stats().start_time =
         std::chrono::system_clock::now();
+    // sp_mg* system procedures execute inside this process via the ABI's
+    // SQL dispatcher, which has no Server reference — publish this
+    // server's snapshot/kill capabilities through the process-wide hooks.
+    openads::mgmt::set_process_snapshot_provider(
+        [this] { return build_mg_snapshot(); });
+    openads::mgmt::set_process_kill_user(
+        [this](const std::string& user, std::uint16_t conn_no) {
+            if (conn_no != 0) return kill_session_by_conn_no(conn_no);
+            bool any = false;
+            auto sessions = sessions_snapshot();
+            for (std::size_t i = 0; i < sessions.size(); ++i) {
+                const auto& s = sessions[i];
+                std::string name = s.user.empty() ? "(anonymous)" : s.user;
+                if (user == "*" || name == user) {
+                    any |= kill_session_by_conn_no(
+                        static_cast<std::uint16_t>(i + 1));
+                }
+            }
+            return any;
+        });
     running_.store(true);
     // Enterprise step 3 — if the sharded-reactor pool is enabled, stand it up
     // before the accept loop so accept_loop hands sockets to it. Env-read (not
@@ -390,6 +410,10 @@ util::Result<void> Server::start(const std::string& host,
 
 void Server::stop() noexcept {
     if (!running_.exchange(false)) return;
+    // Unpublish the sp_mg* hooks before teardown so no SQL dispatch can
+    // call into a dying Server.
+    openads::mgmt::set_process_snapshot_provider(nullptr);
+    openads::mgmt::set_process_kill_user(nullptr);
     // Closing the listener wakes blocking accept() on Linux + Win32,
     // but macOS BSD sockets don't always abort a pending accept on
     // close/shutdown. Force a self-connect on the listener's port
