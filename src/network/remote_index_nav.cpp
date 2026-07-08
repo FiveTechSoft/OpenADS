@@ -18,11 +18,15 @@ util::Result<void> remote_activate_index(RemoteIndex* ri) {
             openads::AE_INTERNAL_ERROR, 0,
             "remote index: missing parent or connection", ""};
     }
-    if (ri->parent->active_index_id != ri->id) {
-        auto r = ri->conn->set_order(ri->parent->id, ri->id);
-        if (!r) return r.error();
-        ri->parent->active_index_id = ri->id;
-    }
+    // Always sync the server's active order. The client may already
+    // consider this index focused (active_index_id) after production
+    // CDX auto-open or OrdSetFocus handle resolution without a prior
+    // SetOrder round-trip; skipping the wire op left ordered_tables_
+    // empty on the server so later GotoTop/Skip walked the engine
+    // table and ignored scope set on the ABI handle.
+    auto r = ri->conn->set_order(ri->parent->id, ri->id);
+    if (!r) return r.error();
+    ri->parent->active_index_id = ri->id;
     return {};
 }
 

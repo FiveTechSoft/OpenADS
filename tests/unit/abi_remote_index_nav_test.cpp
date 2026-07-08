@@ -728,6 +728,98 @@ TEST_CASE("remote AdsGetKeyCount with conditional FOR index returns filtered cou
     server.stop();
 }
 
+// OrdScope / AdsSetScope: scope is stored on the server's ABI table
+// order. Without marking ordered_tables_ after SetScope (or syncing
+// SetOrder before index GotoTop), GotoTop/Skip used the engine Table
+// and returned every record — the work-order labour-items report.
+TEST_CASE("remote AdsSetScope constrains GotoTop/Skip walk") {
+    using openads::network::Server;
+    auto dir = fs::temp_directory_path() / "openads_remote_scope";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+
+    UNSIGNED8 srv[512];
+    const auto sp = dir.string();
+    std::memcpy(srv, sp.c_str(), sp.size() + 1);
+    ADSHANDLE hConn = 0;
+    REQUIRE(AdsConnect60(srv, ADS_LOCAL_SERVER,
+                         nullptr, nullptr, 0, &hConn) == 0);
+
+    UNSIGNED8 fields[] = "GRP,Character,1;DATA,Character,8";
+    UNSIGNED8 tname[]  = "item.dbf";
+    ADSHANDLE hT = 0;
+    REQUIRE(AdsCreateTable(hConn, tname, nullptr, ADS_CDX,
+                           0, 0, 0, 64, fields, &hT) == 0);
+    UNSIGNED8 bag[]  = "item.cdx";
+    UNSIGNED8 tag[]  = "BYGRP";
+    UNSIGNED8 expr[] = "GRP";
+    ADSHANDLE hIdx = 0;
+    REQUIRE(AdsCreateIndex61(hT, bag, tag, expr,
+                             nullptr, nullptr, 0, 512, &hIdx) == 0);
+    struct Row { const char* grp; const char* data; };
+    const Row rows[] = {
+        {"A", "a1"}, {"B", "b1"}, {"A", "a2"}, {"A", "a3"},
+    };
+    for (const auto& r : rows) {
+        REQUIRE(AdsAppendRecord(hT) == 0);
+        UNSIGNED8 fg[] = "GRP";
+        UNSIGNED8 fd[] = "DATA";
+        REQUIRE(AdsSetString(hT, fg, (UNSIGNED8*)r.grp, 1) == 0);
+        REQUIRE(AdsSetString(hT, fd, (UNSIGNED8*)r.data,
+                             static_cast<UNSIGNED32>(std::strlen(r.data))) == 0);
+        REQUIRE(AdsWriteRecord(hT) == 0);
+    }
+    REQUIRE(AdsCloseTable(hT) == 0);
+    REQUIRE(AdsDisconnect(hConn) == 0);
+
+    Server server;
+    REQUIRE(server.start("127.0.0.1", 0).has_value());
+    const std::uint16_t port = server.port();
+
+    ADSHANDLE hRC = remote_connect(dir, port);
+    ADSHANDLE hRT = 0;
+    REQUIRE(AdsOpenTable(hRC, tname, nullptr, ADS_CDX,
+                         0, 0, 0, 0, &hRT) == 0);
+
+    ADSHANDLE hOrd = 0;
+    REQUIRE(AdsGetIndexHandleByOrder(hRT, 1, &hOrd) == 0);
+    REQUIRE(hOrd != 0);
+
+    // Scope to group "A" without an explicit AdsSetIndexOrderByHandle —
+    // mirrors OrdSetFocus + OrdScope where the client already tracks
+    // active_index_id from auto-opened production CDX.
+    UNSIGNED8 top[] = "A";
+    UNSIGNED8 bot[] = "A";
+    REQUIRE(AdsSetScope(hOrd, ADS_TOP, top, 1, ADS_STRINGKEY) == 0);
+    REQUIRE(AdsSetScope(hOrd, ADS_BOTTOM, bot, 1, ADS_STRINGKEY) == 0);
+
+    auto visible_count = [&](ADSHANDLE nav) -> int {
+        REQUIRE(AdsGotoTop(nav) == 0);
+        int n = 0;
+        for (;;) {
+            UNSIGNED16 eof = 0;
+            REQUIRE(AdsAtEOF(hRT, &eof) == 0);
+            if (eof) break;
+            ++n;
+            REQUIRE(AdsSkip(nav, 1) == 0);
+        }
+        return n;
+    };
+
+    CHECK(visible_count(hOrd) == 3);
+    CHECK(visible_count(hRT) == 3);
+
+    REQUIRE(AdsClearScope(hOrd, ADS_TOP) == 0);
+    REQUIRE(AdsClearScope(hOrd, ADS_BOTTOM) == 0);
+    CHECK(visible_count(hOrd) == 4);
+
+    REQUIRE(AdsCloseTable(hRT) == 0);
+    REQUIRE(AdsDisconnect(hRC) == 0);
+    fs::remove_all(dir, ec);
+    server.stop();
+}
+
 // M12.28 — AdsGetDate over the wire. Before the fix, rddads resolved
 // Date-type field access to AdsGetDate(hOrdCurrent, ...) which passed
 // the RemoteIndex handle to AdsGetField — but AdsGetField only checks

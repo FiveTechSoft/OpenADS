@@ -1872,6 +1872,18 @@ DispatchResult Session::dispatch(const Frame& f) {
                 iit->second, which, kb.data(),
                 static_cast<UNSIGNED16>(klen), dtype);
             if (rrc != 0) { reply = err("SetScope", rrc); break; }
+            // Scope is stored on the ABI table's active order (via
+            // table_for_index inside AdsSetScope). GotoTop/Skip only
+            // honour index scope when they route through that ABI
+            // handle (ordered_tables_), not the parallel engine Table
+            // in tbls_. OrdScope / scoped-relation flows often set
+            // scope without a preceding SetOrder wire op — the client
+            // may already track active_index_id from auto-opened
+            // production CDX tags while ordered_tables_ is still
+            // empty, which made remote navigation ignore scope.
+            if (auto tit = index_table_.find(iid); tit != index_table_.end()) {
+                ordered_tables_.insert(tit->second);
+            }
             reply.opcode = Opcode::SetScopeAck;
             break;
         }

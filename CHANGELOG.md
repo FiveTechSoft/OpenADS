@@ -1,3 +1,28 @@
+## 1.7.0 — 2026-07-08
+
+### REMOTE — AdsSetScope / OrdScope navigation fix
+
+`OrdScope` / `AdsSetScope` top/bottom key-range bounds were sent to the
+server (wire opcode `SetScope` 0x98) but `GotoTop`/`Skip` ignored them:
+navigation walked every record in the table instead of the scoped group.
+
+Root cause: scope is stored on the ABI table's active order, while
+`GotoTop`/`Skip` only routed through that handle when `ordered_tables_`
+was set — which happened on `SetOrder` but never on `SetScope`. Harbour
+`OrdSetFocus` + `OrdScope` flows often set scope without a preceding
+`SetOrder` wire op (client already tracks `active_index_id` from
+auto-opened production CDX).
+
+Fix:
+- Server `SetScope` handler: mark the parent table in `ordered_tables_`
+  after a successful `AdsSetScope`.
+- Client `remote_activate_index`: always sync `SetOrder` to the server
+  before index-driven navigation.
+
+Files: `session.cpp`, `remote_index_nav.cpp`.
+Tests: `remote AdsSetScope constrains GotoTop/Skip walk` in
+`abi_remote_index_nav_test.cpp`; `openads_remote_scope_probe` harness.
+
 ## 1.6.5 — 2026-07-07
 
 ### REMOTE — OrdKeyCount() fix + AdsGetDate() crash fix

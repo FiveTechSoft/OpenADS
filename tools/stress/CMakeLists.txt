@@ -51,6 +51,12 @@ add_executable(openads_remote_random remote_random_main.cpp)
 target_link_libraries(openads_remote_random PRIVATE openads_core)
 target_include_directories(openads_remote_random PRIVATE
     ${CMAKE_SOURCE_DIR}/src)
+
+add_executable(openads_remote_scope_probe
+    ${CMAKE_SOURCE_DIR}/tools/remote_scope_probe.cpp)
+target_link_libraries(openads_remote_scope_probe PRIVATE openads_core)
+target_include_directories(openads_remote_scope_probe PRIVATE
+    ${CMAKE_SOURCE_DIR}/src)
 if(NOT WIN32)
     find_package(Threads REQUIRED)
     target_link_libraries(openads_remote_random PRIVATE Threads::Threads)
