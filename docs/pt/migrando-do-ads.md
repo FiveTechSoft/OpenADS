@@ -1,3 +1,11 @@
+---
+title: Migrando do ADS
+layout: default
+parent: Início (PT)
+nav_order: 1
+permalink: /pt/migrando-do-ads/
+---
+
 # Migrando do ADS
 
 O OpenADS é um motor open-source compatível com o ADS, para aplicações feitas
@@ -44,6 +52,19 @@ openads_serverd --config openads.ini
 > servidor (CP850, Windows-1252) está no roadmap. Se seus DBFs forem CP850,
 > teste uma cópia antes de entrar em produção.
 
+> **Rollback para SAP ACE não é automático.** O OpenADS grava CDX no formato
+> compatível com DBFCDX do Harbour (magic `RCHB` no offset 0x14 do header da
+> structure tag). O SAP ACE não reconhece esse layout e retorna **erro 7017**
+> (*Corrupt .ADI, .CDX, or .IDX index*) em qualquer tabela cujo CDX foi tocado
+> pelo OpenADS. O OpenADS **lê** CDX construídos pelo SAP sem modificação,
+> desde que você não grave pelo OpenADS.
+>
+> Se você pode precisar do SAP ACE novamente (rollback, ambiente misto ou
+> benchmark lado a lado), faça backup dos `.cdx` originais **antes** de apontar
+> o app para o OpenADS, ou, após voltar ao SAP, apague os `.cdx` escritos pelo
+> OpenADS e reconstrua todas as tags no SAP. Índices NTX e ADI seguem a mesma
+> regra unidirecional após escrita pelo OpenADS.
+
 ## Lado cliente — aponte seu app para o OpenADS
 
 No caso comum você **não** relinka:
@@ -83,6 +104,7 @@ TLS na frente (veja [`servico-implantacao.md`](servico-implantacao.md)).
 - [ ] Instalar o servidor: `openads_serverd --setup` → `openads.ini`.
 - [ ] Resolver a porta 6262 se o ADS ainda roda no host.
 - [ ] Largar `ace64.dll`/`ace32.dll` ao lado do app (ou relinkar com `lib/`).
+- [ ] Backup dos `.cdx` do SAP se um rollback para o SAP ACE for possível.
 - [ ] Testar leituras/gravações/seeks de índice numa **cópia** dos dados.
 - [ ] Verificar acentuação (ressalva de code page acima).
 - [ ] Usar o Studio (`openads-studio`) no dia a dia.

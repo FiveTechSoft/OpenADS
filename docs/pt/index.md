@@ -15,16 +15,17 @@ de banco de dados compatível com ADS. Funciona como
 fazem link com `contrib/rddads` continuam funcionando sem
 recompilar.
 
-Release atual: **v1.1.0**.
+Release atual: **v1.7.0**.
 
 ## Conteúdo
 
 - **[Novidades](novidades/)** — resumo das mudanças desde
-  v1.0.0-rc29 → v1.5.0 (driver SQLite, triggers, DA-Web, escrita ADI, e
-  mais).
+  v1.0.0-rc29 → v1.7.0 (scope remoto, xBrowse, CDX, e mais).
 - **[História do projeto](historia/)** — como o OpenADS cresceu
   de um esqueleto mínimo até um motor completo compatível com
   ADS (868 commits).
+- **[Migrando do ADS](migrando-do-ads/)** — mapear uma instalação
+  Advantage para OpenADS; rollback (erro CDX 7017), porta 6262, Studio.
 - **[Como contribuir](contribuindo/)** — build, PRs, política de
   protocolo paralelo e checklist.
 - **[Primeiros passos](primeiros-passos/)** — instalação,

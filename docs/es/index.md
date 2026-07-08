@@ -15,16 +15,17 @@ directo** del Advantage Client Engine (`ace32.dll` /
 que enlazan contra `contrib/rddads` siguen funcionando sin
 recompilar.
 
-Release actual: **v1.1.0**.
+Release actual: **v1.7.0**.
 
 ## Contenido
 
 - **[Novedades](novedades/)** — resumen de cambios desde
-  v1.0.0-rc29 → v1.5.0 (driver SQLite, triggers, DA-Web, escritura ADI,
-  y más).
+  v1.0.0-rc29 → v1.7.0 (scope remoto, xBrowse, CDX, y más).
 - **[Historia del proyecto](historia/)** — cómo OpenADS creció
   desde un esqueleto mínimo hasta un motor completo compatible
   con ADS (868 commits).
+- **[Migrando desde ADS](migrando-desde-ads/)** — mapear una
+  instalación Advantage a OpenADS; rollback (error CDX 7017), puerto 6262.
 - **[Primeros pasos](primeros-pasos/)** — instalación, primer
   build, smoke test.
 - **[Arquitectura](arquitectura/)** — arquitectura de cinco

@@ -6,7 +6,7 @@ nav_order: 9
 
 # Known issues — current
 
-Status as of **v1.5.1** (2026-06-27).
+Status as of **v1.7.0** (2026-07-08).
 
 ## Open
 
@@ -16,6 +16,34 @@ OpenADS speaks its own documented wire protocol on `tcp://` / `tls://`.
 It is **not** byte-compatible with the proprietary SAP Advantage 11.x/12.x
 TCP protocol. Talking to a legacy ADS server as a drop-in client requires
 a future `SapWireTransport` layer (`ads://` / `sap://` URIs).
+
+### CDX rollback to SAP ACE (error 7017)
+
+OpenADS **reads** SAP-built CDX files without modification. Once OpenADS
+**writes** a CDX (append, reindex, `INDEX ON`, etc.), the file uses
+Harbour's DBFCDX layout (magic `RCHB` at offset 0x14). SAP ACE does not
+recognize that header and returns **error 7017** (*Corrupt .ADI, .CDX, or
+.IDX index*). Rollback is not automatic — back up original `.cdx` files
+before migration, or delete and rebuild all tags under SAP after reverting.
+See [Migrating from ADS](en/migrating-from-ads/) for the full checklist.
+
+### OEM national collations (NTXPL852 and related)
+
+`AdsSetCollation` today accepts only `BINARY` and `NOCASE`. Clipper/Harbour
+apps that set `OEM_CHAR_SET=NTXPL852` (Polish CP852) or other national
+collation tables in `adslocal.cfg` expect index build and soft `dbSeek` to
+sort by collation weight (e.g. Ł between L and M). OpenADS currently uses
+binary byte order for those paths — mis-positioned seeks and wrong reindex
+order on Central/Eastern-European datasets. Tracked as
+[issue #127](https://github.com/FiveTechSoft/OpenADS/issues/127).
+
+### CDX `INDEX ON` write performance
+
+Full CDX rebuilds on large production tables can be significantly slower
+than SAP ACE 11.10 on the same hardware (reports of ~11× on multi-tag
+`INDEX ON` workloads). A bulk-load B+tree path exists for `CREATE INDEX` /
+`REINDEX`, but real-world parity is still under investigation. Tracked as
+[issue #128](https://github.com/FiveTechSoft/OpenADS/issues/128).
 
 ### SAP-imported Data Dictionary permissions
 
@@ -46,38 +74,36 @@ HTTP Basic auth. The default bind is `127.0.0.1`; if you set
 that handles authentication. Remote Server mode (`openads_serverd`)
 supports `--http-user user:password`.
 
-### Remote ABI gaps
-
-Most navigational and DML entry points work over `tcp://` remote tables.
-`AdsAggregate` / `AdsFetchWhere` and `AdsGetRecordCRC` are wired on the
-OpenADS wire protocol (v1.5.2+). Remaining remote gaps are documented in
-`CHANGELOG.md` as they close.
-
 ### DDL execution
 
-`ALTER TABLE`, `DROP TABLE`, and `DROP INDEX` are parsed (v1.5.0) but
+`ALTER TABLE`, `DROP TABLE`, and `DROP INDEX` are parsed but
 backend execution hooks are not wired yet.
 
 ## Closed recently
 
-- **VFP header 0x32 (autoinc + nullable)** — fixed v1.5.1: `_NullFlags`
-  column and correct field offsets when the NULL bitmap is present.
-- **Plus SQLite / MSSQL read-only** — fixed v1.5.1: navigational write
-  (`AdsAppendRecord` / `AdsWriteRecord` / `AdsDeleteRecord`).
-- **MSSQL NVARCHAR padding** — fixed v1.5.1: `ADS_STRING` padded to
-  declared width in `mssql_get_field`.
-- **Remote `AdsSetRelation` / `AdsSetRecord` / `AdsCustomizeAOF`** — fixed
-  v1.5.1 (Fase 2).
-- **Path traversal on remote Connect** — fixed v1.5.1: client paths are
-  canonicalized and jailed under `openads_serverd --data`.
-- **LockMgr nested unlock** — fixed v1.5.1: OS byte locks stay held until
-  the final nested `unlock_*`.
-- **Remote memo/Unicode/date/raw field writes** — fixed v1.5.1:
-  `AdsGetMemoDataType`, `AdsSetStringW`, `AdsSetJulian`, `AdsSetFieldRaw`
-  route through `tcp://`.
-- **Wire-protocol forward-only prefetch** — re-enabled v1.0.3 (PR #47);
-  sequential prefetch on `Skip(+N)` with cursor resync.
-- **AdsEval*Expr / AdsStmt*** — implemented; no longer stubs.
-- **X# AXDBFCDX RDD** — local + remote smoke passes (rc19).
+- **Remote `AdsSetScope` / `OrdScope` ignored** — fixed v1.7.0:
+  `GotoTop`/`Skip` now honour scoped key ranges over `tcp://`.
+- **Remote `OrdKeyCount()` returns 0** — fixed v1.6.5: new `GetKeyCount`
+  wire opcode; xBrowse grids show the correct filtered row count.
+- **`AdsGetDate()` crash on remote Date fields** — fixed v1.6.5:
+  `RemoteIndex` handles resolve to the parent `RemoteTable` before
+  field I/O.
+- **Numeric `dbSeek` not-found on aliased CDX tags** — fixed v1.6.x:
+  seek path converts raw double keys to the stored `FoxNumeric` /
+  ASCII form; alias qualifiers stripped on the read side.
+- **Conditional index re-create stale order** — fixed v1.6.x:
+  in-place `CREATE INDEX` on an open bag rebinds expression, FOR,
+  and the active order (`abi_cond_refilter_no_close_test`).
+- **WSL2 / Linux `-Werror=conversion` build failures** — fixed:
+  narrowing casts and linkage issues in `ace_exports.cpp`; Linux CI
+  green on v1.7.0.
+- **Remote FiveWin / TDataBase field I/O** — fixed v1.6.4: Date columns,
+  ordinal-as-pointer idiom, unlocked-write `EG_UNLOCKED` parity.
+- **Remote xBrowse index navigation** — fixed v1.6.3: `AdsKeyNo`,
+  bookmark `GotoRecord` sync, `AdsAtBOF` at first key.
+- **VFP header 0x32 (autoinc + nullable)** — fixed v1.5.1.
+- **Plus SQLite / MSSQL read-only** — fixed v1.5.1: navigational write.
+- **Remote `AdsSetRelation` / `AdsSetRecord` / `AdsCustomizeAOF`** —
+  fixed v1.5.1 (Fase 2).
 
 See `CHANGELOG.md` for the full per-release breakdown.

@@ -6,11 +6,39 @@ nav_order: 0
 permalink: /es/novedades/
 ---
 
-# Novedades (v1.0.0-rc29 → v1.6.4)
+# Novedades (v1.0.0-rc29 → v1.7.0)
 
 Esta página resume los cambios más destacados desde la versión
 v1.0.0-rc29. Para el historial completo de commits, consulta el
 [CHANGELOG](https://github.com/FiveTechSoft/OpenADS/blob/main/CHANGELOG.md).
+
+---
+
+## Destacados v1.7.0
+
+### REMOTO — `AdsSetScope` / `OrdScope`
+
+Los límites superior/inferior de `OrdScope` se enviaban al servidor, pero
+`GotoTop`/`Skip` ignoraban el ámbito. Corregido en `session.cpp` y
+`remote_index_nav.cpp`. Requiere `openace64.dll` y `openads_serverd`
+actualizados.
+
+### Docs — aviso de rollback CDX
+
+[Migrando desde ADS](migrando-desde-ads/) documenta que los CDX escritos por
+OpenADS usan el header `RCHB` de Harbour y no son legibles por SAP ACE
+(error 7017).
+
+---
+
+## Destacados v1.6.5
+
+### REMOTO — `OrdKeyCount()` y `AdsGetDate()`
+
+- **`OrdKeyCount()` devolvía 0** en alias remotos — rejillas xBrowse vacías.
+  Nuevo opcode wire `GetKeyCount`.
+- **`AdsGetDate()` fallaba** en campos `ADS_DATE` remotos cuando rddads
+  pasaba un handle `RemoteIndex`.
 
 ---
 

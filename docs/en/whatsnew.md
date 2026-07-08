@@ -6,11 +6,45 @@ nav_order: 0
 permalink: /en/whatsnew/
 ---
 
-# What's New (v1.0.0-rc29 → v1.6.4)
+# What's New (v1.0.0-rc29 → v1.7.0)
 
 This page summarises the most notable changes since the
 v1.0.0-rc29 release. For the full commit-by-commit history see
 the [CHANGELOG](https://github.com/FiveTechSoft/OpenADS/blob/main/CHANGELOG.md).
+
+---
+
+## v1.7.0 Highlights
+
+### REMOTE — `AdsSetScope` / `OrdScope` navigation
+
+`OrdScope` top/bottom bounds were sent to the server but `GotoTop`/`Skip`
+ignored them — scoped walks returned every record in the table. Fixed by
+marking the parent table in `ordered_tables_` after `SetScope`, and by
+always syncing `SetOrder` before remote index navigation.
+
+Requires updated `openace64.dll` **and** `openads_serverd`. Regression
+tests in `abi_remote_index_nav_test`; harness `openads_remote_scope_probe`.
+
+### Docs — CDX rollback warning
+
+[Migrating from ADS](migrating-from-ads/) now warns that CDX files written
+by OpenADS use Harbour's `RCHB` header and are unreadable by SAP ACE
+(error 7017). Back up SAP-built `.cdx` before migration if rollback is
+possible.
+
+---
+
+## v1.6.5 Highlights
+
+### REMOTE — `OrdKeyCount()` + `AdsGetDate()` fixes
+
+- **`OrdKeyCount()` returned 0** on remote aliases — xBrowse grids showed
+  no rows. New `GetKeyCount` wire opcode (0xB0/0xB1) computes the true
+  filtered key count from the active index order.
+- **`AdsGetDate()` crashed** on remote `ADS_DATE` columns when rddads
+  passed a `RemoteIndex` handle. Resolves to parent `RemoteTable` before
+  field I/O.
 
 ---
 
