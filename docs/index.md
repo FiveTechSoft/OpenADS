@@ -29,8 +29,8 @@ schedule. See [OpenADS Plus](OPENADS_PLUS.md).
 
 - Source: [github.com/FiveTechSoft/OpenADS](https://github.com/FiveTechSoft/OpenADS)
 - License: Apache License 2.0
-- Latest release: **v1.8.1** —
-  [release notes](https://github.com/FiveTechSoft/OpenADS/releases/tag/v1.8.1)
+- Latest release: **v1.8.2** —
+  [release notes](https://github.com/FiveTechSoft/OpenADS/releases/tag/v1.8.2)
   · [all releases](https://github.com/FiveTechSoft/OpenADS/releases)
   · [CHANGELOG](https://github.com/FiveTechSoft/OpenADS/blob/main/CHANGELOG.md)
 

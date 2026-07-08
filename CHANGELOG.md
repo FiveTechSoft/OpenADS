@@ -1,3 +1,20 @@
+## 1.8.2 — 2026-07-08
+
+### CI / release — NTXPL852 test fixture (Clang + Linux/macOS builds)
+
+The v1.8.0 NTXPL852 unit tests used adjacent string literals and greedy
+`\x` escapes for the Polish Ł (OEM `0x9D`) rows. Clang on Linux/macOS
+treated them as `-Werror,-Wstring-concatenation` / `hex escape sequence
+out of range`, breaking **ci** and **release** legs for POSIX platforms
+while Windows MSVC passed.
+
+Fix: shared `tests/fixtures/polish_oem_fixture.h` with explicit
+`constexpr` byte arrays; `release.yml` skips artifact upload when a build
+leg produced no `ASSET`.
+
+No functional engine changes vs v1.8.1 — use v1.8.2 release archives for
+Linux/macOS binaries.
+
 ## 1.8.1 — 2026-07-08
 
 ### ABI — `OrdScope` / `AdsSetScope` string key padding

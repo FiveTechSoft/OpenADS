@@ -14,12 +14,12 @@ for the Advantage Client Engine (`ace32.dll` / `ace64.dll` /
 `libace.so`) — Harbour / Clipper applications that link against
 `contrib/rddads` keep working without recompilation.
 
-Current release: **v1.8.1**.
+Current release: **v1.8.2**.
 
 ## What's in here
 
 - **[What's New](whatsnew/)** — summary of changes since
-  v1.0.0-rc29 → v1.8.1 (OrdScope string padding, NTXPL852 collation, and more).
+  v1.0.0-rc29 → v1.8.2 (OrdScope string padding, NTXPL852 collation, and more).
 - **[Project History](history/)** — how OpenADS grew from a
   minimal skeleton into a full ADS-compatible engine (868 commits).
 - **[Migrating from ADS](migrating-from-ads/)** — map an Advantage

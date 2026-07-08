@@ -6,7 +6,7 @@ nav_order: 9
 
 # Known issues — current
 
-Status as of **v1.8.1** (2026-07-08).
+Status as of **v1.8.2** (2026-07-08).
 
 ## Open
 
@@ -77,6 +77,9 @@ backend execution hooks are not wired yet.
 
 ## Closed recently
 
+- **Linux/macOS CI and release builds broken (NTXPL852 tests)** — fixed
+  v1.8.2: shared `polish_oem_fixture.h`; Clang `-Wstring-concatenation` /
+  greedy `\x` escape errors in unit tests.
 - **`OrdScope` / `AdsSetScope` on character fields** — fixed v1.8.1:
   unpadded scope strings (Harbour `hb_itemGetCLen`) are now space-padded to
   index `key_length` before comparison — work-order `setScopeTop` /
