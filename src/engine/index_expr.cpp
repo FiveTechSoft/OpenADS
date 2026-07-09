@@ -283,12 +283,15 @@ Value apply_scalar_fn(const std::string& fn, const std::vector<Value>& args) {
     v.is_number = false;
     if (fn == "UPPER" && args.size() >= 1) {
         const std::string& s = args[0].s;
-        // Use OEM upper table for national collations (NTXPL852 / PL852 etc.)
-        // when the connection was configured via adslocal.cfg or AdsSetCollation.
-        // This makes UPPER() on OEM data produce the same bytes as Harbour
-        // under the same codepage, fixing seek on indexes like Upper(A_NAZWA).
-        const std::uint8_t* up = openads::engine::lookup_oem_upper_table("NTXPL852");
-        if (!up) up = openads::engine::lookup_oem_upper_table("PL852");
+        // Use the OEM upper table only when a national collation
+        // (NTXPL852 / PL852 etc.) was actually activated via
+        // AdsSetCollation / adslocal.cfg — then UPPER() on OEM data
+        // produces the same bytes as Harbour under the same codepage,
+        // fixing seek on indexes like Upper(A_NAZWA). With no OEM
+        // collation active (the default), UTF-8 case promotion applies;
+        // an unconditional table lookup here broke UPPER for every
+        // non-OEM caller (ñ stayed ñ).
+        const std::uint8_t* up = openads::engine::active_oem_upper_table();
         if (up) {
             v.s = openads::engine::oem_upper(up, s.data(), s.size());
         } else {
@@ -542,8 +545,10 @@ evaluate_index_expr(Table& t, const std::string& expr, std::uint16_t key_len) {
             auto r = t.read_field(static_cast<std::uint16_t>(fidx));
             if (r) {
                 std::string raw = r.value().as_string;
-                const std::uint8_t* up = openads::engine::lookup_oem_upper_table("NTXPL852");
-                if (!up) up = openads::engine::lookup_oem_upper_table("PL852");
+                // Same rule as apply_scalar_fn UPPER: OEM upper only when
+                // an OEM collation is active on this process.
+                const std::uint8_t* up =
+                    openads::engine::active_oem_upper_table();
                 std::string key = up ? openads::engine::oem_upper(up, raw.data(), raw.size())
                                      : upper_utf8(raw);
                 if (key.size() < key_len) key.append(key_len - key.size(), ' ');

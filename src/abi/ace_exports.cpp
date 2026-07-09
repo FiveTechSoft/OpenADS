@@ -5871,6 +5871,14 @@ UNSIGNED32 ENTRYPOINT AdsDisconnect(ADSHANDLE hConnect) {
         // Drop this connection's sp_CreateEvent registrations so the
         // global event map can't hold a dangling Connection key.
         spproc::drop_all_events_for(c);
+        // If this connection activated the process-wide OEM upper table
+        // (AdsSetCollation NTXPL852/PL852), deactivate it so UPPER()
+        // reverts to UTF-8 promotion for the rest of the process.
+        if (c->oem_upper_table() != nullptr &&
+            c->oem_upper_table() ==
+                openads::engine::active_oem_upper_table()) {
+            openads::engine::set_active_oem_upper_table(nullptr);
+        }
         // Collect this connection's still-open Table handles. `s.conns.erase`
         // below frees the Connection — and with it every Table it owns — so
         // any registry slot still pointing at one of those Tables would dangle.
@@ -16953,10 +16961,12 @@ UNSIGNED32 ENTRYPOINT AdsSetCollation(ADSHANDLE hConnect, UNSIGNED8* pucName) {
         c->set_collation(Connection::Collation::Binary);
         c->set_oem_sort_table(nullptr);
         c->set_oem_upper_table(nullptr);
+        openads::engine::set_active_oem_upper_table(nullptr);
     } else if (upper == "NOCASE") {
         c->set_collation(Connection::Collation::NoCase);
         c->set_oem_sort_table(nullptr);
         c->set_oem_upper_table(nullptr);
+        openads::engine::set_active_oem_upper_table(nullptr);
     } else {
         const auto* oem = openads::engine::lookup_oem_collation(name.c_str());
         if (oem == nullptr) {
@@ -16966,7 +16976,13 @@ UNSIGNED32 ENTRYPOINT AdsSetCollation(ADSHANDLE hConnect, UNSIGNED8* pucName) {
         }
         c->set_collation(Connection::Collation::Binary);
         c->set_oem_sort_table(oem->sort);
-        c->set_oem_upper_table(openads::engine::lookup_oem_upper_table(name.c_str()));
+        const std::uint8_t* up =
+            openads::engine::lookup_oem_upper_table(name.c_str());
+        c->set_oem_upper_table(up);
+        // Publish for expression evaluation (UPPER() / upper_bare in
+        // index_expr have no Connection context) — see
+        // active_oem_upper_table in oem_collation.h.
+        openads::engine::set_active_oem_upper_table(up);
     }
     return ok();
 }

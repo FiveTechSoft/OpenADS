@@ -32,4 +32,13 @@ std::string oem_upper(const std::uint8_t* upper_tbl, const char* s, std::size_t 
 // Returns null if no special upper table (use ASCII fallback).
 const std::uint8_t* lookup_oem_upper_table(const char* name) noexcept;
 
+// Process-wide "currently active" OEM upper table for expression
+// evaluation. UPPER() / the upper_bare fast path in index_expr run
+// without a Connection at hand, so AdsSetCollation publishes the
+// selected collation's upper table here (and clears it on
+// BINARY/NOCASE). nullptr — the default — means no OEM collation is
+// active and UPPER falls back to UTF-8 case promotion.
+void set_active_oem_upper_table(const std::uint8_t* tbl) noexcept;
+const std::uint8_t* active_oem_upper_table() noexcept;
+
 } // namespace openads::engine

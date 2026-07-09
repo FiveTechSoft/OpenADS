@@ -1,6 +1,7 @@
 #include "engine/oem_collation.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <string>
 
@@ -121,6 +122,18 @@ std::string oem_upper(const std::uint8_t* upper_tbl, const char* s, std::size_t 
                  ((c >= 'a' && c <= 'z') ? static_cast<char>(c-32) : s[i]);
     }
     return out;
+}
+
+namespace {
+std::atomic<const std::uint8_t*> g_active_oem_upper{nullptr};
+}  // namespace
+
+void set_active_oem_upper_table(const std::uint8_t* tbl) noexcept {
+    g_active_oem_upper.store(tbl, std::memory_order_relaxed);
+}
+
+const std::uint8_t* active_oem_upper_table() noexcept {
+    return g_active_oem_upper.load(std::memory_order_relaxed);
 }
 
 } // namespace openads::engine
