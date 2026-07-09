@@ -22,6 +22,14 @@
 #include <unordered_map>
 #include <vector>
 
+// Defined in abi/ace_exports.cpp: every index attached to an open Table
+// handle in this process. Sessions open tables through the in-process ABI,
+// so this covers their indexes too (same linkage pattern as session.cpp's
+// dd_get_property_dispatch call into the ABI layer).
+namespace openads::abi {
+std::vector<openads::mgmt::MgIndex> open_index_snapshot();
+}
+
 namespace openads::network {
 
 util::Result<void> recv_exact(Socket& s, std::uint8_t* buf,
@@ -216,6 +224,22 @@ mgmt::MgSnapshot Server::build_mg_snapshot() const {
     // LockRecord/LockTable opcode calls (see session.cpp).
     snap.locks     = mgmt::LockRegistry::instance().count();
     snap.lock_list = mgmt::LockRegistry::instance().snapshot();
+
+    // Open indexes, enumerated from the in-process ABI table registry.
+    // Attribute each to the session whose open-table list contains the
+    // owning table (basename match — sessions record the client-supplied
+    // name, which may be relative while Table::path() is absolute).
+    snap.index_list = openads::abi::open_index_snapshot();
+    for (auto& ix : snap.index_list) {
+        for (const auto& t : snap.table_list) {
+            if (mgmt::MgCollector::table_name_matches(ix.table, t.name)) {
+                ix.user    = t.user;
+                ix.conn_no = t.conn_no;
+                break;
+            }
+        }
+    }
+    snap.indexes = static_cast<std::uint32_t>(snap.index_list.size());
 
     // Fold in this server's cumulative MgStats (uptime, comm totals,
     // high-water marks) so it travels the wire with the live counts.

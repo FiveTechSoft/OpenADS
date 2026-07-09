@@ -16,6 +16,11 @@
  *   Calls AdsMgGetThreadSql — on-demand SQL text + start time for one
  *   queries[] row (threadNo comes from the GET response above).
  *
+ * POST {action:'locks', dd:<name>, tableName:<path>}
+ *   Calls AdsMgGetLocks filtered by owning table — record locks for one
+ *   tables[] row (recNo 0 = whole-table lock). Owner user/conn# come
+ *   back inside each ADS_MGMT_LOCK_INFO entry.
+ *
  * Calls AdsMgConnect + AdsMgGetActivityInfo + AdsMgGetUserNames +
  * AdsMgGetUserAvgCost + AdsMgGetOpenTables + AdsMgGetWorkerThreadActivity +
  * AdsMgGetThreadSql + AdsMgKillUser via PHP FFI against openace64.dll. The
@@ -140,6 +145,12 @@ typedef struct {
     UNSIGNED8  aucOSUserLoginName [64];
 } ADS_MGMT_THREAD_ACTIVITY;
 
+typedef struct {
+    UNSIGNED8  aucUserName        [32];
+    UNSIGNED16 usConnNumber;
+    UNSIGNED32 ulRecordNumber;
+} ADS_MGMT_LOCK_INFO;
+
 UNSIGNED32 AdsMgConnect(UNSIGNED8* pucServer, UNSIGNED8* pucUser,
                         UNSIGNED8* pucPassword, ADSHANDLE* phMgmt);
 UNSIGNED32 AdsMgDisconnect(ADSHANDLE hMgmt);
@@ -162,6 +173,10 @@ UNSIGNED32 AdsMgGetUserAvgCost(ADSHANDLE hMgmt, UNSIGNED32* pulCosts,
 UNSIGNED32 AdsMgGetThreadSql(ADSHANDLE hMgmt, UNSIGNED32 ulThreadNumber,
                              UNSIGNED8* pucBuf, UNSIGNED32* pulLen,
                              UNSIGNED64* pullStartEpoch);
+UNSIGNED32 AdsMgGetLocks(ADSHANDLE hMgmt, UNSIGNED8* pucTableName,
+                         UNSIGNED8* pucUserName, UNSIGNED16 usConnNumber,
+                         ADS_MGMT_LOCK_INFO* pstLockInfo,
+                         UNSIGNED16* pusArrayLen, UNSIGNED16* pusStructSize);
 ';
 
 try {
@@ -248,6 +263,44 @@ try {
                 'sql'       => $sql,
                 'startedAt' => $epochVal > 0 ? date('Y-m-d H:i:s', $epochVal) : null,
             ]);
+            exit;
+        }
+
+        if ($action === 'locks') {
+            // Record locks for one tables[] row — tableName comes from a
+            // row in the tables[] array the last GET returned. Each
+            // ADS_MGMT_LOCK_INFO already carries the owner, so no
+            // AdsMgGetLockOwner round-trip is needed per record.
+            $tableName = trim((string)($body['tableName'] ?? ''));
+            if ($tableName === '') {
+                http_response_code(400);
+                echo json_encode(['error' => 'tableName is required']);
+                exit;
+            }
+            $maxLocks  = 1024;
+            $lockArr   = $ffi->new("ADS_MGMT_LOCK_INFO[$maxLocks]");
+            $lockCount = $ffi->new('UNSIGNED16');
+            $lockCount->cdata = $maxLocks;
+            $lockSize  = $ffi->new('UNSIGNED16');
+            $lockSize->cdata = (int)FFI::sizeof($ffi->new('ADS_MGMT_LOCK_INFO'));
+            $tblArg = ffiCStr($ffi, $tableName);
+            $rc = $ffi->AdsMgGetLocks($h, $tblArg, null, 0, $lockArr,
+                                      FFI::addr($lockCount), FFI::addr($lockSize));
+            if ($rc !== 0) {
+                echo json_encode(['error' => "AdsMgGetLocks failed (rc=$rc)"]);
+                exit;
+            }
+            $locks = [];
+            $n = min((int)$lockCount->cdata, $maxLocks);
+            for ($i = 0; $i < $n; $i++) {
+                $l = $lockArr[$i];
+                $locks[] = [
+                    'recNo'  => (int)$l->ulRecordNumber,
+                    'user'   => ffiStr($l->aucUserName, 32),
+                    'connNo' => (int)$l->usConnNumber,
+                ];
+            }
+            echo json_encode(['ok' => true, 'locks' => $locks]);
             exit;
         }
 

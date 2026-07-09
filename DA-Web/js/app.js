@@ -4789,6 +4789,37 @@
     }
   }
 
+  async function showTableLocks(dd, tabId, row) {
+    const box = document.getElementById('srvinfo-locks-' + tabId);
+    if (!box) return;
+    box.textContent = 'Loading…';
+    try {
+      const r = await apiFetch('api/server_info.php', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'locks', dd, tableName: row.name }),
+      });
+      if (r.error) { box.textContent = `Error: ${r.error}`; return; }
+      if (!r.locks || r.locks.length === 0) {
+        box.textContent = `No locks held on ${row.name}.`;
+        return;
+      }
+      const rows = r.locks.map(l =>
+        `<tr><td style="padding:2px 14px 2px 0;">${l.recNo === 0 ? '(table lock)' : escHtml(String(l.recNo))}</td>` +
+        `<td style="padding:2px 14px 2px 0;">${escHtml(l.user || '')}</td>` +
+        `<td style="padding:2px 0;">${escHtml(String(l.connNo))}</td></tr>`).join('');
+      box.innerHTML =
+        `<div style="color:#a6adc8;margin-bottom:6px;">${escHtml(row.name)} — ${r.locks.length} lock(s)</div>` +
+        `<table style="border-collapse:collapse;font-size:12px;color:#cdd6f4;">` +
+        `<thead><tr style="color:#89b4fa;text-align:left;">` +
+        `<th style="padding:2px 14px 2px 0;">Record#</th>` +
+        `<th style="padding:2px 14px 2px 0;">User</th>` +
+        `<th style="padding:2px 0;">Conn#</th></tr></thead>` +
+        `<tbody>${rows}</tbody></table>`;
+    } catch (err) {
+      box.textContent = `Error: ${err.message}`;
+    }
+  }
+
   function loadServerInfo(tabId, dd) {
     const container = document.getElementById('srvinfo-' + tabId);
     if (!container) return;
@@ -4831,8 +4862,12 @@
               <div id="srvinfo-users-grid-${tabId}" class="health-grid" style="min-height:160px;"></div>
             </div>
             <div>
-              <div class="srvinfo-section-title">Open Tables</div>
+              <div class="srvinfo-section-title">Open Tables <span style="text-transform:none;font-weight:400;">(click a row to view its record locks below)</span></div>
               <div id="srvinfo-tables-grid-${tabId}" class="health-grid" style="min-height:160px;"></div>
+            </div>
+            <div>
+              <div class="srvinfo-section-title">Record Locks</div>
+              <div id="srvinfo-locks-${tabId}" style="background:#181825;border:1px solid #313244;border-radius:4px;padding:10px;min-height:52px;max-height:200px;overflow:auto;font-size:12px;color:#cdd6f4;">Select a table above to view its locks.</div>
             </div>
             <div>
               <div class="srvinfo-section-title">Active Queries <span style="text-transform:none;font-weight:400;">(click a row to view its SQL below)</span></div>
@@ -4900,6 +4935,10 @@
             { title: 'Conn#', field: 'connNo', width: 70, hozAlign: 'right' },
           ],
         });
+        // Same Tabulator-6 caveat as usersGrid: row-click must go through
+        // .on(), a constructor-level rowClick option is silently ignored.
+        tablesGrid.on('rowClick', (e, row) =>
+          showTableLocks(dd, tabId, row.getData()));
 
         const queriesGrid = new Tabulator('#srvinfo-queries-grid-' + tabId, {
           data: resp.queries,

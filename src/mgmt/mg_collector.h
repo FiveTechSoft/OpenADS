@@ -56,7 +56,12 @@ public:
     std::vector<ADS_MGMT_USER_INFO>       user_names() const;
     std::vector<ADS_MGMT_TABLE_INFO>      open_tables() const;
     std::vector<ADS_MGMT_INDEX_INFO>      open_indexes() const;
-    std::vector<ADS_MGMT_LOCK_INFO>       locks() const;
+    // Optional filters: `table_filter` matches the lock's owning table by
+    // full path or basename (case-insensitive); `user_filter` matches the
+    // owner name. Empty = no filter (previous behavior).
+    std::vector<ADS_MGMT_LOCK_INFO>       locks(
+        const std::string& table_filter = {},
+        const std::string& user_filter  = {}) const;
     std::vector<ADS_MGMT_THREAD_ACTIVITY> worker_thread_activity() const;
 
     // Non-SAP extension: one average per-frame cost (microseconds) per
@@ -76,8 +81,16 @@ public:
     std::chrono::system_clock::time_point thread_sql_at(std::uint32_t thread_no) const;
 
     // Returns the lock held on (conn-agnostic) `recno`; usConnNumber
-    // is 0 and ulRecordNumber is 0 when no such lock exists.
-    ADS_MGMT_LOCK_INFO lock_owner(std::uint32_t recno) const;
+    // is 0 and ulRecordNumber is 0 when no such lock exists. Optional
+    // owning-table filter, same matching rules as locks().
+    ADS_MGMT_LOCK_INFO lock_owner(std::uint32_t recno,
+                                  const std::string& table_filter = {}) const;
+
+    // True when `open_name` (a lock/index entry's owning-table path)
+    // matches `want` by full path or basename, case-insensitively; an
+    // empty `want` matches everything.
+    static bool table_name_matches(const std::string& open_name,
+                                   const std::string& want);
 
     std::uint16_t server_type() const { return snapshot_.server_type; }
 
@@ -116,9 +129,13 @@ class LockRegistry {
 public:
     static LockRegistry& instance();
 
-    void add_record_lock(const void* table_key, std::uint32_t recno);
+    // `table_path` is the owning table's file path, recorded per entry so
+    // the mgmt surface can filter locks by table (ADS_MGMT_LOCK_INFO
+    // itself has no room for it — see MgLock::table).
+    void add_record_lock(const void* table_key, const std::string& table_path,
+                         std::uint32_t recno);
     void remove_record_lock(const void* table_key, std::uint32_t recno);
-    void add_table_lock(const void* table_key);
+    void add_table_lock(const void* table_key, const std::string& table_path);
     void remove_table_lock(const void* table_key);
     // Safety net for abrupt disconnects that skip explicit unlocks.
     void remove_all_for_table(const void* table_key);
@@ -141,9 +158,15 @@ private:
         }
     };
 
+    // Owner + owning-table path, per lock entry.
+    struct LockEnt {
+        LockOwner   owner;
+        std::string table;
+    };
+
     mutable std::mutex                                    mu_;
-    std::unordered_map<RecKey, LockOwner, RecKeyHash>     record_locks_;
-    std::unordered_map<const void*, LockOwner>            table_locks_;
+    std::unordered_map<RecKey, LockEnt, RecKeyHash>       record_locks_;
+    std::unordered_map<const void*, LockEnt>              table_locks_;
 };
 
 // Reserved admin username exempted from the ADS_DD_LOGINS_DISABLED gate

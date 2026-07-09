@@ -36,13 +36,24 @@ struct MgIndex {
     std::string name;
     std::string tag;
     std::string expression;
+    // Attribution beyond SAP's ADS_MGMT_INDEX_INFO (which carries only
+    // name/tag/expression): the owning table's path and the session that
+    // opened the index — needed by sp_mgGetTableIndexes /
+    // sp_mgGetUserIndexes / sp_mgGetIndexUsers to filter.
+    std::string   table;
+    std::string   user;
+    std::uint16_t conn_no = 0;
 };
 
 // One held lock.
 struct MgLock {
     std::string   user;
     std::uint16_t conn_no = 0;
-    std::uint32_t recno   = 0;
+    std::uint32_t recno   = 0;   // 0 = whole-table (file) lock
+    // Owning table's path. Not part of SAP's ADS_MGMT_LOCK_INFO — kept
+    // here so AdsMgGetLocks / sp_mgGetAllLocks can honor their TableName
+    // filter argument.
+    std::string   table;
 };
 
 // One worker thread.

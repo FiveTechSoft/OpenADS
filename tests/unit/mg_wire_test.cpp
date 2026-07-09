@@ -22,7 +22,13 @@ TEST_CASE("mg_wire snapshot round-trips identically") {
 
     mgmt::MgLock l;
     l.user = "bob"; l.conn_no = 7; l.recno = 99;
+    l.table = "c:/data/t.adt";
     in.lock_list.push_back(l);
+
+    mgmt::MgIndex x;
+    x.name = "c:/data/t.adi"; x.tag = "byname"; x.expression = "NAME";
+    x.table = "c:/data/t.adt"; x.user = "bob"; x.conn_no = 7;
+    in.index_list.push_back(x);
 
     std::string blob = network::encode_mg_snapshot(in);
     auto out = network::decode_mg_snapshot(blob);
@@ -39,6 +45,13 @@ TEST_CASE("mg_wire snapshot round-trips identically") {
     CHECK(s.table_list[0].lock_type == 2);
     REQUIRE(s.lock_list.size() == 1);
     CHECK(s.lock_list[0].recno == 99);
+    CHECK(s.lock_list[0].table == "c:/data/t.adt");
+    REQUIRE(s.index_list.size() == 1);
+    CHECK(s.index_list[0].name == "c:/data/t.adi");
+    CHECK(s.index_list[0].tag == "byname");
+    CHECK(s.index_list[0].table == "c:/data/t.adt");
+    CHECK(s.index_list[0].user == "bob");
+    CHECK(s.index_list[0].conn_no == 7);
 }
 
 TEST_CASE("mg_wire request round-trips") {

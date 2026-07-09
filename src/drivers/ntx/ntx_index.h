@@ -19,6 +19,7 @@ public:
 
     std::string name()       const override { return tag_name_; }
     std::string expression() const override { return key_expr_; }
+    std::string file_path()  const override { return file_path_; }
     bool        descending() const override { return descend_; }
     bool        unique()     const override { return unique_; }
     std::uint16_t key_length() const override { return key_size_; }
@@ -139,6 +140,7 @@ private:
     std::string                                    key_expr_;
     std::string                                    for_expr_;
     std::string                                    tag_name_;
+    std::string                                    file_path_;  // set on open()
 
     // Per-page cache (read-then-mutate).
     std::unordered_map<std::uint32_t, Page>        page_cache_;

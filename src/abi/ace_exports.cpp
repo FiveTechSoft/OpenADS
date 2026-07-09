@@ -10580,7 +10580,8 @@ UNSIGNED32 ENTRYPOINT AdsLockRecord(ADSHANDLE hTable, UNSIGNED32 ulRecord) {
     std::uint32_t rec = (ulRecord == 0) ? t->recno() : ulRecord;
     return lock_with_retry([t, rec]() {
         auto r = t->try_lock_record_excl(rec);
-        if (r) openads::mgmt::LockRegistry::instance().add_record_lock(t, rec);
+        if (r) openads::mgmt::LockRegistry::instance().add_record_lock(
+            t, t->path(), rec);
         return r;
     });
 }
@@ -10718,7 +10719,8 @@ UNSIGNED32 ENTRYPOINT AdsLockTable(ADSHANDLE hTable) {
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
     return lock_with_retry([t]() {
         auto r = t->try_lock_table_excl();
-        if (r) openads::mgmt::LockRegistry::instance().add_table_lock(t);
+        if (r) openads::mgmt::LockRegistry::instance().add_table_lock(
+            t, t->path());
         return r;
     });
 }
@@ -19265,6 +19267,39 @@ extern "C++" bool dispatch_sp_builtin(
 // ---------------------------------------------------------------------------
 extern "C++" {
 
+// Enumerate every index attached to an open Table handle in this process.
+// Walks the ABI registry at snapshot time — no open/close bookkeeping to
+// drift out of sync. Remote sessions open their tables through this same
+// registry (session.cpp calls the ABI in-process), so the network Server's
+// build_mg_snapshot uses this too; attribution to a user/conn is the
+// caller's job (entries carry only the owning table's path).
+namespace openads::abi {
+std::vector<openads::mgmt::MgIndex> open_index_snapshot() {
+    std::vector<openads::mgmt::MgIndex> out;
+    state().registry.for_each_handle([&](Handle, HandleKind k, void* p) {
+        if (k != HandleKind::Table) return;
+        auto* tp = static_cast<Table*>(p);
+        if (tp == nullptr) return;
+        for (auto* ix : tp->all_indexes()) {
+            if (ix == nullptr) continue;
+            openads::mgmt::MgIndex mi;
+            mi.name       = ix->file_path().empty() ? ix->name()
+                                                    : ix->file_path();
+            mi.tag        = ix->name();
+            mi.expression = ix->expression();
+            mi.table      = tp->path();
+            bool dup = false;
+            for (const auto& e : out) {
+                if (e.name == mi.name && e.tag == mi.tag &&
+                    e.table == mi.table) { dup = true; break; }
+            }
+            if (!dup) out.push_back(std::move(mi));
+        }
+    });
+    return out;
+}
+}  // namespace openads::abi
+
 // In-process telemetry for the local (embedded DLL) case: enumerate the ABI
 // handle registry for real connection/table counts and fold in the process
 // MgStats. Shared with AdsMg*'s local backend (fetch_mg_snapshot).
@@ -19308,6 +19343,13 @@ openads::mgmt::MgSnapshot collect_local_abi_snapshot() {
         if (l.user.empty()) l.user = "(local)";
         if (l.conn_no == 0)  l.conn_no = 1;
     }
+
+    snap.index_list = openads::abi::open_index_snapshot();
+    for (auto& ix : snap.index_list) {
+        ix.user    = "(local)";
+        ix.conn_no = 1;
+    }
+    snap.indexes = static_cast<std::uint32_t>(snap.index_list.size());
 
     openads::mgmt::capture_mg_stats(
         snap, openads::mgmt::process_mg_stats());
@@ -19512,8 +19554,23 @@ bool dispatch_sp_builtin_cursor(
         return emit("sp_mgGetTableUsers", kUserCols, rows);
     }
     if (uname == "SP_MGGETINDEXUSERS") {
-        // Open indexes are not tracked per-session yet; empty result.
-        return emit("sp_mgGetIndexUsers", kUserCols, {});
+        auto snap = spproc::current_snapshot();
+        std::vector<std::vector<std::string>> rows;
+        for (const auto& x : snap.index_list) {
+            if (!spproc::table_matches(x.name, arg(0))) continue;
+            bool found = false;
+            for (const auto& u : snap.user_list) {
+                if (u.conn_no == x.conn_no) {
+                    rows.push_back(user_row(u));
+                    found = true;
+                    break;
+                }
+            }
+            if (!found && !x.user.empty())
+                rows.push_back({x.user, std::to_string(x.conn_no),
+                                x.user, "", "", ""});
+        }
+        return emit("sp_mgGetIndexUsers", kUserCols, rows);
     }
     if (uname == "SP_MGGETUSERTABLES" || uname == "SP_MGGETALLTABLES") {
         bool by_user = (uname == "SP_MGGETUSERTABLES");
@@ -19547,18 +19604,39 @@ bool dispatch_sp_builtin_cursor(
     }
     if (uname == "SP_MGGETALLINDEXES" || uname == "SP_MGGETTABLEINDEXES" ||
         uname == "SP_MGGETUSERINDEXES") {
-        // Open indexes are not tracked in the management snapshot yet;
-        // shape matches SAP so callers see an empty grid, not an error.
-        return emit("sp_mgGetIndexes", {{"IndexName", 'C', 260, 0}}, {});
+        auto snap = spproc::current_snapshot();
+        std::vector<std::vector<std::string>> rows;
+        for (const auto& x : snap.index_list) {
+            if (uname == "SP_MGGETTABLEINDEXES" &&
+                !spproc::table_matches(x.table, arg(0))) continue;
+            if (uname == "SP_MGGETUSERINDEXES") {
+                bool match = spproc::lower(x.user) == spproc::lower(arg(0));
+                if (!match) {
+                    for (const auto& u : snap.user_list) {
+                        if (u.conn_no == x.conn_no &&
+                            spproc::user_matches(u, arg(0))) {
+                            match = true;
+                            break;
+                        }
+                    }
+                }
+                if (!match) continue;
+            }
+            // One row per index FILE, like SAP — a multi-tag CDX/ADI
+            // shows once, not once per tag.
+            bool dup = false;
+            for (const auto& r0 : rows)
+                if (r0[0] == x.name) { dup = true; break; }
+            if (!dup) rows.push_back({x.name});
+        }
+        return emit("sp_mgGetIndexes", {{"IndexName", 'C', 260, 0}}, rows);
     }
     if (uname == "SP_MGGETALLLOCKS" || uname == "SP_MGGETUSERLOCKS") {
-        // MgLock carries no table name (SAP's struct doesn't either), so
-        // the TableName argument cannot narrow the result; all locks held
-        // in this process/server are listed.
         bool by_user = (uname == "SP_MGGETUSERLOCKS");
         auto snap = spproc::current_snapshot();
         std::vector<std::vector<std::string>> rows;
         for (const auto& l : snap.lock_list) {
+            if (!spproc::table_matches(l.table, arg(0))) continue;
             if (by_user) {
                 bool match = spproc::lower(l.user) == spproc::lower(arg(1));
                 if (!match) {
@@ -19581,6 +19659,7 @@ bool dispatch_sp_builtin_cursor(
         auto want = static_cast<std::uint32_t>(arg_int(1));
         std::vector<std::vector<std::string>> rows;
         for (const auto& l : snap.lock_list) {
+            if (!spproc::table_matches(l.table, arg(0))) continue;
             if (l.recno != want) continue;
             std::string addr, oslogin;
             for (const auto& u : snap.user_list) {
@@ -27949,26 +28028,46 @@ UNSIGNED32 ENTRYPOINT AdsMgGetInstallInfo(ADSHANDLE h, void* p, UNSIGNED16* l) {
     if (!c.has_value()) return static_cast<UNSIGNED32>(c.error().code);
     return emit_mg_struct(c.value().install_info(), p, l);
 }
-UNSIGNED32 ENTRYPOINT AdsMgGetLockOwner(ADSHANDLE h, UNSIGNED8* /*t*/, UNSIGNED32 ulRec,
+UNSIGNED32 ENTRYPOINT AdsMgGetLockOwner(ADSHANDLE h, UNSIGNED8* pucTable,
+                              UNSIGNED32 ulRec,
                               void* p, UNSIGNED16* l, UNSIGNED16* lt) {
     auto col = mg_collector_for(h);
     if (!col.has_value()) return static_cast<UNSIGNED32>(col.error().code);
     if (lt) *lt = ADS_MGMT_RECORD_LOCK;
-    return emit_mg_struct(col.value().lock_owner(ulRec), p, l);
+    std::string tbl = pucTable ? openads::abi::to_internal(pucTable, 0) : "";
+    return emit_mg_struct(col.value().lock_owner(ulRec, tbl), p, l);
 }
-UNSIGNED32 ENTRYPOINT AdsMgGetLocks(ADSHANDLE h, UNSIGNED8* /*f*/, UNSIGNED8* /*t*/,
-                          UNSIGNED16 /*o*/, void* p, UNSIGNED16* c,
+UNSIGNED32 ENTRYPOINT AdsMgGetLocks(ADSHANDLE h, UNSIGNED8* pucTable,
+                          UNSIGNED8* pucUser,
+                          UNSIGNED16 /*usConnNumber*/, void* p, UNSIGNED16* c,
                           UNSIGNED16* sz) {
     auto col = mg_collector_for(h);
     if (!col.has_value()) return static_cast<UNSIGNED32>(col.error().code);
-    return emit_mg_array(col.value().locks(), p, c, sz);
+    std::string tbl = pucTable ? openads::abi::to_internal(pucTable, 0) : "";
+    std::string usr = pucUser  ? openads::abi::to_internal(pucUser, 0)  : "";
+    return emit_mg_array(col.value().locks(tbl, usr), p, c, sz);
 }
-UNSIGNED32 ENTRYPOINT AdsMgGetOpenIndexes(ADSHANDLE h, UNSIGNED8* /*f*/, UNSIGNED8* /*t*/,
-                                UNSIGNED16 /*o*/, void* p, UNSIGNED16* c,
-                                UNSIGNED16* sz) {
+UNSIGNED32 ENTRYPOINT AdsMgGetOpenIndexes(ADSHANDLE h, UNSIGNED8* pucTable,
+                                UNSIGNED8* /*pucUser*/,
+                                UNSIGNED16 /*usConnNumber*/, void* p,
+                                UNSIGNED16* c, UNSIGNED16* sz) {
     auto col = mg_collector_for(h);
     if (!col.has_value()) return static_cast<UNSIGNED32>(col.error().code);
-    return emit_mg_array(col.value().open_indexes(), p, c, sz);
+    auto all = col.value().open_indexes();
+    if (pucTable != nullptr && pucTable[0] != 0) {
+        // Filter by owning table. ADS_MGMT_INDEX_INFO has no table field,
+        // so match against the raw snapshot entries (same order as `all`).
+        std::string tbl = openads::abi::to_internal(pucTable, 0);
+        const auto& raw = col.value().snapshot().index_list;
+        std::vector<ADS_MGMT_INDEX_INFO> filtered;
+        for (std::size_t i = 0; i < all.size() && i < raw.size(); ++i) {
+            if (openads::mgmt::MgCollector::table_name_matches(
+                    raw[i].table, tbl))
+                filtered.push_back(all[i]);
+        }
+        return emit_mg_array(filtered, p, c, sz);
+    }
+    return emit_mg_array(all, p, c, sz);
 }
 UNSIGNED32 ENTRYPOINT AdsMgGetOpenTables(ADSHANDLE h, UNSIGNED8* /*f*/, UNSIGNED16 /*o*/,
                                void* p, UNSIGNED16* c, UNSIGNED16* sz) {

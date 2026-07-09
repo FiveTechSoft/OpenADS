@@ -5,6 +5,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstring>
+#include <filesystem>
 
 namespace openads::mgmt {
 
@@ -191,10 +192,34 @@ std::vector<ADS_MGMT_INDEX_INFO> MgCollector::open_indexes() const {
     return out;
 }
 
-std::vector<ADS_MGMT_LOCK_INFO> MgCollector::locks() const {
+bool MgCollector::table_name_matches(const std::string& open_name,
+                                     const std::string& want) {
+    if (want.empty()) return true;
+    auto lower = [](std::string s) {
+        for (auto& ch : s) ch = static_cast<char>(
+            std::tolower(static_cast<unsigned char>(ch)));
+        return s;
+    };
+    if (lower(open_name) == lower(want)) return true;
+    namespace fs = std::filesystem;
+    return lower(fs::path(open_name).filename().string()) ==
+           lower(fs::path(want).filename().string());
+}
+
+std::vector<ADS_MGMT_LOCK_INFO> MgCollector::locks(
+        const std::string& table_filter,
+        const std::string& user_filter) const {
+    auto lower = [](std::string s) {
+        for (auto& ch : s) ch = static_cast<char>(
+            std::tolower(static_cast<unsigned char>(ch)));
+        return s;
+    };
     std::vector<ADS_MGMT_LOCK_INFO> out;
     out.reserve(snapshot_.lock_list.size());
     for (const auto& l : snapshot_.lock_list) {
+        if (!table_name_matches(l.table, table_filter)) continue;
+        if (!user_filter.empty() && lower(l.user) != lower(user_filter))
+            continue;
         ADS_MGMT_LOCK_INFO i;
         std::memset(&i, 0, sizeof(i));
         put_field(i.aucUserName, sizeof(i.aucUserName), l.user);
@@ -243,10 +268,12 @@ MgCollector::thread_sql_at(std::uint32_t thread_no) const {
     return {};
 }
 
-ADS_MGMT_LOCK_INFO MgCollector::lock_owner(std::uint32_t recno) const {
+ADS_MGMT_LOCK_INFO MgCollector::lock_owner(
+        std::uint32_t recno, const std::string& table_filter) const {
     ADS_MGMT_LOCK_INFO i;
     std::memset(&i, 0, sizeof(i));
     for (const auto& l : snapshot_.lock_list) {
+        if (!table_name_matches(l.table, table_filter)) continue;
         if (l.recno == recno) {
             put_field(i.aucUserName, sizeof(i.aucUserName), l.user);
             i.usConnNumber   = l.conn_no;
@@ -307,9 +334,12 @@ LockRegistry& LockRegistry::instance() {
     return g_registry;
 }
 
-void LockRegistry::add_record_lock(const void* table_key, std::uint32_t recno) {
+void LockRegistry::add_record_lock(const void* table_key,
+                                   const std::string& table_path,
+                                   std::uint32_t recno) {
     std::lock_guard<std::mutex> lk(mu_);
-    record_locks_[RecKey{table_key, recno}] = current_lock_owner();
+    record_locks_[RecKey{table_key, recno}] =
+        LockEnt{current_lock_owner(), table_path};
 }
 
 void LockRegistry::remove_record_lock(const void* table_key, std::uint32_t recno) {
@@ -317,9 +347,10 @@ void LockRegistry::remove_record_lock(const void* table_key, std::uint32_t recno
     record_locks_.erase(RecKey{table_key, recno});
 }
 
-void LockRegistry::add_table_lock(const void* table_key) {
+void LockRegistry::add_table_lock(const void* table_key,
+                                  const std::string& table_path) {
     std::lock_guard<std::mutex> lk(mu_);
-    table_locks_[table_key] = current_lock_owner();
+    table_locks_[table_key] = LockEnt{current_lock_owner(), table_path};
 }
 
 void LockRegistry::remove_table_lock(const void* table_key) {
@@ -345,19 +376,21 @@ std::vector<MgLock> LockRegistry::snapshot() const {
     std::lock_guard<std::mutex> lk(mu_);
     std::vector<MgLock> out;
     out.reserve(record_locks_.size() + table_locks_.size());
-    for (const auto& [key, owner] : record_locks_) {
+    for (const auto& [key, ent] : record_locks_) {
         MgLock l;
-        l.user   = owner.user;
-        l.conn_no = owner.conn_no;
-        l.recno  = key.recno;
+        l.user    = ent.owner.user;
+        l.conn_no = ent.owner.conn_no;
+        l.recno   = key.recno;
+        l.table   = ent.table;
         out.push_back(std::move(l));
     }
-    for (const auto& [key, owner] : table_locks_) {
+    for (const auto& [key, ent] : table_locks_) {
         (void)key;
         MgLock l;
-        l.user    = owner.user;
-        l.conn_no = owner.conn_no;
+        l.user    = ent.owner.user;
+        l.conn_no = ent.owner.conn_no;
         l.recno   = 0;  // whole-table lock
+        l.table   = ent.table;
         out.push_back(std::move(l));
     }
     return out;

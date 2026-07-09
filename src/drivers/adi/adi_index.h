@@ -94,6 +94,7 @@ public:
 
     std::string    name()       const override { return tag_name_; }
     std::string    expression() const override { return tag_name_; }
+    std::string    file_path()  const override { return adi_path_; }
     bool           descending() const override { return false; }
     bool           unique()     const override { return unique_; }
     std::uint16_t  key_length() const override {

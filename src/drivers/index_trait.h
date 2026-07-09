@@ -40,6 +40,10 @@ public:
 
     virtual std::string name()       const = 0;
     virtual std::string expression() const = 0;
+    // On-disk index file path, for the management surface
+    // (AdsMgGetOpenIndexes / sp_mgGet*Indexes). Empty when the driver
+    // doesn't track one (e.g. purely in-memory orders).
+    virtual std::string file_path()  const { return std::string{}; }
     // FOR-clause predicate (CDX conditional tag). Empty = unconditional.
     // Default empty; CdxIndex parses it from the on-disk sub-tag header so
     // (re)build paths can re-apply the same filter the tag was created with.

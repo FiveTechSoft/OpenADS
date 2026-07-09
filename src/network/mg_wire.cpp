@@ -153,12 +153,16 @@ std::string encode_mg_snapshot(const mgmt::MgSnapshot& s) {
         put_str(b, x.name);
         put_str(b, x.tag);
         put_str(b, x.expression);
+        put_str(b, x.table);
+        put_str(b, x.user);
+        put_u16(b, x.conn_no);
     }
     put_u32(b, static_cast<std::uint32_t>(s.lock_list.size()));
     for (const auto& l : s.lock_list) {
         put_str(b, l.user);
         put_u16(b, l.conn_no);
         put_u32(b, l.recno);
+        put_str(b, l.table);
     }
     put_u32(b, static_cast<std::uint32_t>(s.thread_list.size()));
     for (const auto& t : s.thread_list) {
@@ -231,6 +235,9 @@ util::Result<mgmt::MgSnapshot> decode_mg_snapshot(
         x.name       = r.str();
         x.tag        = r.str();
         x.expression = r.str();
+        x.table      = r.str();
+        x.user       = r.str();
+        x.conn_no    = r.u16();
         s.index_list.push_back(std::move(x));
     }
     std::uint32_t nl = r.u32();
@@ -239,6 +246,7 @@ util::Result<mgmt::MgSnapshot> decode_mg_snapshot(
         l.user    = r.str();
         l.conn_no = r.u16();
         l.recno   = r.u32();
+        l.table   = r.str();
         s.lock_list.push_back(std::move(l));
     }
     std::uint32_t nh = r.u32();

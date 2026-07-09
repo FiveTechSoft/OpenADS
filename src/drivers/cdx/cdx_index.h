@@ -41,6 +41,7 @@ public:
 
     std::string name()       const override { return tag_name_; }
     std::string expression() const override { return key_expr_; }
+    std::string file_path()  const override { return path_; }
     std::string condition()  const override { return for_expr_; }
     bool        descending() const override { return descend_; }
     bool        unique()     const override { return unique_; }

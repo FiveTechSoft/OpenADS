@@ -113,6 +113,7 @@ util::Result<void> NtxIndex::flush_page_(std::uint32_t offset) {
 
 util::Result<void> NtxIndex::open(const std::string& path, IndexOpenMode mode) {
     mode_ = mode;
+    file_path_ = path;
     auto fres = platform::File::open(path, map_mode(mode));
     if (!fres) return fres.error();
     file_ = std::move(fres).value();
@@ -850,6 +851,7 @@ NtxIndex::create(const std::string& path,
 
     NtxIndex ix;
     ix.file_       = std::move(file);
+    ix.file_path_  = path;
     ix.mode_       = IndexOpenMode::Shared;
     ix.root_page_  = 0;
     ix.next_avail_ = NTX_PAGE_SIZE;

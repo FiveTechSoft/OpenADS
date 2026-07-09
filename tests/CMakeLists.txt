@@ -142,6 +142,7 @@ add_executable(openads_unit_tests
     unit/index_expr_utf8_test.cpp
     unit/abi_misc_impls_test.cpp
     unit/abi_mgmt_test.cpp
+    unit/abi_mgmt_locks_indexes_test.cpp
     unit/mg_collector_test.cpp
     unit/mg_wire_test.cpp
     unit/abi_mgmt_remote_test.cpp
