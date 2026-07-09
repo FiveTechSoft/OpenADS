@@ -148,6 +148,15 @@ public:
     void load_record_for_bulk_scan(std::vector<std::uint8_t> buf,
                                    std::uint32_t recno);
 
+    // Prototype for single-pass multi-tag collection (for future optimization
+    // of multi-INDEX ON / full bag rebuild). Returns one vector of (key,recno)
+    // per expression. This is a prototype; not yet wired into AdsCreateIndex61.
+    util::Result<std::vector<std::vector<std::pair<std::string, std::uint32_t>>>>
+    collect_keys_for_multiple_expressions(
+        const std::vector<std::string>& expressions,
+        const std::vector<std::string>& for_clauses,
+        const std::vector<std::uint16_t>& key_lens);
+
     // Reload the current row from disk without repositioning the active
     // index cursor — used after transaction rollback refresh.
     util::Result<void> refresh_record_buffer();

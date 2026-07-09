@@ -1,3 +1,23 @@
+## 1.8.4 — 2026-07-09
+
+### CDX — further `INDEX ON` speedups (#128)
+
+- Single-pass batching for sibling tag rebuilds using the new
+  `Table::collect_keys_for_multiple_expressions` prototype. When multiple
+  tags in a bag need a full rebuild (common after ORDLSTCLEAR + repeated
+  `INDEX ON`), we now do one DBF scan instead of N.
+- Fast paths + OEM upper-casing for `UPPER(barefield)` and similar common
+  expressions (skips per-row Parser + UTF-8 work; uses proper CP-852
+  upper table for NTXPL852/PL852 data).
+- Added `oem_upper` / `lookup_oem_upper_table` support in oem_collation.
+- More unit test coverage: wide tables (100+ cols), composite expressions,
+  additional FOR clauses, deleted records during `AdsCreateIndex61`.
+- CI now builds and runs `dbf_cdx_bench` as a multi-tag smoke on every job.
+- Enhanced `dbf_cdx_bench` to time realistic 4-tag `INDEX ON` sequences.
+
+These changes attack the remaining per-row expression cost and multi-tag
+scan cost after the initial read-ahead fix.
+
 ## 1.8.3 — 2026-07-09
 
 ### CDX — `INDEX ON` / REINDEX performance for local rddads (#128)

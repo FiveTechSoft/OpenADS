@@ -103,7 +103,7 @@ generated baseline; OpenADS clears every line of the regenerated
 ADS-flavoured baseline. The session that closed the last gap is
 recorded across 28 incremental commits ending at `28be1be`.
 
-**Current release: [v1.8.3](https://github.com/FiveTechSoft/OpenADS/releases/tag/v1.8.3) (2026-07-09).**
+**Current release: [v1.8.4](https://github.com/FiveTechSoft/OpenADS/releases/tag/v1.8.4) (2026-07-09).**
 Harbour `rddads` + FiveWin `TDataBase` / `xBrowse` over `tcp://` is
 production-ready: remote scope (`OrdScope`), index navigation, key counts,
 date fields, and field I/O by ordinal all work end-to-end. Full Data

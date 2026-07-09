@@ -505,6 +505,40 @@ void Table::load_record_for_bulk_scan(std::vector<std::uint8_t> buf,
     state_      = State::Positioned;
 }
 
+util::Result<std::vector<std::vector<std::pair<std::string, std::uint32_t>>>>
+Table::collect_keys_for_multiple_expressions(
+    const std::vector<std::string>& expressions,
+    const std::vector<std::string>& for_clauses,
+    const std::vector<std::uint16_t>& key_lens) {
+
+    const auto n = expressions.size();
+    if (for_clauses.size() != n || key_lens.size() != n) {
+        return util::Error{5000, 0, "mismatched expression lists", ""};
+    }
+
+    std::vector<std::vector<std::pair<std::string, std::uint32_t>>> results(n);
+    const auto rec_count = driver_->record_count();
+
+    for (std::uint32_t r = 1; r <= rec_count; ++r) {
+        auto raw = driver_->read_record_raw(r);
+        if (!raw) continue;
+        load_record_for_bulk_scan(std::move(raw.value()), r);
+
+        for (size_t i = 0; i < n; ++i) {
+            const auto& for_expr = for_clauses[i];
+            if (!for_expr.empty() &&
+                !evaluate_index_expr_truthy(*this, for_expr)) {
+                continue;
+            }
+            auto k = evaluate_index_expr(*this, expressions[i], key_lens[i]);
+            if (k) {
+                results[i].emplace_back(std::move(k.value()), r);
+            }
+        }
+    }
+    return results;
+}
+
 util::Result<void> Table::refresh_record_buffer() {
     if (state_ != State::Positioned || recno_ == 0) return {};
     return load_record_(recno_);

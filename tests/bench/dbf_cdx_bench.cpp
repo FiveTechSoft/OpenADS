@@ -79,8 +79,52 @@ int main(int argc, char** argv) {
     double t4 = now_ms();
     AdsCreateIndex(hTable, idxfile, idxname, idxexpr, nullptr, 0, 0, &hIdx);
     double t5 = now_ms();
-    fprintf(stderr, "Create CDX:     %8.1f ms\n", t5 - t4);
+    fprintf(stderr, "Create CDX (single): %8.1f ms\n", t5 - t4);
     if (hIdx) AdsCloseIndex(hIdx);
+
+    // === Multi-tag INDEX ON simulation (like real rddads / issue #128) ===
+    // Drop the bag and rebuild with several tags using AdsCreateIndex61.
+    // This exercises the optimized bulk key collection path.
+    std::error_code ec_rm;
+    fs::remove(dir + "/bench.cdx", ec_rm);
+    double t_multi = now_ms();
+
+    // Tag 1: bare ID
+    {
+        UNSIGNED8 tag[] = "BY_ID";
+        UNSIGNED8 expr[] = "ID";
+        ADSHANDLE h = 0;
+        AdsCreateIndex61(hTable, idxfile, tag, expr, nullptr, nullptr, 0, 512, &h);
+        if (h) AdsCloseIndex(h);
+    }
+    // Tag 2: UPPER on a stringified value (simulates common UPPER usage)
+    {
+        UNSIGNED8 tag[] = "UP_ID";
+        UNSIGNED8 expr[] = "UPPER(STR(ID,6))";
+        ADSHANDLE h = 0;
+        AdsCreateIndex61(hTable, idxfile, tag, expr, nullptr, nullptr, 0, 512, &h);
+        if (h) AdsCloseIndex(h);
+    }
+    // Tag 3: numeric expression (simulates VAL-style)
+    {
+        UNSIGNED8 tag[] = "VAL_DBL";
+        UNSIGNED8 expr[] = "VALUE*2";
+        ADSHANDLE h = 0;
+        AdsCreateIndex61(hTable, idxfile, tag, expr, nullptr, nullptr, 0, 512, &h);
+        if (h) AdsCloseIndex(h);
+    }
+    // Tag 4: another bare field
+    {
+        UNSIGNED8 tag[] = "BY_VAL";
+        UNSIGNED8 expr[] = "VALUE";
+        ADSHANDLE h = 0;
+        AdsCreateIndex61(hTable, idxfile, tag, expr, nullptr, nullptr, 0, 512, &h);
+        if (h) AdsCloseIndex(h);
+    }
+
+    double t_multi_end = now_ms();
+    fprintf(stderr, "Create CDX (4 tags): %8.1f ms  (multi-tag pattern)\n",
+            t_multi_end - t_multi);
 
     // Explicit flush to disk
     double t6 = now_ms();
@@ -88,9 +132,9 @@ int main(int argc, char** argv) {
     double t7 = now_ms();
     fprintf(stderr, "Flush to disk:  %8.1f ms\n", t7 - t6);
 
-    std::error_code ec;
-    auto dbf_sz = fs::file_size(dir + "/bench.dbf", ec);
-    auto cdx_sz = fs::file_size(dir + "/bench.cdx", ec);
+    std::error_code ec2;
+    auto dbf_sz = fs::file_size(dir + "/bench.dbf", ec2);
+    auto cdx_sz = fs::file_size(dir + "/bench.cdx", ec2);
     fprintf(stderr, "DBF size: %.1f MB\n", dbf_sz / (1024.0 * 1024.0));
     fprintf(stderr, "CDX size: %.1f KB\n", cdx_sz / 1024.0);
 

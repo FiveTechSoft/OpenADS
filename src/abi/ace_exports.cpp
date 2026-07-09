@@ -11990,94 +11990,108 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
     if (is_cdx) {
         auto sibs = openads::drivers::cdx::CdxIndex::list_tags(p.string());
         if (sibs) {
+            // Collect all siblings that need a full DBF rebuild (lost binding + empty tree).
+            // Batch their key collection with ONE scan using the multi-expression prototype.
+            struct Pending {
+                std::string name;
+                std::string expr;
+                std::string for_expr;
+                std::uint16_t klen;
+                bool fox;
+                std::unique_ptr<openads::drivers::cdx::CdxIndex> sub;
+            };
+            std::vector<Pending> pending;
             for (const auto& sib : sibs.value()) {
                 if (sib == tag) continue;
-                // Skip siblings that still hold a live binding: they are
-                // already tracked by sync_all_indexes_ (so their B+tree is
-                // current) and re-parking them here would (a) duplicate the
-                // binding — AdsGetNumIndexes / ordinal lookups would then
-                // double-count the tag — and (b) pay an O(records) rebuild
-                // on every CREATE INDEX, turning N tags into O(N*records*N)
-                // work. Worse, the duplicate parked view double-writes every
-                // dbAppend into the same on-disk tag, so the index outgrows
-                // the table and keeps growing. Only tags that LOST their
-                // binding across an rddads ORDLSTCLEAR cycle need the
-                // rebuild-and-re-park below.
                 bool already_bound = false;
                 for (auto& [h0, b0] : m_pre) {
-                    if (b0.table == t && b0.tag_name == sib) {
-                        already_bound = true;
-                        break;
-                    }
+                    if (b0.table == t && b0.tag_name == sib) { already_bound = true; break; }
                 }
                 if (already_bound) continue;
-                auto sub = std::make_unique<
-                    openads::drivers::cdx::CdxIndex>();
-                if (auto r0 = sub->open_named(p.string(),
-                        openads::drivers::IndexOpenMode::Shared,
-                        sib); !r0) continue;
+
+                auto sub = std::make_unique<openads::drivers::cdx::CdxIndex>();
+                if (auto r0 = sub->open_named(p.string(), openads::drivers::IndexOpenMode::Shared, sib); !r0) continue;
                 mark_cdx_key_encoding(t, sub.get());
                 apply_cdx_oem_collation(t, sub.get());
-                // The sibling lost its binding (rddads ORDLSTCLEAR) but its
-                // on-disk B+tree is already current when it was built earlier
-                // in this same INDEX / REINDEX run — the common case, since a
-                // full reindex builds every tag in turn. Rebuilding it again
-                // on each subsequent CREATE INDEX is the O(tags^2) re-scan
-                // that made INDEXAR of a 10-tag table take minutes. So if the
-                // tag already has a populated tree, just RE-PARK the binding
-                // (cheap) so sync_all_indexes_ tracks it again. Only rebuild
-                // from the DBF when the tree is empty (never built / cleared).
-                bool sib_has_data = false;
-                if (auto sf = sub->seek_first(); sf)
-                    sib_has_data = sf.value().positioned;
+
+                bool has_data = false;
+                if (auto sf = sub->seek_first(); sf) has_data = sf.value().positioned;
                 sub->invalidate_cursor();
-                if (!sib_has_data) {
+
+                if (!has_data) {
                     if (auto cl = sub->clear_data(); !cl) continue;
-                    std::string sib_expr = sub->expression();
-                    std::string sib_for  = sub->condition();
-                    std::uint16_t sib_klen = sub->key_length();
-                    const bool sib_fox = sub->key_encoding() ==
-                        openads::drivers::KeyEncoding::FoxNumeric;
-                    std::vector<std::pair<std::string, std::uint32_t>> sib_keys;
-                    sib_keys.reserve(rec_count);
-                    for (std::uint32_t r2 = 1; r2 <= rec_count; ++r2) {
-                        auto raw2 = t->driver()->read_record_raw(r2);
-                        if (!raw2) continue;
-                        t->load_record_for_bulk_scan(std::move(raw2.value()), r2);
-                        // Honor the sibling tag's own FOR clause so a
-                        // conditional tag is not silently rebuilt
-                        // unconditional during this resync.
-                        if (!sib_for.empty() &&
-                            !openads::engine::evaluate_index_expr_truthy(
-                                *t, sib_for))
-                            continue;
-                        std::string k2b;
-                        if (sib_fox) {
-                            double dv = 0.0;
-                            if (!openads::engine::evaluate_index_expr_number(
-                                    *t, sib_expr, dv))
-                                continue;
-                            k2b = openads::engine::fox_numeric_key(dv);
-                        } else {
-                            auto k2 = openads::engine::evaluate_index_expr(
-                                *t, sib_expr, sib_klen);
-                            if (!k2) continue;
-                            k2b = std::move(k2).value();
-                        }
-                        sib_keys.emplace_back(std::move(k2b), r2);
-                    }
-                    (void)sub->build_bulk(std::move(sib_keys));
-                    (void)sub->flush();
+                    Pending pend;
+                    pend.name = sib;
+                    pend.expr = sub->expression();
+                    pend.for_expr = sub->condition();
+                    pend.klen = sub->key_length();
+                    pend.fox = (sub->key_encoding() == openads::drivers::KeyEncoding::FoxNumeric);
+                    pend.sub = std::move(sub);
+                    pending.push_back(std::move(pend));
+                } else {
+                    // Park existing
+                    ADSHANDLE sh = next_index_handle();
+                    m_pre[sh] = IndexBinding{t, sib, std::move(sub), p.string()};
+                    t->register_extra_index_view(m_pre[sh].parked.get());
+                    (void)act_pre;
                 }
-                // Park as extra binding (persists across rddads
-                // ORDLSTCLEAR cycles? - it gets dropped, but at
-                // least sync_all_indexes_ can see it until then).
-                ADSHANDLE sh = next_index_handle();
-                openads::drivers::IIndex* raw = sub.get();
-                m_pre[sh] = IndexBinding{t, sib, std::move(sub),
-                                         p.string()};
-                t->register_extra_index_view(raw);
-                (void)act_pre;
+            }
+
+            if (!pending.empty()) {
+                // Batch non-fox string expressions with single scan
+                std::vector<std::string> bexprs, bfors;
+                std::vector<std::uint16_t> bklens;
+                std::vector<size_t> batch_idx;
+                for (size_t i=0; i<pending.size(); ++i) {
+                    if (!pending[i].fox) {
+                        bexprs.push_back(pending[i].expr);
+                        bfors.push_back(pending[i].for_expr);
+                        bklens.push_back(pending[i].klen);
+                        batch_idx.push_back(i);
+                    }
+                }
+
+                std::vector<std::vector<std::pair<std::string,uint32_t>>> multi_res;
+                if (!bexprs.empty()) {
+                    if (auto mr = t->collect_keys_for_multiple_expressions(bexprs, bfors, bklens); mr) {
+                        multi_res = std::move(mr.value());
+                    }
+                }
+
+                for (size_t j=0; j<batch_idx.size(); ++j) {
+                    auto& ps = pending[batch_idx[j]];
+                    std::vector<std::pair<std::string,uint32_t>> keys = (j < multi_res.size()) ? std::move(multi_res[j]) : std::vector<std::pair<std::string,uint32_t>>();
+                    (void)ps.sub->build_bulk(std::move(keys));
+                    (void)ps.sub->flush();
+
+                    ADSHANDLE sh = next_index_handle();
+                    openads::drivers::IIndex* rawp = ps.sub.get();
+                    m_pre[sh] = IndexBinding{t, ps.name, std::move(ps.sub), p.string()};
+                    t->register_extra_index_view(rawp);
+                    (void)act_pre;
+                }
+
+                // Fox numeric fallbacks (do individually)
+                for (auto& ps : pending) {
+                    if (ps.fox && ps.sub) {
+                        std::vector<std::pair<std::string,uint32_t>> keys;
+                        for (uint32_t r=1; r<=rec_count; ++r) {
+                            auto raw = t->driver()->read_record_raw(r);
+                            if (!raw) continue;
+                            t->load_record_for_bulk_scan(std::move(raw.value()), r);
+                            if (!ps.for_expr.empty() && !openads::engine::evaluate_index_expr_truthy(*t, ps.for_expr)) continue;
+                            double dv=0;
+                            if (openads::engine::evaluate_index_expr_number(*t, ps.expr, dv)) {
+                                keys.emplace_back(openads::engine::fox_numeric_key(dv), r);
+                            }
+                        }
+                        (void)ps.sub->build_bulk(std::move(keys));
+                        (void)ps.sub->flush();
+                        ADSHANDLE sh = next_index_handle();
+                        m_pre[sh] = IndexBinding{t, ps.name, std::move(ps.sub), p.string()};
+                        t->register_extra_index_view(m_pre[sh].parked.get());
+                    }
+                }
             }
         }
     }
