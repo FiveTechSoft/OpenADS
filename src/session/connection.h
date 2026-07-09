@@ -155,6 +155,16 @@ public:
         oem_sort_ = tab;
     }
 
+    // OEM upper-case table for national collations (parallel to sort table).
+    // Used for UPPER() in index key expressions so Polish NTXPL852 etc. upper
+    // matches what Harbour/Clipper produce under the same OEM charset.
+    const std::uint8_t* oem_upper_table() const noexcept {
+        return oem_upper_;
+    }
+    void set_oem_upper_table(const std::uint8_t* tab) noexcept {
+        oem_upper_ = tab;
+    }
+
     // DD authentication: set after credential validation in AdsConnect60.
     // RCB 2026-06-27: Keep the connection username normalized so every
     // conn->username() permission check sees one canonical DD user name.
@@ -202,6 +212,8 @@ private:
     Collation                                                  collation_ =
         Collation::Binary;
     const std::uint8_t*                                        oem_sort_ =
+        nullptr;
+    const std::uint8_t*                                        oem_upper_ =
         nullptr;
     // Authenticated username (empty = anonymous / unauthenticated).
     std::string                                                username_;

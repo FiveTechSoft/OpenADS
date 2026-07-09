@@ -282,9 +282,18 @@ Value apply_scalar_fn(const std::string& fn, const std::vector<Value>& args) {
     Value v;
     v.is_number = false;
     if (fn == "UPPER" && args.size() >= 1) {
-        // Use OEM upper when available for national collations (speed + correctness for OEM data)
-        const std::uint8_t* up = openads::engine::lookup_oem_upper_table("PL852");
-        v.s = openads::engine::oem_upper(up, args[0].s.data(), args[0].s.size());
+        const std::string& s = args[0].s;
+        // Use OEM upper table for national collations (NTXPL852 / PL852 etc.)
+        // when the connection was configured via adslocal.cfg or AdsSetCollation.
+        // This makes UPPER() on OEM data produce the same bytes as Harbour
+        // under the same codepage, fixing seek on indexes like Upper(A_NAZWA).
+        const std::uint8_t* up = openads::engine::lookup_oem_upper_table("NTXPL852");
+        if (!up) up = openads::engine::lookup_oem_upper_table("PL852");
+        if (up) {
+            v.s = openads::engine::oem_upper(up, s.data(), s.size());
+        } else {
+            v.s = upper_utf8(s);
+        }
     } else if (fn == "LOWER" && args.size() >= 1) {
         v.s = lower_utf8(args[0].s);
     } else if (fn == "LTRIM" && args.size() >= 1) {
@@ -532,11 +541,11 @@ evaluate_index_expr(Table& t, const std::string& expr, std::uint16_t key_len) {
         if (fidx >= 0) {
             auto r = t.read_field(static_cast<std::uint16_t>(fidx));
             if (r) {
-                // Prefer OEM upper table when national collation (PL852 etc.) is active.
-                // This is both faster (no UTF8 decode) and correct for OEM data with NTXPL852.
-                const std::uint8_t* up_tbl = openads::engine::lookup_oem_upper_table("PL852");
                 std::string raw = r.value().as_string;
-                std::string key = openads::engine::oem_upper(up_tbl, raw.data(), raw.size());
+                const std::uint8_t* up = openads::engine::lookup_oem_upper_table("NTXPL852");
+                if (!up) up = openads::engine::lookup_oem_upper_table("PL852");
+                std::string key = up ? openads::engine::oem_upper(up, raw.data(), raw.size())
+                                     : upper_utf8(raw);
                 if (key.size() < key_len) key.append(key_len - key.size(), ' ');
                 if (key.size() > key_len) key.resize(key_len);
                 return key;

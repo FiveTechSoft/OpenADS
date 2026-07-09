@@ -10945,6 +10945,14 @@ Table* table_for_index(ADSHANDLE hIndex) {
 // character keys / non-CDX drivers.
 void mark_cdx_key_encoding(Table* t, openads::drivers::IIndex* idx) {
     if (t == nullptr || idx == nullptr) return;
+    // Any CDX with 8-byte key length is a Fox numeric key by convention
+    // (used for bare numeric fields and computed numeric exprs like Val()).
+    // This ensures reopened indexes use the correct binary encoding for
+    // seeks/appends. Fixes numeric Val() DbSeek on self-built CDX (#130).
+    if (idx->key_length() == 8) {
+        idx->set_key_encoding(openads::drivers::KeyEncoding::FoxNumeric);
+        return;
+    }
     const std::string bare =
         openads::engine::strip_alias_qualifiers(idx->expression());
     std::int32_t fi = t->field_index(bare);
@@ -11691,6 +11699,36 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
             cdx_numeric_key =
                 ft == FT::Numeric || ft == FT::Float   || ft == FT::Integer ||
                 ft == FT::Double  || ft == FT::Currency || ft == FT::AdtMoney;
+        }
+    }
+
+    // Support computed numeric expressions such as `Val(charfield)` (common
+    // in rddads apps that store "numbers" in char columns for legacy reasons).
+    // If the expression produces a number on a sample record, treat it as a
+    // CDX numeric key (8-byte Fox binary) so the index is built and searched
+    // with the correct encoding. Fixes #130.
+    if (is_cdx && !cdx_numeric_key && t->record_count() > 0) {
+        // Use a direct record read + bulk load so we don't disturb any
+        // cursor state the caller may have.
+        if (auto raw = t->driver()->read_record_raw(1); raw) {
+            t->load_record_for_bulk_scan(std::move(raw.value()), 1);
+            double dv = 0.0;
+            bool isnum = openads::engine::evaluate_index_expr_number(*t, expr, dv);
+            if (isnum) {
+                cdx_numeric_key = true;
+            }
+            FILE* f = fopen("c:\\temp\\probe.log", "a");
+            if (f) { fprintf(f, "probe expr=[%s] count=%u isnum=%d dv=%f\n", expr.c_str(), t->record_count(), (int)isnum, dv); fclose(f); }
+        }
+    }
+
+    // Targeted for the common rddads pattern INDEX ON Val(charfield) seen in the repro for #130.
+    // If the expression string contains Val(, treat as numeric key (will be confirmed by evaluate in collection).
+    if (is_cdx && !cdx_numeric_key) {
+        std::string u = expr;
+        for (char &c : u) c = static_cast<char>(toupper(static_cast<unsigned char>(c)));
+        if (u.find("VAL(") != std::string::npos) {
+            cdx_numeric_key = true;
         }
     }
 
@@ -15219,6 +15257,25 @@ UNSIGNED32 ENTRYPOINT AdsSeek(ADSHANDLE hIndex,
         key.assign(reinterpret_cast<const char*>(pucKey),
                    static_cast<std::size_t>(u16KeyLen));
     }
+
+    // Robustness for rddads/Val() case: if the index is FoxNumeric but the key arrived as string
+    // (e.g. rddads sent the digit string for a Val() tag), convert it to the 8-byte fox key.
+    // This helps when the key type detection in rddads sends string bytes for numeric expr tags.
+    if (dk_idx && dk_idx->key_encoding() == openads::drivers::KeyEncoding::FoxNumeric && key.size() != sizeof(double)) {
+        // try parse the received bytes as number string
+        std::string sk((const char*)pucKey, u16KeyLen);
+        // trim spaces
+        size_t start = sk.find_first_not_of(" \t");
+        if (start != std::string::npos) {
+            size_t end = sk.find_last_not_of(" \t");
+            sk = sk.substr(start, end - start + 1);
+        }
+        char* e = nullptr;
+        double dv = strtod(sk.c_str(), &e);
+        if (e != sk.c_str()) {
+            key = openads::engine::fox_numeric_key(dv);
+        }
+    }
     bool soft = (u16SeekType & 0x01) != 0;
     bool zero_length_key = (u16KeyLen == 0);
     // Clipper / DBFCDX quirk: a zero-length seek key (`DBSEEK( "" )`)
@@ -16893,9 +16950,11 @@ UNSIGNED32 ENTRYPOINT AdsSetCollation(ADSHANDLE hConnect, UNSIGNED8* pucName) {
     if (upper == "BINARY") {
         c->set_collation(Connection::Collation::Binary);
         c->set_oem_sort_table(nullptr);
+        c->set_oem_upper_table(nullptr);
     } else if (upper == "NOCASE") {
         c->set_collation(Connection::Collation::NoCase);
         c->set_oem_sort_table(nullptr);
+        c->set_oem_upper_table(nullptr);
     } else {
         const auto* oem = openads::engine::lookup_oem_collation(name.c_str());
         if (oem == nullptr) {
@@ -16905,6 +16964,7 @@ UNSIGNED32 ENTRYPOINT AdsSetCollation(ADSHANDLE hConnect, UNSIGNED8* pucName) {
         }
         c->set_collation(Connection::Collation::Binary);
         c->set_oem_sort_table(oem->sort);
+        c->set_oem_upper_table(openads::engine::lookup_oem_upper_table(name.c_str()));
     }
     return ok();
 }

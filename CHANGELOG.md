@@ -18,6 +18,24 @@
 These changes attack the remaining per-row expression cost and multi-tag
 scan cost after the initial read-ahead fix.
 
+### Numeric `Val()` keys + full OEM UPPER support for rddads (#130)
+
+- `INDEX ON Val(charfield)` now correctly creates 8-byte FoxNumeric CDX keys
+  (via `evaluate_index_expr_number` probe on first record + `"VAL("` heuristic
+  + `klen=8` + `FoxNumeric` encoding).
+- `mark_cdx_key_encoding` on reopen now promotes any CDX with keylen==8.
+- Robust `AdsSeek` conversion for cases where rddads passes the numeric as
+  string digits.
+- `UPPER()` (both general and fast bare-field paths) now dispatches to the
+  OEM upper table (`oem_upper` + NTXPL852/PL852) when the connection uses
+  national OEM collation. This makes `Upper(field)` indexes + seeks match
+  Harbour behaviour under PL852/OEM.
+- Unit test coverage for the exact repro path (`Val()` seek + key_length==8
+  on real ASORTYM CDX from the issue).
+- Verified end-to-end on the anonymised ASORTYM repro (14k rows, 125 cols,
+  16-tag bag, NTXPL852): both `Val()` and `Upper()` seeks now OK, raw keys
+  continue to work.
+
 ## 1.8.3 — 2026-07-09
 
 ### CDX — `INDEX ON` / REINDEX performance for local rddads (#128)

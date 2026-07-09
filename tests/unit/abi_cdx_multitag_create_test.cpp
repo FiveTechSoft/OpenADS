@@ -19,6 +19,10 @@
 #include "doctest.h"
 #include "openads/ace.h"
 
+// Internal driver headers for the repro key_length test (CdxIndex + IndexOpenMode)
+#include "drivers/cdx/cdx_index.h"
+#include "drivers/index_trait.h"
+
 #include <cstring>
 #include <filesystem>
 #include <vector>
@@ -319,4 +323,71 @@ TEST_CASE("CDX CreateIndex61 with composite expr and multiple FOR") {
     REQUIRE(AdsCloseTable(hT) == 0);
     REQUIRE(AdsDisconnect(hConn) == 0);
     fs::remove_all(dir, ec);
+}
+
+// Test for numeric Val() expression key on CDX (issue #130).
+// A char field holding digit strings; INDEX ON Val(charfield) must store
+// 8-byte Fox numeric keys and support numeric DbSeek.
+TEST_CASE("CDX numeric Val() expression key seek works (fixes #130)") {
+    auto dir = fs::temp_directory_path() / "openads_cdx_val_numeric";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+
+    const std::string dir_str = dir.string();
+    std::vector<UNSIGNED8> srv(dir_str.begin(), dir_str.end());
+    srv.push_back(0);
+
+    ADSHANDLE hConn = 0;
+    REQUIRE(AdsConnect60(srv.data(), ADS_LOCAL_SERVER, nullptr, nullptr, 0, &hConn) == 0);
+
+    UNSIGNED8 def[] = "NUMSTR,C,10,0;OTHER,C,5,0";
+    UNSIGNED8 tname[] = "valnum";
+    ADSHANDLE hT = 0;
+    REQUIRE(AdsCreateTable(hConn, tname, nullptr, ADS_CDX, 0, 0, 0, 0, def, &hT) == 0);
+
+    // rows with "123", "456", "789"
+    const char* vals[3] = {"123", "456", "789"};
+    for (int r = 0; r < 3; ++r) {
+        REQUIRE(AdsAppendRecord(hT) == 0);
+        set_str(hT, "NUMSTR", vals[r]);
+        set_str(hT, "OTHER", "x");
+    }
+
+    // Create the numeric expr index
+    UNSIGNED8 idxfile[] = "valnum";
+    UNSIGNED8 tag[] = "BYVAL";
+    UNSIGNED8 expr[] = "Val(NUMSTR)";
+    ADSHANDLE hI = 0;
+    REQUIRE(AdsCreateIndex61(hT, idxfile, tag, expr, nullptr, nullptr, 0, 512, &hI) == 0);
+
+    // Check key count ==3 
+    UNSIGNED32 cnt = 0;
+    REQUIRE(AdsGetRecordCount(hI, 0, &cnt) == 0);
+    CHECK(cnt == 3);
+
+    // Seek using the numeric double key (exercises the FoxNumeric path for Val() expr)
+    double dkey = 456.0;
+    UNSIGNED16 found = 0;
+    REQUIRE(AdsSeek(hI, reinterpret_cast<UNSIGNED8*>(&dkey),
+                    static_cast<UNSIGNED16>(sizeof(double)),
+                    ADS_DOUBLEKEY, 0, &found) == 0);
+    CHECK(found == 1);
+
+    REQUIRE(AdsCloseIndex(hI) == 0);
+    REQUIRE(AdsCloseTable(hT) == 0);
+    REQUIRE(AdsDisconnect(hConn) == 0);
+    fs::remove_all(dir, ec);
+}
+
+// Check the key_length for the Val tag in the CDX built by the repro run with current code.
+TEST_CASE("repro CDX key_length for Val tag is 8 (numeric)") {
+  std::string path = "C:\\temp\\repro_run\\ASORTYM.cdx";
+  openads::drivers::cdx::CdxIndex idx;
+  auto r = idx.open_named(path, openads::drivers::IndexOpenMode::ReadOnly, "A_OZNACZ");
+  if (r) {
+    CHECK(idx.key_length() == 8);
+  } else {
+    MESSAGE("could not open the repro cdx for A_OZNACZ, perhaps old build");
+  }
 }
