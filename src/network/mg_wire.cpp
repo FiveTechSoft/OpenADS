@@ -148,6 +148,8 @@ std::string encode_mg_snapshot(const mgmt::MgSnapshot& s) {
         put_u16(b, t.open_mode);
         put_u16(b, t.lock_type);
     }
+    put_str(b, s.error_log_path);
+    put_u32(b, s.error_log_max_kb);
     put_u32(b, static_cast<std::uint32_t>(s.index_list.size()));
     for (const auto& x : s.index_list) {
         put_str(b, x.name);
@@ -229,6 +231,8 @@ util::Result<mgmt::MgSnapshot> decode_mg_snapshot(
         t.lock_type = r.u16();
         s.table_list.push_back(std::move(t));
     }
+    s.error_log_path   = r.str();
+    s.error_log_max_kb = r.u32();
     std::uint32_t nx = r.u32();
     for (std::uint32_t i = 0; r.ok && i < nx; ++i) {
         mgmt::MgIndex x;

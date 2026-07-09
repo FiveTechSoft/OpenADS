@@ -113,6 +113,12 @@ struct MgSnapshot {
     std::uint32_t max_indexes      = 0;
     std::uint32_t max_locks        = 0;
 
+    // Error log configuration of the reporting process (mgmt::ErrorLog),
+    // surfaced through ADS_MGMT_CONFIG_PARAMS aucErrorLog / ulErrorLogMax
+    // and sp_mgGetConfigInfo.
+    std::string   error_log_path;
+    std::uint32_t error_log_max_kb = 0;
+
     std::vector<MgUser>   user_list;
     std::vector<MgTable>  table_list;
     std::vector<MgIndex>  index_list;

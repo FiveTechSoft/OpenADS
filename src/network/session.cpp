@@ -6,6 +6,7 @@
 #include "engine/aggregate.h"
 #include "engine/record_crc.h"
 #include "engine/table.h"
+#include "mgmt/error_log.h"
 #include "mgmt/mg_collector.h"
 #include "mgmt/mg_stats.h"
 #include "network/mg_wire.h"
@@ -193,6 +194,11 @@ UNSIGNED32 dd_set_property_dispatch(ADSHANDLE hConn, DDObjectKind kind,
 // they emit so the client can surface the right `Ads*` code.
 Frame err(const std::string& msg,
           UNSIGNED32 code = openads::AE_INTERNAL_ERROR) {
+    // Every error frame returned to a remote client also lands in the
+    // SAP-style ads_err error log (mirrors ADS, which records errors the
+    // server encounters serving client applications).
+    openads::mgmt::ErrorLog::instance().log(
+        static_cast<std::int32_t>(code), "NET", 0, msg);
     Frame f;
     f.opcode = Opcode::Error;
     f.payload.resize(4);

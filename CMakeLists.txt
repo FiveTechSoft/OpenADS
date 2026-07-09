@@ -349,6 +349,7 @@ if(OPENADS_BUILD_ODBC_DRIVER AND WIN32)
     add_subdirectory(bindings/odbc)
 endif()
 add_subdirectory(tools/serverd)
+add_subdirectory(tools/adsbackup)
 add_subdirectory(tools/bench)
 add_subdirectory(tools/stress)
 add_subdirectory(tools/mgprobe)
@@ -408,8 +409,8 @@ else()
         DESTINATION "${OA_INSTALL_BIN}" RENAME "libace${OA_BITS}.so")
 endif()
 
-# Server + bench CLIs.
-install(TARGETS openads_serverd openads_bench
+# Server + bench + backup CLIs.
+install(TARGETS openads_serverd openads_bench adsbackup
     RUNTIME DESTINATION "${OA_INSTALL_BIN}")
 
 # Public ACE headers.

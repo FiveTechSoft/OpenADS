@@ -44,6 +44,7 @@ add_library(openads_core STATIC
     engine/tx_log.cpp
     engine/lsn_map.cpp
     engine/data_dict.cpp
+    engine/backup.cpp
     engine/fts.cpp
     engine/codepage.cpp
     engine/oem_collation.cpp
@@ -68,6 +69,7 @@ add_library(openads_core STATIC
     network/client.cpp
     network/remote_index_nav.cpp
     mgmt/mg_collector.cpp
+    mgmt/error_log.cpp
     network/mg_wire.cpp
     sql_backend/uri.cpp
     sql_backend/sql_common.cpp

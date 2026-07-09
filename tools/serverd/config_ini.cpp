@@ -99,6 +99,20 @@ bool parse_ini(const std::string& text, IniConfig& out, std::string& error) {
         } else if (key == "data" || key == "data_dir" || key == "datadir") {
             out.data_dir = val;
             out.has_data = true;
+        } else if (key == "error_log_path" || key == "error-log-path" ||
+                   key == "error_assert_logs") {
+            out.error_log_path = val;
+            out.has_error_log_path = true;
+        } else if (key == "error_log_max" || key == "error-log-max") {
+            unsigned long n = 0;
+            if (!parse_uint(val, 0xFFFFFFFFul, n) || n == 0) {
+                error = "line " + std::to_string(lineno) +
+                        ": error_log_max must be a positive number of "
+                        "kilobytes";
+                return false;
+            }
+            out.error_log_max_kb = static_cast<std::uint32_t>(n);
+            out.has_error_log_max = true;
         } else if (key == "http_user" || key == "http-user") {
             auto colon = val.find(':');
             if (colon == std::string::npos) {

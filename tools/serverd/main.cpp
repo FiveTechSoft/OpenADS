@@ -12,6 +12,7 @@
 // `--service` (used internally by the SCM dispatcher; not for
 // interactive use).
 
+#include "mgmt/error_log.h"
 #include "network/server.h"
 #include "platform/dll.h"
 #include "platform/path.h"
@@ -81,6 +82,10 @@ struct Args {
     int           backlog     = 16;
     std::uint16_t http_port   = 0;
     std::string   data_dir    = ".";
+    // ads_err.dbf error log overrides; empty/0 keeps mgmt::ErrorLog's
+    // defaults (OPENADS_ERROR_LOG_PATH env, then the SAP default paths).
+    std::string   error_log_path;
+    std::uint32_t error_log_max_kb = 0;
     std::vector<std::pair<std::string, std::string>> http_users;
 };
 
@@ -97,6 +102,11 @@ bool parse_args(int argc, char** argv, Args& out) {
         else if (a == "--backlog"   && i + 1 < argc) out.backlog = std::atoi(argv[++i]);
         else if (a == "--http-port" && i + 1 < argc) out.http_port = static_cast<std::uint16_t>(std::atoi(argv[++i]));
         else if (a == "--data"      && i + 1 < argc) out.data_dir = argv[++i];
+        else if (a == "--error-log-path" && i + 1 < argc)
+            out.error_log_path = argv[++i];
+        else if (a == "--error-log-max"  && i + 1 < argc)
+            out.error_log_max_kb =
+                static_cast<std::uint32_t>(std::atol(argv[++i]));
         else if (a == "--http-user" && i + 1 < argc) {
             std::string up = argv[++i];
             auto colon = up.find(':');
@@ -125,6 +135,8 @@ void apply_ini(const openads::serverd::IniConfig& cfg, Args& out) {
     if (cfg.has_backlog)   out.backlog   = cfg.backlog;
     if (cfg.has_http_port) out.http_port = cfg.http_port;
     if (cfg.has_data)      out.data_dir  = cfg.data_dir;
+    if (cfg.has_error_log_path) out.error_log_path   = cfg.error_log_path;
+    if (cfg.has_error_log_max)  out.error_log_max_kb = cfg.error_log_max_kb;
     for (const auto& u : cfg.http_users) out.http_users.push_back(u);
 }
 
@@ -214,6 +226,15 @@ static void probe_ace_dlls(bool console) {
 // Run the actual server. Returns when g_running flips to false
 // (signal handler on POSIX / SCM stop control on Windows).
 int run_server(const Args& args, bool console) {
+    // Error log configuration must land before Server::start(), whose
+    // "server started" entry is the log's first row.
+    if (!args.error_log_path.empty())
+        openads::mgmt::ErrorLog::instance().set_directory(
+            args.error_log_path);
+    if (args.error_log_max_kb != 0)
+        openads::mgmt::ErrorLog::instance().set_max_kbytes(
+            args.error_log_max_kb);
+
     openads::network::Server srv;
     if (!args.data_dir.empty() && args.data_dir != ".")
         srv.set_data_dir(args.data_dir);

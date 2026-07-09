@@ -35,6 +35,13 @@ struct IniConfig {
     std::uint16_t http_port     = 0;
     bool          has_data      = false;
     std::string   data_dir;
+    // SAP-style error log settings (ads_err.dbf): directory and max size
+    // in kilobytes. Accepted keys: error_log_path (alias:
+    // error_assert_logs, SAP's registry/ini name) and error_log_max.
+    bool          has_error_log_path = false;
+    std::string   error_log_path;
+    bool          has_error_log_max  = false;
+    std::uint32_t error_log_max_kb   = 0;
     std::vector<std::pair<std::string, std::string>> http_users;
 };
 

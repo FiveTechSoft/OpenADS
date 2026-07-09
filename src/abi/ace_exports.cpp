@@ -22,6 +22,7 @@
 #include "sql_backend/sql_acl_store.h"
 #include "sql_backend/sql_ddl.h"
 #include "sql_backend/sql_system_catalog.h"
+#include "engine/backup.h"
 #include "engine/index_expr.h"
 #include "engine/oem_collation.h"
 #include "engine/record_crc.h"
@@ -35,6 +36,7 @@
 #include "network/mg_wire.h"
 #include "network/server.h"
 #include "network/socket.h"
+#include "mgmt/error_log.h"
 #include "mgmt/mg_collector.h"
 #include "mgmt/mg_stats.h"
 #include "session/connection.h"
@@ -19335,11 +19337,6 @@ extern "C++" bool dispatch_sp_builtin(
         uname == "SP_TESTREPLICATIONCONNECTION") {
         return unsupported("replication is not supported by OpenADS");
     }
-    if (uname == "SP_BACKUPDATABASE" || uname == "SP_BACKUPFREETABLES" ||
-        uname == "SP_RESTOREDATABASE" || uname == "SP_RESTOREFREETABLES") {
-        return unsupported("online backup/restore is not supported by "
-                           "OpenADS; copy the files with the tables closed");
-    }
     if (uname == "SP_ENABLEQUERYLOGGING" || uname == "SP_DISABLEQUERYLOGGING" ||
         uname == "SP_GETQUERYLOGGINGRESULTS" || uname == "SP_VIEWQUERYLOGGING") {
         return unsupported("query logging is not supported by OpenADS");
@@ -19436,6 +19433,9 @@ openads::mgmt::MgSnapshot collect_local_abi_snapshot() {
         ix.conn_no = 1;
     }
     snap.indexes = static_cast<std::uint32_t>(snap.index_list.size());
+
+    snap.error_log_path   = openads::mgmt::ErrorLog::instance().directory();
+    snap.error_log_max_kb = openads::mgmt::ErrorLog::instance().max_kbytes();
 
     openads::mgmt::capture_mg_stats(
         snap, openads::mgmt::process_mg_stats());
@@ -19920,7 +19920,24 @@ bool dispatch_sp_builtin_cursor(
             {});
     }
     if (uname == "SP_MGGETERRORLOG") {
-        // OpenADS does not maintain ads_err.adt/.dbf; SAP-shaped empty set.
+        // Newest entries from the ads_err.dbf error log (mgmt::ErrorLog).
+        // No-arg default is 25, single arg sets the count, and the
+        // two-arg SAP form's second number is the DBF-log count — the
+        // only log OpenADS keeps. Error_Number is 0: per the SAP docs the
+        // DBF-log entries have no Error_Number (that column only exists
+        // in the ADT variant).
+        std::size_t want = 25;
+        if (args.size() >= 2)      want = static_cast<std::size_t>(
+            arg_int(1) > 0 ? arg_int(1) : 0);
+        else if (args.size() == 1) want = static_cast<std::size_t>(
+            arg_int(0) > 0 ? arg_int(0) : 0);
+        std::vector<std::vector<std::string>> rows;
+        for (const auto& e :
+             openads::mgmt::ErrorLog::instance().read_last(want)) {
+            rows.push_back({"0", e.datetime, std::to_string(e.code),
+                            e.source, std::to_string(e.src_line),
+                            e.detail});
+        }
         return emit("sp_mgGetErrorLog",
             {{"Error_Number", 'N',  10, 0},
              {"DateTime",     'C',  25, 0},
@@ -19928,15 +19945,36 @@ bool dispatch_sp_builtin_cursor(
              {"Ads_Source",   'C', 100, 0},
              {"src_Line",     'N',  10, 0},
              {"FileName",     'C', 260, 0}},
-            {});
+            rows);
     }
     if (uname == "SP_MGSETCONFIGVALUE") {
-        return emit("sp_mgSetConfigValue",
-            {{"OldValue",   'C', 256, 0},
-             {"Result",     'N',   5, 0},
-             {"ResultText", 'C', 100, 0}},
-            {{"", "3", "Modifying this setting via this stored procedure "
-                       "is not supported."}});
+        auto& elog = openads::mgmt::ErrorLog::instance();
+        std::string setting = spproc::lower(arg(0));
+        auto respond = [&](const std::string& old, int result,
+                           const char* text) {
+            return emit("sp_mgSetConfigValue",
+                {{"OldValue",   'C', 256, 0},
+                 {"Result",     'N',   5, 0},
+                 {"ResultText", 'C', 100, 0}},
+                {{old, std::to_string(result), text}});
+        };
+        if (setting == "error_log_max") {
+            std::string old = std::to_string(elog.max_kbytes());
+            long v = std::atol(arg(1).c_str());
+            if (v <= 0) {
+                return respond(old, 3, "ERROR_LOG_MAX must be a positive "
+                                       "number of kilobytes.");
+            }
+            elog.set_max_kbytes(static_cast<std::uint32_t>(v));
+            return respond(old, 0, "Success. The change has been applied.");
+        }
+        if (setting == "error_assert_logs") {
+            std::string old = elog.directory();
+            elog.set_directory(arg(1));
+            return respond(old, 0, "Success. The change has been applied.");
+        }
+        return respond("", 3, "Modifying this setting via this stored "
+                              "procedure is not supported.");
     }
     if (uname == "SP_GETSQLSTATEMENTS") {
         auto snap = spproc::current_snapshot();
@@ -20280,6 +20318,83 @@ bool dispatch_sp_builtin_cursor(
         // Accepted no-op: OpenADS opens one collation per index today.
         return emit("sp_AllowMultipleCollations",
             {{"Result", 'N', 5, 0}}, {{"0"}});
+    }
+
+    // -- Backup / restore --------------------------------------------------------
+    // SAP-shaped result set: an EMPTY set means complete success; rows are
+    // warnings/errors. Shares openads::engine::backup with the adsbackup
+    // command-line tool so the two entry points cannot drift.
+    if (uname == "SP_BACKUPDATABASE" || uname == "SP_BACKUPFREETABLES" ||
+        uname == "SP_RESTOREDATABASE" || uname == "SP_RESTOREFREETABLES") {
+        namespace bk = openads::engine::backup;
+        openads::util::Result<bk::Report> res =
+            openads::util::Error{openads::AE_INTERNAL_ERROR, 0, "", ""};
+
+        if (uname == "SP_BACKUPDATABASE") {
+            // (DestinationPath, Options)
+            if (!c->has_dd() || c->dd_path().empty()) {
+                return err(openads::AE_FUNCTION_NOT_AVAILABLE,
+                           "sp_BackupDatabase requires a data dictionary "
+                           "connection (use sp_BackupFreeTables for free "
+                           "tables)");
+            }
+            // Flush every open table first so the file-level image is
+            // consistent with what the engine has in memory.
+            state().registry.for_each_handle(
+                [&](Handle, HandleKind k, void* p) {
+                    if (k != HandleKind::Table) return;
+                    if (auto* tp = static_cast<Table*>(p)) (void)tp->flush();
+                });
+            res = bk::backup_database(c->dd_path(), arg(0),
+                                      bk::parse_options(arg(1)));
+        } else if (uname == "SP_BACKUPFREETABLES") {
+            // (SourcePath, SourceMask, DestinationPath, Options,
+            //  FreeTablePasswords)
+            auto opt = bk::parse_options(arg(3));
+            if (!spproc::is_null_arg(arg(4))) {
+                opt.warnings.push_back(
+                    "FreeTablePasswords ignored: OpenADS copies encrypted "
+                    "tables byte-for-byte, no password needed");
+            }
+            state().registry.for_each_handle(
+                [&](Handle, HandleKind k, void* p) {
+                    if (k != HandleKind::Table) return;
+                    if (auto* tp = static_cast<Table*>(p)) (void)tp->flush();
+                });
+            std::string src = spproc::is_null_arg(arg(0))
+                ? c->data_dir() : arg(0);
+            res = bk::backup_free_tables(src, arg(1), arg(2), opt);
+        } else if (uname == "SP_RESTOREDATABASE") {
+            // (SourcePath[.add], SourcePassword, DestinationPath[.add],
+            //  Options)
+            res = bk::restore_database(arg(0), arg(2),
+                                       bk::parse_options(arg(3)));
+        } else {  // SP_RESTOREFREETABLES
+            // (SourcePath, DestinationPath, Options, FreeTablePasswords)
+            res = bk::restore_free_tables(arg(0), arg(1),
+                                          bk::parse_options(arg(2)));
+        }
+
+        if (!res.has_value()) {
+            return err(static_cast<std::int32_t>(res.error().code),
+                       res.error().message);
+        }
+        std::vector<std::vector<std::string>> rows;
+        for (const auto& r0 : res.value().rows) {
+            rows.push_back({std::to_string(r0.severity),
+                            std::to_string(r0.error_code),
+                            r0.message, r0.table, r0.extra,
+                            "backup.cpp", "0"});
+        }
+        return emit("sp_Backup",
+            {{"Severity",        'N',   5, 0},
+             {"Error Code",      'N',  10, 0},
+             {"Error Message",   'C', 200, 0},
+             {"Table Name",      'C', 200, 0},
+             {"Additional Info", 'C', 260, 0},
+             {"Source File",     'C',  32, 0},
+             {"Source Line",     'N',  10, 0}},
+            rows);
     }
 
     // -- Named-event waits -------------------------------------------------------
@@ -20702,7 +20817,7 @@ bool dispatch_sql_uri_acl(const std::string& sqlstr,
 
 extern "C" {  // reopen for the ACE API exports
 
-UNSIGNED32 ENTRYPOINT AdsExecuteSQLDirect(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
+static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                                ADSHANDLE* phCursor) {
     if (phCursor == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
     SqlStatement* st_ptr = stmt_lookup(hStatement);
@@ -26562,6 +26677,25 @@ UNSIGNED32 ENTRYPOINT AdsExecuteSQLDirect(ADSHANDLE hStatement, UNSIGNED8* pucSQ
 
     *phCursor = gh;
     return ok();
+}
+
+// Thin export over the SQL dispatcher above: a failing statement also
+// lands in the SAP-style ads_err error log with the statement text —
+// matching ADS, whose error log records the SQL errors (7200 etc.) it
+// raises while serving clients. Success paths pay nothing.
+UNSIGNED32 ENTRYPOINT AdsExecuteSQLDirect(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
+                               ADSHANDLE* phCursor) {
+    UNSIGNED32 rc = exec_sql_direct_impl(hStatement, pucSQL, phCursor);
+    if (rc != openads::AE_SUCCESS) {
+        std::string sql = pucSQL != nullptr
+            ? openads::abi::to_internal(pucSQL, 0) : std::string();
+        if (sql.size() > 160) sql.resize(160);
+        std::string msg = openads::abi::last_error_message();
+        openads::mgmt::ErrorLog::instance().log(
+            static_cast<std::int32_t>(rc), "SQL", 0,
+            msg.empty() ? sql : (msg + " | " + sql));
+    }
+    return rc;
 }
 
 UNSIGNED32 ENTRYPOINT AdsExecuteSQLDirectW(ADSHANDLE hStatement, UNSIGNED16* pwcSQL,

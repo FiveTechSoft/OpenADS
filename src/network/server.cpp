@@ -3,6 +3,7 @@
 #include "engine/aof_eval.h"
 #include "engine/aof_expr.h"
 #include "engine/table.h"
+#include "mgmt/error_log.h"
 #include "mgmt/mg_collector.h"
 #include "mgmt/mg_stats.h"
 #include "network/mg_wire.h"
@@ -241,6 +242,9 @@ mgmt::MgSnapshot Server::build_mg_snapshot() const {
     }
     snap.indexes = static_cast<std::uint32_t>(snap.index_list.size());
 
+    snap.error_log_path   = mgmt::ErrorLog::instance().directory();
+    snap.error_log_max_kb = mgmt::ErrorLog::instance().max_kbytes();
+
     // Fold in this server's cumulative MgStats (uptime, comm totals,
     // high-water marks) so it travels the wire with the live counts.
     mgmt::capture_mg_stats(snap, mgmt::process_mg_stats());
@@ -418,6 +422,9 @@ util::Result<void> Server::start(const std::string& host,
             }
             return any;
         });
+    mgmt::ErrorLog::instance().log(
+        0, "SERVER", 0,
+        "OpenADS server started on port " + std::to_string(port_));
     running_.store(true);
     // Enterprise step 3 — if the sharded-reactor pool is enabled, stand it up
     // before the accept loop so accept_loop hands sockets to it. Env-read (not
@@ -438,6 +445,7 @@ void Server::stop() noexcept {
     // call into a dying Server.
     openads::mgmt::set_process_snapshot_provider(nullptr);
     openads::mgmt::set_process_kill_user(nullptr);
+    mgmt::ErrorLog::instance().log(0, "SERVER", 0, "OpenADS server stopped");
     // Closing the listener wakes blocking accept() on Linux + Win32,
     // but macOS BSD sockets don't always abort a pending accept on
     // close/shutdown. Force a self-connect on the listener's port

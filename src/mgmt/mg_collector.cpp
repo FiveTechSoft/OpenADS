@@ -121,9 +121,12 @@ ADS_MGMT_CONFIG_PARAMS MgCollector::config_params() const {
         snapshot_.worker_threads);
     p.usSendIPPort    = snapshot_.server_port;
     p.usReceiveIPPort = snapshot_.server_port;
+    p.ulErrorLogMax   = snapshot_.error_log_max_kb;
+    put_field(p.aucErrorLog, sizeof(p.aucErrorLog),
+              snapshot_.error_log_path);
     // ECB / burst-packet / TPS fields left zero — NetWare-era, no
-    // analogue. Send/receive IP ports now carry the real listener
-    // port; path strings genuinely remain empty (no analogue).
+    // analogue. Send/receive IP ports carry the real listener port;
+    // the semaphore/transaction path strings remain empty (no analogue).
     return p;
 }
 
