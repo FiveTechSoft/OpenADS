@@ -1,3 +1,32 @@
+## 1.8.3 — 2026-07-09
+
+### CDX — `INDEX ON` / REINDEX performance for local rddads (#128)
+
+Significant speedup for local DBFCDX index creation when using Harbour
+`contrib/rddads` (`ADSCDX`) or direct `AdsCreateIndex*` calls.
+
+**Root cause**: Key collection for the bulk B+tree builder did
+`goto_record(r)` for every record. This unconditionally called
+`invalidate_read_cache()` on the `CdxDriver` and performed active index
+cursor repositioning, defeating the 64 KB read-ahead block cache.
+
+**Fix**:
+- New internal helper `Table::load_record_for_bulk_scan()`.
+- Changed the full-table scan loops in:
+  - `AdsCreateIndex61` (main path + sibling-tag resync for multi-tag bags)
+  - legacy `AdsCreateIndex`
+  - `Table::reindex()`
+- Now use direct `driver()->read_record_raw(r)` followed by bulk buffer
+  install. Sequential scans benefit from large reads + memcpy.
+
+Also updated `known-issues.md`.
+
+This directly addresses the ~11× slowdown vs SAP ACE 11.10 on real
+production tables (e.g. `ASORTYM.DBF` 14k rows / 125 cols / 16 tags) and
+full reindex workloads.
+
+Reported-by: rkedzioralmaalpinex
+
 ## 1.8.2 — 2026-07-08
 
 ### CI / release — NTXPL852 test fixture (Clang + Linux/macOS builds)

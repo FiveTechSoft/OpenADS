@@ -498,6 +498,13 @@ util::Result<void> Table::goto_record(std::uint32_t recno) {
     return {};
 }
 
+void Table::load_record_for_bulk_scan(std::vector<std::uint8_t> buf,
+                                      std::uint32_t recno) {
+    record_buf_ = std::move(buf);
+    recno_      = recno;
+    state_      = State::Positioned;
+}
+
 util::Result<void> Table::refresh_record_buffer() {
     if (state_ != State::Positioned || recno_ == 0) return {};
     return load_record_(recno_);
@@ -1192,7 +1199,12 @@ util::Result<void> Table::reindex() {
         std::vector<std::pair<std::string, std::uint32_t>> keys;
         keys.reserve(rec_count);
         for (std::uint32_t r = 1; r <= rec_count; ++r) {
-            if (auto g = goto_record(r); !g) return g.error();
+            // Direct read to let the CdxDriver read-ahead cache work for
+            // the full scan (goto_record would invalidate on each step).
+            auto raw = driver_->read_record_raw(r);
+            if (!raw) return raw.error();
+            load_record_for_bulk_scan(std::move(raw.value()), r);
+
             if (is_deleted()) continue;
             if (!for_expr.empty() &&
                 !evaluate_index_expr_truthy(*this, for_expr)) {
@@ -1238,7 +1250,10 @@ util::Result<void> Table::reindex() {
             {idx, std::string{}}};
         const std::string for_expr = idx->condition();
         for (std::uint32_t r = 1; r <= rec_count; ++r) {
-            if (auto g = goto_record(r); !g) return g.error();
+            auto raw = driver_->read_record_raw(r);
+            if (!raw) return raw.error();
+            load_record_for_bulk_scan(std::move(raw.value()), r);
+
             if (is_deleted()) continue;
             if (!for_expr.empty() &&
                 !evaluate_index_expr_truthy(*this, for_expr)) {

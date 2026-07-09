@@ -11929,7 +11929,13 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
     std::vector<std::pair<std::string, std::uint32_t>> bulk_keys;
     if (cdx_bulk) bulk_keys.reserve(rec_count);
     for (std::uint32_t r = 1; r <= rec_count; ++r) {
-        if (auto g = t->goto_record(r); !g) return fail(g.error());
+        // Use direct driver read + bulk buffer load so the driver's
+        // read-ahead cache is effective for this sequential scan.
+        // goto_record(r) would invalidate on every iteration.
+        auto raw = t->driver()->read_record_raw(r);
+        if (!raw) return fail(raw.error());
+        t->load_record_for_bulk_scan(std::move(raw.value()), r);
+
         // DBFCDX inserts deleted rows too — the index is a logical
         // mirror of the table, not a "live-only" view. SET DELETED
         // hides them at navigation time. Only the FOR clause filters
@@ -12035,7 +12041,9 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
                     std::vector<std::pair<std::string, std::uint32_t>> sib_keys;
                     sib_keys.reserve(rec_count);
                     for (std::uint32_t r2 = 1; r2 <= rec_count; ++r2) {
-                        if (auto g = t->goto_record(r2); !g) continue;
+                        auto raw2 = t->driver()->read_record_raw(r2);
+                        if (!raw2) continue;
+                        t->load_record_for_bulk_scan(std::move(raw2.value()), r2);
                         // Honor the sibling tag's own FOR clause so a
                         // conditional tag is not silently rebuilt
                         // unconditional during this resync.
@@ -12185,7 +12193,11 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex(ADSHANDLE hTable, UNSIGNED8* pucFile,
     std::vector<std::pair<std::string, std::uint32_t>> bulk_keys;
     if (cdx_bulk) bulk_keys.reserve(rec_count);
     for (std::uint32_t r = 1; r <= rec_count; ++r) {
-        if (auto rr = t->goto_record(r); !rr) return fail(rr.error());
+        // Direct driver read (read-ahead friendly) — legacy AdsCreateIndex path.
+        auto raw = t->driver()->read_record_raw(r);
+        if (!raw) return fail(raw.error());
+        t->load_record_for_bulk_scan(std::move(raw.value()), r);
+
         if (t->is_deleted()) continue;
         // FOR clause filters entries out at build time (DBFCDX semantics).
         if (!for_expr.empty() &&

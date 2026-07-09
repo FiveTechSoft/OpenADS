@@ -36,10 +36,14 @@ MAZOVIA, additional NTX* variants) are not implemented yet. Tracked as
 
 ### CDX `INDEX ON` write performance
 
-CDX `REINDEX` now uses the bulk bottom-up path (v1.8.0). Multi-tag
-`INDEX ON` on very large production tables may still be slower than SAP
-ACE 11.10 on the same hardware — real-world parity is under investigation.
-Tracked as [issue #128](https://github.com/FiveTechSoft/OpenADS/issues/128).
+CDX `REINDEX` and `AdsCreateIndex*` now use the bulk bottom-up B+tree
+build (v1.8.0) and, for the key-collection phase, direct driver reads
+that preserve the read-ahead cache instead of per-record `goto_record`
+(which invalidated the cache on every step). This targets the ~11×
+gap reported for local rddads `INDEX ON` vs. SAP ACE on real DBFCDX
+workloads (issue #128). Further parity work may be needed for
+expression evaluation (e.g. UPPER/VAL on OEM data) and multi-tag
+resync overheads. Tracked as [issue #128](https://github.com/FiveTechSoft/OpenADS/issues/128).
 
 ### SAP-imported Data Dictionary permissions
 

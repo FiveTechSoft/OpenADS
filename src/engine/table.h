@@ -138,6 +138,16 @@ public:
     util::Result<void> goto_top();
     util::Result<void> goto_bottom();
     util::Result<void> goto_record(std::uint32_t recno);
+
+    // Internal helper for bulk index creation / REINDEX scans. Installs a
+    // pre-read record buffer (from driver->read_record_raw) without the
+    // public goto_record side effects (invalidate_read_cache + active
+    // index cursor repositioning). This lets sequential full-table scans
+    // benefit from the driver's read-ahead block cache. Caller is
+    // responsible for validity of recno and for any FOR/DELETED filtering.
+    void load_record_for_bulk_scan(std::vector<std::uint8_t> buf,
+                                   std::uint32_t recno);
+
     // Reload the current row from disk without repositioning the active
     // index cursor — used after transaction rollback refresh.
     util::Result<void> refresh_record_buffer();
