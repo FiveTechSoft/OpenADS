@@ -4,6 +4,7 @@
 
 #include "openads/error.h"
 #include "engine/index_expr.h"
+#include "engine/oem_collation.h"
 
 #include "drivers/adt/adt_driver.h"
 #include "drivers/cache/cached_driver.h"
@@ -1219,8 +1220,11 @@ util::Result<void> Table::reindex() {
         return {};
     }
 
-    const std::uint8_t* conn_sort =
-        owner_ != nullptr ? owner_->oem_sort_table() : nullptr;
+    // RCB 2026-07-10 — effective per-table collation (connection
+    // AdsSetCollation override, else ADS_OEM char type + configured
+    // default), not just the connection's. An ADS_OEM table reindexed
+    // without this rebuilt its tags in binary order (#130 follow-up).
+    const std::uint8_t* conn_sort = oem_sort_table();
     const auto rec_count = driver_->record_count();
 
     auto rebuild_cdx = [&](drivers::cdx::CdxIndex* cdx)
@@ -1749,8 +1753,39 @@ void Table::clear_field_null_(std::uint16_t field_idx) {
         static_cast<std::uint8_t>(~(1u << (f.null_bit & 7u)));
 }
 
+// RCB 2026-07-10 — effective per-table OEM collation (#130 follow-up).
+// Resolution order, and WHY it must stay this way:
+//   1. Explicit AdsSetCollation on the owning connection (OpenADS
+//      extension) always wins.
+//   2. A table opened with usCharType=ADS_OEM picks up the configured
+//      default OEM collation (OPENADS_OEM_COLLATION env var today,
+//      adslocal.cfg in Phase 2). This is SAP's zero-config behaviour:
+//      rddads apps only pass ADS_OEM at open and expect the machine's
+//      OEM collation language to apply — they cannot call
+//      AdsSetCollation (no such call exists in rddads).
+//   3. Upper only: the legacy process-global published by
+//      AdsSetCollation, so evaluations on connection-less tables keep
+//      their pre-existing behaviour.
+// Reducing this back to "connection override only" re-breaks PL852
+// seeks for every OEM app (contributor regression on v1.8.6/v1.8.7).
 const std::uint8_t* Table::oem_upper_table() const noexcept {
-    return owner_ != nullptr ? owner_->oem_upper_table() : nullptr;
+    if (owner_ != nullptr) {
+        if (const std::uint8_t* up = owner_->oem_upper_table()) return up;
+    }
+    if (char_type_ == 2 /* ADS_OEM */) {
+        if (const std::uint8_t* up = default_oem_upper_table()) return up;
+    }
+    return active_oem_upper_table();
+}
+
+const std::uint8_t* Table::oem_sort_table() const noexcept {
+    if (owner_ != nullptr) {
+        if (const std::uint8_t* st = owner_->oem_sort_table()) return st;
+    }
+    if (char_type_ == 2 /* ADS_OEM */) {
+        if (const OemCollation* c = default_oem_collation()) return c->sort;
+    }
+    return nullptr;
 }
 
 } // namespace openads::engine

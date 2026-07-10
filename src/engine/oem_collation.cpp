@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <string>
 
 namespace openads::engine {
@@ -110,6 +112,26 @@ std::string oem_upper(const std::uint8_t* upper_tbl, const char* s, std::size_t 
 
 namespace {
 std::atomic<const std::uint8_t*> g_active_oem_upper{nullptr};
+
+// RCB 2026-07-10 — default OEM collation for ADS_OEM tables (#130
+// follow-up). Seeded once from OPENADS_OEM_COLLATION; an explicit
+// set_default_oem_collation() (tests, future adslocal.cfg parser)
+// overrides the env value.
+std::atomic<const OemCollation*> g_default_oem{nullptr};
+std::atomic<const std::uint8_t*> g_default_oem_upper{nullptr};
+std::once_flag                   g_default_oem_env_once;
+
+void seed_default_oem_from_env() noexcept {
+    std::call_once(g_default_oem_env_once, [] {
+        const char* v = std::getenv("OPENADS_OEM_COLLATION");
+        if (v == nullptr || *v == '\0') return;
+        if (const OemCollation* c = lookup_oem_collation(v)) {
+            g_default_oem.store(c, std::memory_order_relaxed);
+            g_default_oem_upper.store(lookup_oem_upper_table(v),
+                                      std::memory_order_relaxed);
+        }
+    });
+}
 }  // namespace
 
 void set_active_oem_upper_table(const std::uint8_t* tbl) noexcept {
@@ -118,6 +140,32 @@ void set_active_oem_upper_table(const std::uint8_t* tbl) noexcept {
 
 const std::uint8_t* active_oem_upper_table() noexcept {
     return g_active_oem_upper.load(std::memory_order_relaxed);
+}
+
+bool set_default_oem_collation(const char* name) noexcept {
+    // Run the env seed first so an explicit set always wins over it.
+    seed_default_oem_from_env();
+    if (name == nullptr || *name == '\0') {
+        g_default_oem.store(nullptr, std::memory_order_relaxed);
+        g_default_oem_upper.store(nullptr, std::memory_order_relaxed);
+        return true;
+    }
+    const OemCollation* c = lookup_oem_collation(name);
+    if (c == nullptr) return false;
+    g_default_oem.store(c, std::memory_order_relaxed);
+    g_default_oem_upper.store(lookup_oem_upper_table(name),
+                              std::memory_order_relaxed);
+    return true;
+}
+
+const OemCollation* default_oem_collation() noexcept {
+    seed_default_oem_from_env();
+    return g_default_oem.load(std::memory_order_relaxed);
+}
+
+const std::uint8_t* default_oem_upper_table() noexcept {
+    seed_default_oem_from_env();
+    return g_default_oem_upper.load(std::memory_order_relaxed);
 }
 
 } // namespace openads::engine

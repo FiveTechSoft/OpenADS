@@ -119,6 +119,43 @@ namespace {
 
 // ---- AST + evaluator ------------------------------------------------
 
+// RCB 2026-07-10 — per-EVALUATION OEM upper table (#130 follow-up).
+// The public entry points (evaluate_index_expr / _truthy / _number)
+// install the table's EFFECTIVE upper table (Table::oem_upper_table():
+// connection AdsSetCollation override → ADS_OEM char type + configured
+// default → legacy process-global) for the duration of the evaluation;
+// apply_scalar_fn's UPPER and the UPPER(barefield) fast path read it
+// here. When no scope is installed (callers that evaluate without a
+// Table-routed entry point) we fall back to the raw process-global, so
+// pre-existing AdsSetCollation behaviour is unchanged. Do NOT collapse
+// this back to reading active_oem_upper_table() directly — that loses
+// per-table ADS_OEM activation and re-breaks PL852 index keys for
+// rddads apps (contributor regression on v1.8.6/v1.8.7).
+thread_local const std::uint8_t* t_eval_oem_upper        = nullptr;
+thread_local bool                t_eval_oem_upper_scoped = false;
+
+struct ScopedEvalOemUpper {
+    const std::uint8_t* prev_tbl;
+    bool                prev_scoped;
+    explicit ScopedEvalOemUpper(const std::uint8_t* tbl) noexcept
+        : prev_tbl(t_eval_oem_upper), prev_scoped(t_eval_oem_upper_scoped) {
+        t_eval_oem_upper        = tbl;
+        t_eval_oem_upper_scoped = true;
+    }
+    ~ScopedEvalOemUpper() {
+        t_eval_oem_upper        = prev_tbl;
+        t_eval_oem_upper_scoped = prev_scoped;
+    }
+    ScopedEvalOemUpper(const ScopedEvalOemUpper&) = delete;
+    ScopedEvalOemUpper& operator=(const ScopedEvalOemUpper&) = delete;
+};
+
+const std::uint8_t* eval_oem_upper_table() noexcept {
+    return t_eval_oem_upper_scoped
+        ? t_eval_oem_upper
+        : openads::engine::active_oem_upper_table();
+}
+
 struct Value {
     bool        is_number = false;
     std::string s;
@@ -284,14 +321,16 @@ Value apply_scalar_fn(const std::string& fn, const std::vector<Value>& args) {
     if (fn == "UPPER" && args.size() >= 1) {
         const std::string& s = args[0].s;
         // Use the OEM upper table only when a national collation
-        // (NTXPL852 / PL852 etc.) was actually activated via
-        // AdsSetCollation / adslocal.cfg — then UPPER() on OEM data
-        // produces the same bytes as Harbour under the same codepage,
-        // fixing seek on indexes like Upper(A_NAZWA). With no OEM
-        // collation active (the default), UTF-8 case promotion applies;
-        // an unconditional table lookup here broke UPPER for every
-        // non-OEM caller (ñ stayed ñ).
-        const std::uint8_t* up = openads::engine::active_oem_upper_table();
+        // (NTXPL852 / PL852 etc.) is in effect for THIS evaluation —
+        // then UPPER() on OEM data produces the same bytes as Harbour
+        // under the same codepage, fixing seek on indexes like
+        // Upper(A_NAZWA). With no OEM collation active (the default),
+        // UTF-8 case promotion applies; an unconditional table lookup
+        // here broke UPPER for every non-OEM caller (ñ stayed ñ).
+        // RCB 2026-07-10 — read the per-evaluation scope (installed by
+        // the entry points from Table::oem_upper_table()), not the raw
+        // process-global: ADS_OEM tables activate per table now.
+        const std::uint8_t* up = eval_oem_upper_table();
         if (up) {
             v.s = openads::engine::oem_upper(up, s.data(), s.size());
         } else {
@@ -459,6 +498,10 @@ private:
 
 util::Result<std::string>
 evaluate_index_expr(Table& t, const std::string& expr, std::uint16_t key_len) {
+    // RCB 2026-07-10 — publish this table's effective OEM upper table
+    // for the whole evaluation (UPPER() deep inside apply_scalar_fn has
+    // no Table at hand). Required for per-table ADS_OEM activation.
+    ScopedEvalOemUpper eval_oem_scope(t.oem_upper_table());
     // Memoise the alias-strip + tokenize step keyed by the raw expression.
     // These depend only on the expression text, not the row, so for a
     // CREATE INDEX / REINDEX that evaluates the same expression over every
@@ -546,9 +589,10 @@ evaluate_index_expr(Table& t, const std::string& expr, std::uint16_t key_len) {
             if (r) {
                 std::string raw = r.value().as_string;
                 // Same rule as apply_scalar_fn UPPER: OEM upper only when
-                // an OEM collation is active on this process.
-                const std::uint8_t* up =
-                    openads::engine::active_oem_upper_table();
+                // an OEM collation is in effect for this evaluation
+                // (RCB 2026-07-10 — per-table scope, see
+                // eval_oem_upper_table()).
+                const std::uint8_t* up = eval_oem_upper_table();
                 std::string key = up ? openads::engine::oem_upper(up, raw.data(), raw.size())
                                      : upper_utf8(raw);
                 if (key.size() < key_len) key.append(key_len - key.size(), ' ');
@@ -831,6 +875,9 @@ bool eval_or(Lex& lx, Table& t) {
 } // anonymous namespace
 
 bool evaluate_index_expr_truthy(Table& t, const std::string& expr) {
+    // RCB 2026-07-10 — per-table OEM upper scope, same as
+    // evaluate_index_expr (FOR clauses can call UPPER too).
+    ScopedEvalOemUpper eval_oem_scope(t.oem_upper_table());
     const std::string e = strip_alias_qualifiers(expr);
     if (e.empty()) return true;
     Lex lx(e);
@@ -839,6 +886,9 @@ bool evaluate_index_expr_truthy(Table& t, const std::string& expr) {
 
 bool evaluate_index_expr_number(Table& t, const std::string& expr,
                                 double& out) {
+    // RCB 2026-07-10 — per-table OEM upper scope, same as
+    // evaluate_index_expr.
+    ScopedEvalOemUpper eval_oem_scope(t.oem_upper_table());
     const std::string e = strip_alias_qualifiers(expr);
     if (e.empty()) return false;
     auto toks = tokenize(e);

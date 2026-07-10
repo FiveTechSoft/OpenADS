@@ -60,7 +60,24 @@ public:
     void set_owner(openads::session::Connection* c) noexcept { owner_ = c; }
     openads::session::Connection* owner() const noexcept { return owner_; }
 
+    // RCB 2026-07-10 — per-table character type, straight from the ACE
+    // usCharType open parameter (1 = ADS_ANSI, 2 = ADS_OEM; kept as raw
+    // ints so the engine layer stays free of ace.h). This is how a
+    // Harbour rddads app declares OEM data (AdsSetCharType(ADS_OEM) →
+    // usCharType on every AdsOpenTable/AdsCreateTable/AdsCreateIndex) —
+    // it never calls AdsSetCollation. The effective-collation accessors
+    // below consult it; do not remove (#130 follow-up, PL852 seeks).
+    std::uint16_t char_type() const noexcept { return char_type_; }
+    void set_char_type(std::uint16_t ct) noexcept { char_type_ = ct; }
+
+    // RCB 2026-07-10 — EFFECTIVE OEM tables for this table, resolved as:
+    // connection AdsSetCollation override → default OEM collation when
+    // char_type()==ADS_OEM (OPENADS_OEM_COLLATION / future adslocal.cfg)
+    // → process-global legacy fallback (upper only). Callers must use
+    // these instead of reaching for the Connection directly, otherwise
+    // ADS_OEM tables silently lose their collation again.
     const std::uint8_t* oem_upper_table() const noexcept;
+    const std::uint8_t* oem_sort_table() const noexcept;
     bool show_deleted_records() const noexcept;
 
     OpenMode  open_mode()  const noexcept { return mode_; }
@@ -495,6 +512,7 @@ private:
     std::string                                   path_;
     std::string                                   alias_;
     openads::session::Connection*                 owner_ = nullptr;
+    std::uint16_t                                 char_type_ = 1;  // ADS_ANSI
     std::unordered_map<std::string, std::string>  ri_snapshot_;
     bool                                          pending_append_ = false;
     bool                                          deferred_flush_ = false;

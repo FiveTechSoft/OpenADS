@@ -123,6 +123,7 @@ add_executable(openads_unit_tests
     unit/abi_index_key_count_test.cpp
     unit/abi_key_type_test.cpp
     unit/abi_pl852_reopen_seek_test.cpp
+    unit/abi_oem_chartype_default_collation_test.cpp
     unit/abi_copy_table_test.cpp
     unit/abi_find_table_test.cpp
     unit/abi_binary_memo_test.cpp

@@ -5916,7 +5916,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
                         UNSIGNED8* pucName,
                         UNSIGNED8* /*pucAlias*/,
                         UNSIGNED16 usTableType,
-                        UNSIGNED16 /*usCharType*/,
+                        UNSIGNED16 usCharType,
                         UNSIGNED16 usLockType,
                         UNSIGNED16 usCheckRights,
                         UNSIGNED16 usMode,
@@ -6368,6 +6368,20 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
         tbl->set_alias(std::move(alias));
     }
 
+    // RCB 2026-07-10 — record the caller's usCharType on the Table, and
+    // do it BEFORE the production-index auto-open below: AdsOpenIndex →
+    // apply_cdx_oem_collation reads it to stamp the effective OEM sort
+    // table onto every tag. usCharType=ADS_OEM is the ONLY signal a
+    // Harbour rddads app gives that its data is OEM (AdsSetCharType()
+    // just feeds this parameter; rddads never calls AdsSetCollation), so
+    // ignoring it — as this function did before v1.8.9 — makes PL852
+    // support unreachable for rddads and reintroduces the v1.8.6/v1.8.7
+    // not-found seeks on Polish keys (#130 follow-up). Do not remove and
+    // do not move below the AdsOpenIndex calls. ADS_DEFAULT (0) keeps
+    // the ANSI default.
+    if (usCharType == ADS_ANSI || usCharType == ADS_OEM)
+        tbl->set_char_type(usCharType);
+
     // M-AOF.6 — production-CDX auto-open. ADS / rddads convention:
     // opening `<base>.dbf` auto-binds `<base>.cdx` if it exists, so
     // every tag inside it becomes navigable on this Table without
@@ -6784,11 +6798,15 @@ AdtFieldSpec adt_spec_for(const FieldOut& f) {
 } // namespace
 } // extern "C++"
 
+// RCB 2026-07-10 — usCharType is now honoured: it is forwarded to the
+// AdsOpenTable call that hands the created table back, so an ADS_OEM
+// creation gets its tags built under the configured OEM collation
+// (#130 follow-up). Don't re-comment the parameter out.
 UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
                           UNSIGNED8*    pucName,
                           UNSIGNED8*    /*pucAlias*/,
                           UNSIGNED16    usTableType,
-                          UNSIGNED16    /*usCharType*/,
+                          UNSIGNED16    usCharType,
                           UNSIGNED16    /*usLockType*/,
                           UNSIGNED16    /*usCheckRights*/,
                           UNSIGNED16    usMemoBlockSize,
@@ -6814,7 +6832,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
         std::vector<UNSIGNED8> namebuf(rel.size() + 1, 0);
         std::memcpy(namebuf.data(), rel.data(), rel.size());
         return AdsOpenTable(conn_h, namebuf.data(), namebuf.data(),
-                            ADS_CDX, 0, 0, 0, 1, phTable);
+                            ADS_CDX, usCharType, 0, 0, 1, phTable);
     };
     auto run_sql_ddl = [&](auto* conn,
                            openads::sql_backend::SqlDdlDialect dialect)
@@ -6989,7 +7007,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
                                                     sizeof(adt_namebuf) - 1);
         std::memcpy(adt_namebuf, rel_adt.data(), adt_nb);
         return AdsOpenTable(hConn, adt_namebuf, adt_namebuf,
-                            ADS_ADT, 0, 0, 0, 1, phTable);
+                            ADS_ADT, usCharType, 0, 0, 1, phTable);
     }
 
     if (is_vfp) {
@@ -7071,7 +7089,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
         std::size_t nb = std::min<std::size_t>(rel.size(), sizeof(namebuf) - 1);
         std::memcpy(namebuf, rel.data(), nb);
         return AdsOpenTable(hConn, namebuf, namebuf,
-                            ADS_VFP, 0, 0, 0, 1, phTable);
+                            ADS_VFP, usCharType, 0, 0, 1, phTable);
     }
 
     // ── DBF creation path (existing) ────────────────────────────────────────
@@ -7159,8 +7177,8 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
     std::size_t nb = std::min<std::size_t>(rel.size(), sizeof(namebuf) - 1);
     std::memcpy(namebuf, rel.data(), nb);
     return AdsOpenTable(hConn, namebuf, namebuf,
-                        ADS_CDX,    // table type
-                        0, 0, 0, 1, // char/lock/checkrights/mode
+                        ADS_CDX,             // table type
+                        usCharType, 0, 0, 1, // char/lock/checkrights/mode
                         phTable);
 }
 
@@ -11015,14 +11033,19 @@ void mark_cdx_key_encoding(Table* t, openads::drivers::IIndex* idx) {
     }
 }
 
-// Stamp OEM national collation onto a CDX index from the table's connection.
+// Stamp OEM national collation onto a CDX index for its table.
+// RCB 2026-07-10 — uses the table's EFFECTIVE collation
+// (Table::oem_sort_table(): connection AdsSetCollation override, else
+// ADS_OEM char type + configured default OEM collation), not just the
+// connection's. Reading only conn->oem_sort_table() here left every
+// rddads-opened tag on binary compare — rddads can't call
+// AdsSetCollation — so PL852 seeks missed existing keys (#130
+// follow-up). Keep routing through Table::oem_sort_table().
 void apply_cdx_oem_collation(Table* t, openads::drivers::IIndex* idx) {
     if (t == nullptr || idx == nullptr) return;
     auto* cdx = dynamic_cast<openads::drivers::cdx::CdxIndex*>(idx);
     if (cdx == nullptr) return;
-    const std::uint8_t* sort = nullptr;
-    if (auto* conn = t->owner()) sort = conn->oem_sort_table();
-    cdx->set_oem_sort_table(sort);
+    cdx->set_oem_sort_table(t->oem_sort_table());
 }
 
 // Re-mark a reopened NTX index NtxNumeric so a later append writes the native
@@ -27614,11 +27637,14 @@ UNSIGNED32 ENTRYPOINT AdsGetTableAlias(ADSHANDLE hTable, UNSIGNED8* p, UNSIGNED1
 }
 UNSIGNED32 ENTRYPOINT AdsGetTableCharType(ADSHANDLE hTable, UNSIGNED16* p) {
     if (p == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
-    // OpenADS always uses ANSI character type. Validate the handle.
     if (get_remote_table(hTable) != nullptr) { *p = ADS_ANSI; return ok(); }
-    if (get_table(hTable) == nullptr)
+    Table* t = get_table(hTable);
+    if (t == nullptr)
         return fail(openads::AE_INTERNAL_ERROR, "no table");
-    *p = ADS_ANSI;
+    // RCB 2026-07-10 — report the char type the table was opened with
+    // (AdsOpenTable now stores usCharType — #130 follow-up). Was a
+    // hard-coded ADS_ANSI.
+    *p = t->char_type();
     return ok();
 }
 UNSIGNED32 ENTRYPOINT AdsGetTableConType(ADSHANDLE hTable, UNSIGNED16* p) {
