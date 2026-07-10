@@ -1,4 +1,4 @@
-## Unreleased
+## 1.8.9 — 2026-07-10
 
 ### Zero-config OEM collation for rddads apps (`usCharType` honoured, adslocal.cfg) — #130 follow-up
 
