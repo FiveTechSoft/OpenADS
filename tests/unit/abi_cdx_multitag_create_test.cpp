@@ -380,14 +380,47 @@ TEST_CASE("CDX numeric Val() expression key seek works (fixes #130)") {
     fs::remove_all(dir, ec);
 }
 
-// Check the key_length for the Val tag in the CDX built by the repro run with current code.
-TEST_CASE("repro CDX key_length for Val tag is 8 (numeric)") {
-  std::string path = "C:\\temp\\repro_run\\ASORTYM.cdx";
+// Check the key_length for a Val() tag is 8 (numeric). Self-contained to not
+// depend on external repro data in CI. (The external path version can be
+// re-enabled locally when the ASORTYM.cdx from the issue is present.)
+TEST_CASE("CDX key_length for Val tag is 8 (numeric)") {
+  auto dir = fs::temp_directory_path() / "openads_val_keylen_test";
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+  fs::create_directories(dir);
+
+  const std::string dir_str = dir.string();
+  std::vector<UNSIGNED8> srv(dir_str.begin(), dir_str.end());
+  srv.push_back(0);
+
+  ADSHANDLE hConn = 0;
+  REQUIRE(AdsConnect60(srv.data(), ADS_LOCAL_SERVER, nullptr, nullptr, 0, &hConn) == 0);
+
+  UNSIGNED8 def[] = "NUMSTR,C,10,0";
+  UNSIGNED8 tname[] = "valkey";
+  ADSHANDLE hT = 0;
+  REQUIRE(AdsCreateTable(hConn, tname, nullptr, ADS_CDX, 0, 0, 0, 0, def, &hT) == 0);
+
+  REQUIRE(AdsAppendRecord(hT) == 0);
+  set_str(hT, "NUMSTR", "123456");
+
+  UNSIGNED8 idxfile[] = "valkey";
+  UNSIGNED8 tag[] = "BYVAL";
+  UNSIGNED8 expr[] = "Val(NUMSTR)";
+  ADSHANDLE hI = 0;
+  REQUIRE(AdsCreateIndex61(hT, idxfile, tag, expr, nullptr, nullptr, 0, 512, &hI) == 0);
+  REQUIRE(AdsCloseIndex(hI) == 0);
+  hI = 0;
+  REQUIRE(AdsCloseTable(hT) == 0);
+  hT = 0;  // close all Ads handles before using internal reader on the cdx file
+
+  // Now open via internal driver and check keylen==8
+  std::string cdxpath = (dir / "valkey.cdx").string();
   openads::drivers::cdx::CdxIndex idx;
-  auto r = idx.open_named(path, openads::drivers::IndexOpenMode::ReadOnly, "A_OZNACZ");
-  if (r) {
-    CHECK(idx.key_length() == 8);
-  } else {
-    MESSAGE("could not open the repro cdx for A_OZNACZ, perhaps old build");
-  }
+  auto r = idx.open_named(cdxpath, openads::drivers::IndexOpenMode::ReadOnly, "BYVAL");
+  REQUIRE(r.has_value());
+  CHECK(idx.key_length() == 8);
+
+  REQUIRE(AdsDisconnect(hConn) == 0);
+  fs::remove_all(dir, ec);
 }

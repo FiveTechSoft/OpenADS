@@ -1749,4 +1749,8 @@ void Table::clear_field_null_(std::uint16_t field_idx) {
         static_cast<std::uint8_t>(~(1u << (f.null_bit & 7u)));
 }
 
+const std::uint8_t* Table::oem_upper_table() const noexcept {
+    return owner_ != nullptr ? owner_->oem_upper_table() : nullptr;
+}
+
 } // namespace openads::engine

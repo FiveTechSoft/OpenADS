@@ -59,6 +59,8 @@ public:
 
     void set_owner(openads::session::Connection* c) noexcept { owner_ = c; }
     openads::session::Connection* owner() const noexcept { return owner_; }
+
+    const std::uint8_t* oem_upper_table() const noexcept;
     bool show_deleted_records() const noexcept;
 
     OpenMode  open_mode()  const noexcept { return mode_; }

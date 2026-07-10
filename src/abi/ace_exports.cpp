@@ -11727,8 +11727,6 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
             if (isnum) {
                 cdx_numeric_key = true;
             }
-            FILE* f = fopen("c:\\temp\\probe.log", "a");
-            if (f) { fprintf(f, "probe expr=[%s] count=%u isnum=%d dv=%f\n", expr.c_str(), t->record_count(), (int)isnum, dv); fclose(f); }
         }
     }
 

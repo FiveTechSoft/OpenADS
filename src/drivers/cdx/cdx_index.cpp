@@ -703,6 +703,16 @@ util::Result<void> CdxIndex::skip_empty_leaves_left_(
 
 int CdxIndex::compare_keys_(const char* a, const char* b,
                             std::size_t len) const noexcept {
+    // FoxNumeric and NtxNumeric keys are binary order-preserving encodings
+    // (FoxPro/Harbour HB_DBL2ORD / NTX zero-padded magnitude).  They MUST
+    // be compared with raw memcmp — the OEM collation sort table remaps
+    // bytes and destroys the binary ordering, causing DbSeek to miss keys
+    // that were correctly inserted during CREATE INDEX.  (#130 regression
+    // for numeric Val() CDX seek.)
+    if (key_enc_ == openads::drivers::KeyEncoding::FoxNumeric ||
+        key_enc_ == openads::drivers::KeyEncoding::NtxNumeric) {
+        return std::memcmp(a, b, len);
+    }
     return openads::engine::compare_oem_keys(oem_sort_, a, b, len);
 }
 
@@ -1011,13 +1021,19 @@ CdxIndex::insert_into_subtree_(std::uint32_t      subtree_root,
         // smaller recno; lower_bound landed BEFORE them, which
         // reversed the recno order and made seek_key surface the
         // last-inserted recno.
+        // FoxNumeric / NtxNumeric keys: raw memcmp ordering.  (#130)
+        const bool numeric_ins =
+            (key_enc_ == openads::drivers::KeyEncoding::FoxNumeric ||
+             key_enc_ == openads::drivers::KeyEncoding::NtxNumeric);
         const std::uint8_t* sort = oem_sort_;
         auto pos = std::upper_bound(keys.begin(), keys.end(),
             std::pair<std::string, std::uint32_t>{padded, recno},
-            [sort](const auto& a, const auto& b) {
+            [numeric_ins, sort](const auto& a, const auto& b) {
                 const auto len = std::min(a.first.size(), b.first.size());
-                int c = openads::engine::compare_oem_keys(
-                    sort, a.first.data(), b.first.data(), len);
+                int c = numeric_ins
+                    ? std::memcmp(a.first.data(), b.first.data(), len)
+                    : openads::engine::compare_oem_keys(
+                        sort, a.first.data(), b.first.data(), len);
                 if (c != 0) return c < 0;
                 return a.second < b.second;
             });
@@ -1273,13 +1289,21 @@ CdxIndex::build_bulk(std::vector<std::pair<std::string, std::uint32_t>> keys) {
         else if (kv.first.size() > key_size_)
             kv.first.resize(key_size_);
     }
+    // FoxNumeric / NtxNumeric keys are binary order-preserving encodings
+    // that must sort by raw byte order.  OEM collation must NOT be applied
+    // — it remaps bytes and destroys the numeric ordering.  (#130)
+    const bool numeric_keys =
+        (key_enc_ == openads::drivers::KeyEncoding::FoxNumeric ||
+         key_enc_ == openads::drivers::KeyEncoding::NtxNumeric);
     const std::uint8_t* sort = oem_sort_;
     std::sort(keys.begin(), keys.end(),
-        [sort](const std::pair<std::string, std::uint32_t>& a,
+        [numeric_keys, sort](const std::pair<std::string, std::uint32_t>& a,
                const std::pair<std::string, std::uint32_t>& b) {
             const auto len = std::min(a.first.size(), b.first.size());
-            int c = openads::engine::compare_oem_keys(
-                sort, a.first.data(), b.first.data(), len);
+            int c = numeric_keys
+                ? std::memcmp(a.first.data(), b.first.data(), len)
+                : openads::engine::compare_oem_keys(
+                    sort, a.first.data(), b.first.data(), len);
             if (c != 0) return c < 0;
             return a.second < b.second;
         });

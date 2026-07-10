@@ -341,8 +341,12 @@ if(OPENADS_WITH_SQLITE)
 endif()
 
 # Default CI/fast tier: skip stress tests tagged [slow].
-add_test(NAME openads_unit_tests COMMAND openads_unit_tests -e="*[slow]*")
-add_test(NAME openads_unit_tests_slow COMMAND openads_unit_tests -tc="*[slow]*")
+# Note: no embedded quotes around the filter value. The previous form
+# produced mangled args like -e="*[slow]*" on Windows under ctest,
+# causing the target to receive a bad filter, run the wrong tests,
+# hit hard failures in remote/DD tests, and report as ***Failed.
+add_test(NAME openads_unit_tests COMMAND openads_unit_tests -e=*[slow]*)
+add_test(NAME openads_unit_tests_slow COMMAND openads_unit_tests -tc=*[slow]*)
 
 # SQL URI backend smoke (sqlite://): runs a focused doctest subset in CI.
 if(OPENADS_WITH_POSTGRESQL)
