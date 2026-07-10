@@ -1,3 +1,57 @@
+## 1.8.7 — 2026-07-10
+
+### Index scopes (`OrdScope` / `AdsSetScope`) fixed end-to-end
+
+Scoped browses over rddads (grids restricted to one parent key) returned
+either every FOR-matching row or no rows at all. Four root causes, all
+fixed:
+
+- **`ADS_TOP` / `ADS_BOTTOM` constants** (`ace.h`): OpenADS used 0/1; the
+  ACE convention (and Harbour's `ads.ch`) is 1/2. `AdsSetScope` therefore
+  never set the TOP bound for rddads callers — both bounds landed on
+  BOTTOM. Note this also applies over the wire: `openads_serverd` must be
+  rebuilt together with the client, or TOP/BOTTOM invert silently.
+- **`AdsGetKeyType` returned the wrong constant family**: it reported the
+  seek/scope buffer encodings (`ADS_STRINGKEY`=1 / `ADS_DOUBLEKEY`=2)
+  instead of the ACE field-type constants (`ADS_STRING`=4, `ADS_NUMERIC`=2,
+  `ADS_DATE`=3, `ADS_LOGICAL`=1). rddads switches `OrdScope()`'s key
+  encoding on this value, read 1 as `ADS_LOGICAL`, and sent a 1-byte
+  `"T"`/`"F"` scope instead of the real key for every character-key tag.
+  Now answers from the table schema for bare-field keys and falls back to
+  the key encoding for computed expressions.
+- **`$` ("contains") operator** was a no-op in FOR-condition evaluation
+  (`STATUS $ 'IEC'` passed every non-blank row). Real containment
+  semantics implemented.
+- **`AdsGetKeyCount` ignored the active scope** on CDX orders — it
+  returned the whole conditional index size. Now walks only the scoped
+  range.
+
+Also new, enabled by the `AdsGetKeyType` fix: rddads sends date scopes
+and `DbSeek(date)` as julian-day doubles — `AdsSetScope` and `AdsSeek`
+now convert those to the `YYYYMMDD` text key form for DBF date keys
+(ADT/ADI date keys keep their packed binary path).
+
+Verified end-to-end locally and over the wire against a live
+`openads_serverd` (new gated tests: `OPENADS_TEST_REMOTE` scope walk /
+key count, plus a seed helper via `OPENADS_SEED_DIR`). Trilingual
+`AdsGetKeyType` reference pages updated.
+
+### Build
+
+- Removed a dead CP-852 upper table in `oem_collation.cpp` that broke
+  clang `-Werror` builds (`-Wunused-const-variable`).
+
+## 1.8.6 — 2026-07-10
+
+- Numeric `Val()` `DbSeek` fix (#130): `memcmp` ordering for
+  FoxNumeric / NtxNumeric key comparison in CDX.
+
+## 1.8.5 — 2026-07-09
+
+- OEM UPPER for NTXPL852/PL852 index keys + complete `Val()` numeric
+  support (#130); collation scoping fix (OEM UPPER only applies when an
+  OEM collation is actually active).
+
 ## 1.8.4 — 2026-07-09
 
 ### CDX — further `INDEX ON` speedups (#128)
