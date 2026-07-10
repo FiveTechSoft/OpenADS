@@ -6013,7 +6013,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
         // would read uninitialized memory.  One extra round-trip on
         // table open positions the cursor on record 1 and populates
         // the record cache, matching LOCAL semantics.
-        if (auto* rtp = get_remote_table(gh)) {
+        if (get_remote_table(gh) != nullptr) {
             (void)AdsGotoTop(gh);
         }
         return ok();
@@ -12583,7 +12583,7 @@ UNSIGNED32 ENTRYPOINT AdsFailedTransactionRecovery(UNSIGNED8* pucServer) {
 
 UNSIGNED32 ENTRYPOINT AdsGetAllLocks(ADSHANDLE hTable, UNSIGNED32* paRecnos,
                           UNSIGNED16* pusCount) {
-    if (auto* rt = get_remote_table(hTable)) {
+    if (get_remote_table(hTable) != nullptr) {
         // Remote record locks are server-managed. A full implementation
         // would add a GetAllLocks wire opcode + server handler that calls
         // AdsGetAllLocks on the server-side ABI handle and returns the

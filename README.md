@@ -464,6 +464,56 @@ Stop / unload via `sudo launchctl kill SIGTERM
 system/com.openads.serverd` and `sudo launchctl bootout system
 /Library/LaunchDaemons/com.openads.serverd.plist`.
 
+### Error log — `ads_err.dbf`
+
+OpenADS keeps a persistent error log in the same spirit as SAP ADS's
+`ads_err` table: a plain **DBF table named `ads_err.dbf`** that any DBF
+tool — or OpenADS itself — can open. Each row records the date, time,
+error code, the subsystem that raised it (`SQL`, `NET`, `SERVER`), a
+source line where applicable, and the detail text (for SQL failures,
+the engine message plus the failing statement).
+
+Entries are written for:
+
+- **SQL statement failures** — every failing `AdsExecuteSQL(Direct)`
+  call, with the error message and statement text;
+- **errors returned to remote clients** — every error frame the TCP
+  server sends back;
+- **server lifecycle** — informational rows (code 0) at server start
+  and stop.
+
+**Where the file lives.** By default the SAP-conventional locations:
+the root of `C:` on Windows, `/var/log/advantage` on Linux — falling
+back automatically to a writable place (`%ProgramData%\OpenADS`,
+`~/.openads`, then the temp directory) when the default isn't
+writable, so unprivileged processes still get a log. Override the
+location with any of:
+
+| Mechanism | Setting |
+|---|---|
+| Environment variable | `OPENADS_ERROR_LOG_PATH=<dir>` (works for the DLL and the server) |
+| `openads.ini` (serverd `--config`) | `error_log_path = <dir>` (alias `error_assert_logs`), `error_log_max = <KB>` |
+| serverd command line | `--error-log-path <dir>`, `--error-log-max <KB>` |
+| SQL, at runtime | `EXECUTE PROCEDURE sp_mgSetConfigValue('ERROR_ASSERT_LOGS', '<dir>')` / `('ERROR_LOG_MAX', '<KB>')` |
+
+**Size cap.** The file is limited to 1000 KB by default (configurable
+as above). When an entry would push it past the cap, the oldest third
+of the records is dropped and the table packed — the same rotation
+behavior SAP documents for `ads_err`.
+
+**Reading it.** Query the newest entries over any connection:
+
+```sql
+EXECUTE PROCEDURE sp_mgGetErrorLog();      -- newest 25
+EXECUTE PROCEDURE sp_mgGetErrorLog(100);   -- newest 100
+```
+
+or simply open `ads_err.dbf` as a table. `sp_mgGetConfigInfo` (and the
+`AdsMgGetConfigInfo` API) report the active `Error Log Path` and
+`Error Log Max`. The SAP ADT variant (`ads_err.adt` with an
+`Error_Number` autoinc column) is not implemented — the DBF variant is
+the documented alternative and is what OpenADS writes.
+
 ### DA-Web — browser-based Data Architect replacement
 
 `DA-Web/` is a PHP 8.x web application that manages OpenADS data
@@ -535,6 +585,28 @@ AdsConnect60((UNSIGNED8*)"pmsys_openads.add", ADS_LOCAL_SERVER,
 ```
 
 The original SAP `.add` is never modified by the import tool.
+
+### adsbackup — backup & restore
+
+`tools/adsbackup` builds the `adsbackup` command-line utility: back up
+and restore a data dictionary (the `.add` plus every bound table and
+its index/memo companions) or a directory of free tables, with the
+same positional arguments and option letters as SAP's `adsbackup.exe`
+so existing scheduled-backup scripts carry over:
+
+```
+adsbackup c:\data\motors\motors.add c:\data\motors\backup
+adsbackup -r c:\data\motors\backup\motors.add c:\data\motors\restore\motors.add
+adsbackup /srv/data "*.dbf" /srv/backup/nightly        # Linux free tables
+```
+
+The CLI and the `sp_BackupDatabase` / `sp_BackupFreeTables` /
+`sp_RestoreDatabase` / `sp_RestoreFreeTables` system procedures share
+one backup engine (`src/engine/backup.*`), so both entry points honor
+the same Include/Exclude/MetaOnly/DontOverwrite options and behave
+identically. Full usage, the option table, and the differences from
+SAP's record-level online backup are documented in
+[`tools/adsbackup/README.md`](tools/adsbackup/README.md).
 
 ### AOF — Rushmore-style query optimisation
 
@@ -1279,6 +1351,8 @@ OpenADS/
 │
 ├── tools/
 │   ├── serverd/                # openads_serverd — TCP wire server daemon
+│   │   └── main.cpp
+│   ├── adsbackup/              # adsbackup — backup/restore CLI (see its README.md)
 │   │   └── main.cpp
 │   ├── import_dd/              # openads_import_dd — SAP .add → OpenADS import
 │   │   └── main.cpp
