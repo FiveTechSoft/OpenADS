@@ -1,0 +1,20 @@
+# OpenADS — Harbour hbmk2 build script (remote console demo, x64).
+#
+# Usage:
+#   set OPENADS_LIB=C:\path\to\OpenADS\build\release-x64\src\Release
+#   hbmk2 openads_demo_remote.hbp
+
+openads_demo_remote.prg
+
+-comp=msvc64
+-gtcgi
+
+-w3
+
+-lrddads
+-L${OPENADS_LIB}
+-lopenace64
+
+-lrddcdx
+-lrddntx
+-lrddfpt
