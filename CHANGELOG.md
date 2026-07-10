@@ -1,3 +1,26 @@
+## 1.8.8 — 2026-07-10
+
+### Fix: NTXPL852 / OEM collation seek broken on reopened CDX bags (#130 regression)
+
+v1.8.6 regression, reported with a clean 1.8.4→1.8.6 bisect: `DbSeek` on
+a character tag under NTXPL852 returned not-found for existing records —
+but only after the bag was closed and reopened (production usage), which
+the test suite never exercised.
+
+Cause was a two-commit interaction: v1.8.5 marked ANY reopened CDX tag
+with an 8-byte key as FoxNumeric (a plain `C(8)` character tag included),
+and v1.8.6 made that flag select the B+tree comparator (`memcmp` for
+numeric encodings). A mis-marked character tag then descended a
+collation-ordered tree in raw byte order and missed keys whose PL852
+weight order differs from byte order (e.g. `Ł` = 0x9D).
+
+The reopen path now decides the encoding from the key expression — bare
+fields by schema type, computed expressions only when the key is 8 bytes
+AND the expression provably evaluates numeric (`Val()` heuristic +
+record-1 probe, same rules as index creation). The #130 numeric `Val()`
+fix is preserved. New regression test closes and reopens the bag before
+seeking.
+
 ## 1.8.7 — 2026-07-10
 
 ### Index scopes (`OrdScope` / `AdsSetScope`) fixed end-to-end
