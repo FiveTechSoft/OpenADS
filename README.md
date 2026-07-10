@@ -496,6 +496,17 @@ location with any of:
 | serverd command line | `--error-log-path <dir>`, `--error-log-max <KB>` |
 | SQL, at runtime | `EXECUTE PROCEDURE sp_mgSetConfigValue('ERROR_ASSERT_LOGS', '<dir>')` / `('ERROR_LOG_MAX', '<KB>')` |
 
+**Services announce themselves in the log.** `openads_serverd` writes
+an informational row ("OpenADS server started on port N", code 0) the
+moment it boots, and another on shutdown. A service installed without
+any error-log override therefore creates the file at the default
+location on first start — on Windows that means `C:\ads_err.dbf`
+appearing right after `sc start openads_serverd` — which doubles as a
+quick "is the service really up and able to write?" health check. To
+move a service's log, bake `--error-log-path <dir>` (or
+`--config <ini>`) into the service's binPath, or set the
+`OPENADS_ERROR_LOG_PATH` environment variable for the service account.
+
 **Size cap.** The file is limited to 1000 KB by default (configurable
 as above). When an entry would push it past the cap, the oldest third
 of the records is dropped and the table packed — the same rotation
