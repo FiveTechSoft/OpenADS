@@ -1,3 +1,37 @@
+## Unreleased
+
+### Zero-config OEM collation for rddads apps (`usCharType` honoured, adslocal.cfg) — #130 follow-up
+
+The second mechanism from the v1.8.6/v1.8.7 regression report: a
+Harbour rddads app has no way to call `AdsSetCollation` — its only OEM
+signal is `usCharType = ADS_OEM` on `AdsOpenTable` (what
+`AdsSetCharType(ADS_OEM)` produces) — and OpenADS ignored that
+parameter. `INDEX ON` therefore built keys with UTF-8 casing and binary
+sort while the app seeks with Harbour's CP-852 `Upper()` keys →
+not-found on every row with Polish letters.
+
+OpenADS now mirrors SAP's model (help: "Advantage Local Server
+Configuration" / "Avoiding OEM Collation Mismatch Errors"): the OEM
+collation language is a machine-level default, and tables opened
+`ADS_OEM` pick it up with zero per-connection code.
+
+- `AdsOpenTable` / `AdsCreateTable` honour `usCharType`;
+  `AdsGetTableCharType` reports the stored value (was hard-coded ANSI).
+- Default OEM collation configured via SAP-style `adslocal.cfg`
+  (`[SETTINGS]` / `OEM_CHAR_SET=NTXPL852`, file next to `openace64.dll`
+  or in the current directory) or the `OPENADS_OEM_COLLATION`
+  environment variable (env wins; `AdsSetCollation` remains the
+  per-connection override).
+- Effective collation resolved per table: CDX tags of ADS_OEM tables
+  build/compare/seek with the PL852 sort weights; `UPPER()` in index
+  expressions cases per table (thread-local evaluation scope), so ANSI
+  tables keep UTF-8 case promotion untouched.
+- Unsupported `OEM_CHAR_SET` values (USA, MAZOVIA, …) leave raw byte
+  order, like SAP's shipping `USA` default (#127 tracks more tables).
+- If OEM data was indexed on v1.8.6/v1.8.7, `REINDEX` once after
+  configuring the collation (same rule as SAP after an OEM
+  collation-language change).
+
 ## 1.8.8 — 2026-07-10
 
 ### Fix: NTXPL852 / OEM collation seek broken on reopened CDX bags (#130 regression)

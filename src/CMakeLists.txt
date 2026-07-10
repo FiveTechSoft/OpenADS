@@ -166,7 +166,9 @@ target_include_directories(openads_core
 target_link_libraries(openads_core PRIVATE openads_aes_impl)
 
 if(UNIX)
-    target_link_libraries(openads_core PUBLIC pthread)
+    # RCB 2026-07-10 — CMAKE_DL_LIBS for dladdr in platform/path.cpp
+    # (module_directory(), used to find adslocal.cfg next to the DLL).
+    target_link_libraries(openads_core PUBLIC pthread ${CMAKE_DL_LIBS})
 endif()
 
 if(OPENADS_WITH_TLS)

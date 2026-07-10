@@ -33,4 +33,14 @@ std::vector<std::string> split_data_roots(const std::string& roots);
 std::optional<std::string> resolve_under_any_root(
     const std::vector<std::string>& roots, const std::string& client_path);
 
+// RCB 2026-07-10 — directory of the binary module that contains the
+// OpenADS engine code: openace64.dll / openace32.dll when the engine is
+// loaded as the ACE-compatible DLL, or the executable itself for
+// statically linked binaries (openads_serverd, the unit-test runner).
+// Used to locate adslocal.cfg SAP-style — the Advantage Local Server
+// reads its configuration file from the directory of the local-server
+// library (adsloc32.dll), so OpenADS looks next to its own DLL. Returns
+// nullopt if the platform lookup fails.
+std::optional<std::string> module_directory();
+
 } // namespace openads::platform

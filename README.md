@@ -341,6 +341,46 @@ and migrating from SAP ADS, `php_openads.dll` + `openace64.dll`
 is the supported replacement pair; the API surface it exposes is
 compatible with what `php_advantage` exposes against SAP ACE64.
 
+#### OEM character sets / national collations (Clipper CP-852 apps)
+
+DOS-era Clipper / Harbour apps store national characters as OEM
+code-page bytes (e.g. Polish CP-852) and open their tables with
+`AdsSetCharType(ADS_OEM)`. Under SAP ADS the matching collation
+language is a *machine-level* setting — the installer writes it into
+`ADSLOCAL.CFG` — and any table opened OEM picks it up with zero code.
+OpenADS mirrors that behaviour. Configure the default OEM collation
+one of two ways:
+
+```ini
+; adslocal.cfg — same file name, format, and keyword SAP uses.
+; Place it next to openace64.dll (or the exe that links OpenADS
+; statically); the current directory is checked as a fallback.
+[SETTINGS]
+OEM_CHAR_SET=NTXPL852
+```
+
+```bat
+:: or the environment variable (containers, CI, quick tests) —
+:: it wins over adslocal.cfg when both are present:
+set OPENADS_OEM_COLLATION=PL852
+```
+
+With either in place, every table opened with `usCharType = ADS_OEM`
+(what rddads' `AdsSetCharType(ADS_OEM)` produces) builds, compares,
+and seeks its CDX keys with the CP-852 sort weights, and `UPPER()`
+inside index expressions cases Polish letters the same way Harbour's
+`Upper()` does — so `DbSeek(Upper("...Ż..."))` finds its record.
+`PL852` / `NTXPL852` name the same table; other SAP `OEM_CHAR_SET`
+values (`USA`, `MAZOVIA`, …) are not implemented yet and leave the
+default at raw byte order, exactly like SAP's shipping `USA` default
+(see [issue #127](https://github.com/FiveTechSoft/OpenADS/issues/127)).
+Tables opened ANSI (the default) are unaffected and keep UTF-8 case
+promotion. `AdsSetCollation(hConn, "NTXPL852")` remains available as
+an explicit per-connection override. If you indexed OEM data on
+v1.8.6/v1.8.7 — where `INDEX ON` briefly built keys without CP-852
+casing — `REINDEX` once after configuring the collation, the same
+rebuild SAP requires after an OEM collation-language change.
+
 ### Studio web console (in-process, LocalServer mode)
 
 OpenADS ships a single-page web admin console (Studio) that lists

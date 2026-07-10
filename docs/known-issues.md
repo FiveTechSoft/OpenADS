@@ -6,7 +6,7 @@ nav_order: 9
 
 # Known issues — current
 
-Status as of **v1.8.2** (2026-07-08).
+Status as of **v1.8.8** (2026-07-10).
 
 ## Open
 
@@ -29,10 +29,26 @@ See [Migrating from ADS](en/migrating-from-ads/) for the full checklist.
 
 ### OEM national collations beyond PL852
 
-`AdsSetCollation` accepts `BINARY`, `NOCASE`, `NTXPL852`, and `PL852`
-(v1.8.0). Other national collation tables from `adslocal.cfg` (e.g.
-MAZOVIA, additional NTX* variants) are not implemented yet. Tracked as
+Only the Polish CP-852 table (`NTXPL852` / `PL852`) is implemented.
+Other `OEM_CHAR_SET` values SAP supports in `adslocal.cfg` (MAZOVIA,
+additional NTX* variants, GREEK437, RUSSIAN, …) are recognised but
+leave the default at raw byte order. Tracked as
 [issue #127](https://github.com/FiveTechSoft/OpenADS/issues/127).
+
+Activation for OEM apps is zero-config since v1.8.9-dev: a table
+opened with `usCharType = ADS_OEM` (rddads `AdsSetCharType(ADS_OEM)`)
+picks up the default OEM collation from `adslocal.cfg`
+(`OEM_CHAR_SET=NTXPL852`, file next to `openace64.dll` or in the
+current directory) or from the `OPENADS_OEM_COLLATION` environment
+variable (which wins when both are set).
+`AdsSetCollation(hConn, ...)` stays available as a per-connection
+override. If OEM data was indexed on v1.8.6/v1.8.7 (which built
+`UPPER()` keys without CP-852 casing), run `REINDEX` once after
+configuring the collation.
+
+The default OEM collation is applied by the in-process engine
+(LocalServer). `openads_serverd` remote connections do not yet
+propagate the client's char type to the server.
 
 ### CDX `INDEX ON` write performance
 

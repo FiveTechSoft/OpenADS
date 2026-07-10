@@ -4,6 +4,18 @@
 #include <cctype>
 #include <filesystem>
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
+
 namespace fs = std::filesystem;
 
 namespace openads::platform {
@@ -119,6 +131,37 @@ std::optional<std::string> resolve_under_any_root(
         }
     }
     return std::nullopt;
+}
+
+// RCB 2026-07-10 — see path.h. The address of this function itself is
+// used as the anchor, so the answer is the module that actually holds
+// the engine code (the DLL under openace64.dll, the exe when linked
+// statically) rather than the host process's exe.
+std::optional<std::string> module_directory() {
+#if defined(_WIN32)
+    HMODULE mod = nullptr;
+    if (!GetModuleHandleExA(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCSTR>(&module_directory), &mod) ||
+        mod == nullptr) {
+        return std::nullopt;
+    }
+    char buf[MAX_PATH] = {0};
+    DWORD n = GetModuleFileNameA(mod, buf, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return std::nullopt;
+    return fs::path(std::string(buf, n)).parent_path().string();
+#else
+    Dl_info info{};
+    if (dladdr(reinterpret_cast<void*>(&module_directory), &info) == 0 ||
+        info.dli_fname == nullptr || info.dli_fname[0] == '\0') {
+        return std::nullopt;
+    }
+    std::error_code ec;
+    fs::path p = fs::absolute(fs::path(info.dli_fname), ec);
+    if (ec) p = fs::path(info.dli_fname);
+    return p.parent_path().string();
+#endif
 }
 
 } // namespace openads::platform

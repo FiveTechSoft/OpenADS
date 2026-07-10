@@ -1,11 +1,16 @@
 #include "engine/oem_collation.h"
 
+#include "platform/path.h"
+
 #include <algorithm>
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <string>
+#include <vector>
 
 namespace openads::engine {
 namespace {
@@ -114,21 +119,80 @@ namespace {
 std::atomic<const std::uint8_t*> g_active_oem_upper{nullptr};
 
 // RCB 2026-07-10 — default OEM collation for ADS_OEM tables (#130
-// follow-up). Seeded once from OPENADS_OEM_COLLATION; an explicit
-// set_default_oem_collation() (tests, future adslocal.cfg parser)
-// overrides the env value.
+// follow-up). Seeded once from OPENADS_OEM_COLLATION or, when the env
+// var is absent, from an SAP-style adslocal.cfg (OEM_CHAR_SET=…) next
+// to the OpenADS module or in the current directory. An explicit
+// set_default_oem_collation() (tests, embedding apps) overrides both.
 std::atomic<const OemCollation*> g_default_oem{nullptr};
 std::atomic<const std::uint8_t*> g_default_oem_upper{nullptr};
 std::once_flag                   g_default_oem_env_once;
 
-void seed_default_oem_from_env() noexcept {
+void store_default_oem(const char* name) noexcept {
+    if (const OemCollation* c = lookup_oem_collation(name)) {
+        g_default_oem.store(c, std::memory_order_relaxed);
+        g_default_oem_upper.store(lookup_oem_upper_table(name),
+                                  std::memory_order_relaxed);
+    }
+}
+
+std::string ini_trim(const std::string& s) {
+    std::size_t b = s.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) return {};
+    std::size_t e = s.find_last_not_of(" \t\r\n");
+    return s.substr(b, e - b + 1);
+}
+
+// Parse the OEM_CHAR_SET value out of an adslocal.cfg. Standard INI
+// format per the SAP help: optional [SETTINGS]-style section headers,
+// keyword=value entries, ';' / '#' comment lines. Keyword match is
+// case-insensitive; the value is returned verbatim (trimmed). Empty
+// string when the file is missing/unreadable or has no entry.
+std::string parse_adslocal_oem_char_set(const std::string& cfg_path) {
+    std::ifstream in(cfg_path);
+    if (!in) return {};
+    std::string line;
+    while (std::getline(in, line)) {
+        std::string t = ini_trim(line);
+        if (t.empty() || t[0] == ';' || t[0] == '#' || t[0] == '[')
+            continue;
+        std::size_t eq = t.find('=');
+        if (eq == std::string::npos) continue;
+        std::string key = ini_trim(t.substr(0, eq));
+        if (!names_equal(key.c_str(), "OEM_CHAR_SET")) continue;
+        return ini_trim(t.substr(eq + 1));
+    }
+    return {};
+}
+
+void seed_default_oem_once() noexcept {
     std::call_once(g_default_oem_env_once, [] {
+        // 1. OPENADS_OEM_COLLATION env var (container/CI friendly).
         const char* v = std::getenv("OPENADS_OEM_COLLATION");
-        if (v == nullptr || *v == '\0') return;
-        if (const OemCollation* c = lookup_oem_collation(v)) {
-            g_default_oem.store(c, std::memory_order_relaxed);
-            g_default_oem_upper.store(lookup_oem_upper_table(v),
-                                      std::memory_order_relaxed);
+        if (v != nullptr && *v != '\0') {
+            store_default_oem(v);
+            return;   // env var present: it owns the decision, valid or not
+        }
+        // 2. adslocal.cfg next to the OpenADS module (SAP looks in the
+        //    directory of the local-server library), then the current
+        //    directory as a convenience for apps that keep the cfg
+        //    beside their exe but load the DLL from elsewhere.
+        try {
+            std::vector<std::string> candidates;
+            if (auto dir = openads::platform::module_directory()) {
+                candidates.push_back(
+                    (std::filesystem::path(*dir) / "adslocal.cfg").string());
+            }
+            candidates.push_back("adslocal.cfg");
+            for (const auto& p : candidates) {
+                std::string val = parse_adslocal_oem_char_set(p);
+                if (!val.empty()) {
+                    store_default_oem(val.c_str());
+                    return;   // first file with an entry wins, SAP-style
+                }
+            }
+        } catch (...) {
+            // Filesystem hiccups must never break engine start-up; the
+            // default simply stays unset (raw byte order, like SAP USA).
         }
     });
 }
@@ -143,8 +207,8 @@ const std::uint8_t* active_oem_upper_table() noexcept {
 }
 
 bool set_default_oem_collation(const char* name) noexcept {
-    // Run the env seed first so an explicit set always wins over it.
-    seed_default_oem_from_env();
+    // Run the seed first so an explicit set always wins over it.
+    seed_default_oem_once();
     if (name == nullptr || *name == '\0') {
         g_default_oem.store(nullptr, std::memory_order_relaxed);
         g_default_oem_upper.store(nullptr, std::memory_order_relaxed);
@@ -159,13 +223,31 @@ bool set_default_oem_collation(const char* name) noexcept {
 }
 
 const OemCollation* default_oem_collation() noexcept {
-    seed_default_oem_from_env();
+    seed_default_oem_once();
     return g_default_oem.load(std::memory_order_relaxed);
 }
 
 const std::uint8_t* default_oem_upper_table() noexcept {
-    seed_default_oem_from_env();
+    seed_default_oem_once();
     return g_default_oem_upper.load(std::memory_order_relaxed);
+}
+
+bool apply_adslocal_cfg(const std::string& cfg_path) noexcept {
+    // Consume the one-shot seed first so an explicit config load is not
+    // later overwritten by it (call_once fires at most once anyway).
+    seed_default_oem_once();
+    try {
+        std::string val = parse_adslocal_oem_char_set(cfg_path);
+        if (val.empty()) return false;
+        const OemCollation* c = lookup_oem_collation(val.c_str());
+        if (c == nullptr) return false;   // USA / MAZOVIA / … → stay unset
+        g_default_oem.store(c, std::memory_order_relaxed);
+        g_default_oem_upper.store(lookup_oem_upper_table(val.c_str()),
+                                  std::memory_order_relaxed);
+        return true;
+    } catch (...) {
+        return false;
+    }
 }
 
 } // namespace openads::engine

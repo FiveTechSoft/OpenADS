@@ -63,4 +63,24 @@ bool set_default_oem_collation(const char* name) noexcept;
 const OemCollation* default_oem_collation() noexcept;
 const std::uint8_t* default_oem_upper_table() noexcept;
 
+// RCB 2026-07-10 — Phase 2 of the zero-config OEM activation: SAP-style
+// adslocal.cfg support. The Advantage Local Server reads an INI-format
+// ADSLOCAL.CFG ("[SETTINGS]" section, keyword=value lines) from the
+// directory of the local-server library; the relevant entry here is
+//     OEM_CHAR_SET=NTXPL852
+// (keyword and supported values per the SAP Advantage help, "Advantage
+// Local Server Configuration"). OpenADS looks for adslocal.cfg next to
+// its own module (openace64.dll / the linking exe) and, failing that,
+// in the current directory. Precedence for the process default stays:
+// explicit set_default_oem_collation() > OPENADS_OEM_COLLATION env var
+// > adslocal.cfg. Values OpenADS doesn't implement yet (USA, MAZOVIA,
+// …) leave the default unset — same effective behaviour as SAP's USA
+// (raw byte order).
+//
+// apply_adslocal_cfg parses one file and installs its OEM_CHAR_SET as
+// the default when supported. Returns true only when a supported
+// collation was applied. Exposed for the unit tests and for callers
+// that manage an explicit config path.
+bool apply_adslocal_cfg(const std::string& cfg_path) noexcept;
+
 } // namespace openads::engine

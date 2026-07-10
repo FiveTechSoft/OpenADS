@@ -3,6 +3,9 @@
 #include "engine/oem_collation.h"
 
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <string>
 
 using openads::engine::compare_oem_keys;
 using openads::engine::lookup_oem_collation;
@@ -75,4 +78,78 @@ TEST_CASE("compare_oem_keys tie-breaks equal weights by raw byte") {
           c->sort[static_cast<unsigned char>('a')]);
     CHECK(compare_oem_keys(c->sort, "A", "a", 1) < 0);
     CHECK(compare_oem_keys(c->sort, "a", "A", 1) > 0);
+}
+
+// RCB 2026-07-10 — Phase 2 of the zero-config OEM activation: SAP-style
+// adslocal.cfg (OEM_CHAR_SET=…). These pin the parser + apply behaviour;
+// each case resets the process default afterwards (RAII) so unrelated
+// tests never inherit a collation.
+namespace {
+
+namespace fs = std::filesystem;
+
+struct DefaultOemReset {
+    ~DefaultOemReset() {
+        (void)openads::engine::set_default_oem_collation("");
+    }
+};
+
+std::string write_cfg(const char* name, const std::string& content) {
+    auto p = fs::temp_directory_path() / name;
+    std::ofstream out(p, std::ios::trunc);
+    out << content;
+    out.close();
+    return p.string();
+}
+
+} // namespace
+
+TEST_CASE("apply_adslocal_cfg installs a supported OEM_CHAR_SET") {
+    DefaultOemReset reset;
+    auto p = write_cfg("openads_adslocal_ok.cfg",
+        "[SETTINGS]\n"
+        "; comment line\n"
+        "ERROR_ASSERT_LOGS=C:\\logs\n"
+        "OEM_CHAR_SET=NTXPL852\n"
+        "TABLES=100\n");
+    CHECK(openads::engine::apply_adslocal_cfg(p));
+    CHECK(openads::engine::default_oem_collation() ==
+          lookup_oem_collation("PL852"));
+    CHECK(openads::engine::default_oem_upper_table() != nullptr);
+    fs::remove(p);
+}
+
+TEST_CASE("apply_adslocal_cfg is keyword-case-insensitive and trims") {
+    DefaultOemReset reset;
+    auto p = write_cfg("openads_adslocal_case.cfg",
+        "  oem_char_set   =   pl852  \r\n");
+    CHECK(openads::engine::apply_adslocal_cfg(p));
+    CHECK(openads::engine::default_oem_collation() ==
+          lookup_oem_collation("PL852"));
+    fs::remove(p);
+}
+
+TEST_CASE("apply_adslocal_cfg leaves default unset for unsupported or "
+          "missing values") {
+    DefaultOemReset reset;
+    REQUIRE(openads::engine::set_default_oem_collation(""));
+
+    // SAP's shipping default: USA → raw byte order, same as unset.
+    auto usa = write_cfg("openads_adslocal_usa.cfg",
+        "[SETTINGS]\nOEM_CHAR_SET=USA\n");
+    CHECK_FALSE(openads::engine::apply_adslocal_cfg(usa));
+    CHECK(openads::engine::default_oem_collation() == nullptr);
+    fs::remove(usa);
+
+    // No OEM_CHAR_SET entry at all.
+    auto none = write_cfg("openads_adslocal_none.cfg",
+        "[SETTINGS]\nTABLES=100\n");
+    CHECK_FALSE(openads::engine::apply_adslocal_cfg(none));
+    CHECK(openads::engine::default_oem_collation() == nullptr);
+    fs::remove(none);
+
+    // Missing file.
+    CHECK_FALSE(openads::engine::apply_adslocal_cfg(
+        (fs::temp_directory_path() / "openads_no_such.cfg").string()));
+    CHECK(openads::engine::default_oem_collation() == nullptr);
 }
