@@ -10968,23 +10968,50 @@ Table* table_for_index(ADSHANDLE hIndex) {
 // character keys / non-CDX drivers.
 void mark_cdx_key_encoding(Table* t, openads::drivers::IIndex* idx) {
     if (t == nullptr || idx == nullptr) return;
-    // Any CDX with 8-byte key length is a Fox numeric key by convention
-    // (used for bare numeric fields and computed numeric exprs like Val()).
-    // This ensures reopened indexes use the correct binary encoding for
-    // seeks/appends. Fixes numeric Val() DbSeek on self-built CDX (#130).
-    if (idx->key_length() == 8) {
-        idx->set_key_encoding(openads::drivers::KeyEncoding::FoxNumeric);
-        return;
-    }
+    // Decide by the key EXPRESSION, never by key length alone. A blanket
+    // "key_length()==8 => FoxNumeric" mis-marked plain C(8) character
+    // tags on reopen; once compare_keys_ started honouring the encoding
+    // (v1.8.6 memcmp fix), every reopened C(8) tag under an OEM
+    // collation seeked with raw byte order against a tree built in
+    // collation order and missed existing keys (#130 follow-up).
     const std::string bare =
         openads::engine::strip_alias_qualifiers(idx->expression());
     std::int32_t fi = t->field_index(bare);
-    if (fi < 0) return;
-    using FT = openads::drivers::DbfFieldType;
-    FT ft = t->field_descriptor(static_cast<std::uint16_t>(fi)).type;
-    if (ft == FT::Numeric || ft == FT::Float || ft == FT::Integer ||
-        ft == FT::Double  || ft == FT::Currency || ft == FT::AdtMoney) {
+    if (fi >= 0) {
+        // Bare field: the schema decides. Character/date/logical keys
+        // stay Text regardless of their width.
+        using FT = openads::drivers::DbfFieldType;
+        FT ft = t->field_descriptor(static_cast<std::uint16_t>(fi)).type;
+        if (ft == FT::Numeric || ft == FT::Float || ft == FT::Integer ||
+            ft == FT::Double  || ft == FT::Currency || ft == FT::AdtMoney) {
+            idx->set_key_encoding(openads::drivers::KeyEncoding::FoxNumeric);
+        }
+        return;
+    }
+    // Computed expression: FoxNumeric only when the key has the 8-byte
+    // binary width AND the expression provably evaluates numeric — the
+    // same rules the AdsCreateIndex61 path applies (Val() heuristic +
+    // record-1 probe). Fixes numeric Val() DbSeek on reopened CDX (#130).
+    if (idx->key_length() != 8) return;
+    std::string u = idx->expression();
+    for (char& c : u)
+        c = static_cast<char>(toupper(static_cast<unsigned char>(c)));
+    if (u.find("VAL(") != std::string::npos) {
         idx->set_key_encoding(openads::drivers::KeyEncoding::FoxNumeric);
+        return;
+    }
+    if (t->record_count() > 0) {
+        // Bulk-scan load so the caller's cursor state is untouched
+        // (mirrors the create-path probe).
+        if (auto raw = t->driver()->read_record_raw(1); raw) {
+            t->load_record_for_bulk_scan(std::move(raw.value()), 1);
+            double dv = 0.0;
+            if (openads::engine::evaluate_index_expr_number(
+                    *t, idx->expression(), dv)) {
+                idx->set_key_encoding(
+                    openads::drivers::KeyEncoding::FoxNumeric);
+            }
+        }
     }
 }
 
