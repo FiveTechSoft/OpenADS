@@ -748,6 +748,21 @@ bool eval_cmp(Lex& lx, Table& t) {
     }
     Value lhs = parse_atom(lx, t);
     lx.skip_ws();
+
+    // xBase '$' (substring / "contains"): `needle $ haystack` — True if
+    // haystack contains needle.  Must be tested BEFORE the general
+    // comparison-operator block because '$' is not one of the standard
+    // comparison tokens.
+    if (lx.i < lx.s.size() && lx.s[lx.i] == '$') {
+        ++lx.i;
+        Value rhs = parse_atom(lx, t);
+        // Needle $ Haystack → check if Haystack contains Needle.
+        const std::string& needle = lhs.s;
+        const std::string& haystack = rhs.s;
+        if (needle.empty()) return true;        // empty needle always "contained"
+        return haystack.find(needle) != std::string::npos;
+    }
+
     // Pick a comparison operator (longest match first).
     std::string op;
     auto try_op = [&](const char* s) {

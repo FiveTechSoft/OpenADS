@@ -115,6 +115,11 @@ public:
     // paint -> O(n) per keystroke, freezing large (e.g. filtered) browses.
     // The walk saves/restores the navigation cursor so callers see no move.
     const std::vector<std::uint32_t>& ordered_recnos_cached();
+    // Count keys whose index key falls within the scope range
+    // [top, bottom]. Empty top → start at first key; empty bottom →
+    // count to end. Saves/restores cursor state.
+    std::uint32_t count_scoped_keys(const std::string& top,
+                                    const std::string& bottom);
     // 0-based position of recno in key order, or 0xFFFFFFFF if absent.
     std::uint32_t pos_of_recno_cached(std::uint32_t recno);
     void invalidate_pos_cache() {

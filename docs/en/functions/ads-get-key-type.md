@@ -8,7 +8,7 @@ permalink: /en/functions/ads-get-key-type/
 
 # AdsGetKeyType
 
-Returns the encoding type of the index key for the active order.
+Returns the data type of the index key expression.
 
 ## Syntax
 
@@ -31,16 +31,29 @@ UNSIGNED32 AdsGetKeyType(ADSHANDLE hIndex, UNSIGNED16 *pusKeyType);
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| `ADS_RAWKEY` | 0 | Raw binary key bytes. |
-| `ADS_STRINGKEY` | 1 | Character / space-padded string key. |
-| `ADS_DOUBLEKEY` | 2 | Numeric or date key (FoxNumeric / NtxNumeric 8-byte encoding). |
+| `ADS_LOGICAL` | 1 | Logical key expression. |
+| `ADS_NUMERIC` | 2 | Numeric key expression. |
+| `ADS_DATE` | 3 | Date key expression. |
+| `ADS_STRING` | 4 | Character key expression. |
+| `ADS_RAW` | 16 | Raw key expression (ADT `;` concatenation). |
+
+Note these are the *field-type* constants, not the buffer-encoding
+constants (`ADS_STRINGKEY` / `ADS_DOUBLEKEY` / `ADS_RAWKEY`) used by
+`AdsSeek` and `AdsSetScope`.
 
 ## Description
 
-`AdsGetKeyType` inspects the `KeyEncoding` of the active index
-and maps it to the ACE key type constants. Character expression
-indexes return `ADS_STRINGKEY`; numeric and date expression
-indexes return `ADS_DOUBLEKEY`.
+`AdsGetKeyType` reports the result type of the index key expression.
+A bare field key answers from the table schema (a `C` field returns
+`ADS_STRING`, an `N`/`F`/`I`/`B`/`Y` field `ADS_NUMERIC`, a `D` field
+`ADS_DATE`, an `L` field `ADS_LOGICAL`). Computed expressions report
+by their result type: string expressions such as `UPPER(name)` return
+`ADS_STRING`; numeric expressions such as `Val(code)` return
+`ADS_NUMERIC`.
+
+Language bindings rely on this value to encode scope and seek keys —
+Harbour's rddads, for example, chooses the `OrdScope()` key encoding
+from it.
 
 ## Example
 
@@ -49,9 +62,9 @@ ADSHANDLE hIndex;
 UNSIGNED16 keyType = 0;
 AdsGetIndexHandle(hTable, "amount", &hIndex);
 AdsGetKeyType(hIndex, &keyType);
-if (keyType == ADS_DOUBLEKEY)
+if (keyType == ADS_NUMERIC)
     printf("Numeric index key\n");
-else
+else if (keyType == ADS_STRING)
     printf("Character index key\n");
 ```
 

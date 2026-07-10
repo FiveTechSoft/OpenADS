@@ -610,8 +610,8 @@ UNSIGNED32 ENTRYPOINT AdsExecuteSQLDirect   (ADSHANDLE hStatement, UNSIGNED8* pu
 UNSIGNED32 ENTRYPOINT AdsExecuteSQLDirectW  (ADSHANDLE hStatement, UNSIGNED16* pwcSQL,
                                   ADSHANDLE* phCursor);
 
-#define ADS_TOP            0
-#define ADS_BOTTOM         1
+#define ADS_TOP            1
+#define ADS_BOTTOM         2
 #define ADS_SOFTSEEK       1
 #define ADS_OPTIMIZED_NONE 3
 // Memo content kinds returned by AdsGetMemoDataType. Match the
@@ -775,7 +775,10 @@ UNSIGNED32 ENTRYPOINT AdsExecuteSQLDirectW  (ADSHANDLE hStatement, UNSIGNED16* p
 #define ADS_BASENAMEANDEXT  2
 #define ADS_BASENAME        3
 
-// SQL key types (AdsGetKeyType).
+// Key buffer encodings for AdsSeek / AdsSetScope `usDataType`.
+// NOT the AdsGetKeyType return domain — AdsGetKeyType reports the
+// field-type constants (ADS_STRING / ADS_NUMERIC / ADS_DATE /
+// ADS_LOGICAL / ADS_RAW) above.
 #define ADS_RAWKEY     0
 #define ADS_STRINGKEY  1
 #define ADS_DOUBLEKEY  2

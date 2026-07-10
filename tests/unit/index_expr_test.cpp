@@ -221,3 +221,76 @@ TEST_CASE("fox_numeric_key is 8 bytes and order-preserving (FoxPro DBL2ORD)") {
     // -0.0 must encode identically to +0.0.
     CHECK(fox_numeric_key(-0.0) == fox_numeric_key(0.0));
 }
+
+// ---- $ (contains / substring) operator in FOR-clause truthy evaluator ----
+
+TEST_CASE("index_expr_truthy: $ operator — 'needle' $ haystack") {
+    using openads::engine::evaluate_index_expr_truthy;
+    // Stage a tiny DBF with STATUS C(5) and NAME C(10).
+    // Record 1: STATUS="IEC", NAME="ALPHA"
+    auto dir = fs::temp_directory_path() / "openads_idx_dollar";
+    fs::create_directories(dir);
+    auto p = dir / "dollar.dbf";
+    fs::remove(p);
+
+    std::vector<std::uint8_t> buf;
+    auto push = [&](const void* d, std::size_t n) {
+        const auto* b = static_cast<const std::uint8_t*>(d);
+        buf.insert(buf.end(), b, b + n);
+    };
+
+    // Header.
+    std::array<std::uint8_t, 32> hdr{};
+    hdr[0] = 0x03;
+    hdr[4] = 1;                       // 1 record
+    hdr[8] = 32 + 32 * 2 + 1;        // header_len = 97
+    hdr[10] = 1 + 5 + 10;            // record_len = 16
+    push(hdr.data(), hdr.size());
+
+    auto field = [&](const char* name, char type, std::uint8_t len) {
+        std::array<std::uint8_t, 32> fd{};
+        std::strncpy(reinterpret_cast<char*>(fd.data()), name, 11);
+        fd[11] = static_cast<std::uint8_t>(type);
+        fd[16] = len;
+        push(fd.data(), fd.size());
+    };
+    field("STATUS", 'C', 5);
+    field("NAME",   'C', 10);
+    buf.push_back(0x0D);
+
+    // One record: not-deleted, STATUS="IEC  ", NAME="ALPHA     "
+    buf.push_back(' ');
+    const char status[5] = {'I','E','C',' ',' '};
+    push(status, 5);
+    const char name[10] = {'A','L','P','H','A',' ',' ',' ',' ',' '};
+    push(name, 10);
+    buf.push_back(0x1A);
+
+    std::ofstream(p, std::ios::binary).write(
+        reinterpret_cast<const char*>(buf.data()),
+        static_cast<std::streamsize>(buf.size()));
+
+    {
+    auto tbl = open_table(p);
+
+    // 'IEC' $ STATUS  →  true (needle "IEC" is contained in "IEC  ")
+    CHECK(evaluate_index_expr_truthy(tbl, "'IEC' $ STATUS"));
+
+    // 'EC' $ STATUS  →  true (substring match)
+    CHECK(evaluate_index_expr_truthy(tbl, "'EC' $ STATUS"));
+
+    // 'XYZ' $ STATUS  →  false (not contained)
+    CHECK_FALSE(evaluate_index_expr_truthy(tbl, "'XYZ' $ STATUS"));
+
+    // '' $ STATUS  →  true (empty needle always matches)
+    CHECK(evaluate_index_expr_truthy(tbl, "'' $ STATUS"));
+
+    // 'ALPHA' $ NAME  →  true (field value contains needle)
+    CHECK(evaluate_index_expr_truthy(tbl, "'ALPHA' $ NAME"));
+
+    // 'BETA' $ NAME  →  false
+    CHECK_FALSE(evaluate_index_expr_truthy(tbl, "'BETA' $ NAME"));
+    }
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}

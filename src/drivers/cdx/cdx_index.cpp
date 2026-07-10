@@ -1454,6 +1454,45 @@ const std::vector<std::uint32_t>& CdxIndex::ordered_recnos_cached() {
     return pos_walk_;
 }
 
+std::uint32_t CdxIndex::count_scoped_keys(const std::string& top,
+                                           const std::string& bottom) {
+    // Save the navigation cursor so callers see no side-effect.
+    std::uint32_t  s_leaf    = cur_leaf_;
+    std::int32_t   s_index   = cur_index_;
+    CurState       s_state   = cur_state_;
+    auto           s_decoded = cur_decoded_;
+    std::string    s_key     = current_key_;
+
+    std::uint32_t count = 0;
+
+    // Seek to top scope (soft-seek finds the first key >= top) or first.
+    auto r = top.empty() ? seek_first() : seek_key(top, /*soft=*/true);
+    if (r && r.value().positioned) {
+        auto cur = r.value();
+        while (cur.positioned) {
+            std::string key = current_key();
+            // If bottom scope is set and we've passed it, stop.
+            if (!bottom.empty() && compare_keys_(key.data(), bottom.data(),
+                                                  key_size_) > 0) {
+                break;
+            }
+            ++count;
+            auto nx = next();
+            if (!nx) break;
+            cur = nx.value();
+        }
+    }
+
+    // Restore the cursor exactly as it was.
+    cur_leaf_    = s_leaf;
+    cur_index_   = s_index;
+    cur_state_   = s_state;
+    cur_decoded_ = std::move(s_decoded);
+    current_key_ = std::move(s_key);
+
+    return count;
+}
+
 std::uint32_t CdxIndex::pos_of_recno_cached(std::uint32_t recno) {
     ordered_recnos_cached();
     auto it = pos_map_.find(recno);

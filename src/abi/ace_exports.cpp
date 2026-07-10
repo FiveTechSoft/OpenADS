@@ -8663,6 +8663,19 @@ UNSIGNED32 ENTRYPOINT AdsGetRecordCount(ADSHANDLE hTable, UNSIGNED16 bFilterOpti
     if (auto* idx = iindex_for_handle(hTable)) {
         if (auto* cdx =
                 dynamic_cast<openads::drivers::cdx::CdxIndex*>(idx)) {
+            // M10.31 — scope-aware: when scope is active, count only keys
+            // within the scoped range rather than the full conditional index.
+            // t was already resolved from hTable via get_table() above, which
+            // handles index handles via lookup_table_by_index + activate.
+            if (t && t->order()) {
+                auto& sc = t->order()->scope();
+                if (sc.top.has_value() || sc.bottom.has_value()) {
+                    *pulRecordCount = cdx->count_scoped_keys(
+                        sc.top.value_or(""),
+                        sc.bottom.value_or(""));
+                    return ok();
+                }
+            }
             *pulRecordCount = static_cast<UNSIGNED32>(
                 cdx->ordered_recnos_cached().size());
             return ok();
@@ -15203,11 +15216,16 @@ UNSIGNED32 ENTRYPOINT AdsSeek(ADSHANDLE hIndex,
               openads::engine::strip_alias_qualifiers(dk_idx->expression()))
         : -1;
     bool dk_numeric = false;
+    bool dk_date    = false;
     if (dk_fidx >= 0) {
         auto dkt = t->field_descriptor(
             static_cast<std::uint16_t>(dk_fidx)).type;
         dk_numeric = (dkt == openads::drivers::DbfFieldType::Numeric ||
                       dkt == openads::drivers::DbfFieldType::Float);
+        // DBF Date only: CDX/NTX date keys are raw YYYYMMDD text. ADT
+        // AdtDate keys are ADI packed binary — the ADI driver converts
+        // a raw-double seek key itself, so leave those on the raw path.
+        dk_date    = (dkt == openads::drivers::DbfFieldType::Date);
     }
     const bool dk_foxnum =
         dk_idx != nullptr &&
@@ -15230,6 +15248,20 @@ UNSIGNED32 ENTRYPOINT AdsSeek(ADSHANDLE hIndex,
         std::memcpy(&dv, pucKey, sizeof(double));
         key = openads::engine::ntx_numeric_key(dv, dk_idx->key_length(),
                                                dk_idx->key_decimals());
+    } else if (dk_idx != nullptr && dk_date && u16KeyLen == sizeof(double)) {
+        // Date seek: rddads sends DbSeek(date) as a julian day number
+        // double (hb_itemGetTD). Our date keys are raw YYYYMMDD text,
+        // so convert the julian day to that key form (mirrors the
+        // AdsSetScope date path).
+        double dv = 0;
+        std::memcpy(&dv, pucKey, sizeof(double));
+        int y = 0, mo = 0, dy = 0;
+        julian_to_ymd(static_cast<SIGNED32>(dv), y, mo, dy);
+        char dbuf[16];
+        std::snprintf(dbuf, sizeof(dbuf), "%04d%02d%02d", y, mo, dy);
+        key.assign(dbuf, 8);
+        std::uint16_t dklen = dk_idx->key_length();
+        if (key.size() < dklen) key.append(dklen - key.size(), ' ');
     } else if (dk_idx != nullptr && dk_numeric && u16KeyLen == sizeof(double)) {
         double dv = 0;
         std::memcpy(&dv, pucKey, sizeof(double));
@@ -15524,6 +15556,24 @@ UNSIGNED32 ENTRYPOINT AdsSetScope(ADSHANDLE hIndex, UNSIGNED16 usScope,
         if (fidx >= 0) {
             const auto& fd = t->field_descriptor(
                 static_cast<std::uint16_t>(fidx));
+            // DBF Date key: rddads sends OrdScope() date values as a
+            // julian day number double (hb_itemGetDL) once AdsGetKeyType
+            // reports ADS_DATE. CDX/NTX date keys are raw YYYYMMDD text,
+            // so convert the julian day to that key form instead of
+            // ASCII-formatting the raw number. (ADT AdtDate keys are ADI
+            // packed binary and stay on the generic path.)
+            if (fd.type == openads::drivers::DbfFieldType::Date) {
+                int y = 0, mo = 0, dy = 0;
+                julian_to_ymd(static_cast<SIGNED32>(dv), y, mo, dy);
+                char dbuf[16];
+                std::snprintf(dbuf, sizeof(dbuf), "%04d%02d%02d",
+                              y, mo, dy);
+                key.assign(dbuf, 8);
+                if (key.size() < klen) key.append(klen - key.size(), ' ');
+                auto rsc = t->set_scope(usScope == ADS_TOP, key);
+                if (!rsc) return fail(rsc.error());
+                return ok();
+            }
             dec = static_cast<std::uint16_t>(fd.decimals);
             if (fd.length > 0)
                 fmt_w = static_cast<std::uint16_t>(fd.length);
@@ -27215,15 +27265,49 @@ UNSIGNED32 ENTRYPOINT AdsGetKeyNum(ADSHANDLE hObj, UNSIGNED16 /*usFilterOption*/
 }
 UNSIGNED32 ENTRYPOINT AdsGetKeyType(ADSHANDLE hIndex, UNSIGNED16* p) {
     if (p == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
-    *p = ADS_STRINGKEY;
+    // ACE reports the key expression *result type* here, using the
+    // field-type constants (ADS_STRING=4, ADS_NUMERIC=2, ADS_DATE=3,
+    // ADS_LOGICAL=1) — NOT the AdsSeek/AdsSetScope buffer-encoding
+    // constants (ADS_STRINGKEY=1 / ADS_DOUBLEKEY=2). Harbour's rddads
+    // switches OrdScope()'s key encoding on this value; returning
+    // ADS_STRINGKEY (1 == ADS_LOGICAL) made every character key look
+    // like a logical key, so scopes were sent as a 1-byte "T"/"F"
+    // instead of the real key value.
+    *p = ADS_STRING;
     auto* idx = iindex_for_handle(hIndex);
     if (idx == nullptr) return ok();
+    // Bare-field key: answer from the schema. Date and logical keys are
+    // Text-encoded on disk, so the key encoding alone cannot tell them
+    // apart from character keys.
+    if (Table* t = lookup_table_by_index(hIndex)) {
+        std::int32_t fi = t->field_index(
+            openads::engine::strip_alias_qualifiers(idx->expression()));
+        if (fi >= 0) {
+            using FT = openads::drivers::DbfFieldType;
+            switch (t->field_descriptor(
+                        static_cast<std::uint16_t>(fi)).type) {
+                case FT::Character: case FT::CiCharacter:
+                case FT::Varchar:   case FT::Memo:
+                    *p = ADS_STRING;  return ok();
+                case FT::Date: case FT::AdtDate:
+                    *p = ADS_DATE;    return ok();
+                case FT::Logical:
+                    *p = ADS_LOGICAL; return ok();
+                case FT::Numeric: case FT::Float:    case FT::Integer:
+                case FT::Double:  case FT::Currency: case FT::AdtMoney:
+                case FT::ShortInt: case FT::AutoInc:
+                    *p = ADS_NUMERIC; return ok();
+                default: break;
+            }
+        }
+    }
+    // Computed expression: fall back to the on-disk key encoding.
     switch (idx->key_encoding()) {
         case openads::drivers::KeyEncoding::Text:
-            *p = ADS_STRINGKEY;  break;
+            *p = ADS_STRING;   break;
         case openads::drivers::KeyEncoding::FoxNumeric:
         case openads::drivers::KeyEncoding::NtxNumeric:
-            *p = ADS_DOUBLEKEY;  break;
+            *p = ADS_NUMERIC;  break;
     }
     return ok();
 }
@@ -28779,8 +28863,17 @@ UNSIGNED32 ENTRYPOINT AdsGetKeyCount(ADSHANDLE hIndex, UNSIGNED16 /*usFilter*/,
     if (ord != nullptr && ord->index() != nullptr) {
         if (auto* cdx =
                 dynamic_cast<openads::drivers::cdx::CdxIndex*>(ord->index())) {
-            *pulCount = static_cast<UNSIGNED32>(
-                cdx->ordered_recnos_cached().size());
+            // When scope is active, count only keys within [top, bottom]
+            // instead of the entire conditional index.
+            auto& sc = ord->scope();
+            if (sc.top.has_value() || sc.bottom.has_value()) {
+                *pulCount = cdx->count_scoped_keys(
+                    sc.top.value_or(""),
+                    sc.bottom.value_or(""));
+            } else {
+                *pulCount = static_cast<UNSIGNED32>(
+                    cdx->ordered_recnos_cached().size());
+            }
             return ok();
         }
     }

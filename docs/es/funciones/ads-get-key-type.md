@@ -8,7 +8,7 @@ permalink: /es/funciones/ads-get-key-type/
 
 # AdsGetKeyType
 
-Devuelve el tipo de codificación de la clave de índice para el orden activo.
+Devuelve el tipo de datos de la expresión de clave del índice.
 
 ## Sintaxis
 
@@ -31,16 +31,30 @@ UNSIGNED32 AdsGetKeyType(ADSHANDLE hIndex, UNSIGNED16 *pusKeyType);
 
 | Constante | Valor | Descripción |
 |-----------|-------|-------------|
-| `ADS_RAWKEY` | 0 | Bytes de clave binaria sin procesar. |
-| `ADS_STRINGKEY` | 1 | Clave de cadena de caracteres / rellenada con espacios. |
-| `ADS_DOUBLEKEY` | 2 | Clave numérica o de fecha (codificación de 8 bytes FoxNumeric / NtxNumeric). |
+| `ADS_LOGICAL` | 1 | Expresión de clave lógica. |
+| `ADS_NUMERIC` | 2 | Expresión de clave numérica. |
+| `ADS_DATE` | 3 | Expresión de clave de fecha. |
+| `ADS_STRING` | 4 | Expresión de clave de caracteres. |
+| `ADS_RAW` | 16 | Expresión de clave raw (concatenación `;` de ADT). |
+
+Nótese que son las constantes de *tipo de campo*, no las constantes
+de codificación de buffer (`ADS_STRINGKEY` / `ADS_DOUBLEKEY` /
+`ADS_RAWKEY`) que usan `AdsSeek` y `AdsSetScope`.
 
 ## Descripción
 
-`AdsGetKeyType` inspecciona el `KeyEncoding` del índice activo
-y lo mapea a las constantes de tipo de clave ACE. Los índices de
-expresión de caracteres devuelven `ADS_STRINGKEY`; los índices de
-expresión numérica y de fecha devuelven `ADS_DOUBLEKEY`.
+`AdsGetKeyType` informa el tipo del resultado de la expresión de
+clave del índice. Una clave de campo simple responde según el esquema
+de la tabla (un campo `C` devuelve `ADS_STRING`, un campo
+`N`/`F`/`I`/`B`/`Y` devuelve `ADS_NUMERIC`, un campo `D` devuelve
+`ADS_DATE`, un campo `L` devuelve `ADS_LOGICAL`). Las expresiones
+calculadas responden según su tipo de resultado: las expresiones de
+cadena como `UPPER(name)` devuelven `ADS_STRING`; las numéricas como
+`Val(code)` devuelven `ADS_NUMERIC`.
+
+Los bindings de lenguaje dependen de este valor para codificar claves
+de scope y seek — el rddads de Harbour, por ejemplo, elige la
+codificación de clave de `OrdScope()` a partir de él.
 
 ## Ejemplo
 
@@ -49,9 +63,9 @@ ADSHANDLE hIndex;
 UNSIGNED16 keyType = 0;
 AdsGetIndexHandle(hTable, "amount", &hIndex);
 AdsGetKeyType(hIndex, &keyType);
-if (keyType == ADS_DOUBLEKEY)
+if (keyType == ADS_NUMERIC)
     printf("Clave de índice numérica\n");
-else
+else if (keyType == ADS_STRING)
     printf("Clave de índice de caracteres\n");
 ```
 
