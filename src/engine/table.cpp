@@ -641,6 +641,43 @@ util::Result<void> Table::skip(std::int32_t delta) {
         else if (delta < 0) state_ = State::Bof;
         recno_ = 0; return {};
     }
+    // Rows the cursor must not land on: deleted rows when SET DELETED
+    // is ON (show_deleted() == false) and rows rejected by an active
+    // filter. The index-order path above already skips deleted rows;
+    // the natural-order path must do the same.
+    const bool skip_deleted = !openads::abi::show_deleted_for(this);
+    auto must_skip = [&]() -> bool {
+        if (state_ != State::Positioned) return false;
+        if (skip_deleted && is_deleted()) return true;
+        if (filter_ && !filter_(*this)) return true;
+        return false;
+    };
+    if ((skip_deleted || filter_) && delta != 0) {
+        // M12.33 — count VISIBLE rows, like the index-order path above.
+        // The old recno + delta jump (then slide only while sitting on a
+        // hidden row) landed one visible row short for every hidden row
+        // strictly inside the range, so a remote folded Skip(N) re-served
+        // a row the client had already painted (the "deleted record
+        // duplicates the previous item" browse bug).
+        const std::int64_t stepdir = (delta > 0) ? 1 : -1;
+        const std::int64_t want =
+            (delta > 0) ? delta : -static_cast<std::int64_t>(delta);
+        std::int64_t pos = static_cast<std::int64_t>(recno_);
+        std::int64_t taken = 0;
+        while (taken < want) {
+            pos += stepdir;
+            if (pos < 1) { state_ = State::Bof; recno_ = 0; return {}; }
+            if (pos > static_cast<std::int64_t>(n)) {
+                state_ = State::Eof; recno_ = n + 1; return {};
+            }
+            if (auto r = load_record_(static_cast<std::uint32_t>(pos)); !r) {
+                return r.error();
+            }
+            if (must_skip()) continue;
+            ++taken;
+        }
+        return {};
+    }
     std::int64_t target = static_cast<std::int64_t>(recno_) + delta;
     if (state_ == State::Bof && delta > 0) target = delta;
     if (target < 1) { state_ = State::Bof; recno_ = 0; return {}; }
@@ -650,17 +687,8 @@ util::Result<void> Table::skip(std::int32_t delta) {
     if (auto r = load_record_(static_cast<std::uint32_t>(target)); !r) {
         return r.error();
     }
-    // Step over rows the cursor must not land on: deleted rows when
-    // SET DELETED is ON (show_deleted() == false) and rows rejected by
-    // an active filter. The index-order path above already skips
-    // deleted rows; the natural-order path must do the same.
-    const bool skip_deleted = !openads::abi::show_deleted_for(this);
-    auto must_skip = [&]() -> bool {
-        if (state_ != State::Positioned) return false;
-        if (skip_deleted && is_deleted()) return true;
-        if (filter_ && !filter_(*this)) return true;
-        return false;
-    };
+    // Skip(0) refresh on a hidden row still slides off it (Clipper
+    // filter convention: the cursor never rests on an invisible row).
     if (skip_deleted || filter_) {
         std::int64_t step = (delta >= 0) ? 1 : -1;
         while (must_skip()) {

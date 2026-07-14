@@ -6,11 +6,30 @@ nav_order: 0
 permalink: /es/novedades/
 ---
 
-# Novedades (v1.0.0-rc29 → v1.8.11)
+# Novedades (v1.0.0-rc29 → v1.8.12)
 
 Esta página resume los cambios más destacados desde la versión
 v1.0.0-rc29. Para el historial completo de commits, consulta el
 [CHANGELOG](https://github.com/FiveTechSoft/OpenADS/blob/main/CHANGELOG.md).
+
+---
+
+## Destacados v1.8.12
+
+### ENGINE — `Skip` multi-registro sobre filas borradas
+
+Continuación de v1.8.10/v1.8.11: con el filtro de borrados activo, un
+browse remoto en orden natural podía mostrar un **duplicado de la fila
+anterior** donde antes aparecía un registro borrado, o terminar el
+recorrido unas filas antes. `Table::skip` calculaba los saltos
+multi-registro con aritmética física de recno; ahora cuenta filas
+**visibles**, igual que la ruta con índice y la semántica `SKIP n` de
+Clipper. También corrige `dbSkip(n > 1)` LOCAL sobre filas
+borradas/filtradas.
+
+Requiere `openads_serverd` actualizado (y `openace64.dll` para modo
+LOCAL). Pruebas de regresión: tres casos M12.33 en
+`abi_remote_index_nav_test.cpp`.
 
 ---
 

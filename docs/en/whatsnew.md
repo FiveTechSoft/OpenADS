@@ -6,11 +6,29 @@ nav_order: 0
 permalink: /en/whatsnew/
 ---
 
-# What's New (v1.0.0-rc29 → v1.8.11)
+# What's New (v1.0.0-rc29 → v1.8.12)
 
 This page summarises the most notable changes since the
 v1.0.0-rc29 release. For the full commit-by-commit history see
 the [CHANGELOG](https://github.com/FiveTechSoft/OpenADS/blob/main/CHANGELOG.md).
+
+---
+
+## v1.8.12 Highlights
+
+### ENGINE — multi-record `Skip` over deleted rows
+
+Follow-up to v1.8.10/v1.8.11: with the deleted-row filter active, a
+remote natural-order browse could show a **duplicate of the previous
+row** where a deleted record used to appear, or end the walk a few
+rows early. `Table::skip` computed multi-record skips with physical
+record arithmetic; it now counts **visible** rows, matching the
+index-order path and Clipper `SKIP n` semantics. Also fixes LOCAL
+`dbSkip(n > 1)` over deleted/filtered rows.
+
+Requires updated `openads_serverd` (and `openace64.dll` for LOCAL
+mode). Regression tests: three M12.33 cases in
+`abi_remote_index_nav_test.cpp`.
 
 ---
 

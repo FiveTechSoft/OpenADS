@@ -1208,3 +1208,229 @@ TEST_CASE("remote AdsGetDate on Date field via index handle does not crash") {
     fs::remove_all(dir, ec);
     server.stop();
 }
+// M12.33 — natural-order multi-record Skip with SET DELETED ON. The
+// engine computed the landing as recno + delta (physical) and then only
+// slid further while sitting ON a deleted row, so every deleted row
+// strictly inside the range left the cursor one visible row short of
+// where a Clipper SKIP N lands.
+TEST_CASE("local natural-order Skip(N) counts visible rows under SET DELETED ON") {
+    auto dir = fs::temp_directory_path() / "openads_local_skip_deleted";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+
+    UNSIGNED8 srv[512];
+    const auto sp = dir.string();
+    std::memcpy(srv, sp.c_str(), sp.size() + 1);
+    ADSHANDLE hConn = 0;
+    REQUIRE(AdsConnect60(srv, ADS_LOCAL_SERVER,
+                         nullptr, nullptr, 0, &hConn) == 0);
+
+    UNSIGNED8 fields[] = "DATA,Character,8";
+    UNSIGNED8 tname[]  = "skipdel.dbf";
+    ADSHANDLE hT = 0;
+    REQUIRE(AdsCreateTable(hConn, tname, nullptr, ADS_CDX,
+                           0, 0, 0, 64, fields, &hT) == 0);
+    // recno: 1 L1, 2 gone, 3 L2, 4 L3, 5 gone, 6 L4, 7 L5
+    const char* vals[] = {"L1", "gone", "L2", "L3", "gone", "L4", "L5"};
+    for (const char* v : vals) {
+        REQUIRE(AdsAppendRecord(hT) == 0);
+        UNSIGNED8 fd[] = "DATA";
+        REQUIRE(AdsSetString(hT, fd, (UNSIGNED8*)v,
+                             static_cast<UNSIGNED32>(std::strlen(v))) == 0);
+        REQUIRE(AdsWriteRecord(hT) == 0);
+    }
+    AdsShowDeleted(1);
+    for (UNSIGNED32 rec : {2u, 5u}) {
+        REQUIRE(AdsGotoRecord(hT, rec) == 0);
+        REQUIRE(AdsDeleteRecord(hT) == 0);
+        REQUIRE(AdsWriteRecord(hT) == 0);
+    }
+
+    REQUIRE(AdsShowDeleted(0) == 0);
+    // Visible rows: 1, 3, 4, 6, 7.
+    UNSIGNED32 rn = 0;
+    REQUIRE(AdsGotoTop(hT) == 0);
+    REQUIRE(AdsGetRecordNum(hT, 0, &rn) == 0);
+    REQUIRE(rn == 1);
+
+    // SKIP 2 from rec 1: visible steps 3, 4 -> rec 4.
+    REQUIRE(AdsSkip(hT, 2) == 0);
+    REQUIRE(AdsGetRecordNum(hT, 0, &rn) == 0);
+    CHECK(rn == 4);
+
+    // SKIP -3 from rec 7: visible steps 6, 4, 3 -> rec 3.
+    REQUIRE(AdsGotoRecord(hT, 7) == 0);
+    REQUIRE(AdsSkip(hT, -3) == 0);
+    REQUIRE(AdsGetRecordNum(hT, 0, &rn) == 0);
+    CHECK(rn == 3);
+
+    // SKIP 3 from rec 4: visible steps 6, 7, phantom -> EOF.
+    REQUIRE(AdsGotoRecord(hT, 4) == 0);
+    REQUIRE(AdsSkip(hT, 3) == 0);
+    UNSIGNED16 eof = 0;
+    REQUIRE(AdsAtEOF(hT, &eof) == 0);
+    CHECK(eof == 1);
+
+    AdsShowDeleted(1);
+    REQUIRE(AdsCloseTable(hT) == 0);
+    REQUIRE(AdsDisconnect(hConn) == 0);
+    fs::remove_all(dir, ec);
+}
+
+// M12.33 — remote natural-order walk with SET DELETED ON. The client's
+// prefetch fold (Skip(step + prefetch_consumed)) sends multi-record
+// skips over the wire; with the physical-arithmetic Skip bug above the
+// server landed one visible row short per deleted row in range and
+// re-served a row the client had already displayed — the "deleted
+// record duplicates the previous item" browse symptom.
+TEST_CASE("remote natural-order walk under SET DELETED ON has no duplicate rows") {
+    using openads::network::Server;
+    auto dir = fs::temp_directory_path() / "openads_remote_skip_del_dup";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+
+    UNSIGNED8 srv[512];
+    const auto sp = dir.string();
+    std::memcpy(srv, sp.c_str(), sp.size() + 1);
+    ADSHANDLE hConn = 0;
+    REQUIRE(AdsConnect60(srv, ADS_LOCAL_SERVER,
+                         nullptr, nullptr, 0, &hConn) == 0);
+
+    UNSIGNED8 fields[] = "DATA,Character,8";
+    UNSIGNED8 tname[]  = "item.dbf";
+    ADSHANDLE hT = 0;
+    REQUIRE(AdsCreateTable(hConn, tname, nullptr, ADS_CDX,
+                           0, 0, 0, 64, fields, &hT) == 0);
+    // recno: 1 live1, 2 live2, 3 gone (deleted), 4 live3, 5 live4
+    const char* vals[] = {"live1", "live2", "gone", "live3", "live4"};
+    for (const char* v : vals) {
+        REQUIRE(AdsAppendRecord(hT) == 0);
+        UNSIGNED8 fd[] = "DATA";
+        REQUIRE(AdsSetString(hT, fd, (UNSIGNED8*)v,
+                             static_cast<UNSIGNED32>(std::strlen(v))) == 0);
+        REQUIRE(AdsWriteRecord(hT) == 0);
+    }
+    AdsShowDeleted(1);
+    REQUIRE(AdsGotoRecord(hT, 3) == 0);
+    REQUIRE(AdsDeleteRecord(hT) == 0);
+    REQUIRE(AdsWriteRecord(hT) == 0);
+    REQUIRE(AdsCloseTable(hT) == 0);
+    REQUIRE(AdsDisconnect(hConn) == 0);
+
+    Server server;
+    REQUIRE(server.start("127.0.0.1", 0).has_value());
+    const std::uint16_t port = server.port();
+
+    // SET DELETED ON before connect — the rddads startup order.
+    REQUIRE(AdsShowDeleted(0) == 0);
+
+    ADSHANDLE hRC = remote_connect(dir, port);
+    ADSHANDLE hRT = 0;
+    REQUIRE(AdsOpenTable(hRC, tname, nullptr, ADS_CDX,
+                         0, 0, 0, 0, &hRT) == 0);
+
+    // Browse-style walk: GoTop then Skip(1) until EOF, collecting the
+    // recno of every row the client would paint.
+    REQUIRE(AdsGotoTop(hRT) == 0);
+    std::vector<UNSIGNED32> seen;
+    for (int guard = 0; guard < 10; ++guard) {
+        UNSIGNED16 eof = 0;
+        REQUIRE(AdsAtEOF(hRT, &eof) == 0);
+        if (eof) break;
+        UNSIGNED32 rn = 0;
+        REQUIRE(AdsGetRecordNum(hRT, 0, &rn) == 0);
+        seen.push_back(rn);
+        REQUIRE(AdsSkip(hRT, 1) == 0);
+    }
+    REQUIRE(seen.size() == 4);
+    CHECK(seen[0] == 1);
+    CHECK(seen[1] == 2);
+    CHECK(seen[2] == 4);
+    CHECK(seen[3] == 5);
+
+    AdsShowDeleted(1);
+    REQUIRE(AdsCloseTable(hRT) == 0);
+    REQUIRE(AdsDisconnect(hRC) == 0);
+    fs::remove_all(dir, ec);
+    server.stop();
+}
+
+// M12.33 — same walk over a table longer than the prefetch lookahead
+// window (64 rows). The folded resync Skip(1 + 64) crosses the deleted
+// row, so the physical-arithmetic bug landed the server one visible row
+// short — on the exact row the client had just painted — which the
+// same-recno nav heuristic then misread as EOF, truncating the walk.
+TEST_CASE("remote natural-order walk longer than prefetch window under SET DELETED ON") {
+    using openads::network::Server;
+    auto dir = fs::temp_directory_path() / "openads_remote_skip_del_long";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+
+    UNSIGNED8 srv[512];
+    const auto sp = dir.string();
+    std::memcpy(srv, sp.c_str(), sp.size() + 1);
+    ADSHANDLE hConn = 0;
+    REQUIRE(AdsConnect60(srv, ADS_LOCAL_SERVER,
+                         nullptr, nullptr, 0, &hConn) == 0);
+
+    UNSIGNED8 fields[] = "DATA,Character,8";
+    UNSIGNED8 tname[]  = "items.dbf";
+    ADSHANDLE hT = 0;
+    REQUIRE(AdsCreateTable(hConn, tname, nullptr, ADS_CDX,
+                           0, 0, 0, 64, fields, &hT) == 0);
+    for (int i = 1; i <= 70; ++i) {
+        REQUIRE(AdsAppendRecord(hT) == 0);
+        UNSIGNED8 fd[] = "DATA";
+        char buf[16];
+        std::snprintf(buf, sizeof(buf), "it%05d", i);
+        REQUIRE(AdsSetString(hT, fd, (UNSIGNED8*)buf,
+                             static_cast<UNSIGNED32>(std::strlen(buf))) == 0);
+        REQUIRE(AdsWriteRecord(hT) == 0);
+    }
+    AdsShowDeleted(1);
+    REQUIRE(AdsGotoRecord(hT, 3) == 0);
+    REQUIRE(AdsDeleteRecord(hT) == 0);
+    REQUIRE(AdsWriteRecord(hT) == 0);
+    REQUIRE(AdsCloseTable(hT) == 0);
+    REQUIRE(AdsDisconnect(hConn) == 0);
+
+    Server server;
+    REQUIRE(server.start("127.0.0.1", 0).has_value());
+    const std::uint16_t port = server.port();
+
+    REQUIRE(AdsShowDeleted(0) == 0);
+
+    ADSHANDLE hRC = remote_connect(dir, port);
+    ADSHANDLE hRT = 0;
+    REQUIRE(AdsOpenTable(hRC, tname, nullptr, ADS_CDX,
+                         0, 0, 0, 0, &hRT) == 0);
+
+    REQUIRE(AdsGotoTop(hRT) == 0);
+    std::vector<UNSIGNED32> seen;
+    for (int guard = 0; guard < 100; ++guard) {
+        UNSIGNED16 eof = 0;
+        REQUIRE(AdsAtEOF(hRT, &eof) == 0);
+        if (eof) break;
+        UNSIGNED32 rn = 0;
+        REQUIRE(AdsGetRecordNum(hRT, 0, &rn) == 0);
+        seen.push_back(rn);
+        REQUIRE(AdsSkip(hRT, 1) == 0);
+    }
+    // Visible rows: 1, 2, 4..70 — 69 of them, each exactly once.
+    REQUIRE(seen.size() == 69);
+    UNSIGNED32 expect = 1;
+    for (std::size_t i = 0; i < seen.size(); ++i) {
+        if (expect == 3) expect = 4;
+        CHECK(seen[i] == expect);
+        ++expect;
+    }
+
+    AdsShowDeleted(1);
+    REQUIRE(AdsCloseTable(hRT) == 0);
+    REQUIRE(AdsDisconnect(hRC) == 0);
+    fs::remove_all(dir, ec);
+    server.stop();
+}

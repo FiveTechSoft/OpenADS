@@ -1,3 +1,48 @@
+## 1.8.12 — 2026-07-14
+
+### ENGINE — multi-record `Skip` counts *visible* rows under `SET DELETED ON` / filters (M12.33)
+
+Follow-up to 1.8.10/1.8.11: with the deleted-row filter now actually
+active on the server, a remote natural-order browse showed a
+**duplicate of the previous row** where a deleted record used to
+appear (or silently truncated the walk a few rows early on tables
+longer than the prefetch window).
+
+Root cause: `Table::skip` on the natural-order path computed the
+landing as `recno + delta` (**physical** record arithmetic) and only
+slid further while sitting *on* a hidden row. Every deleted/filtered
+row strictly inside the range therefore left the cursor one *visible*
+row short of where a Clipper `SKIP n` lands. Two remote mechanisms
+turn that into user-visible corruption:
+
+- The client prefetch fold (M12.21 option C) resynchronises the server
+  with `Skip(step + prefetch_consumed)` — a multi-record skip. When it
+  crossed a deleted row the server landed on the row the client had
+  just painted and re-served it: the duplicated item.
+- The same short landing tripped the client's same-recno EOF heuristic,
+  ending walks early on tables longer than the 64-row lookahead.
+
+The bug was latent for years but unreachable remotely: before 1.8.10
+the server always ran `show_deleted=true`, so physical and visible
+arithmetic coincided. LOCAL apps could hit it with any `dbSkip(n > 1)`
+over deleted rows or with `AdsSetAOF`-style filters.
+
+Fix: when the deleted filter or an AOF is active, `Table::skip` now
+walks one record at a time and counts only visible rows — same
+semantics as the index-order path. The index path and the lookahead
+restore (`skip(-cursor_advance)`) are unchanged and verified symmetric.
+
+Requires updated `openads_serverd` (the engine runs server-side; the
+DLL fix matters for LOCAL mode).
+
+Files: `engine/table.cpp`.
+Tests: `local natural-order Skip(N) counts visible rows under SET
+DELETED ON`, `remote natural-order walk under SET DELETED ON has no
+duplicate rows`, and `remote natural-order walk longer than prefetch
+window under SET DELETED ON` in `abi_remote_index_nav_test.cpp` (the
+long-walk case reproduced the truncation: 66 rows seen instead of 69
+pre-fix).
+
 ## 1.8.11 — 2026-07-14
 
 ### REMOTE — `SET DELETED ON` issued before connect now reaches the server (M12.32)
