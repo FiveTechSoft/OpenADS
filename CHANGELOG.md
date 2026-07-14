@@ -107,6 +107,22 @@ client requires `size() >= 5` on a `SeekAck` and ignores trailing bytes, and
 a new client against an old server sees the short ack, parses no trailer, and
 falls back to the previous behaviour unchanged.
 
+### Fixed — `SET DELETED ON` did not hide deleted rows mid-scan (remote)
+
+Flipping `AdsShowDeleted` changes which rows are *visible*, but it did not drop
+the client's read-ahead block — and that block holds rows already read **ahead**
+of the cursor, under the old visibility. So a scan kept serving them: deleted
+records continued to appear after `SET DELETED ON` (and live ones vanished after
+`SET DELETED OFF`), with **no wire traffic at all** to hint anything was stale.
+Measured on a 60-row table with the even records deleted: the scan returned 34
+rows instead of 30, including deleted ones.
+
+This sits exactly at the seam between remote `SET DELETED` (1.8.10/1.8.11) and
+sequential prefetch (M12.21) — each is correct alone. `AdsShowDeleted` now
+invalidates every remote table's cached row and look-ahead queue, and the server
+ends the read-ahead run on all tables in the session (its payload carries no
+table id, so it cannot go through the usual per-table run-breaker).
+
 ### Fixed — stale-row bugs in the existing prefetch (wrong data, not just slow)
 
 - `AdsSeek` / `AdsSeekLast` invalidated the cached row but **not** the

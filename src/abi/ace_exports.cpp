@@ -28282,6 +28282,25 @@ UNSIGNED32 ENTRYPOINT AdsShowDeleted(UNSIGNED16 us) {
             auto* rc = static_cast<openads::network::RemoteConnection*>(p);
             if (rc != nullptr) remotes.push_back(rc);
         });
+        // RCB 07/14/2026: flipping SET DELETED changes which rows are VISIBLE,
+        // which retroactively invalidates every row we have already read ahead
+        // of the cursor. The look-ahead block was walked under the old
+        // visibility, so without this a scan keeps serving rows from it —
+        // locally, with no wire traffic at all to hint that anything is stale —
+        // and deleted records keep appearing after SET DELETED ON (or vanish
+        // after SET DELETED OFF).
+        //
+        // Same stale-block family as the AdsSeek / AdsSetIndexOrder cases: any
+        // operation that changes what the queued rows MEAN has to drop them.
+        // Purely local state, so it is safe to do under s.mu — no round-trip,
+        // unlike the show_deleted() pushes below.
+        s.registry.for_each_handle([&](Handle, HandleKind k, void* p) {
+            if (k != HandleKind::RemoteTable) return;
+            auto* rt = static_cast<openads::network::RemoteTable*>(p);
+            if (rt == nullptr) return;
+            rt->row_valid = false;
+            rt->invalidate_prefetch();
+        });
     }
     // Release s.mu before the wire round-trips — the in-process test
     // server (and openads_serverd embedded in the same DLL) re-enters
