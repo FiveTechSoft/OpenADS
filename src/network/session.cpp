@@ -463,11 +463,21 @@ Session::abi_schema_for(ADSHANDLE h_abi) {
     UNSIGNED16 nf = 0;
     AdsGetNumFields(h_abi, &nf);
     cols.reserve(nf);
+    // RCB 07/15/2026: on `cap` and the memcpy — this is NOT the unbounded
+    // "ACE writes back the required size" pattern that would overflow nm[64].
+    // These AdsGetFieldName/AdsGetField calls run against a local server-side
+    // handle and land in copy_to_caller() (src/abi/charset.cpp), which writes
+    // back cap = min(name_len, buf-1) and never a value >= the buffer. So the
+    // memcpy is bounded by construction. One record per column, always the full
+    // count: do NOT rewrite this to skip a column on an (unreachable, i = 1..nf)
+    // failure — cols.size() is sent as the row's field count in
+    // pack_one_row_abi, so a short cols would desync the wire row.
     for (UNSIGNED16 i = 1; i <= nf; ++i) {
         AbiField fd;
         UNSIGNED8  nm[64] = {0};
         UNSIGNED16 cap = sizeof(nm);
         AdsGetFieldName(h_abi, i, nm, &cap);
+        if (cap > sizeof(nm)) cap = sizeof(nm);   // belt-and-suspenders; see above
         fd.name.assign(cap + 1, 0);
         std::memcpy(fd.name.data(), nm, cap);
         UNSIGNED16 ftype = 0;
@@ -712,15 +722,18 @@ namespace {
 // read from, or change what the rows mean (order / scope / filter), or write.
 //
 // Why a central list instead of a reset_lookahead() call inside each handler:
-// every one of these carries its table id as the leading u32 of its payload,
-// so dispatch() can break the run in ONE place rather than in twenty handlers —
-// and twenty hand-placed calls is twenty chances to forget one when a new
-// opcode lands.
+// dispatch() can break the run in ONE place rather than in twenty handlers, and
+// twenty hand-placed calls is twenty chances to forget one when a new opcode
+// lands. The leading u32 of the payload names the affected object — but see
+// break_key_is_index_id() below: for the index-scoped ops that u32 is an INDEX
+// id, not a table id, and has to be resolved before it means anything to
+// prefetch_depth_ (which is keyed by table).
 //
-// And forgetting one is cheap by construction, which is the property that makes
-// this safe: getting this list wrong is a TUNING bug, never a correctness bug.
-// The lookahead rows are always walked fresh from the post-op cursor, so a
-// missing entry just means a Skip carries a deeper block than it should have.
+// Forgetting an opcode here (or mis-keying one) is cheap by construction, which
+// is the property that makes the central approach safe: it is a TUNING bug,
+// never a correctness bug. The lookahead rows are always walked fresh from the
+// post-op cursor, so the worst case is a Skip that carries a deeper block than
+// it should have.
 bool breaks_prefetch_run(Opcode op) {
     switch (op) {
         case Opcode::GotoTop:
@@ -750,6 +763,29 @@ bool breaks_prefetch_run(Opcode op) {
     }
 }
 
+// RCB 07/15/2026: of the run-enders above, these carry an INDEX id as their
+// leading u32, not a table id — their handlers resolve it through index_h_ /
+// index_table_ (see the Seek / SkipUnique / SetScope / ClearScope cases). The
+// ramp map prefetch_depth_ is keyed by TABLE, so dispatch() must translate
+// index->table before resetting, or the reset silently misses: an index id is
+// never a live table id, so reset_lookahead() would just erase an absent key
+// and the real table's ramp would keep climbing across a seek — defeating the
+// very "seek then read one, don't over-fetch" case the ramp exists for.
+// SetOrder / SetOrderByName are absent on purpose: those DO lead with a table
+// id (see their handlers).
+bool break_key_is_index_id(Opcode op) {
+    switch (op) {
+        case Opcode::Seek:
+        case Opcode::SeekLast:
+        case Opcode::SkipUnique:
+        case Opcode::SetScope:
+        case Opcode::ClearScope:
+            return true;
+        default:
+            return false;
+    }
+}
+
 } // namespace
 
 // M12.16 — re-position the engine cursor to match the ABI
@@ -773,11 +809,22 @@ void Session::sync_engine_cursor(std::uint32_t id) {
 
 DispatchResult Session::dispatch(const Frame& f) {
     Frame reply;
-    // M12.22 — break the read-ahead run before the handler runs. Every opcode
-    // in breaks_prefetch_run() leads with its table id, so this one spot
-    // replaces a reset call in each of ~20 handlers.
+    // M12.22 — break the read-ahead run before the handler runs, in one place
+    // instead of a reset call in each of ~20 handlers.
+    //
+    // RCB 07/15/2026: the leading u32 is the affected object's id, but for the
+    // index-scoped ops (break_key_is_index_id) that is an INDEX id and has to be
+    // resolved to its table first — prefetch_depth_ is keyed by table. Without
+    // this, a Seek/SetScope/ClearScope on a table left its ramp climbing (an
+    // index id is never a live table id, so the reset hit an absent key and did
+    // nothing). If an index id can't be resolved, there is no table to reset.
     if (breaks_prefetch_run(f.opcode) && f.payload.size() >= 4) {
-        reset_lookahead(read_u32_le(f.payload.data()));
+        std::uint32_t id = read_u32_le(f.payload.data());
+        if (break_key_is_index_id(f.opcode)) {
+            auto it = index_table_.find(id);
+            id = (it != index_table_.end()) ? it->second : 0;
+        }
+        if (id != 0) reset_lookahead(id);
     }
     switch (f.opcode) {
         case Opcode::Hello: {

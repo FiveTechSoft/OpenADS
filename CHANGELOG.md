@@ -107,6 +107,18 @@ client requires `size() >= 5` on a `SeekAck` and ignores trailing bytes, and
 a new client against an old server sees the short ack, parses no trailer, and
 falls back to the previous behaviour unchanged.
 
+### Fixed — a seek/scope op left the read-ahead ramp climbing (code review)
+
+The central run-breaker that resets the adaptive read-ahead depth on a
+reposition keys its map by table id, but `Seek` / `SeekLast` / `SkipUnique` /
+`SetScope` / `ClearScope` frames lead with an *index* id. Passing that
+through unresolved erased an absent key, so the table's ramp kept climbing
+across a seek and the next `Skip` pulled a full ceiling block instead of
+restarting at the floor — defeating the "seek a record, read it, move on"
+case the ramp exists to protect. Rows were always correct (the block is
+walked fresh), so this was a wasted-bandwidth bug, not wrong data. The
+dispatcher now resolves the index id to its table before resetting.
+
 ### Fixed — `SET DELETED ON` did not hide deleted rows mid-scan (remote)
 
 Flipping `AdsShowDeleted` changes which rows are *visible*, but it did not drop
