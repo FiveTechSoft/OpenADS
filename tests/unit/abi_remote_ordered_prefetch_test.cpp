@@ -405,3 +405,58 @@ TEST_CASE("remote ordered prefetch: depth ramps instead of a flat block") {
     fs::remove_all(dir, ec);
     srv.stop();
 }
+
+// RCB 07/15/2026 — a SEEK must reset the depth ramp, like any other reposition.
+//
+// The run-breaker keys prefetch_depth_ by TABLE id, but a Seek frame leads with
+// an INDEX id. Passing that straight through erased an absent key and left the
+// table's ramp climbing across the seek, so the first Skip after a seek pulled a
+// full ceiling block instead of restarting at the floor -- defeating the exact
+// "seek a record, read it, move on" case the ramp exists to protect. Found in
+// code review; this pins it.
+//
+// Observable as a REQUEST count: after ramping to the ceiling and then seeking,
+// a short forward scan needs several small (floor -> ramping) blocks if the seek
+// reset the ramp, but is served in a single 64-row block if it did not.
+TEST_CASE("remote ordered prefetch: a seek resets the depth ramp") {
+    using openads::network::Server;
+    const int N = 400;
+    auto dir = fs::temp_directory_path() / "openads_ord_prefetch_seekramp";
+    make_reversed_dbf(dir, N);
+
+    Server srv;
+    REQUIRE(srv.start("127.0.0.1", 0).has_value());
+    ADSHANDLE hConn = remote_connect(dir, srv.port());
+    ADSHANDLE hTable = 0, hIndex = 0;
+    open_ordered(hConn, &hTable, &hIndex);
+
+    // Drive the ramp all the way to the ceiling first, so prefetch_depth_ holds
+    // the table at 64. This is what makes the test discriminate: without the
+    // fix the seek below leaves that 64 in place.
+    REQUIRE(AdsGotoTop(hIndex) == 0);
+    for (int i = 0; i < 200; ++i) REQUIRE(AdsSkip(hIndex, 1) == 0);
+
+    // Seek to a LOW VAL -> near the top of the index order, so the scan below
+    // has hundreds of rows of runway ahead of it (VAL 10 is index position 10).
+    const double key = 10.0;
+    UNSIGNED16 found = 0;
+    REQUIRE(AdsSeek(hIndex, (UNSIGNED8*)&key, sizeof(key),
+                    ADS_DOUBLEKEY, ADS_HARDSEEK, &found) == 0);
+    CHECK(found != 0);
+
+    // A 60-row forward scan starting from a freshly-reset ramp needs several
+    // refills (blocks of 8, 16, 32, 64 -> ~4 wire requests). If the ramp is
+    // stuck at the ceiling, all 60 rows arrive in one 64-row block == 1 request.
+    auto& stats = openads::mgmt::process_mg_stats();
+    const std::uint64_t base = stats.packets_in.load();
+    for (int i = 0; i < 60; ++i) REQUIRE(AdsSkip(hIndex, 1) == 0);
+    const std::uint64_t reqs = stats.packets_in.load() - base;
+
+    CHECK(reqs >= 3u);        // reset -> ~4; not reset (the bug) -> 1
+
+    REQUIRE(AdsCloseTable(hTable) == 0);
+    REQUIRE(AdsDisconnect(hConn) == 0);
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    srv.stop();
+}
