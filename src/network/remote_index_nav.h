@@ -10,6 +10,12 @@ namespace openads::network {
 // Invalidate parent row cache / prefetch before index-driven navigation.
 void remote_index_nav_preamble(RemoteIndex* ri);
 
+// Serve one forward step from the lookahead block, with no round-trip.
+// Returns false when the queue is empty (caller must go to the wire).
+// Shared by the table-handle and index-handle Skip paths so there is exactly
+// one place that knows how a queued row becomes the current row.
+bool remote_drain_prefetch(RemoteTable* rt);
+
 // Ensure the parent RemoteTable's active order matches this index tag.
 util::Result<void> remote_activate_index(RemoteIndex* ri);
 

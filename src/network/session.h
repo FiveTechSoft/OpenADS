@@ -99,6 +99,62 @@ private:
     // starts with the default (show) and ordered walks leak deleted rows.
     bool          show_deleted_ = true;
 
+    // ---- M12.22 read-ahead ramp -------------------------------------------
+    // RCB 07/14/2026: why sequential-access detection lives on the SERVER and
+    // not the client. First, it is where OS and DB read-ahead normally put it
+    // (Linux readahead, SQL Server read-ahead): the provider watches the access
+    // pattern instead of making the caller declare it, because callers are bad
+    // at declaring it. Second — and this is the part specific to us — it is the
+    // only place that CAN see it. The client serves most of a block locally
+    // without telling anyone, so the server sees roughly one Skip per block,
+    // and every such Skip is direct evidence that the client drained the last
+    // one. The signal is free and it is exactly the signal we want.
+    //
+    // Depth doubles per consecutive forward Skip on a table, floor -> ceiling.
+    // Any reposition or write on that table (see breaks_prefetch_run() in
+    // session.cpp) drops the entry, so the next run restarts at the floor.
+    //
+    // The ramp is not decoration. Before it, EVERY forward Skip dragged a flat
+    // 64 rows — including the lone Skip after a Seek, i.e. "find one customer
+    // and read him", which is a very common shape and paid for 63 rows it would
+    // never look at.
+    static constexpr std::uint16_t kPrefetchFloor = 8;
+    static constexpr std::uint16_t kPrefetchCeil  = 64;
+    // RCB 07/14/2026: a row count alone is NOT a bound — 64 rows of a table
+    // with 4 KB records is a 256 KB frame, and rows are packed with every field
+    // (no projection on the nav path). So bound the block by bytes as well and
+    // let whichever limit hits first win. SAP states the same two-sided rule for
+    // its own client cache: "the lesser of 10 records or the number of records
+    // that can fit in a burst of packets ... about 22K when using IP"
+    // (ace_adscacherecords.htm).
+    static constexpr std::size_t   kPrefetchMaxBytes = 32u * 1024u;
+    std::unordered_map<std::uint32_t, std::uint16_t> prefetch_depth_;
+
+    // Depth to use for one forward Skip on `id`. `hint` is the client's
+    // AdsCacheRecords value, or kPrefetchDepthAuto to let the ramp decide.
+    // Returns 0 when the client never advertised kCapPrefetchConsume.
+    std::uint16_t next_lookahead(std::uint32_t id,
+                                 std::uint16_t hint = kPrefetchDepthAuto);
+    // Break the sequential run for `id` (reposition / write / order change).
+    void          reset_lookahead(std::uint32_t id);
+
+    // ---- ABI schema cache --------------------------------------------------
+    // RCB 07/14/2026: pack_one_row_abi resolved every field's NAME and TYPE
+    // from the ABI on every single row (AdsGetFieldName + AdsGetFieldType +
+    // AdsGetField, per column). At one row per ack nobody would ever notice.
+    // But the whole point of this change is to make that function pack a 64-row
+    // block, which turns it into ~3 ABI calls x columns x 64 rows on every
+    // Skip — i.e. the read-ahead work would have partly eaten the round-trips
+    // it saves. The schema of an OPEN handle cannot change, so resolve it once
+    // per handle and hold it. Invalidated on CloseTable, because AdsCloseTable
+    // frees the ADSHANDLE and a later open can be handed the same value back.
+    struct AbiField {
+        std::vector<UNSIGNED8> name;    // NUL-terminated, for AdsGetField
+        bool                   is_memo = false;
+    };
+    std::unordered_map<ADSHANDLE, std::vector<AbiField>> abi_schema_;
+    const std::vector<AbiField>& abi_schema_for(ADSHANDLE h_abi);
+
     // Moved helpers (were [&] lambdas in session_loop) -> private
     // methods; bodies unchanged except member renames.
     void      cleanup();

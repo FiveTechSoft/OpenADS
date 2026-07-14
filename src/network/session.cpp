@@ -266,8 +266,15 @@ bool Session::process_frame(const Frame& f) {
     srv_->set_session_executing(sid_, false);
     if (res.reply) {
         if (auto wr = write_frame(s_, *res.reply); !wr) return false;
-        openads::mgmt::process_mg_stats()
-            .packets_out.fetch_add(1, std::memory_order_relaxed);
+        auto& mgst = openads::mgmt::process_mg_stats();
+        mgst.packets_out.fetch_add(1, std::memory_order_relaxed);
+        // RCB 07/14/2026: bytes_out was declared alongside packets_out but
+        // never actually fed, so AdsMgGetCommStats / sp_mgGetCommStats have
+        // always reported 0 bytes sent. Found it while trying to MEASURE the
+        // read-ahead block size and getting zeroes back. Same +5 framing
+        // overhead as bytes_in above.
+        mgst.bytes_out.fetch_add(res.reply->payload.size() + 5,
+                                 std::memory_order_relaxed);
         srv_->touch_session(sid_, false, true);
     }
     return !res.close_session;
@@ -443,6 +450,36 @@ bool Session::pack_one_row_engine(std::vector<std::uint8_t>& dst,
     return true;
 }
 
+// Field names + memo-ness for one open ABI handle, resolved once. The schema
+// of an open table cannot change under us, so this is a pure win: it takes
+// the two per-column ABI lookups (name, type) out of the per-row path, which
+// a 64-row lookahead block walks 64 times.
+const std::vector<Session::AbiField>&
+Session::abi_schema_for(ADSHANDLE h_abi) {
+    auto it = abi_schema_.find(h_abi);
+    if (it != abi_schema_.end()) return it->second;
+
+    std::vector<AbiField> cols;
+    UNSIGNED16 nf = 0;
+    AdsGetNumFields(h_abi, &nf);
+    cols.reserve(nf);
+    for (UNSIGNED16 i = 1; i <= nf; ++i) {
+        AbiField fd;
+        UNSIGNED8  nm[64] = {0};
+        UNSIGNED16 cap = sizeof(nm);
+        AdsGetFieldName(h_abi, i, nm, &cap);
+        fd.name.assign(cap + 1, 0);
+        std::memcpy(fd.name.data(), nm, cap);
+        UNSIGNED16 ftype = 0;
+        AdsGetFieldType(h_abi, fd.name.data(), &ftype);
+        fd.is_memo = (ftype == ADS_MEMO ||
+                      ftype == ADS_BINARY ||
+                      ftype == ADS_IMAGE);
+        cols.push_back(std::move(fd));
+    }
+    return abi_schema_.emplace(h_abi, std::move(cols)).first->second;
+}
+
 bool Session::pack_one_row_abi(std::vector<std::uint8_t>& dst,
                                ADSHANDLE h_abi) {
     UNSIGNED16 atend = 0;
@@ -464,28 +501,24 @@ bool Session::pack_one_row_abi(std::vector<std::uint8_t>& dst,
     UNSIGNED16 del = 0;
     AdsIsRecordDeleted(h_abi, &del);
     dst.push_back(del != 0 ? 1 : 0);
-    UNSIGNED16 nf = 0;
-    AdsGetNumFields(h_abi, &nf);
-    write_u16_p(nf);
-    for (UNSIGNED16 i = 1; i <= nf; ++i) {
-        UNSIGNED8  nm[64] = {0};
-        UNSIGNED16 cap = sizeof(nm);
-        AdsGetFieldName(h_abi, i, nm, &cap);
-        std::vector<UNSIGNED8> nbuf(cap + 1, 0);
-        std::memcpy(nbuf.data(), nm, cap);
-        UNSIGNED16 ftype = 0;
-        AdsGetFieldType(h_abi, nbuf.data(), &ftype);
-        bool is_memo = (ftype == ADS_MEMO ||
-                        ftype == ADS_BINARY ||
-                        ftype == ADS_IMAGE);
+    const auto& cols = abi_schema_for(h_abi);
+    write_u16_p(static_cast<std::uint16_t>(cols.size()));
+    std::vector<UNSIGNED8> vbuf;
+    for (const auto& fd : cols) {
+        // Non-memo values fit the fixed DBF field width; 4096 covers every
+        // scalar type the ABI hands back. Memos are sized from the engine.
         UNSIGNED32 vcap = 4096;
-        if (is_memo) {
+        if (fd.is_memo) {
             UNSIGNED32 mlen = 0;
-            if (AdsGetMemoLength(h_abi, nbuf.data(), &mlen) != 0) mlen = 0;
+            if (AdsGetMemoLength(h_abi,
+                    const_cast<UNSIGNED8*>(fd.name.data()), &mlen) != 0) {
+                mlen = 0;
+            }
             vcap = mlen + 1;
         }
-        std::vector<UNSIGNED8> vbuf(vcap, 0);
-        if (AdsGetField(h_abi, nbuf.data(), vbuf.data(), &vcap, 0) != 0) {
+        vbuf.assign(vcap, 0);
+        if (AdsGetField(h_abi, const_cast<UNSIGNED8*>(fd.name.data()),
+                        vbuf.data(), &vcap, 0) != 0) {
             vcap = 0;
         }
         write_u32_p(vcap);
@@ -509,6 +542,25 @@ void Session::pack_row_trailer(Frame& reply, std::uint32_t id,
     ADSHANDLE               h_abi   = 0;
     if (auto cit = cursor_tbls_.find(id); cit != cursor_tbls_.end()) {
         h_abi = cit->second;
+    } else if (ordered_tables_.count(id) != 0) {
+        // RCB 07/14/2026: THIS is the line that unlocks ordered read-ahead, and
+        // it is worth understanding why it was the blocker.
+        //
+        // A table with a controlling order must be walked through the ABI
+        // handle, because that is where the order (and any scope) lives — the
+        // engine cursor only ever moves in natural record order. This function
+        // used to resolve an ordered table to the ENGINE table, which meant the
+        // lookahead walk below produced the natural-order NEIGHBOURS instead of
+        // the next rows in the index. Wrong rows. So the Skip handler defended
+        // itself the only way it could and passed lookahead = 0 for any ordered
+        // table, with a comment saying correctness beats the round-trip save.
+        //
+        // Correct, but it disabled read-ahead precisely where it pays: rddads
+        // navigates on hOrdCurrent whenever an order is set, so "ordered
+        // browse" IS the browse. Sourcing both the current row and the block
+        // from the ABI handle makes the index walk correct, and the lookahead
+        // can simply be switched back on — no wire change, no new opcode.
+        h_abi = ensure_abi_handle(id);
     } else if (auto eit = tbls_.find(id); eit != tbls_.end() && sess_conn_) {
         eng_tbl = sess_conn_->lookup_table(eit->second);
     } else if (auto hit = tbls_h_.find(id); hit != tbls_h_.end()) {
@@ -568,6 +620,14 @@ void Session::pack_row_trailer(Frame& reply, std::uint32_t id,
     // caller-visible cursor lands a row past where the lone
     // Skip(+1) it issued would have produced.
     int cursor_advance = 0;
+    // RCB 07/14/2026: the row count is only half the bound — see
+    // kPrefetchMaxBytes. Stop as soon as the block reaches the byte budget so a
+    // wide table cannot turn a 64-row lookahead into a multi-hundred-KB frame.
+    // Checked AFTER packing each row on purpose: that way we always send at
+    // least one lookahead row even when a single row is bigger than the whole
+    // budget, instead of silently degrading to no read-ahead on exactly the
+    // tables where a round-trip costs the most.
+    std::size_t block_bytes = 0;
     for (std::uint16_t i = 0; i < lookahead_n; ++i) {
         if (eng_tbl) {
             auto sk = eng_tbl->skip(1);
@@ -575,6 +635,7 @@ void Session::pack_row_trailer(Frame& reply, std::uint32_t id,
             ++cursor_advance;
             std::vector<std::uint8_t> row;
             if (!pack_one_row_engine(row, eng_tbl)) break;
+            block_bytes += row.size();
             rows.push_back(std::move(row));
             ++taken;
         } else {
@@ -585,9 +646,11 @@ void Session::pack_row_trailer(Frame& reply, std::uint32_t id,
             if (atend) break;
             std::vector<std::uint8_t> row;
             if (!pack_one_row_abi(row, h_abi)) break;
+            block_bytes += row.size();
             rows.push_back(std::move(row));
             ++taken;
         }
+        if (block_bytes >= kPrefetchMaxBytes) break;
     }
     if (cursor_advance > 0) {
         if (eng_tbl) {
@@ -602,6 +665,92 @@ void Session::pack_row_trailer(Frame& reply, std::uint32_t id,
         reply.payload.insert(reply.payload.end(), r.begin(), r.end());
     }
 }
+
+// M12.22/M12.23 — read-ahead depth for one forward Skip.
+//
+// `hint` is what the client asked for via AdsCacheRecords, or
+// kPrefetchDepthAuto when it never called it (and for any pre-M12.23 client,
+// whose Skip frame carries no depth field at all).
+//
+//   * explicit hint: honour it. The caller knows something we cannot infer
+//     from the access pattern — SAP's documented cases are "0 or 1 turns
+//     read-ahead off" (a batch loop that edits most records it visits, where
+//     every edit would dump the block anyway) and "aggressive = 100" (a
+//     one-directional sweep). Capped at kPrefetchDepthMax so one request
+//     can't become an unbounded server-side scan.
+//   * auto: ramp. One step per consecutive forward Skip on the table,
+//     8 -> 16 -> 32 -> 64, then held. Anything that breaks the sequential run
+//     (reposition, write, order change) erases the entry, so the next run
+//     starts at the floor again — which is what keeps a one-off "seek a
+//     record and read it" from dragging a full block it will never look at.
+std::uint16_t Session::next_lookahead(std::uint32_t id, std::uint16_t hint) {
+    if (!client_prefetch_ok_) return 0;
+    if (hint != kPrefetchDepthAuto) {
+        // SAP: "A usRecords value of 0 (or 1) effectively turns read-ahead
+        // record caching off." 1 means "just the current row", which is
+        // exactly a zero-length lookahead block.
+        if (hint <= 1) return 0;
+        return hint > kPrefetchDepthMax ? kPrefetchDepthMax : hint;
+    }
+    auto [it, fresh] = prefetch_depth_.try_emplace(id, kPrefetchFloor);
+    if (!fresh) {
+        std::uint32_t grown = static_cast<std::uint32_t>(it->second) * 2u;
+        it->second = static_cast<std::uint16_t>(
+            grown > kPrefetchCeil ? kPrefetchCeil : grown);
+    }
+    return it->second;
+}
+
+void Session::reset_lookahead(std::uint32_t id) {
+    prefetch_depth_.erase(id);
+}
+
+namespace {
+
+// RCB 07/14/2026: opcodes that end a sequential read-ahead run on the table
+// they name. All of them either move the cursor somewhere the block was not
+// read from, or change what the rows mean (order / scope / filter), or write.
+//
+// Why a central list instead of a reset_lookahead() call inside each handler:
+// every one of these carries its table id as the leading u32 of its payload,
+// so dispatch() can break the run in ONE place rather than in twenty handlers —
+// and twenty hand-placed calls is twenty chances to forget one when a new
+// opcode lands.
+//
+// And forgetting one is cheap by construction, which is the property that makes
+// this safe: getting this list wrong is a TUNING bug, never a correctness bug.
+// The lookahead rows are always walked fresh from the post-op cursor, so a
+// missing entry just means a Skip carries a deeper block than it should have.
+bool breaks_prefetch_run(Opcode op) {
+    switch (op) {
+        case Opcode::GotoTop:
+        case Opcode::GotoBottom:
+        case Opcode::GotoRecord:
+        case Opcode::RefreshRecord:
+        case Opcode::Seek:
+        case Opcode::SeekLast:
+        case Opcode::SkipUnique:
+        case Opcode::SetOrder:
+        case Opcode::SetOrderByName:
+        case Opcode::SetScope:
+        case Opcode::ClearScope:
+        case Opcode::SetAOF:
+        case Opcode::CustomizeAOF:
+        case Opcode::SetField:
+        case Opcode::SetRecord:
+        case Opcode::AppendBlank:
+        case Opcode::DeleteRecord:
+        case Opcode::RecallRecord:
+        case Opcode::PackTable:
+        case Opcode::ZapTable:
+        case Opcode::CloseTable:
+            return true;
+        default:
+            return false;
+    }
+}
+
+} // namespace
 
 // M12.16 — re-position the engine cursor to match the ABI
 // cursor after an index op that moves it (Seek / SeekLast).
@@ -624,6 +773,12 @@ void Session::sync_engine_cursor(std::uint32_t id) {
 
 DispatchResult Session::dispatch(const Frame& f) {
     Frame reply;
+    // M12.22 — break the read-ahead run before the handler runs. Every opcode
+    // in breaks_prefetch_run() leads with its table id, so this one spot
+    // replaces a reset call in each of ~20 handlers.
+    if (breaks_prefetch_run(f.opcode) && f.payload.size() >= 4) {
+        reset_lookahead(read_u32_le(f.payload.data()));
+    }
     switch (f.opcode) {
         case Opcode::Hello: {
             reply.opcode = Opcode::HelloAck;
@@ -857,6 +1012,10 @@ DispatchResult Session::dispatch(const Frame& f) {
             std::uint32_t id = read_u32_le(f.payload.data());
             auto cit = cursor_tbls_.find(id);
             if (cit != cursor_tbls_.end()) {
+                // Drop the cached schema with the handle: AdsCloseTable frees
+                // the ADSHANDLE, and a later AdsOpenTable can hand the same
+                // value back for a different table.
+                abi_schema_.erase(cit->second);
                 (void)AdsCloseTable(cit->second);
                 cursor_tbls_.erase(cit);
                 srv_->add_session_table(sid_, -1);
@@ -873,6 +1032,9 @@ DispatchResult Session::dispatch(const Frame& f) {
                 srv_->add_session_table(sid_, -1, tname);
             }
             tbl_open_paths_.erase(id);
+            if (auto hit = tbls_h_.find(id); hit != tbls_h_.end()) {
+                abi_schema_.erase(hit->second);
+            }
             tbls_h_.erase(id);
             ordered_tables_.erase(id);
             reply.opcode = Opcode::CloseTableAck;
@@ -900,12 +1062,42 @@ DispatchResult Session::dispatch(const Frame& f) {
                 ordered_tables_.count(id) ? ensure_abi_handle(id) : 0;
             if (hord != 0) {
                 (void)AdsGotoTop(hord);
-                sync_engine_cursor(id);
             } else {
                 (void)tbl->goto_top();
             }
             reply.opcode = Opcode::GotoTopAck;
-            pack_row_trailer(reply, id);
+            // RCB 07/14/2026: M12.24 — warm the first page. A GotoTop is about
+            // as strong a "I am about to walk this table" signal as exists (a
+            // browse painting its first screen, or a scan loop starting), yet
+            // its ack used to carry the current row and nothing else, so the
+            // very first Skip after it was always cold and always cost a
+            // round-trip. Send the block with the row.
+            //
+            // Only GotoTop, deliberately. GotoBottom gets nothing: the block is
+            // a FORWARD walk and there is nothing after the last record — a
+            // warm GotoBottom needs BACKWARD lookahead, which is its own piece
+            // of work (P5). GotoRecord/Seek get nothing either, because
+            // relation navigation drives them once per parent row and would
+            // drag a child block over the wire every time for nothing.
+            //
+            // Depth comes from next_lookahead() like any other block, so it
+            // starts at the floor and honours AdsCacheRecords (an app that
+            // turned read-ahead off must not get a block dumped on it here).
+            // dispatch() has already reset the run for this table (GotoTop is
+            // in breaks_prefetch_run), so this is a fresh run at the floor and
+            // the following Skips ramp up from it.
+            std::uint16_t gt_hint = kPrefetchDepthAuto;
+            if (f.payload.size() >= 6) {
+                gt_hint = static_cast<std::uint16_t>(
+                    static_cast<std::uint16_t>(f.payload[4]) |
+                    (static_cast<std::uint16_t>(f.payload[5]) << 8));
+            }
+            pack_row_trailer(reply, id, next_lookahead(id, gt_hint));
+            // Sync AFTER packing — pack_row_trailer walks the ABI cursor
+            // through the block and restores it, so the engine cursor has to be
+            // anchored to where the ABI cursor finally lands (same reason as
+            // the ordered Skip path).
+            if (hord != 0) sync_engine_cursor(id);
             break;
         }
         case Opcode::Skip: {
@@ -913,19 +1105,30 @@ DispatchResult Session::dispatch(const Frame& f) {
             std::uint32_t id = read_u32_le(f.payload.data());
             std::int32_t step = static_cast<std::int32_t>(
                 read_u32_le(f.payload.data() + 4));
-            // M12.21 — sequential Skip(1) is the xbrowse PgDn
-            // pattern; piggyback up to 19 lookahead rows so the
-            // remaining cells in the repaint hit the client cache.
-            // M12.21 option C — re-enabled. A forward Skip from a
-            // prefetch-capable client piggybacks up to K lookahead
-            // rows; the client serves them locally and folds the
-            // consumed count back into the next wire step, so the
-            // server cursor never desyncs (the bug that shelved
-            // option B). Non-capable clients and non-forward steps
-            // get no lookahead, preserving the old behavior.
-            constexpr std::uint16_t kPrefetchLookahead = 64;
-            std::uint16_t lookahead =
-                (client_prefetch_ok_ && step >= 1) ? kPrefetchLookahead : 0;
+            // M12.21 option C — a forward Skip from a prefetch-capable client
+            // piggybacks a lookahead block; the client serves those rows
+            // locally and folds the consumed count back into the next wire
+            // step, so the server cursor never desyncs (the bug that shelved
+            // option B). Non-capable clients and non-forward steps get no
+            // lookahead, preserving the old behavior.
+            //
+            // M12.22 — the depth is no longer a flat 64. next_lookahead()
+            // ramps it per consecutive forward Skip on this table and any
+            // reposition/write resets the run (see breaks_prefetch_run), so a
+            // one-off Skip pays for a handful of rows instead of a full block.
+            //
+            // M12.23 — ...unless the client named a depth via AdsCacheRecords,
+            // which rides along as an OPTIONAL trailing [u16]. Absent (any
+            // pre-M12.23 client) reads as kPrefetchDepthAuto = "you decide".
+            std::uint16_t depth_hint = kPrefetchDepthAuto;
+            if (f.payload.size() >= 10) {
+                depth_hint = static_cast<std::uint16_t>(
+                    static_cast<std::uint16_t>(f.payload[8]) |
+                    (static_cast<std::uint16_t>(f.payload[9]) << 8));
+            }
+            const bool want_lookahead = (client_prefetch_ok_ && step >= 1);
+            const std::uint16_t lookahead =
+                want_lookahead ? next_lookahead(id, depth_hint) : 0;
             if (auto cit = cursor_tbls_.find(id); cit != cursor_tbls_.end()) {
                 (void)AdsSkip(cit->second, step);
                 reply.opcode = Opcode::SkipAck;
@@ -938,16 +1141,26 @@ DispatchResult Session::dispatch(const Frame& f) {
             }
             auto* tbl = sess_conn_->lookup_table(it->second);
             if (!tbl) { reply = err("Skip: lookup failed"); break; }
-            // Ordered: skip on the ABI handle and sync. Lookahead prefetch
-            // walks the engine table in natural order, so disable it here —
-            // correctness of the index walk beats the PgDn round-trip save.
+            // Ordered: skip on the ABI handle, which is where the order and
+            // any scope live. M12.22 — the lookahead block now rides along
+            // here too: pack_row_trailer resolves an ordered table to the same
+            // ABI handle, so it walks the INDEX, not natural record order.
+            // That was the one thing blocking read-ahead on the browse that
+            // actually matters (rddads skips on hOrdCurrent when an order is
+            // set), and it needed no wire change.
             ADSHANDLE hord =
                 ordered_tables_.count(id) ? ensure_abi_handle(id) : 0;
             if (hord != 0) {
                 (void)AdsSkip(hord, step);
-                sync_engine_cursor(id);
                 reply.opcode = Opcode::SkipAck;
-                pack_row_trailer(reply, id, 0);
+                pack_row_trailer(reply, id, lookahead);
+                // RCB 07/14/2026: sync AFTER packing, not before (this call
+                // used to sit above the pack). pack_row_trailer now walks the
+                // ABI cursor forward through the lookahead block and then
+                // restores it, so the engine cursor has to be re-anchored to
+                // where the ABI cursor FINALLY lands. Syncing first would
+                // anchor it to a position the pack is about to move away from.
+                sync_engine_cursor(id);
                 break;
             }
             (void)tbl->skip(step);
@@ -1803,6 +2016,30 @@ DispatchResult Session::dispatch(const Frame& f) {
                 ? Opcode::SeekLastAck : Opcode::SeekAck;
             reply.payload.push_back(static_cast<std::uint8_t>(found != 0 ? 1 : 0));
             write_u32_le(rn, reply.payload);
+            // RCB 07/14/2026: M12.24 — append the row the seek landed on.
+            //
+            // The ack used to be just [u8 found][u32 recno], which meant the
+            // client knew WHERE it was but not WHAT was there: row_valid stayed
+            // false, so the first AdsGetField after a seek paid a whole extra
+            // FetchCurrentRow round-trip. Seek-then-read is the single most
+            // common thing a business app does, and it was costing 2 RTTs.
+            // Worse, the relation code (seek_remote_child_relation) papered
+            // over it by firing a GotoRecord straight after every seek purely
+            // to pull the row down — so a parent browse with a child relation
+            // paid 2 RTTs per parent ROW. The trailer kills both.
+            //
+            // Deliberately NO lookahead block here (depth 0). A relation
+            // re-seeks the child on every single parent row, so a block would
+            // drag N child rows over the wire per parent row and almost never
+            // be read. SAP draws the same line: read-ahead triggers on "a skip
+            // operation after ... any other movement operation", i.e. the skip
+            // earns the block, not the seek.
+            //
+            // Wire-safe both ways, no capability bit: an old client requires
+            // size() >= 5 and ignores trailing bytes; a new client against an
+            // old server sees a 5-byte ack, parses no trailer, and falls back
+            // to the FetchCurrentRow path exactly as before.
+            if (parent_tid != 0) pack_row_trailer(reply, parent_tid, 0);
             break;
         }
         // CreateIndex / SkipUnique / SetScope / ClearScope —

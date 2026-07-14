@@ -373,6 +373,37 @@ TEST_CASE("AdsSetRelation drives remote child over tcp://") {
     REQUIRE(AdsSkip(hP, 1) == openads::AE_SUCCESS);
     CHECK(child_data(hC) == "beta");
 
+    // RCB 07/14/2026: DO NOT SHORTEN THIS SCAN. Everything below the first Skip
+    // is here on purpose, and the test used to stop right above this line.
+    //
+    // That is precisely why a real wrong-data bug lived in shipped code for
+    // months: the relation read the parent's key with a wire GetField, which
+    // asks for the SERVER's current record — and the server's cursor LAGS the
+    // client's logical position by however many rows were served out of the
+    // read-ahead block. The FIRST skip of a scan happened to go to the wire (the
+    // block was still empty), so the two cursors coincidentally agreed and the
+    // child looked correct. Every skip after it drained the block locally, the
+    // server cursor fell behind, and the child silently followed a STALE parent
+    // row. Confirmed against the pre-fix tree: this asserted "gamma" and got
+    // "beta".
+    //
+    // The lesson, and the reason for the comment: a ONE-STEP test cannot see a
+    // lag bug, because the bug IS the second step. Any test covering a cursor
+    // that can run ahead of the server has to walk at least three rows.
+    REQUIRE(AdsSkip(hP, 1) == openads::AE_SUCCESS);
+    CHECK(child_data(hC) == "gamma");
+
+    // And again from the top. Since M12.24 the GotoTop ack comes back warm, so
+    // here even the FIRST skip is served from the client cache and never touches
+    // the wire — a different lag path to the one above, and the one that made
+    // the bug reproduce immediately instead of on step two.
+    REQUIRE(AdsGotoTop(hP) == openads::AE_SUCCESS);
+    CHECK(child_data(hC) == "alpha");
+    REQUIRE(AdsSkip(hP, 1) == openads::AE_SUCCESS);
+    CHECK(child_data(hC) == "beta");
+    REQUIRE(AdsSkip(hP, 1) == openads::AE_SUCCESS);
+    CHECK(child_data(hC) == "gamma");
+
     REQUIRE(AdsCloseTable(hC) == openads::AE_SUCCESS);
     REQUIRE(AdsCloseTable(hP) == openads::AE_SUCCESS);
     REQUIRE(AdsDisconnect(hConn) == openads::AE_SUCCESS);

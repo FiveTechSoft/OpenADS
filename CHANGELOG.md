@@ -1,3 +1,147 @@
+## Unreleased
+
+### Remote read-ahead on ordered browses (the Mp10 xBrowse case) — 598 → 7 round-trips
+
+Sequential prefetch shipped in M12.21, but it was explicitly disabled
+whenever a controlling order was active: the look-ahead block was walked
+on the engine cursor, which only ever moves in natural record order, so
+for an ordered table it would have returned the wrong rows. That left the
+browse that actually matters paying full price — Harbour's rddads
+navigates on `hOrdCurrent` (an index handle) whenever an order is set, and
+every such skip *also* re-sent a `SetOrder` frame first, then threw the
+prefetch queue away. **Two round-trips per row, cache discarded each time.**
+
+A 299-row ordered scan over loopback measured **598 wire requests before,
+7 after** (`tests/unit/abi_remote_ordered_prefetch_test.cpp`). No wire
+format change.
+
+- **Index-order look-ahead.** `pack_row_trailer` now resolves an ordered
+  table to its ABI handle — where the order and any scope live — so the
+  block is walked in index order and the cursor restored afterwards.
+- **`SetOrder` is sent once per order change, not once per row.** The new
+  `RemoteTable::server_order_id` tracks what the server *actually* has
+  installed (only a `SetOrder` ack writes it), as distinct from the
+  client's belief, which can be set with no round-trip at all via
+  production-bag auto-open. That distinction is what makes skipping the
+  frame safe.
+- **Adaptive depth.** Sequential detection lives on the server, as in OS
+  and DB read-ahead generally: depth ramps 8 → 16 → 32 → 64 per
+  consecutive forward `Skip` on a table, and any reposition, write, or
+  order change resets the run. A one-off "seek a record and read it" no
+  longer drags a full 64-row block it will never look at.
+- **Byte budget.** The block is capped at 32 KB as well as by row count —
+  64 rows of a 4 KB-record table would otherwise be a 256 KB frame. SAP
+  documents the same two-sided rule for its own client cache.
+
+### `AdsCacheRecords` is now honoured (was a documented no-op)
+
+The caller's requested read-ahead depth now reaches the server, riding on
+each `Skip` as an optional trailing `[u16]`. rddads already exposes the
+call, so a Harbour app can use it directly.
+
+- `0` or `1` **turns read-ahead off** — SAP's documented remedy for a batch
+  loop that edits most of the records it visits, where every write dumps
+  the block anyway and reading ahead is pure waste. This previously had no
+  way to be expressed.
+- `N` reads exactly `N` rows per skip, overriding the automatic ramp (SAP's
+  "aggressive" setting is 100). Capped at 512 so one request cannot become
+  an unbounded server-side scan.
+
+**No capability bit, and no break in either version-mix direction.** A new
+client sending the extra 2 bytes to an old server is ignored by its length
+check; an old client sending none to a new server reads as
+`kPrefetchDepthAuto`. That sentinel is deliberately `0xFFFF` and not `0`,
+because `0` already means "disable" — had absent-been-zero, every
+pre-existing client would have silently *lost* read-ahead. That exact
+regression is pinned by a raw-frame test
+(`tests/unit/network_skip_depth_test.cpp`), which hand-builds a legacy
+8-byte `Skip` because the ABI client can no longer produce one.
+
+### Fixed — relations followed a STALE parent row (wrong data, shipped)
+
+`AdsSetRelation` over a remote connection pointed the child at the **wrong
+parent record** from the second skip of any scan onward. A parent/child grid
+— every Mp10 relation browse — showed mismatched child data.
+
+The cause: the relation read the parent's key with a wire `GetField`, which
+reads the **server's** cursor. That cursor lags the client's logical position
+by however many rows were served out of the read-ahead block, so the key was
+one or more records behind. It read the parent's row into the client cache
+first and then ignored it.
+
+It hid because the only coverage skipped the parent exactly **once**, and the
+first skip of a scan always went to the wire (the block was still empty),
+leaving the two cursors coincidentally in sync. Every skip after it drained
+the block locally and drifted. Present since sequential prefetch landed
+(M12.21); found while adding the warm-GotoTop below, which makes even the
+first skip local and so exposed it immediately. The relation test now walks
+the whole parent instead of stopping at the first row.
+
+Reading the cached row also removes a wire round-trip per parent row, per
+relation.
+
+### The first page after a reposition is no longer cold
+
+- **`SeekAck` now carries the row it landed on.** It used to be just
+  `[u8 found][u32 recno]` — the client knew *where* it was but not *what*
+  was there, so the first `AdsGetField` after a seek paid a second
+  round-trip (`FetchCurrentRow`). **Seek-then-read — the most common thing a
+  business app does — cost 2 round-trips; it now costs 1.** The relation code
+  had been papering over this by firing a `GotoRecord` immediately after
+  every seek purely to pull the row down, so a parent browse with a child
+  relation paid **2 round-trips per parent row**; that frame is now only sent
+  when talking to an older server.
+- **`GotoTop` now comes back warm**, carrying a read-ahead block with the
+  row. A browse painting its first screen no longer pays a round-trip for the
+  first `Skip`.
+- Deliberately **not** `GotoBottom` (a *forward* block past the last record is
+  empty — that needs backward look-ahead, which is separate work) and
+  deliberately **not** `Seek`/`GotoRecord` (relation navigation drives those
+  once per parent row, and a block there would drag child rows over the wire
+  every time for nothing). SAP draws the same line: read-ahead triggers on
+  "a skip operation after ... any other movement operation" — the skip earns
+  the block, not the movement.
+
+Both are wire-compatible in either direction with no capability bit: an old
+client requires `size() >= 5` on a `SeekAck` and ignores trailing bytes, and
+a new client against an old server sees the short ack, parses no trailer, and
+falls back to the previous behaviour unchanged.
+
+### Fixed — stale-row bugs in the existing prefetch (wrong data, not just slow)
+
+- `AdsSeek` / `AdsSeekLast` invalidated the cached row but **not** the
+  look-ahead queue, so the next `Skip(1)` could serve a **stale pre-seek
+  row** with no wire traffic, and the following wire skip sent a step
+  inflated by a lag that no longer applied.
+- `AdsSetIndexOrder` / `AdsSetIndexOrderByHandle` had the same hole: rows
+  read in the previous order stayed queued.
+- `AdsGetRecord` did not settle the prefetch lag, so it returned the raw
+  image of the record at the *server's* lagging cursor rather than the
+  caller's current row.
+
+### Fixed — telemetry
+
+- `bytes_out` was declared alongside `packets_out` but never incremented,
+  so `AdsMgGetCommStats` / `sp_mgGetCommStats` always reported **0 bytes
+  sent**. Now fed per reply frame.
+
+### Performance
+
+- `pack_one_row_abi` re-resolved every column's name and type from the ABI
+  on every row (three ABI calls per column, per row). Harmless at one row
+  per ack; with a 64-row block it is thousands of calls per `Skip`. The
+  schema of an open handle cannot change, so it is now resolved once per
+  handle and cached.
+
+### Docs
+
+- `AdsCacheRecords` was documented as a no-op because "OpenADS does not
+  pre-cache rows" — untrue since M12.21. Now describes the automatic
+  read-ahead and states plainly that the requested *depth* is still not
+  honoured.
+- `docs/wire-protocol.md` §5.8 documented a row-trailer layout that has
+  never existed in the code. Replaced with the real format, including the
+  look-ahead block and the consumed-lag protocol.
 ## 1.8.11 — 2026-07-14
 
 ### REMOTE — `SET DELETED ON` issued before connect now reaches the server (M12.32)

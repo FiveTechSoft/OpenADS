@@ -413,6 +413,41 @@ inline constexpr std::uint32_t kCapPrefetchConsume = 0x00000001u;
 // servers never see a 0xA6 frame, so the wire stays backward compatible.
 inline constexpr std::uint32_t kCapAggregate = 0x00000002u;
 
+// RCB 07/14/2026: M12.23 — AdsCacheRecords support. Why a bare trailing field
+// and not a new opcode or a capability bit: the Skip request grew an OPTIONAL
+// trailing [u16 LE] carrying the caller's requested read-ahead depth:
+//
+//     Skip: [u32 tid][i32 step]            <- pre-M12.23, still valid
+//     Skip: [u32 tid][i32 step][u16 depth] <- M12.23
+//
+// No capability bit is needed, because this is compatible in BOTH
+// version-mix directions by construction:
+//   * new client -> old server: the old handler length-checks (`size() < 8`)
+//     and reads only the first 8 bytes, so the trailing field is ignored and
+//     the server keeps choosing the depth itself.
+//   * old client -> new server: the field is simply absent, which the new
+//     handler reads as kPrefetchDepthAuto (below).
+//
+// RCB 07/14/2026: this sentinel is 0xFFFF and deliberately NOT 0. SAP gives 0
+// a real meaning — "0 (or 1) effectively turns read-ahead record caching off"
+// (ace_adscacherecords.htm). So "the caller said nothing" and "the caller said
+// stop caching" are DIFFERENT instructions and the server has to tell them
+// apart: the first ramps, the second sends no block at all. Had I let an
+// absent field decode as 0, every pre-M12.23 client — which sends no field —
+// would have silently lost read-ahead the day this shipped. Pinned by
+// tests/unit/network_skip_depth_test.cpp, which hand-builds a legacy 8-byte
+// Skip because the ABI client can no longer emit one.
+inline constexpr std::uint16_t kPrefetchDepthAuto = 0xFFFFu;
+
+// RCB 07/14/2026: safety cap on a caller-requested depth. usRecords is a u16,
+// so an app can ask for 65534 rows in one block. The byte budget would stop
+// that from becoming an oversized frame, but NOT from walking 65534 records on
+// the server thread first — the cost we actually care about. SAP's own
+// guidance is that "read-ahead values greater than 100 records are not
+// beneficial", so this bound sits far above anything useful and exists purely
+// to keep one wire request from turning into an unbounded scan.
+inline constexpr std::uint16_t kPrefetchDepthMax = 512u;
+
 struct Frame {
     Opcode                    opcode = Opcode::Hello;
     std::vector<std::uint8_t> payload;

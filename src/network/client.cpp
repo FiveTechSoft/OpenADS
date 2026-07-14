@@ -330,6 +330,16 @@ util::Result<void> RemoteConnection::goto_top(RemoteTable* rt) {
     Frame req;
     req.opcode = Opcode::GotoTop;
     write_u32_le(rt->id, req.payload);
+    // RCB 07/14/2026: M12.24 — same OPTIONAL trailing [u16 depth] the Skip
+    // request carries. GotoTop now comes back warm (a lookahead block rides on
+    // the ack), and it has to respect AdsCacheRecords like everything else —
+    // otherwise an app that explicitly turned read-ahead OFF would still get a
+    // block dumped on it by every GoTop. Old servers length-check and ignore
+    // the two bytes; see kPrefetchDepthAuto in wire.h.
+    req.payload.push_back(
+        static_cast<std::uint8_t>(rt->cache_records_hint & 0xFFu));
+    req.payload.push_back(
+        static_cast<std::uint8_t>((rt->cache_records_hint >> 8) & 0xFFu));
     auto rep = request(req);
     if (!rep) return rep.error();
     if (rep.value().opcode != Opcode::GotoTopAck) {
@@ -365,6 +375,17 @@ util::Result<void> RemoteConnection::skip(RemoteTable* rt,
     // parse_row_trailer_into on the ack below.
     std::int32_t eff = step + static_cast<std::int32_t>(rt->prefetch_consumed);
     write_u32_le(static_cast<std::uint32_t>(eff), req.payload);
+    // RCB 07/14/2026: M12.23 — trailing optional [u16 depth] carrying the
+    // AdsCacheRecords value (kPrefetchDepthAuto when the app never called it).
+    // Safe to append unconditionally: an older server length-checks its Skip
+    // payload (`size() < 8`) and reads only the first 8 bytes, so it simply
+    // ignores these two. That is why this needed no capability bit — see the
+    // note on kPrefetchDepthAuto in wire.h for the other direction, which is
+    // the one that could actually have bitten us.
+    req.payload.push_back(
+        static_cast<std::uint8_t>(rt->cache_records_hint & 0xFFu));
+    req.payload.push_back(
+        static_cast<std::uint8_t>((rt->cache_records_hint >> 8) & 0xFFu));
     auto rep = request(req);
     if (!rep) return rep.error();
     if (rep.value().opcode != Opcode::SkipAck) {
@@ -1800,7 +1821,8 @@ util::Result<RemoteConnection::SeekOutcome>
 RemoteConnection::seek(std::uint32_t index_id,
                         const std::string& key,
                         std::uint8_t soft,
-                        std::uint8_t last) {
+                        std::uint8_t last,
+                        RemoteTable* parent) {
     Frame req;
     req.opcode = last ? Opcode::SeekLast : Opcode::Seek;
     write_u32_le(index_id, req.payload);
@@ -1816,6 +1838,14 @@ RemoteConnection::seek(std::uint32_t index_id,
     SeekOutcome o;
     o.hit   = rep.value().payload[0];
     o.recno = read_u32_le(rep.value().payload.data() + 1);
+    // RCB 07/14/2026: M12.24 — a current-M12.24 server appends the row it
+    // landed on after the [u8 found][u32 recno] pair, so the caller does not
+    // have to spend a second round-trip fetching it. Strictly optional: an
+    // older server sends exactly 5 bytes, we parse no trailer, row_valid stays
+    // false, and the old FetchCurrentRow fallback takes over unchanged.
+    if (parent != nullptr && rep.value().payload.size() > 5) {
+        parse_row_trailer_into(parent, rep.value().payload, 5);
+    }
     return o;
 }
 
