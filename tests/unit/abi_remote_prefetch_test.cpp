@@ -358,6 +358,97 @@ TEST_CASE("AdsCacheRecords(100) reads ahead aggressively") {
     srv.stop();
 }
 
+// RCB 07/14/2026 — read-ahead x SET DELETED (M12.31/M12.32) interaction.
+//
+// These are separate features that meet badly. Flipping SET DELETED changes
+// which rows are VISIBLE, and the look-ahead block holds rows already read
+// AHEAD of the cursor under the old visibility. Without an explicit
+// invalidation the scan keeps serving them — locally, with no wire traffic at
+// all to hint anything is stale — so deleted records keep showing up after
+// SET DELETED ON. The block has to be dropped when the meaning of its rows
+// changes, exactly as for Seek and order changes.
+TEST_CASE("remote prefetch: flipping SET DELETED drops the read-ahead block") {
+    using openads::network::Server;
+    const int N = 60;
+    auto dir = fs::temp_directory_path() / "openads_prefetch_showdel";
+    make_dbf(dir, "pf", N);
+
+    Server srv;
+    REQUIRE(srv.start("127.0.0.1", 0).has_value());
+    ADSHANDLE hConn = remote_connect(dir, srv.port());
+    ADSHANDLE hTable = 0;
+    UNSIGNED8 tname[16] = "pf.dbf";
+    UNSIGNED8 alias[8]  = "pf";
+    REQUIRE(AdsOpenTable(hConn, tname, alias, ADS_CDX, 0, 0, 0, 0, &hTable) == 0);
+
+    // Delete every even record while deleted rows are visible.
+    REQUIRE(AdsShowDeleted(1) == 0);
+    for (int k = 2; k <= N; k += 2) {
+        REQUIRE(AdsGotoRecord(hTable, static_cast<UNSIGNED32>(k)) == 0);
+        REQUIRE(AdsLockRecord(hTable, static_cast<UNSIGNED32>(k)) == 0);
+        REQUIRE(AdsDeleteRecord(hTable) == 0);
+    }
+
+    // Land on recno 1 with deleted rows still VISIBLE. This is the setup that
+    // makes the test discriminating, and it is worth being explicit about:
+    // the block always holds the rows AFTER the cursor, so sitting on an ODD
+    // recno means the queued front row is recno 2 — a DELETED one. (Since
+    // M12.24 the GotoTop ack itself arrives carrying that block.)
+    //
+    // Do NOT reposition after the flip below. A GotoTop/Seek would refetch the
+    // block and mask the bug; the whole hazard is a skip that never reaches the
+    // wire and is served straight out of the stale queue.
+    REQUIRE(AdsShowDeleted(1) == 0);
+    REQUIRE(AdsGotoTop(hTable) == 0);
+    UNSIGNED32 r1 = 0;
+    REQUIRE(AdsGetRecordNum(hTable, 0, &r1) == 0);
+    REQUIRE(r1 == 1u);
+
+    // Now hide deleted rows. Every row already queued was read under the old
+    // visibility, and the very next one is deleted.
+    REQUIRE(AdsShowDeleted(0) == 0);
+
+    // The next step must skip OVER the deleted recno 2 and land on 3. Without
+    // the invalidation this pops recno 2 — a deleted record — out of the client
+    // cache with no wire traffic at all.
+    REQUIRE(AdsSkip(hTable, 1) == 0);
+    UNSIGNED32 rn = 0;
+    REQUIRE(AdsGetRecordNum(hTable, 0, &rn) == 0);
+    UNSIGNED16 del = 9;
+    REQUIRE(AdsIsRecordDeleted(hTable, &del) == 0);
+    CHECK(rn == 3u);                       // NOT 2
+    CHECK(del == 0);                       // and not a deleted record
+
+    // Carry on to the end: only live (odd) recnos, exactly half the table.
+    int seen = 2;                          // recnos 1 and 3 so far
+    bool any_deleted = false, any_even = false;
+    UNSIGNED16 eof = 0;
+    REQUIRE(AdsSkip(hTable, 1) == 0);
+    REQUIRE(AdsAtEOF(hTable, &eof) == 0);
+    while (!eof && seen < N) {
+        UNSIGNED32 r = 0;
+        REQUIRE(AdsGetRecordNum(hTable, 0, &r) == 0);
+        UNSIGNED16 d = 9;
+        REQUIRE(AdsIsRecordDeleted(hTable, &d) == 0);
+        if (d != 0)     any_deleted = true;
+        if (r % 2 == 0) any_even    = true;
+        ++seen;
+        REQUIRE(AdsSkip(hTable, 1) == 0);
+        REQUIRE(AdsAtEOF(hTable, &eof) == 0);
+    }
+
+    CHECK_FALSE(any_deleted);              // no deleted row ever served
+    CHECK_FALSE(any_even);                 // the even recnos ARE the deleted ones
+    CHECK(seen == N / 2);                  // exactly the live half
+
+    REQUIRE(AdsShowDeleted(1) == 0);       // restore process-wide default
+    REQUIRE(AdsCloseTable(hTable) == 0);
+    REQUIRE(AdsDisconnect(hConn) == 0);
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    srv.stop();
+}
+
 TEST_CASE("remote prefetch: an Eof()/IsFound()-polling scan loop sheds its round-trips") {
     using openads::network::Server;
     const int N = 300;

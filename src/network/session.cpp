@@ -2154,6 +2154,15 @@ DispatchResult Session::dispatch(const Frame& f) {
             if (abi_conn_ != 0) {
                 openads::abi::set_connection_show_deleted(abi_conn_, visible);
             }
+            // RCB 07/14/2026: row visibility just changed for EVERY table on
+            // this session, so end the read-ahead run on all of them and let
+            // the depth ramp back up from the floor.
+            //
+            // This cannot go through breaks_prefetch_run() like the other
+            // run-enders: that mechanism reads the table id from the leading
+            // u32 of the payload, and ShowDeleted's payload is a single byte
+            // with no table id in it at all. Hence the explicit clear here.
+            prefetch_depth_.clear();
             reply.opcode = Opcode::ShowDeletedAck;
             break;
         }
