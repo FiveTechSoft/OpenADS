@@ -557,7 +557,7 @@ sucesso, código de erro ACE em falha) salvo indicação contrária.
 | `AdsSetDateFormat` | ✅ | Definir formato de data do processo |
 | `AdsGetLastTableUpdate` | ✅ | Obter data de última actualização |
 | `AdsGetLastAutoinc` | ✅ | Obter último valor autoincrement |
-| `AdsShowDeleted` | ✅ | Alternar visibilidade `SET DELETED` |
+| `AdsShowDeleted` | ✅ | Alternar `SET DELETED`; remoto: wire `ShowDeleted` (0xDA) desde v1.8.10 |
 | `AdsGetDeleted` | ✅ | Consultar estado `SET DELETED` |
 | `AdsSetCollation` | ✅ | Definir ordenação |
 | `AdsConvertOemToAnsi` | ✅ | Conversão OEM→ANSI |

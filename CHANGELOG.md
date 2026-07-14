@@ -1,3 +1,34 @@
+## 1.8.10 — 2026-07-14
+
+### REMOTE — `SET DELETED ON` honoured on scoped index walks (M12.31)
+
+With `SET DELETED ON` (`AdsShowDeleted(0)`), a scoped browse over a
+remote alias (`OrdScope` / `AdsSetScope` + `GotoTop`/`Skip`) still
+returned rows flagged deleted. LOCAL mode filtered them correctly.
+
+Root cause: `AdsShowDeleted` only updated the client process; the server
+session (`sess_conn_` and the parallel ABI connection used for ordered
+navigation) kept `show_deleted=true`, so index walks on the server
+included deleted keys inside the active scope.
+
+Fix:
+- New wire opcodes `ShowDeleted` / `ShowDeletedAck` (`0xDA` / `0xDB`).
+  `AdsShowDeleted` pushes the flag to every open `RemoteConnection`.
+- Server handler applies it to the global engine flag, `sess_conn_`, and
+  `abi_conn_` (the handle used for `ordered_tables_` navigation).
+- `SetScope` handler also calls `AdsSetIndexOrderByHandle` on the ABI
+  table so scope stays bound to the active order without a prior
+  `SetOrder` wire op.
+- Client releases `s.mu` before the `ShowDeleted` wire round-trip (same
+  deadlock pattern as remote `AdsOpenTable` / `AdsOpenIndex`).
+
+Requires updated `openace64.dll` **and** `openads_serverd`. Pre-M12.31
+servers ignore the new opcode (best-effort); upgrade both sides together.
+
+Files: `wire.h`, `client.{h,cpp}`, `session.cpp`, `ace_exports.cpp`.
+Test: `remote AdsSetScope with SET DELETED ON skips deleted rows` in
+`abi_remote_index_nav_test.cpp`.
+
 ## 1.8.9 — 2026-07-10
 
 ### Zero-config OEM collation for rddads apps (`usCharType` honoured, adslocal.cfg) — #130 follow-up

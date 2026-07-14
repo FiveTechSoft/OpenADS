@@ -26,6 +26,10 @@
 #include <unordered_map>
 #include <vector>
 
+namespace openads::abi {
+void set_connection_show_deleted(ADSHANDLE hConnect, bool visible);
+}
+
 namespace openads::network {
 
 namespace {
@@ -1889,8 +1893,25 @@ DispatchResult Session::dispatch(const Frame& f) {
             // empty, which made remote navigation ignore scope.
             if (auto tit = index_table_.find(iid); tit != index_table_.end()) {
                 ordered_tables_.insert(tit->second);
+                if (ADSHANDLE ht = ensure_abi_handle(tit->second); ht != 0) {
+                    (void)AdsSetIndexOrderByHandle(ht, iit->second);
+                    sync_engine_cursor(tit->second);
+                }
             }
             reply.opcode = Opcode::SetScopeAck;
+            break;
+        }
+        case Opcode::ShowDeleted: {
+            if (f.payload.size() < 1) {
+                reply = err("ShowDeleted: bad payload"); break;
+            }
+            const bool visible = f.payload[0] != 0;
+            openads::engine::set_show_deleted(visible);
+            if (sess_conn_) sess_conn_->set_show_deleted(visible);
+            if (abi_conn_ != 0) {
+                openads::abi::set_connection_show_deleted(abi_conn_, visible);
+            }
+            reply.opcode = Opcode::ShowDeletedAck;
             break;
         }
         case Opcode::ClearScope: {

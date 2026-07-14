@@ -556,7 +556,7 @@ ACE error code on failure) unless noted otherwise.
 | `AdsSetDateFormat` | ✅ | Set process-wide date format |
 | `AdsGetLastTableUpdate` | ✅ | Get last-update date from DBF header |
 | `AdsGetLastAutoinc` | ✅ | Get last autoincrement value |
-| `AdsShowDeleted` | ✅ | Toggle `SET DELETED` visibility |
+| `AdsShowDeleted` | ✅ | Toggle `SET DELETED` visibility; remote: wire `ShowDeleted` (0xDA) since v1.8.10 |
 | `AdsGetDeleted` | ✅ | Query `SET DELETED` state |
 | `AdsSetCollation` | ✅ | Set collation order |
 | `AdsConvertOemToAnsi` | ✅ | OEM→ANSI character conversion |

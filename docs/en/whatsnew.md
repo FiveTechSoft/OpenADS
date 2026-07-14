@@ -6,11 +6,26 @@ nav_order: 0
 permalink: /en/whatsnew/
 ---
 
-# What's New (v1.0.0-rc29 → v1.8.1)
+# What's New (v1.0.0-rc29 → v1.8.10)
 
 This page summarises the most notable changes since the
 v1.0.0-rc29 release. For the full commit-by-commit history see
 the [CHANGELOG](https://github.com/FiveTechSoft/OpenADS/blob/main/CHANGELOG.md).
+
+---
+
+## v1.8.10 Highlights
+
+### REMOTE — `SET DELETED ON` on scoped walks
+
+`AdsShowDeleted(0)` (SET DELETED ON) now propagates to the server over
+the wire (`ShowDeleted` 0xDA/0xDB). Scoped index navigation
+(`OrdScope` / `AdsSetScope` + `GotoTop`/`Skip`) no longer returns rows
+flagged deleted on remote aliases while LOCAL mode already hid them.
+
+Requires updated `openace64.dll` **and** `openads_serverd`. Regression
+test: `remote AdsSetScope with SET DELETED ON skips deleted rows` in
+`abi_remote_index_nav_test.cpp`.
 
 ---
 

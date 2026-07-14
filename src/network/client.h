@@ -251,6 +251,8 @@ public:
                                           std::uint16_t data_type);
     util::Result<void>          clear_scope(std::uint32_t index_id,
                                             std::uint16_t which);
+    // M12.31 — propagate SET DELETED ON/OFF to the server session.
+    void                        show_deleted(bool visible) noexcept;
     // M12.17 — single-frame whole-record read.
     struct RowSnapshot {
         bool                     has_row = false;

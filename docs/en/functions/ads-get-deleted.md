@@ -37,6 +37,10 @@ This matches the ACE semantics where `AdsGetDeleted` returns 1 when deleted reco
 
 In OpenADS, this setting is process-wide and affects all tables. The default behavior is SET DELETED OFF (deleted records visible), which is the Clipper default.
 
+`AdsGetDeleted` reads the **client** state only. On remote connections,
+call `AdsShowDeleted` to push SET DELETED ON/OFF to the server (v1.8.10+);
+there is no separate wire query for the server's copy of the flag.
+
 ## Example
 
 ```c

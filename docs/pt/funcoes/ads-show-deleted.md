@@ -30,7 +30,11 @@ UNSIGNED32 AdsShowDeleted(UNSIGNED16 us);
 
 `AdsShowDeleted` define se os registos marcados como eliminados são visíveis nas operações de navegação. Por omissão, os registos eliminados são ocultados (comportamento padrão do Clipper).
 
-Esta é uma configuração global que afeta todas as tabelas abertas.
+Esta é uma configuração global que afeta todas as tabelas abertas. Em
+ligações **remotas** `tcp://` (desde v1.8.10), o cliente envia o estado
+ao servidor pelo opcode wire `ShowDeleted` (0xDA), para que percursos
+com âmbito (`OrdScope`) ignorem registos eliminados como no modo local.
+Atualize `openace64.dll` **e** `openads_serverd` em conjunto.
 
 ## Exemplo
 

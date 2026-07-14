@@ -339,6 +339,16 @@ enum class Opcode : std::uint8_t {
     DDGrantPermission     = 0xD8,
     DDGrantPermissionAck  = 0xD9,
 
+    // M12.31 — AdsShowDeleted (SET DELETED ON/OFF) over the wire.
+    // Without this, the client's SET DELETED flag never reaches
+    // openads_serverd: scoped/ordered GotoTop/Skip on the server
+    // walk index keys with show_deleted=true and return rows flagged
+    // deleted even though LOCAL mode hides them.
+    // Request:  [u8 show]  (0 = hide deleted, 1 = show deleted)
+    // Reply ShowDeletedAck: (empty)
+    ShowDeleted        = 0xDA,
+    ShowDeletedAck     = 0xDB,
+
     Error              = 0xFF,
 };
 

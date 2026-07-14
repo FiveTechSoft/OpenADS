@@ -1765,6 +1765,16 @@ RemoteConnection::fetch_current_row(RemoteTable* rt) {
     return {};
 }
 
+void RemoteConnection::show_deleted(bool visible) noexcept {
+    if (!transport_ || !transport_->valid()) return;
+    Frame req;
+    req.opcode = Opcode::ShowDeleted;
+    req.payload.push_back(visible ? 1 : 0);
+    // Best-effort: pre-M12.31 servers lack this opcode; local SET
+    // DELETED must still succeed on the client either way.
+    (void)request(req);
+}
+
 util::Result<void>
 RemoteConnection::clear_scope(std::uint32_t index_id,
                                std::uint16_t which) {

@@ -6,11 +6,25 @@ nav_order: 0
 permalink: /es/novedades/
 ---
 
-# Novedades (v1.0.0-rc29 → v1.8.1)
+# Novedades (v1.0.0-rc29 → v1.8.10)
 
 Esta página resume los cambios más destacados desde la versión
 v1.0.0-rc29. Para el historial completo de commits, consulta el
 [CHANGELOG](https://github.com/FiveTechSoft/OpenADS/blob/main/CHANGELOG.md).
+
+---
+
+## Destacados v1.8.10
+
+### REMOTO — `SET DELETED ON` en recorridos con ámbito
+
+`AdsShowDeleted(0)` (SET DELETED ON) ahora se propaga al servidor por
+wire (`ShowDeleted` 0xDA/0xDB). La navegación indexada con ámbito
+(`OrdScope` / `AdsSetScope` + `GotoTop`/`Skip`) ya no devuelve filas
+marcadas como eliminadas en alias remotos.
+
+Requiere `openace64.dll` **y** `openads_serverd` actualizados. Prueba:
+`remote AdsSetScope with SET DELETED ON skips deleted rows`.
 
 ---
 

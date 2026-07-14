@@ -266,6 +266,8 @@ milestones reused gaps left by earlier ones.
 | `DDGetPermissionsAck`      | `0xD7` | S→C | `[u32 permissions]`             | M12.30 |
 | `DDGrantPermission`        | `0xD8` | C→S | `AdsDDGrantPermission` (revoke = grant 0) | M12.30 |
 | `DDGrantPermissionAck`     | `0xD9` | S→C |                                 | M12.30 |
+| `ShowDeleted`              | `0xDA` | C→S | `AdsShowDeleted` (SET DELETED ON/OFF) | M12.31 |
+| `ShowDeletedAck`           | `0xDB` | S→C |                                 | M12.31 |
 | `Error`               | `0xFF` | S→C | Any failure (4-byte ACE-code prefix since M12.10) | M12.3 |
 
 ## 5. Payload formats
@@ -633,6 +635,17 @@ shape the way plain property get/set does:
   fixes Revoke transitively (call `dd_grant_permission` with
   `permissions=0`).
 - All create/add/drop/grant acks: empty payload.
+
+### 5.26 ShowDeleted (M12.31)
+
+- `ShowDeleted`: `[u8 show]` — `0` = hide deleted records (SET DELETED ON),
+  `1` = show deleted records (SET DELETED OFF, Clipper default). Maps to
+  `AdsShowDeleted`. The client sends this to every open remote session
+  whenever `AdsShowDeleted` is called locally.
+- `ShowDeletedAck`: empty. Server applies the flag to its session
+  `Connection`, the lazy ABI `Connection`, and the process-wide engine
+  default so ordered/scoped `GotoTop`/`Skip` skip deleted index keys the
+  same way as local mode.
 
 With phase 2, every `AdsDD*` function works identically over local and
 remote connections except the permanently-stubbed `SetIndexProperty`.

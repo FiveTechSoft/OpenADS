@@ -4689,6 +4689,12 @@ void purge_pending_binaries_for_table(openads::engine::Table* t);
 // ---------------------------------------------------------------------------
 namespace openads::abi {
 
+void set_connection_show_deleted(ADSHANDLE hConnect, bool visible) {
+    if (openads::session::Connection* c = lookup_connection(hConnect)) {
+        c->set_show_deleted(visible);
+    }
+}
+
 void register_builtin_backends() {
 #if defined(OPENADS_WITH_SQLITE)
     register_backend_table_ops(openads::session::HandleKind::SqliteTable,
@@ -28073,9 +28079,27 @@ UNSIGNED32 ENTRYPOINT AdsShowDeleted(UNSIGNED16 us) {
     const bool visible = us != 0;
     openads::engine::set_show_deleted(visible);
     auto& s = state();
-    std::lock_guard<std::recursive_mutex> lk(s.mu);
-    if (Connection* c = lookup_connection(resolve_connection_handle(0))) {
-        c->set_show_deleted(visible);
+    std::vector<openads::network::RemoteConnection*> remotes;
+    {
+        std::lock_guard<std::recursive_mutex> lk(s.mu);
+        if (Connection* c = lookup_connection(resolve_connection_handle(0))) {
+            c->set_show_deleted(visible);
+        }
+        // M12.31 — SET DELETED is process-wide on the client but must be
+        // pushed to every open remote server session; otherwise scoped
+        // index walks on the server still return deleted rows.
+        s.registry.for_each_handle([&](Handle, HandleKind k, void* p) {
+            if (k != HandleKind::RemoteConnection) return;
+            auto* rc = static_cast<openads::network::RemoteConnection*>(p);
+            if (rc != nullptr) remotes.push_back(rc);
+        });
+    }
+    // Release s.mu before the wire round-trips — the in-process test
+    // server (and openads_serverd embedded in the same DLL) re-enters
+    // the ABI on another thread and takes s.mu; holding it here
+    // deadlocks (same pattern as remote AdsOpenTable / AdsOpenIndex).
+    for (auto* rc : remotes) {
+        if (rc->valid()) rc->show_deleted(visible);
     }
     return openads::AE_SUCCESS;
 }
