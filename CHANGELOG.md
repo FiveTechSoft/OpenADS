@@ -1,3 +1,44 @@
+## 1.8.11 — 2026-07-14
+
+### REMOTE — `SET DELETED ON` issued before connect now reaches the server (M12.32)
+
+Follow-up to 1.8.10 (M12.31): a scoped remote browse still showed
+deleted rows when the application ran `SET DELETED ON` **before**
+`AdsConnect60` — the startup order virtually every rddads / FiveWin
+app uses (`SET DELETED ON` in `Main`, then connect). LOCAL mode was
+unaffected.
+
+Root cause, two gaps left by M12.31:
+
+- Client: the `AdsShowDeleted` broadcast only notified remote
+  connections open at call time. A connection created afterwards never
+  received the flag, and `connect_with_transport` did not sync it.
+- Server: the `ShowDeleted` handler applied the flag to `abi_conn_`
+  only if it already existed. That connection is created lazily (first
+  `SetScope` / `SetOrder`), so when the opcode arrived earlier the
+  lazily-created ABI connection started with the default
+  `show_deleted=true` — and the per-connection flag overrides the
+  engine global on ordered/scoped walks.
+
+Fix:
+- `RemoteConnection::connect_with_transport` pushes `ShowDeleted(0)`
+  right after `ConnectAck` whenever the client state is "hide deleted"
+  (the server default is "show", so only that direction needs syncing).
+- `Session` remembers the last `ShowDeleted` state and re-applies it
+  when `ensure_abi_conn` creates the lazy ABI connection.
+
+Requires updated `openace64.dll` **and** `openads_serverd`. A 1.8.10
+server honours the flag only if it changes while connected; pre-1.8.10
+servers ignore it entirely.
+
+Files: `client.cpp`, `session.{h,cpp}`.
+Tests: `remote scoped walk honours SET DELETED ON issued before
+connect` and `… before first ordered op` in
+`abi_remote_index_nav_test.cpp`. New wire probe
+`tools/remote_deleted_probe.cpp` (`openads_remote_deleted_probe`)
+reproduced the leak against a live pre-fix server and verified the fix
+end-to-end over TCP.
+
 ## 1.8.10 — 2026-07-14
 
 ### REMOTE — `SET DELETED ON` honoured on scoped index walks (M12.31)

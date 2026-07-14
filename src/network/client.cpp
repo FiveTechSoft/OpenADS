@@ -1,5 +1,7 @@
 #include "network/client.h"
 
+#include "engine/table.h"
+
 #include <cstring>
 
 namespace openads::network {
@@ -245,6 +247,11 @@ RemoteConnection::connect_with_transport(std::unique_ptr<ITransport> transport,
                         rep.value().payload.end());
         return util::Error{5000, 0, "Connect: " + msg, data_dir};
     }
+    // M12.32 — SET DELETED often runs before AdsConnect60 (rddads apps
+    // set it in Main, then connect), so the AdsShowDeleted broadcast
+    // found no remote connection to notify. Sync the state now; the
+    // server default is "show", so only the hidden state needs pushing.
+    if (!openads::engine::show_deleted()) show_deleted(false);
     return {};
 }
 

@@ -34,6 +34,15 @@ Esta é uma configuração global que afeta todas as tabelas abertas. Em
 ligações **remotas** `tcp://` (desde v1.8.10), o cliente envia o estado
 ao servidor pelo opcode wire `ShowDeleted` (0xDA), para que percursos
 com âmbito (`OrdScope`) ignorem registos eliminados como no modo local.
+
+Desde a v1.8.11 (M12.32) a ordem das chamadas deixa de importar: uma
+ligação aberta **depois** de `AdsShowDeleted(0)` sincroniza o estado
+logo após o handshake de conexão, pelo que o arranque habitual de
+rddads / FiveWin (`SET DELETED ON` no `Main`, conectar depois) também
+oculta os registos eliminados em remoto. O servidor reaplica ainda o
+indicador à conexão ABI criada preguiçosamente para a navegação
+ordenada/com âmbito.
+
 Atualize `openace64.dll` **e** `openads_serverd` em conjunto.
 
 ## Exemplo

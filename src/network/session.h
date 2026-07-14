@@ -94,6 +94,10 @@ private:
     std::string   session_password_;
     // M12.21 option C — set from the Connect payload's capability word.
     bool          client_prefetch_ok_ = false;
+    // M12.32 — last ShowDeleted state received; abi_conn_ is created
+    // lazily, so ensure_abi_conn must re-apply it or the ABI connection
+    // starts with the default (show) and ordered walks leak deleted rows.
+    bool          show_deleted_ = true;
 
     // Moved helpers (were [&] lambdas in session_loop) -> private
     // methods; bodies unchanged except member renames.

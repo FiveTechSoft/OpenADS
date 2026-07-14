@@ -39,6 +39,13 @@ its session connection and to the ABI connection used for ordered /
 scoped navigation, so `OrdScope` walks honour SET DELETED ON the same
 way as local mode.
 
+Since v1.8.11 (M12.32) the call order no longer matters: a connection
+opened **after** `AdsShowDeleted(0)` syncs the state right after the
+connect handshake, so the usual rddads / FiveWin startup (`SET DELETED
+ON` in `Main`, then `AdsConnect60`) hides deleted rows remotely too.
+The server also re-applies the flag to the ABI connection it creates
+lazily for ordered/scoped navigation.
+
 Upgrade **both** `openace64.dll` and `openads_serverd` together; older
 servers ignore the opcode (best-effort) and continue to return deleted
 rows inside a scoped remote walk.

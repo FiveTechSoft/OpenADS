@@ -349,6 +349,11 @@ bool Session::ensure_abi_conn() {
         // This makes AdsGetJulian / date FieldGet return usable values
         // over remote and matches the engine's internal 8-digit strings.
         (void)AdsSetDateFormat((UNSIGNED8*)"YYYYMMDD");
+        // M12.32 — a ShowDeleted opcode may have arrived before this
+        // lazy connection existed; new connections default to "show".
+        if (!show_deleted_) {
+            openads::abi::set_connection_show_deleted(abi_conn_, false);
+        }
     }
     return rc == 0;
 }
@@ -1906,6 +1911,7 @@ DispatchResult Session::dispatch(const Frame& f) {
                 reply = err("ShowDeleted: bad payload"); break;
             }
             const bool visible = f.payload[0] != 0;
+            show_deleted_ = visible;
             openads::engine::set_show_deleted(visible);
             if (sess_conn_) sess_conn_->set_show_deleted(visible);
             if (abi_conn_ != 0) {

@@ -646,6 +646,11 @@ shape the way plain property get/set does:
   `Connection`, the lazy ABI `Connection`, and the process-wide engine
   default so ordered/scoped `GotoTop`/`Skip` skip deleted index keys the
   same way as local mode.
+- Since v1.8.11 (M12.32): the client also sends `ShowDeleted` right
+  after `ConnectAck` when its state is "hide" (server default is
+  "show"), covering apps that run SET DELETED ON before connecting.
+  The server remembers the last received state and re-applies it when
+  it lazily creates the ABI `Connection` used for ordered navigation.
 
 With phase 2, every `AdsDD*` function works identically over local and
 remote connections except the permanently-stubbed `SetIndexProperty`.

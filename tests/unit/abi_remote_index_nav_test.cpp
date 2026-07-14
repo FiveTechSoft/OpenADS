@@ -907,6 +907,191 @@ TEST_CASE("remote AdsSetScope with SET DELETED ON skips deleted rows") {
     server.stop();
 }
 
+// M12.32 — SET DELETED ON issued BEFORE AdsConnect60 (the usual rddads
+// startup order: SET DELETED ON in Main, then AdsConnect). The M12.31
+// AdsShowDeleted broadcast only reached connections open at call time,
+// and the server's lazy ABI connection (created at the first SetScope /
+// SetOrder) defaulted to show_deleted=true — so scoped walks on remote
+// aliases still returned deleted rows.
+TEST_CASE("remote scoped walk honours SET DELETED ON issued before connect") {
+    using openads::network::Server;
+    auto dir = fs::temp_directory_path() / "openads_remote_scope_del_pre";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+
+    UNSIGNED8 srv[512];
+    const auto sp = dir.string();
+    std::memcpy(srv, sp.c_str(), sp.size() + 1);
+    ADSHANDLE hConn = 0;
+    REQUIRE(AdsConnect60(srv, ADS_LOCAL_SERVER,
+                         nullptr, nullptr, 0, &hConn) == 0);
+
+    UNSIGNED8 fields[] = "GRP,Character,1;DATA,Character,8";
+    UNSIGNED8 tname[]  = "item.dbf";
+    ADSHANDLE hT = 0;
+    REQUIRE(AdsCreateTable(hConn, tname, nullptr, ADS_CDX,
+                           0, 0, 0, 64, fields, &hT) == 0);
+    UNSIGNED8 bag[]  = "item.cdx";
+    UNSIGNED8 tag[]  = "BYGRP";
+    UNSIGNED8 expr[] = "GRP";
+    ADSHANDLE hIdx = 0;
+    REQUIRE(AdsCreateIndex61(hT, bag, tag, expr,
+                             nullptr, nullptr, 0, 512, &hIdx) == 0);
+    struct Row { const char* grp; const char* data; };
+    const Row rows[] = {
+        {"A", "live1"}, {"A", "gone"}, {"A", "live2"}, {"B", "other"},
+    };
+    for (const auto& r : rows) {
+        REQUIRE(AdsAppendRecord(hT) == 0);
+        UNSIGNED8 fg[] = "GRP";
+        UNSIGNED8 fd[] = "DATA";
+        REQUIRE(AdsSetString(hT, fg, (UNSIGNED8*)r.grp, 1) == 0);
+        REQUIRE(AdsSetString(hT, fd, (UNSIGNED8*)r.data,
+                             static_cast<UNSIGNED32>(std::strlen(r.data))) == 0);
+        REQUIRE(AdsWriteRecord(hT) == 0);
+    }
+    AdsShowDeleted(1);
+    REQUIRE(AdsGotoRecord(hT, 2) == 0);
+    REQUIRE(AdsDeleteRecord(hT) == 0);
+    REQUIRE(AdsWriteRecord(hT) == 0);
+    REQUIRE(AdsCloseTable(hT) == 0);
+    REQUIRE(AdsDisconnect(hConn) == 0);
+
+    Server server;
+    REQUIRE(server.start("127.0.0.1", 0).has_value());
+    const std::uint16_t port = server.port();
+
+    // SET DELETED ON before the remote connection exists.
+    REQUIRE(AdsShowDeleted(0) == 0);
+
+    ADSHANDLE hRC = remote_connect(dir, port);
+    ADSHANDLE hRT = 0;
+    REQUIRE(AdsOpenTable(hRC, tname, nullptr, ADS_CDX,
+                         0, 0, 0, 0, &hRT) == 0);
+
+    ADSHANDLE hOrd = 0;
+    REQUIRE(AdsGetIndexHandleByOrder(hRT, 1, &hOrd) == 0);
+    REQUIRE(hOrd != 0);
+
+    UNSIGNED8 top[] = "A";
+    UNSIGNED8 bot[] = "A";
+    REQUIRE(AdsSetScope(hOrd, ADS_TOP, top, 1, ADS_STRINGKEY) == 0);
+    REQUIRE(AdsSetScope(hOrd, ADS_BOTTOM, bot, 1, ADS_STRINGKEY) == 0);
+
+    REQUIRE(AdsGotoTop(hOrd) == 0);
+    int n = 0;
+    for (;;) {
+        UNSIGNED16 eof = 0;
+        REQUIRE(AdsAtEOF(hRT, &eof) == 0);
+        if (eof) break;
+        UNSIGNED16 del = 0;
+        REQUIRE(AdsIsRecordDeleted(hRT, &del) == 0);
+        CHECK(del == 0);
+        ++n;
+        REQUIRE(AdsSkip(hOrd, 1) == 0);
+    }
+    CHECK(n == 2);
+
+    AdsShowDeleted(1);
+    REQUIRE(AdsCloseTable(hRT) == 0);
+    REQUIRE(AdsDisconnect(hRC) == 0);
+    fs::remove_all(dir, ec);
+    server.stop();
+}
+
+// M12.32 — SET DELETED ON after connect but before the first ordered
+// operation: the ShowDeleted opcode arrived while the server's lazy ABI
+// connection didn't exist yet, so ensure_abi_conn later created it with
+// the default show_deleted=true and the scoped walk leaked deleted rows.
+TEST_CASE("remote scoped walk honours SET DELETED ON before first ordered op") {
+    using openads::network::Server;
+    auto dir = fs::temp_directory_path() / "openads_remote_scope_del_lazy";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+
+    UNSIGNED8 srv[512];
+    const auto sp = dir.string();
+    std::memcpy(srv, sp.c_str(), sp.size() + 1);
+    ADSHANDLE hConn = 0;
+    REQUIRE(AdsConnect60(srv, ADS_LOCAL_SERVER,
+                         nullptr, nullptr, 0, &hConn) == 0);
+
+    UNSIGNED8 fields[] = "GRP,Character,1;DATA,Character,8";
+    UNSIGNED8 tname[]  = "item.dbf";
+    ADSHANDLE hT = 0;
+    REQUIRE(AdsCreateTable(hConn, tname, nullptr, ADS_CDX,
+                           0, 0, 0, 64, fields, &hT) == 0);
+    UNSIGNED8 bag[]  = "item.cdx";
+    UNSIGNED8 tag[]  = "BYGRP";
+    UNSIGNED8 expr[] = "GRP";
+    ADSHANDLE hIdx = 0;
+    REQUIRE(AdsCreateIndex61(hT, bag, tag, expr,
+                             nullptr, nullptr, 0, 512, &hIdx) == 0);
+    struct Row { const char* grp; const char* data; };
+    const Row rows[] = {
+        {"A", "live1"}, {"A", "gone"}, {"A", "live2"}, {"B", "other"},
+    };
+    for (const auto& r : rows) {
+        REQUIRE(AdsAppendRecord(hT) == 0);
+        UNSIGNED8 fg[] = "GRP";
+        UNSIGNED8 fd[] = "DATA";
+        REQUIRE(AdsSetString(hT, fg, (UNSIGNED8*)r.grp, 1) == 0);
+        REQUIRE(AdsSetString(hT, fd, (UNSIGNED8*)r.data,
+                             static_cast<UNSIGNED32>(std::strlen(r.data))) == 0);
+        REQUIRE(AdsWriteRecord(hT) == 0);
+    }
+    AdsShowDeleted(1);
+    REQUIRE(AdsGotoRecord(hT, 2) == 0);
+    REQUIRE(AdsDeleteRecord(hT) == 0);
+    REQUIRE(AdsWriteRecord(hT) == 0);
+    REQUIRE(AdsCloseTable(hT) == 0);
+    REQUIRE(AdsDisconnect(hConn) == 0);
+
+    Server server;
+    REQUIRE(server.start("127.0.0.1", 0).has_value());
+    const std::uint16_t port = server.port();
+
+    ADSHANDLE hRC = remote_connect(dir, port);
+    ADSHANDLE hRT = 0;
+    REQUIRE(AdsOpenTable(hRC, tname, nullptr, ADS_CDX,
+                         0, 0, 0, 0, &hRT) == 0);
+
+    // SET DELETED ON reaches the server before any SetScope/SetOrder has
+    // created the lazy ABI connection.
+    REQUIRE(AdsShowDeleted(0) == 0);
+
+    ADSHANDLE hOrd = 0;
+    REQUIRE(AdsGetIndexHandleByOrder(hRT, 1, &hOrd) == 0);
+    REQUIRE(hOrd != 0);
+
+    UNSIGNED8 top[] = "A";
+    UNSIGNED8 bot[] = "A";
+    REQUIRE(AdsSetScope(hOrd, ADS_TOP, top, 1, ADS_STRINGKEY) == 0);
+    REQUIRE(AdsSetScope(hOrd, ADS_BOTTOM, bot, 1, ADS_STRINGKEY) == 0);
+
+    REQUIRE(AdsGotoTop(hOrd) == 0);
+    int n = 0;
+    for (;;) {
+        UNSIGNED16 eof = 0;
+        REQUIRE(AdsAtEOF(hRT, &eof) == 0);
+        if (eof) break;
+        UNSIGNED16 del = 0;
+        REQUIRE(AdsIsRecordDeleted(hRT, &del) == 0);
+        CHECK(del == 0);
+        ++n;
+        REQUIRE(AdsSkip(hOrd, 1) == 0);
+    }
+    CHECK(n == 2);
+
+    AdsShowDeleted(1);
+    REQUIRE(AdsCloseTable(hRT) == 0);
+    REQUIRE(AdsDisconnect(hRC) == 0);
+    fs::remove_all(dir, ec);
+    server.stop();
+}
+
 // M12.28 — AdsGetDate over the wire. Before the fix, rddads resolved
 // Date-type field access to AdsGetDate(hOrdCurrent, ...) which passed
 // the RemoteIndex handle to AdsGetField — but AdsGetField only checks

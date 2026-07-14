@@ -557,7 +557,7 @@ Todas las funciones devuelven `UNSIGNED32` (`AE_SUCCESS` = 0 en
 | `AdsSetDateFormat` | ✅ | Establecer formato de fecha del proceso |
 | `AdsGetLastTableUpdate` | ✅ | Obtener fecha de última actualización |
 | `AdsGetLastAutoinc` | ✅ | Obtener último valor autoincrement |
-| `AdsShowDeleted` | ✅ | Alternar `SET DELETED`; remoto: wire `ShowDeleted` (0xDA) desde v1.8.10 |
+| `AdsShowDeleted` | ✅ | Alternar `SET DELETED`; remoto: wire `ShowDeleted` (0xDA) desde v1.8.10, sincronizado al conectar desde v1.8.11 |
 | `AdsGetDeleted` | ✅ | Consultar estado `SET DELETED` |
 | `AdsSetCollation` | ✅ | Establecer orden de clasificación |
 | `AdsConvertOemToAnsi` | ✅ | Conversión OEM→ANSI |

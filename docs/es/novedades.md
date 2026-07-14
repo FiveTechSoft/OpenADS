@@ -6,11 +6,29 @@ nav_order: 0
 permalink: /es/novedades/
 ---
 
-# Novedades (v1.0.0-rc29 → v1.8.10)
+# Novedades (v1.0.0-rc29 → v1.8.11)
 
 Esta página resume los cambios más destacados desde la versión
 v1.0.0-rc29. Para el historial completo de commits, consulta el
 [CHANGELOG](https://github.com/FiveTechSoft/OpenADS/blob/main/CHANGELOG.md).
+
+---
+
+## Destacados v1.8.11
+
+### REMOTO — `SET DELETED ON` antes de conectar
+
+Continuación de v1.8.10: el indicador ahora también llega al servidor
+cuando `SET DELETED ON` se ejecuta **antes** de `AdsConnect60` — el
+orden que usa cualquier aplicación rddads / FiveWin. El cliente
+sincroniza el estado justo después de conectar, y el servidor lo
+reaplica a la conexión ABI (creación diferida) usada para la
+navegación ordenada/con ámbito.
+
+Requiere `openace64.dll` **y** `openads_serverd` actualizados. Pruebas:
+`remote scoped walk honours SET DELETED ON issued before connect`
+(+ `… before first ordered op`); sonda de red
+`tools/remote_deleted_probe.cpp`.
 
 ---
 

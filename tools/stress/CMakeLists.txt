@@ -57,6 +57,12 @@ add_executable(openads_remote_scope_probe
 target_link_libraries(openads_remote_scope_probe PRIVATE openads_core)
 target_include_directories(openads_remote_scope_probe PRIVATE
     ${CMAKE_SOURCE_DIR}/src)
+
+add_executable(openads_remote_deleted_probe
+    ${CMAKE_SOURCE_DIR}/tools/remote_deleted_probe.cpp)
+target_link_libraries(openads_remote_deleted_probe PRIVATE openads_core)
+target_include_directories(openads_remote_deleted_probe PRIVATE
+    ${CMAKE_SOURCE_DIR}/src)
 if(NOT WIN32)
     find_package(Threads REQUIRED)
     target_link_libraries(openads_remote_random PRIVATE Threads::Threads)
