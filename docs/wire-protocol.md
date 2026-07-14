@@ -201,7 +201,7 @@ milestones reused gaps left by earlier ones.
 | `SetOrderByName`      | `0x8E` | C→S | Switch active order by tag name | M12.16 |
 | `SetOrderByNameAck`   | `0x8F` | S→C |                                 | M12.16 |
 | `Seek`                | `0x90` | C→S | Index key seek (hit / miss)     | M12.16 |
-| `SeekAck`             | `0x91` | S→C | Found flag + recno              | M12.16 |
+| `SeekAck`             | `0x91` | S→C | Found flag + recno + row (M12.24) | M12.16 |
 | `SeekLast`            | `0x92` | C→S | Seek last matching key          | M12.16 |
 | `SeekLastAck`         | `0x93` | S→C |                                 | M12.16 |
 | `CreateIndex`         | `0x94` | C→S | CDX-on-the-wire `CREATE INDEX`  | M12.16 |
@@ -320,16 +320,58 @@ Notation:
   than `max_rows` (EOF or skip failure stops the walk early).
 
 ### 5.8 GotoTop / GotoTopAck, GotoBottom / GotoBottomAck, Skip / SkipAck, GotoRecord / GotoRecordAck
-- GotoTop / GotoBottom: `[u32 tid]`.
-- Skip: `[u32 tid][u32 step_le]` (`step` is signed; transmit as
-  little-endian raw u32 bits).
+- GotoTop: `[u32 tid][u16 depth]?` — the same optional read-ahead depth the
+  Skip request carries (below). Since M12.24 the **GotoTopAck arrives warm**:
+  it carries a lookahead block along with the current row, so the first Skip
+  of a browse's opening repaint costs no round-trip. It honours
+  `AdsCacheRecords` like any other block, which is why the depth has to reach
+  the server here too.
+- GotoBottom: `[u32 tid]`. No lookahead block — the block is a *forward* walk
+  and there is nothing after the last record; a warm GotoBottom needs backward
+  look-ahead, which is not implemented.
+- Skip: `[u32 tid][i32 step][u16 depth]?` (`step` is signed; transmit as
+  little-endian raw u32 bits). The trailing `depth` is **optional** and
+  carries the caller's `AdsCacheRecords` value:
+  - **absent** (pre-M12.23 clients) — read as `kPrefetchDepthAuto`
+    (`0xFFFF`): the server chooses the depth itself by ramping on
+    detected sequential access.
+  - `0` or `1` — read-ahead **off** for this request (SAP: "a usRecords
+    value of 0 (or 1) effectively turns read-ahead record caching off").
+  - `N` — read ahead exactly `N` rows, overriding the ramp, capped at
+    `kPrefetchDepthMax` (512).
+
+  No capability bit is needed: a new client sending 10 bytes to an old
+  server is fine (the old handler length-checks `size() < 8` and reads
+  only the first 8), and an old client sending 8 bytes to a new server is
+  fine (absent ⇒ auto). Note that `0xFFFF` is a *distinct sentinel* rather
+  than `0`, precisely because `0` already means "disable" — "the caller
+  said nothing" and "the caller said stop" are different instructions.
 - GotoRecord: `[u32 tid][u32 recno]`.
-- Acks **carry a row trailer** since M12.18 (v1.0.0-rc18):
-  `[u32 recno][u8 deleted][u32 row_buf_len][row_buf bytes]`. The
-  trailer is empty (length 0) only when the cursor lands at EOF /
-  Limbo. Clients that pre-date M12.18 can ignore extra bytes past
-  the prior 0-length frame — the wire codec passes the full payload
-  through.
+- Acks **carry a row trailer** since M12.18 (v1.0.0-rc18). Its actual
+  layout (`Session::pack_row_trailer`, `parse_row_trailer_into`) is:
+
+  ```
+  [u8 has_row]                     ; 0 => EOF/BOF/Limbo, nothing follows
+  [u32 recno][u8 deleted][u16 nfields]
+    per field: [u32 vlen][val bytes]      ; all fields, table order
+  [u16 lookahead_count]            ; read-ahead block, 0 when absent
+    per row: same {recno, deleted, nfields, fields...} body
+  ```
+
+  Clients that pre-date M12.18 can ignore extra bytes past the prior
+  0-length frame — the wire codec passes the full payload through.
+
+  **Read-ahead block.** A client that advertised `kCapPrefetchConsume`
+  in the Connect capability word gets a block of look-ahead rows on a
+  forward `Skip`, and serves the following skips from it with no
+  round-trip. The server cursor therefore *lags* the client's logical
+  position by the number of rows consumed locally; the client folds
+  that count back into the next wire step (`step + prefetch_consumed`),
+  and every nav ack resets the lag to zero. The depth is chosen by the
+  server: it ramps 8 → 64 per consecutive forward `Skip` on a table and
+  resets on any reposition, write, or order change, bounded also by a
+  32 KB byte budget. Ordered tables are walked through the ABI handle,
+  so the block follows *index* order, not natural record order.
 
 ### 5.9 GetField / GetFieldAck
 - GetField: `[u32 tid][bytes field_name]` (no length prefix —
@@ -403,7 +445,23 @@ Notation:
   index handle in `tbls_h` and syncs the engine cursor.
 - `CloseIndex`: `[u32 wire_index_id]`, ack empty.
 - `Seek`: `[u32 tid][u32 hindex][u8 soft][u8 last][u16 klen][key]`.
-- `SeekAck`: `[u8 found][u32 recno]`.
+- `SeekAck`: `[u8 found][u32 recno]` **+ an optional row trailer** (M12.24;
+  same layout as §5.8, always with `lookahead_count == 0`).
+
+  The row the seek landed on now comes back **with** the seek. Previously the
+  ack stopped after `recno`, so the client knew where it was but not what was
+  there — the next field read cost a separate `FetchCurrentRow` round-trip,
+  making seek-then-read a 2-round-trip operation.
+
+  No lookahead block is attached here, deliberately: relation navigation
+  re-seeks a child table once per *parent row*, so a block would ship child
+  rows over the wire on every parent row and almost never be read. The block
+  is earned by a `Skip`, matching SAP ("a skip operation after ... any other
+  movement operation").
+
+  Optional in both directions, no capability bit: an old client requires
+  `size() >= 5` and ignores trailing bytes; a new client against an old server
+  sees a 5-byte ack, parses no trailer, and falls back to `FetchCurrentRow`.
 - `CreateIndex`: `[u32 tid][u16 tlen][tag][u16 elen][expr][u32 flags]`
   (flags = `ADS_DESCENDING` / `ADS_UNIQUE` / `ADS_COMPOUND` /
   `ADS_DOUBLEKEY`).

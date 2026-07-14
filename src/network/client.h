@@ -231,10 +231,15 @@ public:
         std::uint8_t  hit  = 0;     // 1 = exact, 0 = soft / not found
         std::uint32_t recno = 0;
     };
+    // RCB 07/14/2026: `parent` is optional but you almost always want to pass
+    // it — an M12.24 server returns the row it landed on in the SeekAck, and
+    // that is the only way to receive it. Pass nullptr and the row cache stays
+    // invalid, which costs a FetchCurrentRow round-trip on the next field read.
     util::Result<SeekOutcome>   seek(std::uint32_t index_id,
                                      const std::string& key,
                                      std::uint8_t soft,
-                                     std::uint8_t last);
+                                     std::uint8_t last,
+                                     RemoteTable* parent = nullptr);
     util::Result<std::uint32_t> create_index(std::uint32_t table_id,
                                               const std::string& path,
                                               const std::string& tag,
@@ -403,6 +408,51 @@ struct RemoteTable {
     // Server-side wire id of the active controlling index (0 = natural order).
     // Updated by AdsSetIndexOrder / AdsSetIndexOrderByHandle / AdsOpenIndex.
     std::uint32_t active_index_id = 0;
+    // RCB 07/14/2026: the order the SERVER actually has installed, as last
+    // confirmed by a SetOrder ack. Why this exists as a SECOND field instead
+    // of just reusing active_index_id: active_index_id is only the client's
+    // *belief*, and it can be set with no round-trip at all (the production-bag
+    // auto-open in AdsOpenTable100, or AdsGetIndexHandle resolving a tag). That
+    // asymmetry is exactly why remote_activate_index used to re-send SetOrder
+    // before every single nav op — trusting active_index_id left
+    // ordered_tables_ empty on the server, so GotoTop/Skip walked the engine
+    // table in natural order and ignored any scope. Somebody hit that, and the
+    // fix was to give up and always send the frame.
+    //
+    // Keying the skip on a value that ONLY a real ack can write closes the hole
+    // properly, which is what makes it safe to send SetOrder once per order
+    // change instead of once per row. rddads navigates on hOrdCurrent whenever
+    // an order is set, so that was costing a whole round-trip on every single
+    // row of every ordered browse.
+    static constexpr std::uint32_t kOrderUnknown = 0xFFFFFFFFu;
+    std::uint32_t server_order_id = kOrderUnknown;
+
+    // RCB 07/14/2026: M12.23 — AdsCacheRecords(hTable, N). The depth the CALLER
+    // asked for, sent on each Skip request. kPrefetchDepthAuto (the default)
+    // means the app never called AdsCacheRecords, so the server picks the depth
+    // itself by ramping on detected sequential access.
+    //
+    // Why honour an explicit value at all, when the server's ramp is usually
+    // smarter than a fixed number: because the app can know things the access
+    // pattern cannot reveal. "I am about to edit most of the records I visit"
+    // looks identical to a plain scan until the writes start landing — and by
+    // then we have already shipped blocks that each write throws away. SAP
+    // documents 0/1 as the remedy for exactly that, and it needs a way to reach
+    // us.
+    std::uint16_t cache_records_hint = kPrefetchDepthAuto;
+
+    // RCB 07/14/2026: drop the read-ahead block AND the consumed-lag counter.
+    // Every op that moves the server cursor outside the sequential-skip path
+    // (Seek, order change, ...) must call this. Missing it is not a perf bug,
+    // it is a WRONG-DATA bug, and we shipped three of them: the queued rows
+    // were read at the *old* position/in the *old* order, so a following
+    // Skip(1) would pop a stale row with no wire traffic at all (nothing on the
+    // network to make it look suspicious), and the next real skip would then
+    // send a step inflated by a lag that no longer applies.
+    void invalidate_prefetch() {
+        prefetch_queue.clear();
+        prefetch_consumed = 0;
+    }
     // Tag name → server wire index id (populated at AdsOpenIndex).
     std::vector<std::pair<std::string, std::uint32_t>> index_by_tag;
     // Parallel to index_by_tag: the ABI ADSHANDLE (registry handle, 64-bit)

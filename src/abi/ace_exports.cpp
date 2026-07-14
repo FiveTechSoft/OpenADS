@@ -3686,6 +3686,55 @@ std::string remote_parent_field(openads::network::RemoteTable* parent,
     if (!parent->row_valid) {
         (void)parent->conn->fetch_current_row(parent);
     }
+    // RCB 07/14/2026: BUG FIX (pre-existing, exposed by the M12.24 warm
+    // GotoTop). This used to fetch the parent's row into the cache above and
+    // then ignore it, reading the field with conn->get_field() — which reads
+    // the SERVER's cursor. That cursor lags the client's logical position by
+    // prefetch_consumed whenever rows have been served out of the lookahead
+    // block, so the relation followed a STALE PARENT ROW and pointed the child
+    // at the wrong record.
+    //
+    // It stayed hidden because the only coverage skipped the parent exactly
+    // once, and before the warm GotoTop that first Skip always went to the wire
+    // (the queue was still empty), leaving the cursors in sync. The SECOND skip
+    // of any scan would have drained the queue and broken — i.e. this has been
+    // wrong for parent/child grids since sequential prefetch landed.
+    //
+    // Read the cached row, which is the client's logical current record by
+    // construction. Also removes a wire round-trip per parent row per relation.
+    //
+    // DO NOT "simplify" this back to a single conn->get_field() call. It reads
+    // like the obvious, direct thing to do — that is exactly how the bug got
+    // written — but asking the server for "the current record" is asking the
+    // WRONG QUESTION whenever the client is ahead of it. Guarded by the
+    // full-parent walk in the AdsSetRelation remote test; a test that skips the
+    // parent only once will NOT catch a regression here.
+    if (parent->row_valid) {
+        if (!parent->fields_cached) {
+            if (auto d = parent->conn->describe_table(parent->id)) {
+                parent->fields        = std::move(d).value();
+                parent->fields_cached = true;
+            }
+        }
+        auto upper = [](std::string s) {
+            for (auto& c : s) {
+                c = static_cast<char>(
+                    std::toupper(static_cast<unsigned char>(c)));
+            }
+            return s;
+        };
+        const std::string want = upper(field);
+        const std::size_t n = std::min(parent->fields.size(),
+                                       parent->current_row.size());
+        for (std::size_t i = 0; i < n; ++i) {
+            if (upper(parent->fields[i].name) == want) {
+                return parent->current_row[i];
+            }
+        }
+    }
+    // Fallback: no cached row (e.g. an older server that sent no trailer).
+    // The server cursor is authoritative in that case because nothing was
+    // drained locally.
     auto v = parent->conn->get_field(parent->id, field);
     return v.has_value() ? v.value() : std::string();
 }
@@ -3783,13 +3832,36 @@ void seek_remote_child_relation(openads::network::RemoteTable* parent,
         child->current_found = true;
         return;
     }
+    // RCB 07/14/2026: M12.24 — pass `child` so the SeekAck's row trailer lands
+    // straight in the child's row cache.
+    //
+    // Clearing row_valid FIRST is load-bearing, not tidiness: it is what turns
+    // the `!child->row_valid` test below into an honest "did the server actually
+    // send me a row?" probe. Leave a stale row_valid=true standing here and that
+    // test answers yes for the PREVIOUS parent's child row, we skip the fallback,
+    // and the grid quietly shows the wrong child.
+    child->row_valid = false;
+    child->invalidate_prefetch();
     auto so = child->conn->seek(child->active_index_id, key,
-                                /*soft=*/1, /*last=*/0);
+                                /*soft=*/1, /*last=*/0, child);
     if (!so || so.value().hit == 0) {
         remote_child_to_eof(child);
         return;
     }
-    (void)child->conn->goto_record(child, so.value().recno);
+    // RCB 07/14/2026: this GotoRecord used to fire UNCONDITIONALLY, and it was
+    // pure overhead — the seek had ALREADY positioned the server cursor on this
+    // record. The only reason for the second frame was to drag the row down,
+    // because SeekAck carried no row. It runs once per PARENT row in a relation
+    // browse, so it was doubling the wire cost of every child lookup in the grid.
+    //
+    // An M12.24 server hands us the row with the seek, so this is now only sent
+    // when talking to an OLDER server that didn't. It is NOT dead code — delete
+    // the branch and every remote relation against a pre-M12.24 server silently
+    // stops resolving its child row. (See the row_valid note above for why the
+    // condition is trustworthy.)
+    if (!child->row_valid) {
+        (void)child->conn->goto_record(child, so.value().recno);
+    }
     child->found_cached  = true;
     child->current_found = true;
 }
@@ -3836,13 +3908,36 @@ void seek_remote_child_relation(Table* parent,
         child->current_found = true;
         return;
     }
+    // RCB 07/14/2026: M12.24 — pass `child` so the SeekAck's row trailer lands
+    // straight in the child's row cache.
+    //
+    // Clearing row_valid FIRST is load-bearing, not tidiness: it is what turns
+    // the `!child->row_valid` test below into an honest "did the server actually
+    // send me a row?" probe. Leave a stale row_valid=true standing here and that
+    // test answers yes for the PREVIOUS parent's child row, we skip the fallback,
+    // and the grid quietly shows the wrong child.
+    child->row_valid = false;
+    child->invalidate_prefetch();
     auto so = child->conn->seek(child->active_index_id, key,
-                                /*soft=*/1, /*last=*/0);
+                                /*soft=*/1, /*last=*/0, child);
     if (!so || so.value().hit == 0) {
         remote_child_to_eof(child);
         return;
     }
-    (void)child->conn->goto_record(child, so.value().recno);
+    // RCB 07/14/2026: this GotoRecord used to fire UNCONDITIONALLY, and it was
+    // pure overhead — the seek had ALREADY positioned the server cursor on this
+    // record. The only reason for the second frame was to drag the row down,
+    // because SeekAck carried no row. It runs once per PARENT row in a relation
+    // browse, so it was doubling the wire cost of every child lookup in the grid.
+    //
+    // An M12.24 server hands us the row with the seek, so this is now only sent
+    // when talking to an OLDER server that didn't. It is NOT dead code — delete
+    // the branch and every remote relation against a pre-M12.24 server silently
+    // stops resolving its child row. (See the row_valid note above for why the
+    // condition is trustworthy.)
+    if (!child->row_valid) {
+        (void)child->conn->goto_record(child, so.value().recno);
+    }
     child->found_cached  = true;
     child->current_found = true;
 }
@@ -7944,17 +8039,17 @@ UNSIGNED32 ENTRYPOINT AdsSkip(ADSHANDLE hTable, SIGNED32 lRows) {
         // M12.21 — sequential prefetch: Skip(1) drains the queue
         // populated by the previous Skip's lookahead block. Zero
         // RTT for every cached step.
-        if (lRows == 1 && !rt->prefetch_queue.empty()) {
-            auto pr = std::move(rt->prefetch_queue.front());
-            rt->prefetch_queue.pop_front();
-            rt->current_recno   = pr.recno;
-            rt->current_deleted = pr.deleted;
-            rt->current_row     = std::move(pr.fields);
-            rt->row_valid       = true;
-            // M12.21 option C — the server cursor did not move; remember
-            // we are one logical row further ahead so the next wire op
-            // resyncs by (step + prefetch_consumed).
-            ++rt->prefetch_consumed;
+        //
+        // RCB 07/14/2026: the drain itself now lives in remote_drain_prefetch()
+        // because the index-handle Skip path (remote_index_skip — what rddads
+        // ACTUALLY calls once an order is set, via hOrdCurrent) needs exactly
+        // the same logic. It used to have none at all: it threw the queue away
+        // on every skip. Duplicating the drain there would have meant two copies
+        // of the consumed-counter bookkeeping that keeps the lagging server
+        // cursor correct, and that counter is the whole reason "option B" of
+        // this feature had to be shelved once already. One copy, two callers.
+        if (lRows == 1 &&
+            openads::network::remote_drain_prefetch(rt)) {
             remote_sync_keyno_skip(rt, lRows);
             remote_update_nav_boundaries(rt, lRows, rec_before, row_valid_before);
             apply_relations_for_handle(hTable);
@@ -12687,8 +12782,23 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrder(ADSHANDLE hTable, UNSIGNED8* pucName) {
             ? openads::abi::to_internal(pucName, 0) : std::string();
         auto r = rt->conn->set_order_by_name(rt->id, name);
         if (!r) return fail(r.error());
+        // RCB 07/14/2026: BUG FIX — the controlling order just changed, so the
+        // cached row and every queued lookahead row were read in the OLD order
+        // and cannot be served against the new one. Same family as the AdsSeek
+        // stale-queue bug: without this, the first skip after an OrdSetFocus
+        // serves a row from the previous ordering, locally, with no wire
+        // traffic to make it look suspicious.
+        rt->row_valid = false;
+        rt->invalidate_prefetch();
+        // RCB 07/14/2026: the server now orders by whatever `name` resolved to
+        // on ITS side. Mirror that into server_order_id when we can map the tag
+        // locally; when we can't, deliberately leave it "unknown" so the next
+        // remote_activate_index re-sends SetOrder rather than trusting a guess.
+        // A wrong guess here is the "remote browse shows no index" bug.
+        rt->server_order_id = openads::network::RemoteTable::kOrderUnknown;
         if (name.empty()) {
             rt->active_index_id = 0;
+            rt->server_order_id = 0;          // natural record order
             rt->keyno_valid     = false;
         } else {
             for (auto& [tag, wid] : rt->index_by_tag) {
@@ -12703,6 +12813,7 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrder(ADSHANDLE hTable, UNSIGNED8* pucName) {
                     }
                     if (eq) {
                         rt->active_index_id = wid;
+                        rt->server_order_id = wid;
                         rt->keyno_valid     = false;
                         break;
                     }
@@ -12836,13 +12947,30 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrderByHandle(ADSHANDLE hTable, ADSHANDLE hInde
         if (hIndex == 0) {
             rt->active_index_id = 0;
             rt->keyno_valid     = false;
+            rt->row_valid       = false;
+            rt->invalidate_prefetch();
+            // RCB 07/14/2026: heads-up for whoever reads this next — this
+            // branch (hIndex == 0 == "back to natural order") sends NO frame,
+            // so the server keeps the old order installed in ordered_tables_
+            // and a table-handle Skip still walks it in index order. That is a
+            // PRE-EXISTING gap, not something introduced here; it is written up
+            // as a side bug in todo.local.md. Forcing server_order_id back to
+            // unknown at least makes the next index-handle nav re-install a
+            // known order instead of trusting a stale belief.
+            rt->server_order_id = openads::network::RemoteTable::kOrderUnknown;
             return ok();
         }
         if (auto* ri = get_remote_index(hIndex)) {
             auto r = rt->conn->set_order(rt->id, ri->id);
             if (!r) return fail(r.error());
             rt->active_index_id = ri->id;
+            rt->server_order_id = ri->id;
             rt->keyno_valid     = false;
+            // RCB 07/14/2026: BUG FIX — order changed, so the cached row and
+            // the queued lookahead rows are in the wrong order. Drop them.
+            // (Same stale-queue family as AdsSeek / AdsSetIndexOrder.)
+            rt->row_valid = false;
+            rt->invalidate_prefetch();
             return ok();
         }
         return fail(openads::AE_INTERNAL_ERROR,
@@ -15238,10 +15366,25 @@ UNSIGNED32 ENTRYPOINT AdsSeek(ADSHANDLE hIndex,
     if (auto* ri = get_remote_index(hIndex)) {
         std::string key(reinterpret_cast<const char*>(pucKey),
                         u16KeyLen);
-        if (ri->parent) ri->parent->row_valid = false;   // M12.17
+        if (ri->parent) {
+            ri->parent->row_valid = false;               // M12.17
+            // RCB 07/14/2026: BUG FIX — this path invalidated the cached row
+            // but not the lookahead queue. A seek repositions the server cursor
+            // ABSOLUTELY, so every queued row belongs to the pre-seek position
+            // and the consumed-lag counter no longer describes anything real.
+            // Left as it was, the next AdsSkip(1) popped a stale PRE-SEEK row
+            // and returned it as the current record with no wire traffic at all
+            // — nothing on the network to make it look wrong — and the wire skip
+            // after that sent (step + a lag that no longer applied).
+            ri->parent->invalidate_prefetch();
+        }
+        // RCB 07/14/2026: M12.24 — pass the parent so the SeekAck's row trailer
+        // lands straight in the row cache. Without it row_valid stays false and
+        // the caller's next AdsGetField pays a FetchCurrentRow round-trip, i.e.
+        // seek-then-read costs 2 RTTs instead of 1.
         auto r = ri->conn->seek(ri->id, key,
             static_cast<std::uint8_t>(u16SeekType),
-            /*last=*/0);
+            /*last=*/0, ri->parent);
         if (!r) return fail(r.error());
         if (pbFound) *pbFound = r.value().hit;
         if (ri->parent) {                            // M12.21 option C
@@ -15528,10 +15671,15 @@ UNSIGNED32 ENTRYPOINT AdsSeekLast(ADSHANDLE hIndex,
     if (auto* ri = get_remote_index(hIndex)) {
         std::string key(reinterpret_cast<const char*>(pucKey),
                         u16KeyLen);
-        if (ri->parent) ri->parent->row_valid = false;   // M12.17
+        if (ri->parent) {
+            ri->parent->row_valid = false;               // M12.17
+            // RCB 07/14/2026: same stale-queue bug as AdsSeek — see the note
+            // there for why dropping the block is mandatory after a seek.
+            ri->parent->invalidate_prefetch();
+        }
         auto r = ri->conn->seek(ri->id, key,
             /*soft=*/0,
-            /*last=*/1);
+            /*last=*/1, ri->parent);       // M12.24 — see AdsSeek
         if (!r) return fail(r.error());
         if (pbFound) *pbFound = r.value().hit;
         if (ri->parent) {                            // M12.21 option C
@@ -26945,10 +27093,35 @@ UNSIGNED32 ENTRYPOINT AdsClearCallbackFunction(void) { ADS_STUB(openads::AE_SUCC
 UNSIGNED32 ENTRYPOINT AdsClearProgressCallback(void) { ADS_STUB(openads::AE_SUCCESS); }
 UNSIGNED32 ENTRYPOINT AdsCacheOpenCursors(UNSIGNED16) { ADS_STUB(openads::AE_SUCCESS); }
 UNSIGNED32 ENTRYPOINT AdsCacheOpenTables(UNSIGNED16) { ADS_STUB(openads::AE_SUCCESS); }
-UNSIGNED32 ENTRYPOINT AdsCacheRecords(ADSHANDLE hTable, UNSIGNED16 /*usNumRecords*/) {
-    // Read-ahead hint. OpenADS does not pre-cache rows, so this is a no-op
-    // beyond validating the table handle.
-    if (get_remote_table(hTable) || get_table(hTable) != nullptr) return ok();
+UNSIGNED32 ENTRYPOINT AdsCacheRecords(ADSHANDLE hTable, UNSIGNED16 usNumRecords) {
+    // RCB 07/14/2026: M12.23 — this used to be a no-op ("OpenADS does not
+    // pre-cache rows"), which stopped being true back in M12.21 and is now
+    // thoroughly untrue. The caller's depth now rides on every subsequent Skip
+    // for this table (see kPrefetchDepthAuto in wire.h) and overrides the
+    // server's automatic ramp.
+    //
+    // SAP's semantics (ace_adscacherecords.htm), which we mirror:
+    //   - 0 or 1 "effectively turns read-ahead record caching off";
+    //   - big values suit a one-directional batch sweep, and are a bad idea
+    //     when most visited records get edited, because "any editing of data
+    //     causes the cache to be dumped".
+    //
+    // The value is a CEILING, not a promise: we will not read further ahead
+    // than asked, but the byte budget can still hand back fewer rows.
+    if (auto* rt = get_remote_table(hTable)) {
+        rt->cache_records_hint = usNumRecords;
+        // Turning caching off has to bite NOW, not at the next refill. Rows
+        // already queued would otherwise keep being served locally out of the
+        // old block — and a caller who just disabled read-ahead is, per SAP's
+        // own guidance, usually about to start editing and specifically needs
+        // to stop seeing cached data.
+        if (usNumRecords <= 1) rt->invalidate_prefetch();
+        return ok();
+    }
+    // Local (in-process) tables: there is no wire to read ahead of, and the
+    // driver already keeps a 64 KB block cache under the cursor, so the hint
+    // has nothing to tune. Validate the handle and succeed, as before.
+    if (get_table(hTable) != nullptr) return ok();
     return fail(openads::AE_INTERNAL_ERROR, "unknown table");
 }
 UNSIGNED32 ENTRYPOINT AdsCloseCachedTables(ADSHANDLE) { ADS_STUB(openads::AE_SUCCESS); }
@@ -27445,6 +27618,22 @@ UNSIGNED32 ENTRYPOINT AdsGetRecord(ADSHANDLE hTable, UNSIGNED8* pucRecord,
             *pulLen = r.value();
             return ok();
         }
+        // RCB 07/14/2026: BUG FIX — GetRecord reads the SERVER's current
+        // record, so the prefetch lag has to be settled first. Rows served
+        // locally out of the lookahead queue leave the server cursor behind by
+        // prefetch_consumed, and this path never settled, so it happily handed
+        // back the raw image of a record the caller had already skipped past.
+        //
+        // KNOWN COST, accepted deliberately: settling forces a round-trip, so a
+        // scan shaped like Skip(1)/GetRecord/Skip(1)/GetRecord defeats
+        // read-ahead and pays 1 RTT per row. Correctness has to win — handing
+        // back the wrong record is not a trade we get to make — but it does mean
+        // AdsGetRecord is the ONE nav-path read that prefetch cannot accelerate.
+        // Fixing it properly means carrying the raw record image in the
+        // lookahead block; today the block carries decoded per-field values,
+        // which is what AdsGetField and friends want and what AdsGetRecord
+        // specifically cannot use. Tracked in todo.local.md.
+        remote_settle_cursor(rt);
         auto r = rt->conn->get_record(rt->id);
         if (!r) return fail(r.error());
         const auto& buf = r.value();

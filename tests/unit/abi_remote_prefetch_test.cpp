@@ -262,6 +262,102 @@ TEST_CASE("remote prefetch: a write mid-scan hits the logical record, not the la
     srv.stop();
 }
 
+// RCB 07/14/2026 — M12.23. AdsCacheRecords(hTable, N) now actually reaches the
+// server, as an optional trailing [u16] on the Skip request. Two cases matter,
+// and they are the two SAP calls out in ace_adscacherecords.htm.
+//
+// Both assert on REQUEST COUNTS, which is the only way to observe this: a hint
+// changes how much comes back per round-trip, never what the rows are. Relax
+// these bounds and the API goes back to being a no-op with nothing to notice.
+TEST_CASE("AdsCacheRecords(0) turns read-ahead off") {
+    using openads::network::Server;
+    const int N = 60;
+    auto dir = fs::temp_directory_path() / "openads_cacherecs_off";
+    make_dbf(dir, "pf", N);
+
+    Server srv;
+    REQUIRE(srv.start("127.0.0.1", 0).has_value());
+    ADSHANDLE hConn = remote_connect(dir, srv.port());
+    ADSHANDLE hTable = 0;
+    UNSIGNED8 tname[16] = "pf.dbf";
+    UNSIGNED8 alias[8]  = "pf";
+    REQUIRE(AdsOpenTable(hConn, tname, alias, ADS_CDX, 0, 0, 0, 0, &hTable) == 0);
+
+    // SAP: "A usRecords value of 0 (or 1) effectively turns read-ahead record
+    // caching off." The documented use is a batch loop that edits most of the
+    // records it visits, where every edit would dump the block anyway.
+    REQUIRE(AdsCacheRecords(hTable, 0) == 0);
+
+    REQUIRE(AdsGotoTop(hTable) == 0);
+    auto& stats = openads::mgmt::process_mg_stats();
+    const std::uint64_t base = stats.packets_in.load();
+
+    bool ordered = true;
+    for (int k = 2; k <= N; ++k) {
+        REQUIRE(AdsSkip(hTable, 1) == 0);
+        UNSIGNED32 rn = 0;
+        REQUIRE(AdsGetRecordNum(hTable, 0, &rn) == 0);
+        if (rn != static_cast<UNSIGNED32>(k)) ordered = false;
+    }
+    const std::uint64_t reqs = stats.packets_in.load() - base;
+
+    CHECK(ordered);                 // still correct, just uncached
+    // Caching off => one wire Skip per record. (With read-ahead on, the same
+    // scan costs a handful of requests — see the forward-scan test above.)
+    CHECK(reqs >= static_cast<std::uint64_t>(N - 5));
+
+    REQUIRE(AdsCloseTable(hTable) == 0);
+    REQUIRE(AdsDisconnect(hConn) == 0);
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    srv.stop();
+}
+
+TEST_CASE("AdsCacheRecords(100) reads ahead aggressively") {
+    using openads::network::Server;
+    const int N = 300;
+    auto dir = fs::temp_directory_path() / "openads_cacherecs_aggr";
+    make_dbf(dir, "pf", N);
+
+    Server srv;
+    REQUIRE(srv.start("127.0.0.1", 0).has_value());
+    ADSHANDLE hConn = remote_connect(dir, srv.port());
+    ADSHANDLE hTable = 0;
+    UNSIGNED8 tname[16] = "pf.dbf";
+    UNSIGNED8 alias[8]  = "pf";
+    REQUIRE(AdsOpenTable(hConn, tname, alias, ADS_CDX, 0, 0, 0, 0, &hTable) == 0);
+
+    // SAP's rcAggressive == 100 records. An explicit depth overrides the
+    // server's automatic ramp, so blocks are 100 rows from the very first
+    // Skip rather than climbing 8 -> 16 -> 32 -> 64.
+    REQUIRE(AdsCacheRecords(hTable, 100) == 0);
+
+    REQUIRE(AdsGotoTop(hTable) == 0);
+    auto& stats = openads::mgmt::process_mg_stats();
+    const std::uint64_t base = stats.packets_in.load();
+
+    bool ordered = true;
+    for (int k = 2; k <= N; ++k) {
+        REQUIRE(AdsSkip(hTable, 1) == 0);
+        UNSIGNED32 rn = 0;
+        REQUIRE(AdsGetRecordNum(hTable, 0, &rn) == 0);
+        if (rn != static_cast<UNSIGNED32>(k)) ordered = false;
+    }
+    const std::uint64_t reqs = stats.packets_in.load() - base;
+
+    CHECK(ordered);
+    // 299 steps / 100-row blocks = 3 wire skips. Beats the ramped default
+    // (which spends its first few blocks climbing), so this is a real,
+    // observable difference — not just "still fast".
+    CHECK(reqs <= 6u);
+
+    REQUIRE(AdsCloseTable(hTable) == 0);
+    REQUIRE(AdsDisconnect(hConn) == 0);
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    srv.stop();
+}
+
 TEST_CASE("remote prefetch: an Eof()/IsFound()-polling scan loop sheds its round-trips") {
     using openads::network::Server;
     const int N = 300;
