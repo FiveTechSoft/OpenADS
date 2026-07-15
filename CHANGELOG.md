@@ -1,4 +1,4 @@
-## Unreleased
+## 1.8.13 — 2026-07-15
 
 ### Remote read-ahead on ordered browses (the Mp10 xBrowse case) — 598 → 7 round-trips
 
@@ -170,6 +170,14 @@ table id, so it cannot go through the usual per-table run-breaker).
 - `docs/wire-protocol.md` §5.8 documented a row-trailer layout that has
   never existed in the code. Replaced with the real format, including the
   look-ahead block and the consumed-lag protocol.
+
+### Examples
+
+- `examples/fivewin/xbrowse_delscope.prg` — FiveWin xBrowse over a remote
+  table with `SET DELETED ON` and an index scope, records deleted inside
+  the scoped range; `/auto` mode asserts no visible deleted row, no
+  duplicate, and the exact expected key walk in both directions.
+
 ## 1.8.12 — 2026-07-14
 
 ### ENGINE — multi-record `Skip` counts *visible* rows under `SET DELETED ON` / filters (M12.33)

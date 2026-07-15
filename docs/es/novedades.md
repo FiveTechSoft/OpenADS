@@ -6,11 +6,33 @@ nav_order: 0
 permalink: /es/novedades/
 ---
 
-# Novedades (v1.0.0-rc29 → v1.8.12)
+# Novedades (v1.0.0-rc29 → v1.8.13)
 
 Esta página resume los cambios más destacados desde la versión
 v1.0.0-rc29. Para el historial completo de commits, consulta el
 [CHANGELOG](https://github.com/FiveTechSoft/OpenADS/blob/main/CHANGELOG.md).
+
+---
+
+## Destacados v1.8.13
+
+### REMOTO — browses con orden/scope: correcciones + read-ahead
+
+Cierra el trabajo remoto de `SET DELETED`: cambiar `AdsShowDeleted`
+ahora invalida el bloque de lectura adelantada del cliente (los
+registros borrados ya no persisten a mitad de recorrido), las
+relaciones leen la clave del padre de la fila actual del cliente en
+vez del cursor rezagado del servidor, y `Seek`/`SetIndexOrder`/
+`GetRecord` ya no sirven filas precargadas obsoletas. El read-ahead
+funciona ahora también en browses **con orden** (un recorrido ordenado
+de 299 filas pasó de 598 viajes de red a 7), `AdsCacheRecords` se
+respeta, y `GotoTop`/`Seek` devuelven la fila alcanzada, así que la
+primera lectura tras reposicionar no cuesta un viaje extra.
+
+Actualiza **ambos** binarios: `openads_serverd` y `openace64.dll` —
+varias de estas correcciones son del lado cliente. Nuevo ejemplo:
+`examples/fivewin/xbrowse_delscope.prg` (xBrowse FWH, remoto,
+`SET DELETED ON` + scope de índice, borrados dentro del scope).
 
 ---
 
