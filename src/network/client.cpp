@@ -327,6 +327,11 @@ util::Result<void> RemoteConnection::goto_top(std::uint32_t id) {
 // row cache in-place. xbrowse repaint becomes 1 RTT per Skip
 // (the row arrives with the ack) instead of 2.
 util::Result<void> RemoteConnection::goto_top(RemoteTable* rt) {
+    // RCB 07/15/2026: rt is non-null by caller contract -- every caller resolves
+    // it from the handle registry (get_remote_table) or from a ri->parent that
+    // was already checked. Deliberately NOT null-checked here, matching every
+    // other rt/id method on this class; a lone guard (flagged in review) would
+    // be inconsistent noise, not added safety.
     Frame req;
     req.opcode = Opcode::GotoTop;
     write_u32_le(rt->id, req.payload);
@@ -365,6 +370,9 @@ util::Result<void> RemoteConnection::skip(std::uint32_t id,
 
 util::Result<void> RemoteConnection::skip(RemoteTable* rt,
                                            std::int32_t step) {
+    // RCB 07/15/2026: rt is non-null by caller contract (resolved from the
+    // handle registry, or a checked ri->parent). Not null-checked, for the same
+    // reason as goto_top(rt) above -- consistent with the rest of this class.
     Frame req;
     req.opcode = Opcode::Skip;
     write_u32_le(rt->id, req.payload);
