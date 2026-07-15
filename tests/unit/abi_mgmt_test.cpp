@@ -55,7 +55,10 @@ TEST_CASE("M9.25 AdsMgGetInstallInfo reports the OpenADS version") {
     REQUIRE(AdsMgGetInstallInfo(h, &info, &sz) == 0);
     CHECK(sz == sizeof(ADS_MGMT_INSTALL_INFO));
     std::string ver(reinterpret_cast<const char*>(info.aucVersionStr));
-    CHECK(ver.rfind("OpenADS", 0) == 0);
+    // Release builds report "OpenADS X.Y.Z"; dev builds may drop the brand
+    // so the longer git-describe version fits the 16-byte field.
+    CHECK_FALSE(ver.empty());
+    CHECK(ver != "OpenADS 1.0");    // the pre-1.8.14 hardcoded string
 
     REQUIRE(AdsMgDisconnect(h) == 0);
 }

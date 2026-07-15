@@ -24,8 +24,12 @@ TEST_CASE("MgCollector::install_info reports the product string") {
     MgCollector c(snap);
 
     ADS_MGMT_INSTALL_INFO info = c.install_info();
-    CHECK(c_str_of(info.aucVersionStr, sizeof(info.aucVersionStr))
-              .rfind("OpenADS", 0) == 0);
+    // Since 1.8.14 this carries the real build version. Release builds
+    // report "OpenADS X.Y.Z"; a dev build may drop the brand so the longer
+    // git-describe string fits the 16-byte field.
+    std::string ver = c_str_of(info.aucVersionStr, sizeof(info.aucVersionStr));
+    CHECK_FALSE(ver.empty());
+    CHECK(ver != "OpenADS 1.0");    // the pre-1.8.14 hardcoded string
     // OpenADS is not serial-licensed: serial reports empty.
     CHECK(c_str_of(info.aucSerialNumber,
                    sizeof(info.aucSerialNumber)).empty());

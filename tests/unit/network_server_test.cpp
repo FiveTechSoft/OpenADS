@@ -46,7 +46,12 @@ TEST_CASE("M12.3 server Hello → HelloAck round-trip") {
     CHECK(reply.value().opcode == Opcode::HelloAck);
     std::string ver(reply.value().payload.begin(),
                     reply.value().payload.end());
-    CHECK(ver == "openads/0.3.2");
+    // Since 1.8.14 the ack carries the real build version ("openads/X.Y.Z"),
+    // so a client can tell WHICH serverd is answering; only the prefix is
+    // stable across releases.
+    CHECK(ver.rfind("openads/", 0) == 0);
+    CHECK(ver.size() > std::string("openads/").size());
+    CHECK(ver != "openads/0.3.2");   // the pre-1.8.14 hardcoded string
 
     sock_close(cs);
     srv.stop();

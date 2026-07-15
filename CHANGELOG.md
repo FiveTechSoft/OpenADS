@@ -53,6 +53,30 @@ mixed PgDn/PgUp navigation lands on the right recno, and the thrift test drops
 from 299 requests to 7 (and back to 299 with the backward path disabled, which
 is how the test proves the read-ahead is real).
 
+### The server's real version is now visible from the client
+
+Repeated "the fix didn't help" reports keep resolving to an old
+`openads_serverd` still running (a live service holds its exe, so an
+update copy can fail silently). There was no way to prove it from the
+client side: the wire `HelloAck` carried a hardcoded `openads/0.3.2` and
+`AdsMgGetInstallInfo` a hardcoded `OpenADS 1.0`.
+
+- `HelloAck` now answers with the real build version
+  (`openads/<version>`, e.g. `openads/1.8.14`).
+- `AdsMgGetInstallInfo` on a **remote** mgmt handle reports the
+  **server's** version (one `Hello` round-trip — works against every
+  wire-protocol version ever shipped; an old server identifies itself by
+  answering the literal `0.3.2`). Local handles report the DLL's build.
+  From Harbour:
+  `AdsMgConnect("host:port")`, `AdsMgGetInstallInfo()[3]`,
+  `AdsMgDisconnect()`.
+- `examples/fivewin/xbpaint_delscope.prg` (new) logs that server version
+  and drives the exact xBrowse repaint shape — anchor / page-read /
+  `AdsGetRelKeyPos` / `DbGoto` back / advance, plus the arrow-up variant
+  and scrollbar thumb drags via `AdsSetRelKeyPos` — over a 300-row
+  remote table with SET DELETED ON, an index scope, and deleted rows
+  inside the scope.
+
 ### Remote `CloseTable` released the client's view of the table but kept the files open
 
 Ordered navigation, index scopes, locks and a few other remote operations

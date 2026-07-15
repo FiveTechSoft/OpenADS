@@ -28550,6 +28550,30 @@ fetch_mg_snapshot(const MgBackend& be) {
     return openads::network::decode_mg_snapshot(payload);
 }
 
+// Ask a remote server what build it is via the Hello opcode (supported by
+// every wire protocol version). Returns e.g. "openads/1.8.14"; a pre-1.8.14
+// server answers its hardcoded "openads/0.3.2", which is itself the
+// diagnosis — an old serverd is running. Empty string when unreachable.
+std::string fetch_server_hello(const MgBackend& be) {
+    openads::network::network_init();
+    auto sock = openads::network::connect_tcp(be.host, be.port);
+    if (!sock.has_value()) return "";
+    openads::network::Socket s = sock.value();
+    openads::network::Frame req;
+    req.opcode = openads::network::Opcode::Hello;
+    std::string out;
+    if (auto wr = openads::network::write_frame(s, req); wr.has_value()) {
+        auto reply = openads::network::read_frame(s);
+        if (reply.has_value() &&
+            reply.value().opcode == openads::network::Opcode::HelloAck) {
+            out.assign(reply.value().payload.begin(),
+                       reply.value().payload.end());
+        }
+    }
+    openads::network::sock_close(s);
+    return out;
+}
+
 }  // namespace
 }  // extern "C++"
 
@@ -28737,7 +28761,27 @@ UNSIGNED32 ENTRYPOINT AdsMgGetConfigInfo(ADSHANDLE h, void* pv, UNSIGNED16* lv,
 UNSIGNED32 ENTRYPOINT AdsMgGetInstallInfo(ADSHANDLE h, void* p, UNSIGNED16* l) {
     auto c = mg_collector_for(h);
     if (!c.has_value()) return static_cast<UNSIGNED32>(c.error().code);
-    return emit_mg_struct(c.value().install_info(), p, l);
+    ADS_MGMT_INSTALL_INFO info = c.value().install_info();
+    // For a remote mgmt handle the version that matters is the SERVER
+    // binary's, not this DLL's — MgCollector only knows the local build.
+    // One Hello round-trip answers it for any server version ever shipped.
+    if (const MgBackend* be = lookup_mg(h); be != nullptr && be->remote) {
+        std::string hello = fetch_server_hello(*be);   // "openads/X.Y.Z"
+        if (!hello.empty()) {
+            const std::string prefix = "openads/";
+            std::string ver = hello.rfind(prefix, 0) == 0
+                ? hello.substr(prefix.size()) : hello;
+            std::string vs = "OpenADS " + ver;
+            // aucVersionStr is 16 bytes. A release version ("OpenADS
+            // 1.8.14") fits; a dev build ("1.8.14-3-gabc1234-dirty") does
+            // not — prefer the version detail over the brand then.
+            if (vs.size() >= sizeof(info.aucVersionStr)) vs = ver;
+            std::memset(info.aucVersionStr, 0, sizeof(info.aucVersionStr));
+            std::memcpy(info.aucVersionStr, vs.c_str(),
+                        std::min(vs.size(), sizeof(info.aucVersionStr) - 1));
+        }
+    }
+    return emit_mg_struct(info, p, l);
 }
 UNSIGNED32 ENTRYPOINT AdsMgGetLockOwner(ADSHANDLE h, UNSIGNED8* pucTable,
                               UNSIGNED32 ulRec,

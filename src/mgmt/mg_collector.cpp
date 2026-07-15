@@ -54,8 +54,22 @@ ADS_MGMT_INSTALL_INFO MgCollector::install_info() const {
     info.ulUserOption = 0;
     put_field(info.aucRegisteredOwner, sizeof(info.aucRegisteredOwner),
               "OpenADS");
+    // Real build version — support triage relies on this to tell WHICH
+    // binary is answering (see the HelloAck note in network/session.cpp).
+    // aucVersionStr is 16 bytes: a release ("OpenADS 1.8.14") fits, a dev
+    // build ("1.8.14-3-gabc1234-dirty") does not — prefer the version
+    // detail over the brand when it is tight.
+#ifdef OPENADS_VERSION_STR
+    {
+        std::string vs = "OpenADS " OPENADS_VERSION_STR;
+        if (vs.size() >= sizeof(info.aucVersionStr))
+            vs = OPENADS_VERSION_STR;
+        put_field(info.aucVersionStr, sizeof(info.aucVersionStr), vs);
+    }
+#else
     put_field(info.aucVersionStr, sizeof(info.aucVersionStr),
-              "OpenADS 1.0");
+              "OpenADS (unknown)");
+#endif
     // aucSerialNumber / aucEvalExpireDate intentionally left empty:
     // OpenADS is not serial-licensed.
     return info;

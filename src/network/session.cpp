@@ -848,7 +848,16 @@ DispatchResult Session::dispatch(const Frame& f) {
     switch (f.opcode) {
         case Opcode::Hello: {
             reply.opcode = Opcode::HelloAck;
-            std::string v = "openads/0.3.2";
+            // Real build version, not a hardcoded protocol string: this is
+            // the only way a client (or a support engineer) can prove which
+            // serverd binary is actually answering — "the fix didn't help"
+            // reports keep turning out to be an old serverd still running.
+            // Any pre-1.8.14 server answers the literal "openads/0.3.2".
+#ifdef OPENADS_VERSION_STR
+            std::string v = "openads/" OPENADS_VERSION_STR;
+#else
+            std::string v = "openads/unknown";
+#endif
             reply.payload.assign(v.begin(), v.end());
             break;
         }
