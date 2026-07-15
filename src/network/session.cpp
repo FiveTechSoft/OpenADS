@@ -1105,8 +1105,27 @@ DispatchResult Session::dispatch(const Frame& f) {
             tbl_open_paths_.erase(id);
             if (auto hit = tbls_h_.find(id); hit != tbls_h_.end()) {
                 abi_schema_.erase(hit->second);
+                // Close the shadow ABI handle, not just the map entry.
+                // Erasing alone leaks a full local open of the same
+                // .dbf/.cdx/.fpt until the session disconnects, so the
+                // server kept the files open after the client closed the
+                // table — any app that erases/renames/reopens-exclusive
+                // its work files right after closing them then blocks on
+                // files "in use" for as long as the connection lives.
+                (void)AdsCloseTable(hit->second);
+                tbls_h_.erase(hit);
             }
-            tbls_h_.erase(id);
+            // Index ids resolved through the shadow handle died with it
+            // (AdsCloseTable purges the table's index bindings); drop the
+            // session's entries so a stale id can't be re-used.
+            for (auto iit = index_table_.begin(); iit != index_table_.end(); ) {
+                if (iit->second == id) {
+                    index_h_.erase(iit->first);
+                    iit = index_table_.erase(iit);
+                } else {
+                    ++iit;
+                }
+            }
             ordered_tables_.erase(id);
             reply.opcode = Opcode::CloseTableAck;
             break;

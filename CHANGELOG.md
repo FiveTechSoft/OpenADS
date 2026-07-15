@@ -53,6 +53,26 @@ mixed PgDn/PgUp navigation lands on the right recno, and the thrift test drops
 from 299 requests to 7 (and back to 299 with the backward path disabled, which
 is how the test proves the read-ahead is real).
 
+### Remote `CloseTable` released the client's view of the table but kept the files open
+
+Ordered navigation, index scopes, locks and a few other remote operations
+run through a per-session "shadow" ABI handle the server opens alongside
+the engine table (M12.16). The wire `CloseTable` handler closed the engine
+table but only *erased the map entry* for that shadow handle — the local
+open itself (and its `.dbf`/`.cdx`/`.fpt` OS file handles) survived until
+the session disconnected. Consequence on the app side: close a set of work
+tables, then try to erase / rename / reopen-exclusive any of them, and the
+files are still "in use" by the server for as long as the connection
+lives — an app-level retry loop turns that into seconds of delay or an
+apparent hang at "close all the invoice's files" time.
+
+`CloseTable` now closes the shadow ABI handle with the engine table and
+drops the session's index-id entries that resolved through it. Pinned by
+`tests/unit/abi_remote_zombie_lock_test.cpp` (lock release across close +
+file deletability straight after a remote close) and
+`tests/unit/abi_remote_close_hang_test.cpp` (a 12-table invoice-shaped
+open/work/close pass over a live socket, timed).
+
 ## 1.8.13 — 2026-07-15
 
 ### Remote read-ahead on ordered browses (the Mp10 xBrowse case) — 598 → 7 round-trips
