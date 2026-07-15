@@ -1,3 +1,38 @@
+## Unreleased
+
+### Backward (PgUp) read-ahead — 299 → 7 round-trips on a reverse scan
+
+Read-ahead was forward-only: a `Skip(-1)` browse (PgUp, or a report walking a
+table in reverse) paid one round-trip per row. It now gets the same treatment
+as a forward scan — a 300-row reverse scan over loopback dropped from 299 wire
+requests to 7 (the depth ramp: 8+16+32+64×4).
+
+- The server attaches a **backward block** (rows *before* the cursor, in
+  backward visit order) to a `Skip` with a negative step, walked and restored
+  symmetrically to the forward block.
+- The prefetch lag counter is now **signed** (`cursor_lag = client_logical −
+  server_cursor`): a forward local drain moves it positive, a backward one
+  negative, and the resync `step + cursor_lag` handles both with one formula.
+  The forward path is byte-for-byte unchanged (the lag was always ≥ 0 there),
+  which the existing forward tests confirm by still passing.
+- The depth ramp resets on a **direction reversal**, so a PgUp right after a
+  long PgDn doesn't inherit the forward run's ceiling depth.
+- **New capability bit `kCapPrefetchBackward` (0x04), and it is a correctness
+  gate, not an optimization.** A read-ahead block carries no direction marker
+  on the wire, so a client that only understood forward blocks would drain a
+  backward one the wrong way and serve the wrong record. The server therefore
+  sends a backward block only to clients that advertise the bit. Safe in both
+  mix directions: an old server ignores it; a new server never sends a backward
+  block to a client that didn't ask for it (that client just keeps paying one
+  round-trip per backward step).
+
+A direction reversal itself costs one round-trip (the standing queue is on the
+wrong side and can't serve it); the wire skip refills the queue in the new
+direction. Verified end-to-end: a reverse scan is correct to the BoF boundary,
+mixed PgDn/PgUp navigation lands on the right recno, and the thrift test drops
+from 299 requests to 7 (and back to 299 with the backward path disabled, which
+is how the test proves the read-ahead is real).
+
 ## 1.8.13 — 2026-07-15
 
 ### Remote read-ahead on ordered browses (the Mp10 xBrowse case) — 598 → 7 round-trips

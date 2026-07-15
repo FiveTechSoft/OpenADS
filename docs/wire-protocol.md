@@ -326,11 +326,19 @@ Notation:
   of a browse's opening repaint costs no round-trip. It honours
   `AdsCacheRecords` like any other block, which is why the depth has to reach
   the server here too.
-- GotoBottom: `[u32 tid]`. No lookahead block — the block is a *forward* walk
-  and there is nothing after the last record; a warm GotoBottom needs backward
-  look-ahead, which is not implemented.
+- GotoBottom: `[u32 tid]`. No lookahead block — a warm GotoBottom would need a
+  *backward* block, which rides on `Skip` (below), not on the reposition.
 - Skip: `[u32 tid][i32 step][u16 depth]?` (`step` is signed; transmit as
-  little-endian raw u32 bits). The trailing `depth` is **optional** and
+  little-endian raw u32 bits). **The sign of `step` selects the lookahead
+  direction**: a forward step (`>= 1`) gets a forward block (rows after the
+  cursor), a backward step (`<= -1`) gets a backward/PgUp block (rows before
+  it), `0` (a settle) gets none. A backward block is sent **only** to clients
+  that advertised `kCapPrefetchBackward` in the Connect caps word (M12.25) —
+  it is otherwise indistinguishable on the wire from a forward one, and a
+  client that could only drain forward would serve its rows in the wrong order.
+  The `SkipAck` row trailer and its block are byte-identical in both
+  directions; the client knows the direction because it knows the sign of the
+  wire step it sent. The trailing `depth` is **optional** and
   carries the caller's `AdsCacheRecords` value:
   - **absent** (pre-M12.23 clients) — read as `kPrefetchDepthAuto`
     (`0xFFFF`): the server chooses the depth itself by ramping on
@@ -364,14 +372,27 @@ Notation:
   **Read-ahead block.** A client that advertised `kCapPrefetchConsume`
   in the Connect capability word gets a block of look-ahead rows on a
   forward `Skip`, and serves the following skips from it with no
-  round-trip. The server cursor therefore *lags* the client's logical
-  position by the number of rows consumed locally; the client folds
-  that count back into the next wire step (`step + prefetch_consumed`),
-  and every nav ack resets the lag to zero. The depth is chosen by the
-  server: it ramps 8 → 64 per consecutive forward `Skip` on a table and
-  resets on any reposition, write, or order change, bounded also by a
-  32 KB byte budget. Ordered tables are walked through the ABI handle,
-  so the block follows *index* order, not natural record order.
+  round-trip. The server cursor is therefore *offset* from the client's
+  logical position by the number of rows consumed locally; the client
+  folds that offset (a signed `cursor_lag`) into the next wire step
+  (`step + cursor_lag`), and every nav ack resets it to zero. The depth is
+  chosen by the server: it ramps 8 → 64 per consecutive same-direction
+  `Skip` on a table and resets on any reposition, write, order change, or
+  **direction reversal**, bounded also by a 32 KB byte budget. Ordered
+  tables are walked through the ABI handle, so the block follows *index*
+  order, not natural record order.
+
+  **Backward (PgUp) block (M12.25).** A client that also advertised
+  `kCapPrefetchBackward` gets the mirror-image block on a backward `Skip`
+  (`step <= -1`): rows *before* the cursor, in backward visit order, walked
+  the same way and restored the same way. The `cursor_lag` goes negative
+  for a backward run; `step + cursor_lag` handles both signs with one
+  formula. The separate capability bit is a correctness gate, not an
+  optimization: the block carries no direction marker, so a
+  `kCapPrefetchConsume`-only client would drain a backward block forward and
+  serve the wrong record. A direction reversal (PgDn then PgUp) can't be
+  served from the standing queue — its rows are on the wrong side — so it
+  costs one wire round-trip that refills the queue in the new direction.
 
 ### 5.9 GetField / GetFieldAck
 - GetField: `[u32 tid][bytes field_name]` (no length prefix —

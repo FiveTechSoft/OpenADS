@@ -388,11 +388,23 @@ struct RemoteTable {
         std::vector<std::string> fields;
     };
     std::deque<PrefetchedRow> prefetch_queue;
-    // M12.21 option C — rows popped from prefetch_queue locally since the
-    // last server round-trip. The server cursor lags the client's logical
-    // position by exactly this count, so the next wire Skip sends
-    // (step + prefetch_consumed) to resync. Reset on every nav ack.
-    std::uint32_t prefetch_consumed = 0;
+    // RCB 07/15/2026: M12.25 — the direction the queued rows are walked in:
+    // +1 = forward (each row is the next in a Skip(+1) scan), -1 = backward
+    // (PgUp), 0 = empty/none. A drain only fires when the caller's step sign
+    // matches; a direction reversal can't serve from the queue and goes to the
+    // wire (which refills the queue in the new direction). Set on each nav ack
+    // from the sign of the wire step.
+    std::int8_t prefetch_dir = 0;
+    // RCB 07/15/2026: M12.25 — was `prefetch_consumed` (unsigned, forward-only).
+    // Now SIGNED: cursor_lag = client's logical position MINUS the server's
+    // cursor position. A forward local drain moves the client ahead of the
+    // server (lag += 1); a backward local drain moves it behind (lag -= 1). The
+    // next wire Skip sends (step + cursor_lag) so the server lands at
+    // client_logical + step regardless of sign. Reset to 0 on every nav ack
+    // (the ack re-anchors the server to the client's logical row). The forward
+    // path is byte-for-byte unchanged: lag was always >= 0 there, and
+    // step + lag == the old step + prefetch_consumed.
+    std::int32_t cursor_lag = 0;
     // M12.21 option C — cached Found() state. xBase clears Found() on any
     // non-seek move (Skip/Goto) and sets it from the seek outcome, so the
     // ops that know the value set it here and AdsIsFound serves it with no
@@ -451,7 +463,8 @@ struct RemoteTable {
     // send a step inflated by a lag that no longer applies.
     void invalidate_prefetch() {
         prefetch_queue.clear();
-        prefetch_consumed = 0;
+        prefetch_dir = 0;
+        cursor_lag   = 0;
     }
     // Tag name → server wire index id (populated at AdsOpenIndex).
     std::vector<std::pair<std::string, std::uint32_t>> index_by_tag;

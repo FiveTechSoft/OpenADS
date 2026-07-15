@@ -8,8 +8,7 @@ void remote_index_nav_preamble(RemoteIndex* ri) {
     if (ri == nullptr || ri->parent == nullptr) return;
     ri->parent->found_cached  = true;
     ri->parent->current_found = false;
-    ri->parent->prefetch_queue.clear();
-    ri->parent->prefetch_consumed = 0;
+    ri->parent->invalidate_prefetch();   // drops queue + dir + cursor_lag
 }
 
 util::Result<void> remote_activate_index(RemoteIndex* ri) {
@@ -65,17 +64,26 @@ util::Result<void> remote_index_goto_bottom(RemoteIndex* ri) {
     return ri->conn->goto_bottom(ri->parent);
 }
 
-bool remote_drain_prefetch(RemoteTable* rt) {
-    if (rt == nullptr || rt->prefetch_queue.empty()) return false;
+bool remote_drain_prefetch(RemoteTable* rt, std::int8_t dir) {
+    // RCB 07/15/2026: only serve from the queue when it was walked in the same
+    // direction the caller is stepping. A forward queue cannot answer a Skip(-1)
+    // (its rows are ahead, not behind), so a direction reversal falls through to
+    // the wire, which refills the queue in the new direction. prefetch_dir == 0
+    // means empty/none and matches nothing.
+    if (rt == nullptr || rt->prefetch_queue.empty() ||
+        rt->prefetch_dir != dir) {
+        return false;
+    }
     auto pr = std::move(rt->prefetch_queue.front());
     rt->prefetch_queue.pop_front();
     rt->current_recno   = pr.recno;
     rt->current_deleted = pr.deleted;
     rt->current_row     = std::move(pr.fields);
     rt->row_valid       = true;
-    // The server cursor did not move — remember we are one logical row further
-    // ahead so the next wire op resyncs by (step + prefetch_consumed).
-    ++rt->prefetch_consumed;
+    // The server cursor did not move; the client's logical position did (by dir).
+    // cursor_lag = client_logical - server, so it moves by dir: +1 forward,
+    // -1 backward. The next wire op resyncs via (step + cursor_lag).
+    rt->cursor_lag += dir;
     return true;
 }
 
@@ -102,20 +110,26 @@ util::Result<void> remote_index_skip(RemoteIndex* ri, std::int32_t rows) {
     // unconditionally, which threw the queue away on EVERY skip. That made
     // sense while the server refused to send a block for ordered tables (the
     // queue was always empty anyway); it is exactly wrong now.
-    if (rows == 1 && remote_drain_prefetch(rt)) {
+    if (rows == 1 && remote_drain_prefetch(rt, +1)) {
         return {};
     }
-    // RCB 07/14/2026: non-sequential step. The queued rows were read forward
-    // from where we were, so they cannot serve this move — drop them.
+    // RCB 07/15/2026: M12.25 — PgUp. A single backward step drains a backward
+    // block the same way a single forward step drains a forward one.
+    if (rows == -1 && remote_drain_prefetch(rt, -1)) {
+        return {};
+    }
+    // Non-sequential step (or a reversal the queue can't serve). The queued
+    // rows were read in one direction from where we were, so they cannot serve
+    // this move — drop them.
     //
-    // But do NOT reset prefetch_consumed here, however tempting the symmetry
-    // is. The server cursor still lags the client's logical position by exactly
-    // that many rows, and RemoteConnection::skip has to fold the lag into the
-    // wire step (step + prefetch_consumed) to land in the right place. Zeroing
-    // it would send a short step and silently land the cursor on the wrong
-    // record. The ack is what clears it (parse_row_trailer_into), because the
-    // ack is the point at which the lag is genuinely gone.
+    // RCB 07/14/2026: but do NOT reset cursor_lag here, however tempting the
+    // symmetry is. The server cursor is still offset from the client's logical
+    // position by that amount, and RemoteConnection::skip has to fold it into
+    // the wire step (step + cursor_lag) to land in the right place. Zeroing it
+    // would silently land the cursor on the wrong record. The ack is what
+    // clears it (parse_row_trailer_into), because that is when the lag is gone.
     rt->prefetch_queue.clear();
+    rt->prefetch_dir = 0;
     return ri->conn->skip(rt, rows);
 }
 

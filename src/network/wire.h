@@ -413,6 +413,19 @@ inline constexpr std::uint32_t kCapPrefetchConsume = 0x00000001u;
 // servers never see a 0xA6 frame, so the wire stays backward compatible.
 inline constexpr std::uint32_t kCapAggregate = 0x00000002u;
 
+// RCB 07/15/2026: M12.25 — the client can drain a BACKWARD lookahead block
+// (PgUp). This MUST be its own capability, not a free extension of
+// kCapPrefetchConsume, because it is a correctness gate rather than an
+// optimization: the read-ahead block is a plain [count][rows] list with no
+// direction marker on the wire, and a kCapPrefetchConsume-only client (which
+// only knows how to drain a block forward) would pop a backward-walked row on
+// its next Skip(+1) and serve the WRONG record. A server therefore attaches a
+// backward block only to clients that set this bit; everyone else keeps paying
+// one round-trip per backward step, exactly as before. Both mix directions stay
+// safe: an old server ignores the bit, and a new server never sends a backward
+// block to a client that did not advertise it.
+inline constexpr std::uint32_t kCapPrefetchBackward = 0x00000004u;
+
 // RCB 07/14/2026: M12.23 — AdsCacheRecords support. Why a bare trailing field
 // and not a new opcode or a capability bit: the Skip request grew an OPTIONAL
 // trailing [u16 LE] carrying the caller's requested read-ahead depth:

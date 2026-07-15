@@ -79,7 +79,8 @@ TEST_CASE("RemoteTable: default constructed state") {
     CHECK(rt.cached_rec_count == 0);
     CHECK_FALSE(rt.rec_count_cached);
     CHECK(rt.prefetch_queue.empty());
-    CHECK(rt.prefetch_consumed == 0);
+    CHECK(rt.cursor_lag == 0);
+    CHECK(rt.prefetch_dir == 0);
     CHECK_FALSE(rt.found_cached);
     CHECK_FALSE(rt.current_found);
 }

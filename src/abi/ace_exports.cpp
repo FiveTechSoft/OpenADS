@@ -387,14 +387,16 @@ openads::network::RemoteTable* get_remote_table(ADSHANDLE h) {
 }
 
 // M12.21 option C — settle the sequential-prefetch lag before any op
-// that reads or mutates the server's CURRENT record. Rows served
-// locally from the lookahead queue left the server cursor behind by
-// prefetch_consumed; a Skip(0) (which the client sends as
-// Skip(prefetch_consumed)) walks the server cursor up to the client's
-// logical row and the ack resets the counter. A no-op when nothing was
-// prefetched (the common cold-cache write path pays nothing).
+// that reads or mutates the server's CURRENT record. Rows served locally
+// from the lookahead queue left the server cursor away from the client's
+// logical row by cursor_lag (behind it for a forward run, ahead of it for a
+// backward one); a Skip(0) — which the client sends as Skip(cursor_lag) —
+// walks the server cursor to the logical row and the ack zeroes the lag. A
+// no-op when nothing was prefetched (the common cold-cache write path pays
+// nothing). RCB 07/15/2026: condition is now `!= 0`, since a backward lag is
+// negative.
 void remote_settle_cursor(openads::network::RemoteTable* rt) {
-    if (rt != nullptr && rt->conn != nullptr && rt->prefetch_consumed > 0) {
+    if (rt != nullptr && rt->conn != nullptr && rt->cursor_lag != 0) {
         (void)rt->conn->skip(rt, 0);
     }
 }
@@ -1068,8 +1070,7 @@ UNSIGNED32 remote_measure_keyno(openads::network::RemoteTable* rt) {
 
     rt->found_cached      = true;
     rt->current_found     = false;
-    rt->prefetch_queue.clear();
-    rt->prefetch_consumed = 0;
+    rt->invalidate_prefetch();
     if (auto r = rt->conn->goto_top(rt); !r) return 0;
     remote_sync_keyno_gototop(rt);
     if (rt->row_valid && rt->current_recno == target) {
@@ -1140,8 +1141,7 @@ UNSIGNED32 remote_goto_key_num(openads::network::RemoteTable* rt,
     if (!remote_table_has_index(rt)) {
         rt->found_cached      = true;
         rt->current_found     = false;
-        rt->prefetch_queue.clear();
-        rt->prefetch_consumed = 0;
+        rt->invalidate_prefetch();
         if (auto r = rt->conn->goto_record(rt, keyno); !r) {
             return fail(r.error());
         }
@@ -1151,8 +1151,7 @@ UNSIGNED32 remote_goto_key_num(openads::network::RemoteTable* rt,
     }
     rt->found_cached      = true;
     rt->current_found     = false;
-    rt->prefetch_queue.clear();
-    rt->prefetch_consumed = 0;
+    rt->invalidate_prefetch();
     if (auto r = rt->conn->goto_top(rt); !r) return fail(r.error());
     remote_sync_keyno_gototop(rt);
     if (keyno > 1u) {
@@ -3689,8 +3688,8 @@ std::string remote_parent_field(openads::network::RemoteTable* parent,
     // RCB 07/14/2026: BUG FIX (pre-existing, exposed by the M12.24 warm
     // GotoTop). This used to fetch the parent's row into the cache above and
     // then ignore it, reading the field with conn->get_field() — which reads
-    // the SERVER's cursor. That cursor lags the client's logical position by
-    // prefetch_consumed whenever rows have been served out of the lookahead
+    // the SERVER's cursor. That cursor is offset from the client's logical
+    // position by cursor_lag whenever rows have been served out of the lookahead
     // block, so the relation followed a STALE PARENT ROW and pointed the child
     // at the wrong record.
     //
@@ -8049,7 +8048,15 @@ UNSIGNED32 ENTRYPOINT AdsSkip(ADSHANDLE hTable, SIGNED32 lRows) {
         // cursor correct, and that counter is the whole reason "option B" of
         // this feature had to be shelved once already. One copy, two callers.
         if (lRows == 1 &&
-            openads::network::remote_drain_prefetch(rt)) {
+            openads::network::remote_drain_prefetch(rt, +1)) {
+            remote_sync_keyno_skip(rt, lRows);
+            remote_update_nav_boundaries(rt, lRows, rec_before, row_valid_before);
+            apply_relations_for_handle(hTable);
+            return ok();
+        }
+        // RCB 07/15/2026: M12.25 — PgUp. Symmetric to the forward drain above.
+        if (lRows == -1 &&
+            openads::network::remote_drain_prefetch(rt, -1)) {
             remote_sync_keyno_skip(rt, lRows);
             remote_update_nav_boundaries(rt, lRows, rec_before, row_valid_before);
             apply_relations_for_handle(hTable);
@@ -27620,9 +27627,9 @@ UNSIGNED32 ENTRYPOINT AdsGetRecord(ADSHANDLE hTable, UNSIGNED8* pucRecord,
         }
         // RCB 07/14/2026: BUG FIX — GetRecord reads the SERVER's current
         // record, so the prefetch lag has to be settled first. Rows served
-        // locally out of the lookahead queue leave the server cursor behind by
-        // prefetch_consumed, and this path never settled, so it happily handed
-        // back the raw image of a record the caller had already skipped past.
+        // locally out of the lookahead queue leave the server cursor offset by
+        // cursor_lag, and this path never settled, so it happily handed back
+        // the raw image of a record the caller had already skipped past.
         //
         // KNOWN COST, accepted deliberately: settling forces a round-trip, so a
         // scan shaped like Skip(1)/GetRecord/Skip(1)/GetRecord defeats
@@ -30057,8 +30064,7 @@ UNSIGNED32 ENTRYPOINT AdsFetchWhereApplyRow(ADSHANDLE hRes, UNSIGNED32 ulRow, AD
     rt->current_deleted   = false;        // FetchWhere skip(1) honours SET DELETED
     rt->found_cached      = true;
     rt->current_found     = false;        // a scan move clears Found()
-    rt->prefetch_queue.clear();           // the cursor is driven by FetchWhere now
-    rt->prefetch_consumed = 0;
+    rt->invalidate_prefetch();            // the cursor is driven by FetchWhere now
     return ok();
 }
 

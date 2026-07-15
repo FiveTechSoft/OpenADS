@@ -94,6 +94,10 @@ private:
     std::string   session_password_;
     // M12.21 option C — set from the Connect payload's capability word.
     bool          client_prefetch_ok_ = false;
+    // RCB 07/15/2026: M12.25 — client can also drain a BACKWARD lookahead block
+    // (kCapPrefetchBackward). Gated separately: a forward-only client that got a
+    // backward block would pop its rows the wrong way. See the Skip handler.
+    bool          client_prefetch_back_ok_ = false;
     // M12.32 — last ShowDeleted state received; abi_conn_ is created
     // lazily, so ensure_abi_conn must re-apply it or the ABI connection
     // starts with the default (show) and ordered walks leak deleted rows.
@@ -129,12 +133,19 @@ private:
     // (ace_adscacherecords.htm).
     static constexpr std::size_t   kPrefetchMaxBytes = 32u * 1024u;
     std::unordered_map<std::uint32_t, std::uint16_t> prefetch_depth_;
+    // RCB 07/15/2026: M12.25 — the direction (+1/-1) the current ramp run for a
+    // table is going. A reversal restarts the ramp at the floor (see
+    // next_lookahead), so a PgUp right after a long PgDn doesn't inherit the
+    // forward run's ceiling depth.
+    std::unordered_map<std::uint32_t, std::int8_t>   prefetch_run_dir_;
 
-    // Depth to use for one forward Skip on `id`. `hint` is the client's
-    // AdsCacheRecords value, or kPrefetchDepthAuto to let the ramp decide.
-    // Returns 0 when the client never advertised kCapPrefetchConsume.
+    // Depth to use for one Skip on `id` in direction `dir` (+1 fwd, -1 back).
+    // `hint` is the client's AdsCacheRecords value, or kPrefetchDepthAuto to let
+    // the ramp decide. Returns 0 when the client never advertised
+    // kCapPrefetchConsume.
     std::uint16_t next_lookahead(std::uint32_t id,
-                                 std::uint16_t hint = kPrefetchDepthAuto);
+                                 std::uint16_t hint = kPrefetchDepthAuto,
+                                 std::int8_t dir = 1);
     // Break the sequential run for `id` (reposition / write / order change).
     void          reset_lookahead(std::uint32_t id);
 
@@ -165,7 +176,8 @@ private:
     bool      pack_one_row_abi(std::vector<std::uint8_t>& dst,
                                ADSHANDLE h_abi);
     void      pack_row_trailer(Frame& reply, std::uint32_t id,
-                               std::uint16_t lookahead_n = 0);
+                               std::uint16_t lookahead_n = 0,
+                               std::int8_t dir = 1);
     void      sync_engine_cursor(std::uint32_t id);
 };
 

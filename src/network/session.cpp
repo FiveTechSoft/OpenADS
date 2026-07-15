@@ -540,7 +540,8 @@ bool Session::pack_one_row_abi(std::vector<std::uint8_t>& dst,
 }
 
 void Session::pack_row_trailer(Frame& reply, std::uint32_t id,
-                               std::uint16_t lookahead_n) {
+                               std::uint16_t lookahead_n,
+                               std::int8_t dir) {
     auto write_u16_p = [&](std::uint16_t v,
                             std::vector<std::uint8_t>& dst) {
         dst.push_back(static_cast<std::uint8_t>( v       & 0xFFu));
@@ -609,26 +610,27 @@ void Session::pack_row_trailer(Frame& reply, std::uint32_t id,
             }
         }
     }
-    // M12.21 lookahead block. Walk Skip(+1) up to lookahead_n
-    // times capturing each row, then Skip(-N) back so the
-    // cursor lands at the same spot the lone Skip(+1) the
-    // caller actually issued would have produced.
-    if (!current_packed || lookahead_n == 0) {
+    // M12.21 lookahead block. Walk Skip(dir) up to lookahead_n times capturing
+    // each row, then Skip(-dir * advance) back so the cursor lands at the same
+    // spot the lone Skip the caller actually issued would have produced.
+    // RCB 07/15/2026: M12.25 — `dir` is +1 for a forward block, -1 for a
+    // backward (PgUp) one. The walk and the restore are symmetric in it.
+    if (!current_packed || lookahead_n == 0 || dir == 0) {
         // No lookahead either way — emit a count of 0 so the
         // wire format always carries the field. Old clients
         // (M12.18) ignore the extra bytes.
         write_u16_p(0, reply.payload);
         return;
     }
+    const SIGNED32 walk = dir;             // +1 or -1, one step per iteration
     std::vector<std::vector<std::uint8_t>> rows;
     rows.reserve(lookahead_n);
     std::uint16_t taken = 0;
-    // Track cursor moves separately from rows packed: a Skip(+1)
-    // that lands on EoF still moves the cursor, even though no
-    // row gets packed. The restore step at the end has to undo
-    // every cursor advance, packed-row or not, otherwise the
-    // caller-visible cursor lands a row past where the lone
-    // Skip(+1) it issued would have produced.
+    // Track cursor moves separately from rows packed: a Skip that lands on
+    // EoF/BoF still moves the cursor, even though no row gets packed. The
+    // restore step at the end has to undo every cursor advance, packed-row or
+    // not, otherwise the caller-visible cursor lands a row past where the lone
+    // Skip it issued would have produced.
     int cursor_advance = 0;
     // RCB 07/14/2026: the row count is only half the bound — see
     // kPrefetchMaxBytes. Stop as soon as the block reaches the byte budget so a
@@ -640,7 +642,7 @@ void Session::pack_row_trailer(Frame& reply, std::uint32_t id,
     std::size_t block_bytes = 0;
     for (std::uint16_t i = 0; i < lookahead_n; ++i) {
         if (eng_tbl) {
-            auto sk = eng_tbl->skip(1);
+            auto sk = eng_tbl->skip(walk);
             if (!sk) break;
             ++cursor_advance;
             std::vector<std::uint8_t> row;
@@ -649,10 +651,13 @@ void Session::pack_row_trailer(Frame& reply, std::uint32_t id,
             rows.push_back(std::move(row));
             ++taken;
         } else {
-            if (AdsSkip(h_abi, 1) != 0) break;
+            if (AdsSkip(h_abi, walk) != 0) break;
             ++cursor_advance;
+            // A backward walk stops at BoF, a forward one at EoF; pack_one_row_*
+            // already refuses to pack an off-record cursor, but check the
+            // relevant boundary first so we don't pack a phantom row.
             UNSIGNED16 atend = 0;
-            AdsAtEOF(h_abi, &atend);
+            if (dir > 0) AdsAtEOF(h_abi, &atend); else AdsAtBOF(h_abi, &atend);
             if (atend) break;
             std::vector<std::uint8_t> row;
             if (!pack_one_row_abi(row, h_abi)) break;
@@ -663,11 +668,14 @@ void Session::pack_row_trailer(Frame& reply, std::uint32_t id,
         if (block_bytes >= kPrefetchMaxBytes) break;
     }
     if (cursor_advance > 0) {
+        // Undo every advance: we stepped `walk` cursor_advance times, so step
+        // back by -walk * cursor_advance.
+        const SIGNED32 restore =
+            -walk * static_cast<SIGNED32>(cursor_advance);
         if (eng_tbl) {
-            (void)eng_tbl->skip(-cursor_advance);
+            (void)eng_tbl->skip(restore);
         } else {
-            (void)AdsSkip(h_abi,
-                -static_cast<SIGNED32>(cursor_advance));
+            (void)AdsSkip(h_abi, restore);
         }
     }
     write_u16_p(taken, reply.payload);
@@ -693,7 +701,8 @@ void Session::pack_row_trailer(Frame& reply, std::uint32_t id,
 //     (reposition, write, order change) erases the entry, so the next run
 //     starts at the floor again — which is what keeps a one-off "seek a
 //     record and read it" from dragging a full block it will never look at.
-std::uint16_t Session::next_lookahead(std::uint32_t id, std::uint16_t hint) {
+std::uint16_t Session::next_lookahead(std::uint32_t id, std::uint16_t hint,
+                                      std::int8_t dir) {
     if (!client_prefetch_ok_) return 0;
     if (hint != kPrefetchDepthAuto) {
         // SAP: "A usRecords value of 0 (or 1) effectively turns read-ahead
@@ -702,6 +711,15 @@ std::uint16_t Session::next_lookahead(std::uint32_t id, std::uint16_t hint) {
         if (hint <= 1) return 0;
         return hint > kPrefetchDepthMax ? kPrefetchDepthMax : hint;
     }
+    // RCB 07/15/2026: M12.25 — a direction reversal (PgDn then PgUp) is a fresh
+    // run, so restart the ramp at the floor. Otherwise the first backward block
+    // after a long forward scan would arrive at the ceiling and over-fetch the
+    // same way an unramped forward scan did.
+    if (auto dit = prefetch_run_dir_.find(id);
+        dit != prefetch_run_dir_.end() && dit->second != dir) {
+        prefetch_depth_.erase(id);
+    }
+    prefetch_run_dir_[id] = dir;
     auto [it, fresh] = prefetch_depth_.try_emplace(id, kPrefetchFloor);
     if (!fresh) {
         std::uint32_t grown = static_cast<std::uint32_t>(it->second) * 2u;
@@ -713,6 +731,7 @@ std::uint16_t Session::next_lookahead(std::uint32_t id, std::uint16_t hint) {
 
 void Session::reset_lookahead(std::uint32_t id) {
     prefetch_depth_.erase(id);
+    prefetch_run_dir_.erase(id);
 }
 
 namespace {
@@ -870,6 +889,11 @@ DispatchResult Session::dispatch(const Frame& f) {
                     (static_cast<std::uint32_t>(pl[p + 3]) << 24);
                 client_prefetch_ok_ =
                     (caps & openads::network::kCapPrefetchConsume) != 0;
+                // RCB 07/15/2026: M12.25 — backward (PgUp) prefetch is a
+                // separate opt-in; a client that only set kCapPrefetchConsume
+                // cannot drain a backward block (see kCapPrefetchBackward).
+                client_prefetch_back_ok_ =
+                    (caps & openads::network::kCapPrefetchBackward) != 0;
             }
             if (srv_->require_auth()) {
                 std::lock_guard<std::mutex> clk(srv_->creds_mu_);
@@ -1173,13 +1197,20 @@ DispatchResult Session::dispatch(const Frame& f) {
                     static_cast<std::uint16_t>(f.payload[8]) |
                     (static_cast<std::uint16_t>(f.payload[9]) << 8));
             }
-            const bool want_lookahead = (client_prefetch_ok_ && step >= 1);
+            // RCB 07/15/2026: M12.25 — direction from the step sign. Forward
+            // (>= 1) needs kCapPrefetchConsume; backward (<= -1) additionally
+            // needs kCapPrefetchBackward, because a forward-only client would
+            // mis-drain a backward block. step == 0 (a settle) gets no block.
+            const std::int8_t dir = (step >= 1) ? 1 : (step <= -1) ? -1 : 0;
+            const bool want_lookahead =
+                (dir == 1 && client_prefetch_ok_) ||
+                (dir == -1 && client_prefetch_ok_ && client_prefetch_back_ok_);
             const std::uint16_t lookahead =
-                want_lookahead ? next_lookahead(id, depth_hint) : 0;
+                want_lookahead ? next_lookahead(id, depth_hint, dir) : 0;
             if (auto cit = cursor_tbls_.find(id); cit != cursor_tbls_.end()) {
                 (void)AdsSkip(cit->second, step);
                 reply.opcode = Opcode::SkipAck;
-                pack_row_trailer(reply, id, lookahead);
+                pack_row_trailer(reply, id, lookahead, dir);
                 break;
             }
             auto it = tbls_.find(id);
@@ -1200,19 +1231,19 @@ DispatchResult Session::dispatch(const Frame& f) {
             if (hord != 0) {
                 (void)AdsSkip(hord, step);
                 reply.opcode = Opcode::SkipAck;
-                pack_row_trailer(reply, id, lookahead);
+                pack_row_trailer(reply, id, lookahead, dir);
                 // RCB 07/14/2026: sync AFTER packing, not before (this call
-                // used to sit above the pack). pack_row_trailer now walks the
-                // ABI cursor forward through the lookahead block and then
-                // restores it, so the engine cursor has to be re-anchored to
-                // where the ABI cursor FINALLY lands. Syncing first would
-                // anchor it to a position the pack is about to move away from.
+                // used to sit above the pack). pack_row_trailer walks the ABI
+                // cursor through the lookahead block and then restores it, so
+                // the engine cursor has to be re-anchored to where the ABI
+                // cursor FINALLY lands. Syncing first would anchor it to a
+                // position the pack is about to move away from.
                 sync_engine_cursor(id);
                 break;
             }
             (void)tbl->skip(step);
             reply.opcode = Opcode::SkipAck;
-            pack_row_trailer(reply, id, lookahead);
+            pack_row_trailer(reply, id, lookahead, dir);
             break;
         }
         case Opcode::GetField: {

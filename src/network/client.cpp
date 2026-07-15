@@ -82,17 +82,27 @@ std::size_t parse_one_row(const std::vector<std::uint8_t>& pl,
     return pos;
 }
 
+// RCB 07/15/2026: `block_dir` is the direction the SERVER walked the lookahead
+// block (+1 forward, -1 backward) — which is sign(eff), NOT sign(the caller's
+// step. On a direction reversal those disagree for one step: after a forward
+// run the resync eff can still be positive on the first backward Skip, so the
+// server sends a FORWARD block; tagging it backward would make the next
+// Skip(-1) pop a forward row and serve the wrong record. Callers that never
+// request a block (GotoBottom / Seek / FetchCurrentRow) can leave the default;
+// if no block comes back the queue ends up empty and prefetch_dir is set to 0.
 void parse_row_trailer_into(RemoteTable* rt,
                              const std::vector<std::uint8_t>& pl,
-                             std::size_t pos = 0) {
+                             std::size_t pos = 0,
+                             std::int8_t block_dir = 1) {
     if (rt == nullptr || pos >= pl.size()) {
         if (rt) rt->row_valid = false;
         return;
     }
     rt->prefetch_queue.clear();
     // M12.21 option C — every nav ack re-anchors the server cursor to the
-    // client's logical position, so the consumed-row lag resets to zero.
-    rt->prefetch_consumed = 0;
+    // client's logical position, so the lag resets to zero.
+    rt->cursor_lag   = 0;
+    rt->prefetch_dir = 0;
     std::uint8_t has_row = pl[pos++];
     if (has_row == 0) {
         rt->row_valid = false;
@@ -117,6 +127,7 @@ void parse_row_trailer_into(RemoteTable* rt,
         pos = end;
         rt->prefetch_queue.push_back(std::move(pr));
     }
+    if (!rt->prefetch_queue.empty()) rt->prefetch_dir = block_dir;
 }
 
 } // namespace
@@ -209,7 +220,10 @@ void connect_pack_payload(std::vector<std::uint8_t>& payload,
     // M12.21 option C — advertise the prefetch-consume capability so the
     // server may piggyback lookahead rows on forward-Skip acks. Trailing
     // and optional: pre-M12.21 servers ignore the extra 4 bytes.
-    std::uint32_t caps = kCapPrefetchConsume;
+    // RCB 07/15/2026: M12.25 — also advertise backward (PgUp) prefetch. This is
+    // a distinct bit precisely because a server must NOT send a backward block
+    // to a client that only understands forward ones (see kCapPrefetchBackward).
+    std::uint32_t caps = kCapPrefetchConsume | kCapPrefetchBackward;
     for (int i = 0; i < 4; ++i)
         payload.push_back(static_cast<std::uint8_t>((caps >> (8 * i)) & 0xFFu));
 }
@@ -376,12 +390,13 @@ util::Result<void> RemoteConnection::skip(RemoteTable* rt,
     Frame req;
     req.opcode = Opcode::Skip;
     write_u32_le(rt->id, req.payload);
-    // M12.21 option C — the server cursor lags the client's logical
-    // position by prefetch_consumed rows (those served locally from the
-    // queue without a round-trip). Fold that lag into the wire step so
-    // the server lands where the client logically is + step. Cleared by
-    // parse_row_trailer_into on the ack below.
-    std::int32_t eff = step + static_cast<std::int32_t>(rt->prefetch_consumed);
+    // M12.21 option C — the server cursor is offset from the client's logical
+    // position by cursor_lag (rows served locally from the queue without a
+    // round-trip). Fold that lag into the wire step so the server lands where
+    // the client logically is + step. RCB 07/15/2026: cursor_lag is signed now
+    // (negative for a backward run), so this one line serves both directions;
+    // parse_row_trailer_into on the ack zeroes it again.
+    std::int32_t eff = step + rt->cursor_lag;
     write_u32_le(static_cast<std::uint32_t>(eff), req.payload);
     // RCB 07/14/2026: M12.23 — trailing optional [u16 depth] carrying the
     // AdsCacheRecords value (kPrefetchDepthAuto when the app never called it).
@@ -399,7 +414,10 @@ util::Result<void> RemoteConnection::skip(RemoteTable* rt,
     if (rep.value().opcode != Opcode::SkipAck) {
         return util::Error{5000, 0, "Skip: server error", ""};
     }
-    parse_row_trailer_into(rt, rep.value().payload, 0);
+    // The block (if any) was walked by the server in the direction of eff, not
+    // of the user's step — see parse_row_trailer_into. eff == 0 sends no block.
+    const std::int8_t bdir = (eff > 0) ? 1 : (eff < 0) ? -1 : 1;
+    parse_row_trailer_into(rt, rep.value().payload, 0, bdir);
     return {};
 }
 
