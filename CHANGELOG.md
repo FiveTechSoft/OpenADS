@@ -1,5 +1,25 @@
 ## Unreleased
 
+### Fixed — SQL result cursor was left at BOF after execute (wrong data on every query)
+
+`AdsExecuteSQLDirect` (and `AdsExecuteSQL`, which delegates to it) left the
+result cursor positioned *before* the first row, where SAP ADS positions it
+*on* the first row. A client that reads the current record immediately after
+executing — the SAP-supported pattern, used by countless apps — got a
+**phantom empty row** on every query. Proven with an aggregate, which returns
+exactly one logical row: `SELECT COUNT(*)` came back as two rows (a blank,
+then the count) on OpenADS versus one on SAP, and a plain `SELECT` yielded an
+all-empty leading row.
+
+Found by a differential parity dump of a real production dictionary (PMSYS)
+against SAP ACE as the oracle. The fix positions the result on the first row at
+the API boundary, so it applies uniformly to engine tables, memory-backed
+`system.*`/aggregate results, and SQL-backend cursors, and to remote clients
+(the server executes through the same entry point). `AdsGotoTop` is absolute,
+so callers that already call it are unaffected — which is exactly why the whole
+existing suite passed without catching this. Regression test added that reads
+a result with no prior `GotoTop`.
+
 ### Backward (PgUp) read-ahead — 299 → 7 round-trips on a reverse scan
 
 Read-ahead was forward-only: a `Skip(-1)` browse (PgUp, or a report walking a

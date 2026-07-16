@@ -26961,6 +26961,19 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
 UNSIGNED32 ENTRYPOINT AdsExecuteSQLDirect(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                                ADSHANDLE* phCursor) {
     UNSIGNED32 rc = exec_sql_direct_impl(hStatement, pucSQL, phCursor);
+    // RCB 07/15/2026: SAP ADS positions a SQL result cursor ON the first
+    // record after execute; OpenADS was leaving the engine Table at BOF, so a
+    // client that reads the current record immediately (the SAP-supported
+    // pattern) got a phantom empty row on EVERY query — proven with
+    // `SELECT COUNT(*)` returning two rows (blank, then the count) vs SAP's
+    // one. Position the result at row 1 here, at the public-API boundary, so
+    // it applies uniformly to engine tables, memory-backed system.*/aggregate
+    // results, and SQL-backend cursors. GotoTop is absolute/idempotent, so a
+    // caller that also calls AdsGotoTop is unaffected. Write statements set
+    // *phCursor == 0 and are skipped.
+    if (rc == openads::AE_SUCCESS && phCursor != nullptr && *phCursor != 0) {
+        (void)AdsGotoTop(*phCursor);
+    }
     if (rc != openads::AE_SUCCESS) {
         std::string sql = pucSQL != nullptr
             ? openads::abi::to_internal(pucSQL, 0) : std::string();

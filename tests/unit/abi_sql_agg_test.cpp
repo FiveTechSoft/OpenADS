@@ -90,6 +90,59 @@ TEST_CASE("M10.10 SELECT COUNT(*) returns matching row count") {
     fs::remove_all(dir, ec);
 }
 
+// RCB 07/15/2026: after AdsExecuteSQLDirect the result cursor must be
+// positioned ON the first row, exactly as SAP ADS does — NOT at BOF. OpenADS
+// used to leave it at BOF, so a client that read the current record without a
+// prior AdsGotoTop got a phantom empty row on every query (proven with a
+// PMSYS parity dump: `SELECT COUNT(*)` returned two rows, blank then the
+// count). The tests above all call AdsGotoTop first, which masked it. These
+// deliberately do NOT — read immediately after execute, the SAP-supported
+// pattern.
+TEST_CASE("SQL result cursor is on row 1 after execute (no GotoTop) — SAP parity") {
+    auto dir = fs::temp_directory_path() / "openads_sql_cursor_row1";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    stage_dbf(dir);
+
+    UNSIGNED8 srv[256];
+    std::memcpy(srv, dir.string().c_str(), dir.string().size() + 1);
+    ADSHANDLE hConn = 0;
+    REQUIRE(AdsConnect60(srv, ADS_LOCAL_SERVER, nullptr, nullptr, 0, &hConn) == 0);
+    ADSHANDLE hStmt = 0;
+    REQUIRE(AdsCreateSQLStatement(hConn, &hStmt) == 0);
+
+    // Aggregate: exactly one logical row. Reading it directly must yield the
+    // count, and the cursor must not report BOF.
+    {
+        UNSIGNED8 sql[64] = "SELECT COUNT(*) FROM data.dbf";
+        ADSHANDLE hCur = 0;
+        REQUIRE(AdsExecuteSQLDirect(hStmt, sql, &hCur) == 0);
+        UNSIGNED16 bof = 1;
+        REQUIRE(AdsAtBOF(hCur, &bof) == 0);
+        CHECK(bof == 0);                         // NOT before the first row
+        CHECK(read_col(hCur, "COL1") == "4");    // read WITHOUT AdsGotoTop
+        REQUIRE(AdsCloseTable(hCur) == 0);
+    }
+
+    // Plain SELECT: first record must be the first data row (AGE 10), read
+    // directly. A BOF cursor would return a blank AGE here.
+    {
+        UNSIGNED8 sql[64] = "SELECT AGE FROM data.dbf";
+        ADSHANDLE hCur = 0;
+        REQUIRE(AdsExecuteSQLDirect(hStmt, sql, &hCur) == 0);
+        // N(4,0) is right-justified ("  10"); strip leading blanks too. The
+        // point is it's the first record's value, not an empty phantom row.
+        std::string age = read_col(hCur, "AGE");
+        age.erase(0, age.find_first_not_of(' '));
+        CHECK(age == "10");                      // first row, no GotoTop
+        REQUIRE(AdsCloseTable(hCur) == 0);
+    }
+
+    REQUIRE(AdsCloseSQLStatement(hStmt) == 0);
+    REQUIRE(AdsDisconnect(hConn) == 0);
+    fs::remove_all(dir, ec);
+}
+
 TEST_CASE("M10.10 SUM / AVG / MIN / MAX") {
     auto dir = fs::temp_directory_path() / "openads_m10_10_agg";
     std::error_code ec;
