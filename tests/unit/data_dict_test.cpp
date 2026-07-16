@@ -83,6 +83,60 @@ TEST_CASE("DataDict add_index per-tag metadata round-trips") {
     fs::remove(p);
 }
 
+// RCB 07/16/2026: column-level permissions — grant, per-op visibility, and
+// save/reopen round-trip (parent table must survive). Foundation for closing
+// the "OpenADS exposes columns SAP restricts" hole.
+TEST_CASE("DataDict column-level permissions: grant + permitted_columns + round-trip") {
+    using U = openads::engine::DataDict;
+    auto p = fs::temp_directory_path() / "openads_dd_colperm.add";
+    fs::remove(p);
+    {
+        auto created = U::create(p.string());
+        REQUIRE(created.has_value());
+        U dd = std::move(created).value();
+        REQUIRE(dd.add_table("leases", "leases.adt").has_value());
+        REQUIRE(dd.create_group("General").has_value());
+        REQUIRE(dd.create_user("bob").has_value());
+        REQUIRE(dd.add_user_to_group("bob", "General").has_value());
+
+        // General may SELECT rent+tenant, and also UPDATE rent — but nothing
+        // grants a column-level DELETE.
+        REQUIRE(dd.grant_column_permission("leases", "rent",   "General",
+                    U::DD_PERM_SELECT | U::DD_PERM_UPDATE).has_value());
+        REQUIRE(dd.grant_column_permission("leases", "tenant", "General",
+                    U::DD_PERM_SELECT).has_value());
+
+        CHECK(dd.has_any_column_acl());
+    }
+    auto check = [](U& dd) {
+        // bob (via General) can SELECT rent + tenant only.
+        auto sel = dd.permitted_columns("bob", "leases", U::DD_PERM_SELECT);
+        REQUIRE(sel.has_value());
+        CHECK(sel->count("rent") == 1);
+        CHECK(sel->count("tenant") == 1);
+        CHECK(sel->count("deposit") == 0);   // not granted -> hidden
+        // UPDATE is column-restricted to rent only.
+        auto upd = dd.permitted_columns("bob", "leases", U::DD_PERM_UPDATE);
+        REQUIRE(upd.has_value());
+        CHECK(upd->count("rent") == 1);
+        CHECK(upd->count("tenant") == 0);
+        // DELETE has no column grant -> not column-restricted (table-level).
+        CHECK_FALSE(dd.permitted_columns("bob", "leases", U::DD_PERM_DELETE).has_value());
+        // A different table has no column restriction.
+        CHECK_FALSE(dd.permitted_columns("bob", "other", U::DD_PERM_SELECT).has_value());
+        // adssys is never column-restricted.
+        CHECK_FALSE(dd.permitted_columns("adssys", "leases", U::DD_PERM_SELECT).has_value());
+    };
+    {
+        auto opened = U::open(p.string());
+        REQUIRE(opened.has_value());
+        U dd = std::move(opened).value();
+        CHECK(dd.has_any_column_acl());   // survived reopen
+        check(dd);
+    }
+    fs::remove(p);
+}
+
 // -------------------------------------------------------------------------
 // Legacy format rejection
 // -------------------------------------------------------------------------

@@ -1781,6 +1781,7 @@ util::Result<void> DataDict::load_() {
                 }
                 auto type_code_of = [](const std::string& t) -> int {
                     if (t == "Table")      return 1;
+                    if (t == "Column")     return 4;   // RCB 07/16/2026
                     if (t == "View")       return 6;
                     if (t == "StoredProc") return 10;
                     if (t == "Function")   return 18;
@@ -1793,6 +1794,8 @@ util::Result<void> DataDict::load_() {
                 pe.grantee          = obj_key;
                 pe.grantee_is_group = is_grp;
                 pe.bitmask          = bitmask;
+                if (m.count("parent")) pe.parent = m.at("parent");
+                if (pe.object_type_code == 4) has_column_perms_ = true;
                 permissions_.push_back(std::move(pe));
                 // Reconstruct table_perms_ coarse level from Table perms.
                 if (ot == "Table") {
@@ -1971,9 +1974,13 @@ util::Result<void> DataDict::save() {
         }
     }
 
-    // Permissions (fine-grained bitmask grants for all object types)
+    // Permissions (fine-grained bitmask grants for all object types).
+    // RCB 07/16/2026: column grants (object_type "Column") also carry a
+    // parent table, written into the JSON so it survives reopen.
     for (const auto& pe : permissions_) {
         std::string j = "{\"obj_type\":\"" + json_escape(pe.object_type) + "\"";
+        if (!pe.parent.empty())
+            j += ",\"parent\":\"" + json_escape(pe.parent) + "\"";
         j += ",\"bitmask\":" + std::to_string(pe.bitmask) + "}";
         mk("Perm", pe.object_name, pe.grantee, j);
     }
@@ -2482,6 +2489,93 @@ DataDict::grant_permission(const std::string& obj_type,
     pe.bitmask          = bitmask;
     permissions_.push_back(std::move(pe));
     return save();
+}
+
+util::Result<void>
+DataDict::grant_column_permission(const std::string& table,
+                                  const std::string& column,
+                                  const std::string& grantee,
+                                  uint32_t bitmask, bool persist) {
+    if (table.empty() || column.empty() || grantee.empty())
+        return util::Error{5000, 0,
+                           "column perm: table/column/grantee empty", ""};
+    bool is_grp = groups_.count(grantee) != 0;
+    if (!is_grp) {
+        const auto gci = ci_name(grantee);
+        for (const auto& g : groups_)
+            if (ci_name(g) == gci) { is_grp = true; break; }
+    }
+    // Replace an existing (table, column, grantee) grant, else append.
+    for (auto& pe : permissions_) {
+        if (pe.object_type_code == 4 &&
+            ci_name(pe.parent) == ci_name(table) &&
+            ci_name(pe.object_name) == ci_name(column) &&
+            ci_name(pe.grantee) == ci_name(grantee)) {
+            pe.bitmask = bitmask;
+            has_column_perms_ = true;
+            invalidate_perm_cache_();
+            return persist ? save() : util::Result<void>{};
+        }
+    }
+    PermissionEntry pe;
+    pe.object_name      = column;
+    pe.object_type      = "Column";
+    pe.object_type_code = 4;
+    pe.grantee          = grantee;
+    pe.grantee_is_group = is_grp;
+    pe.bitmask          = bitmask;
+    pe.parent           = table;
+    permissions_.push_back(std::move(pe));
+    has_column_perms_ = true;
+    invalidate_perm_cache_();
+    return persist ? save() : util::Result<void>{};
+}
+
+std::optional<std::unordered_set<std::string>>
+DataDict::permitted_columns(const std::string& username,
+                            const std::string& table,
+                            uint32_t op_bit) const {
+    // Fast opt-out: no column security anywhere, or an admin principal.
+    if (!has_column_perms_) return std::nullopt;
+    const auto lo = ci_name(username);
+    if (lo == "adssys") return std::nullopt;
+    auto mg = memberships_.find(lo);
+    // DB:Admin members are unrestricted (inline ci check — has_ci_group is a
+    // file-local static defined later in this TU).
+    if (mg != memberships_.end()) {
+        for (const auto& g : mg->second)
+            if (ci_name(g) == "db:admin") return std::nullopt;
+    }
+
+    // Principals: the user + every group they belong to (both raw + folded).
+    std::unordered_set<std::string> principals;
+    principals.insert(lo);
+    if (mg != memberships_.end())
+        for (const auto& g : mg->second) {
+            principals.insert(g);
+            principals.insert(ci_name(g));
+        }
+
+    const auto tci = ci_name(table);
+    std::unordered_set<std::string> cols;
+    bool restricted = false;
+    for (const auto& pe : permissions_) {
+        if (pe.object_type_code != 4) continue;          // column grants only
+        if (ci_name(pe.parent) != tci) continue;         // this table
+        if (principals.find(pe.grantee) == principals.end() &&
+            principals.find(ci_name(pe.grantee)) == principals.end())
+            continue;                                    // not one of my grants
+        // Per-op: a column grant restricts an op only when it carries that
+        // op's bit. So SELECT is column-restricted iff a column-SELECT grant
+        // exists; a row-level op like DELETE (never granted per column) stays
+        // table-level. This is what closes the SELECT-exposure hole precisely.
+        if (pe.bitmask & op_bit) {
+            restricted = true;
+            cols.insert(ci_name(pe.object_name));
+        }
+    }
+    if (!restricted) return std::nullopt;   // table-level applies to all columns
+    return cols;                            // ONLY these columns for this op
 }
 
 util::Result<void>

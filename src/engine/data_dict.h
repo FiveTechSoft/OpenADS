@@ -5,6 +5,7 @@
 #include <array>
 #include <cctype>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -343,6 +344,11 @@ public:
         std::string  grantee;
         bool         grantee_is_group = false;
         uint32_t     bitmask = 0;
+        // RCB 07/16/2026: for a COLUMN grant (object_type_code == 4) this is the
+        // parent table; the column name is object_name. Empty for table/proc/
+        // view/function grants. A column name alone is not unique across tables,
+        // so column permissions must carry their table.
+        std::string  parent;
     };
 
     struct EffectiveOps {
@@ -371,6 +377,34 @@ public:
 
     EffectiveOps get_effective_ops(const std::string& username,
                                     const std::string& object_name) const;
+
+    // ---- COLUMN-LEVEL permissions (RCB 07/16/2026) ----------------------
+    // Grant a column-level permission: `table` is the parent table, `column`
+    // the field name. Batch with persist=false and call save() once (import).
+    util::Result<void> grant_column_permission(const std::string& table,
+                                               const std::string& column,
+                                               const std::string& grantee,
+                                               uint32_t bitmask,
+                                               bool persist = true);
+
+    // The columns `username` may access on `table` for the operation `op_bit`
+    // (a single DD_PERM_* bit, e.g. DD_PERM_SELECT). Returns:
+    //   * nullopt  → NO column-level restriction for this user/op on this table;
+    //                the table-level grant applies to every column (unchanged
+    //                behaviour). This is the common case.
+    //   * a set    → the ONLY columns the user may touch for this op (SAP
+    //                column-level security). Column names are lower-cased.
+    // Used by the SQL/ISAM layer to project or deny columns. Fail-secure: when
+    // a table has column grants for a user's op, columns not in the set are
+    // hidden even though the user holds table-level access.
+    std::optional<std::unordered_set<std::string>>
+        permitted_columns(const std::string& username,
+                          const std::string& table,
+                          uint32_t op_bit) const;
+
+    // True if any column-level grant exists at all (fast opt-out for the
+    // common no-column-security case).
+    bool has_any_column_acl() const noexcept { return has_column_perms_; }
 
     bool has_any_acl() const noexcept { return !permissions_.empty(); }
     bool has_acl_for_object(const std::string& object_name) const;
@@ -465,6 +499,10 @@ private:
                        std::unordered_map<std::string, int>>
                                                  table_perms_;
     std::vector<PermissionEntry>                 permissions_;
+    // RCB 07/16/2026: true once any column-level (object_type_code==4) grant is
+    // stored — lets the SQL/ISAM hot path skip column checks entirely when a DD
+    // has no column security (the overwhelmingly common case).
+    bool                                         has_column_perms_ = false;
     mutable bool                                 perm_indexes_valid_ = false;
     mutable std::unordered_map<std::string,
                                std::vector<const PermissionEntry*>>
