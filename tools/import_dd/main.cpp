@@ -170,11 +170,16 @@ static void emit_result(bool ok,
                         int memberships, int permissions,
                         int function_bodies, int db_properties,
                         const std::string& error,
-                        const std::vector<std::string>& warnings) {
+                        const std::vector<std::string>& warnings,
+                        // RCB 07/16/2026: trailing defaults so the many failure
+                        // call sites need no change; success reports the counts.
+                        int indexes = 0, int column_perms = 0) {
     std::printf("{\"ok\":%s", ok ? "true" : "false");
     if (ok) {
-        std::printf(",\"memberships\":%d,\"permissions\":%d,\"function_bodies\":%d,\"db_properties\":%d",
-                    memberships, permissions, function_bodies, db_properties);
+        std::printf(",\"memberships\":%d,\"permissions\":%d,\"function_bodies\":%d,\"db_properties\":%d"
+                    ",\"indexes\":%d,\"column_perms\":%d",
+                    memberships, permissions, function_bodies, db_properties,
+                    indexes, column_perms);
     } else {
         std::printf(",\"error\":\"%s\"", json_escape(error).c_str());
     }
@@ -542,6 +547,51 @@ int main(int argc, char** argv) {
         }
     }
 
+    // ── Step 5c3: read COLUMN-level permissions from SAP ────────────────────
+    // RCB 07/16/2026: SAP grants a group table access AND restricts it to
+    // specific columns (Object_Type 4 in system.permissions). OpenADS enforced
+    // only table-level, so a restricted group saw the whole table. We read the
+    // column grants here (SAP ACE decodes them) and write them natively so
+    // OpenADS can enforce column-level SELECT. Brackets escape the SQL-keyword
+    // column names.
+    struct ColPerm {
+        std::string parent, column, grantee;
+        std::uint32_t bitmask = 0;
+    };
+    std::vector<ColPerm> col_perms;
+    {
+        ADSHANDLE hc = 0;
+        rc = f.execSQL(hStmt,
+            (UNSIGNED8*)"SELECT Parent, Name, Grantee, [Select], [Update], "
+                        "[Insert], [Delete] FROM system.permissions "
+                        "WHERE Object_Type = 4",
+            &hc);
+        if (rc == 0 && hc) {
+            UNSIGNED16 eof = 0;
+            while (f.atEOF(hc, &eof) == 0 && !eof) {
+                ColPerm cp;
+                cp.parent  = sap_field(f, hc, "Parent");
+                cp.column  = sap_field(f, hc, "Name");
+                cp.grantee = sap_field(f, hc, "Grantee");
+                auto bit = [&](const char* c, std::uint32_t m) {
+                    if (sap_field(f, hc, c) == "1") cp.bitmask |= m;
+                };
+                bit("Select", 0x0001u);   // DD_PERM_SELECT
+                bit("Update", 0x0002u);   // DD_PERM_UPDATE
+                bit("Insert", 0x0010u);   // DD_PERM_INSERT
+                bit("Delete", 0x0020u);   // DD_PERM_DELETE
+                if (!cp.parent.empty() && !cp.column.empty() &&
+                    !cp.grantee.empty() && cp.bitmask != 0)
+                    col_perms.push_back(std::move(cp));
+                f.skip(hc, 1);
+            }
+            f.close(hc);
+        } else {
+            warnings.push_back("system.permissions column query failed — "
+                               "column-level grants skipped.");
+        }
+    }
+
     // ── Step 5d: read table properties from SAP ─────────────────────────────
     struct TableProps {
         std::string name;
@@ -820,6 +870,10 @@ int main(int argc, char** argv) {
     int written_memberships = 0;
     int written_perms       = 0;
     int written_db_props    = 0;
+    // RCB 07/16/2026: declared at outer scope so they survive the RAII block
+    // below and can be reported by emit_result after Step 8.
+    int written_indexes     = 0;
+    int written_col_perms   = 0;
     std::vector<std::string> admin_principals;
     {
         auto opened = openads::engine::DataDict::open(dest);
@@ -850,7 +904,6 @@ int main(int argc, char** argv) {
 
         // Per-tag index metadata: replace the file-level entries the dest DD
         // parsed from SAP with the rich per-tag set read from system.indexes.
-        std::size_t written_indexes = 0;
         if (!idx_meta.empty()) {
             (void)dd.clear_indexes(/*persist=*/false);
             for (const auto& im : idx_meta) {
@@ -871,6 +924,21 @@ int main(int argc, char** argv) {
             }
             if (auto r = dd.save(); !r)
                 warnings.push_back("save after indexes: " + r.error().message);
+        }
+
+        // Column-level grants (RCB 07/16/2026) — write them so OpenADS can
+        // enforce column-level SELECT the way SAP does.
+        if (!col_perms.empty()) {
+            for (const auto& cp : col_perms) {
+                auto r = dd.grant_column_permission(cp.parent, cp.column,
+                             cp.grantee, cp.bitmask, /*persist=*/false);
+                if (r) ++written_col_perms;
+                else warnings.push_back("grant_column_permission(" + cp.parent +
+                         "." + cp.column + "," + cp.grantee + "): " +
+                         r.error().message);
+            }
+            if (auto r = dd.save(); !r)
+                warnings.push_back("save after column perms: " + r.error().message);
         }
 
         // ── Guarantee adssys user exists and is DB:Admin ──────────────────────
@@ -1396,6 +1464,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    emit_result(true, written_memberships, written_perms, written_func_bodies, written_db_props, "", warnings);
+    emit_result(true, written_memberships, written_perms, written_func_bodies, written_db_props, "", warnings,
+                written_indexes, written_col_perms);
     return 0;
 }

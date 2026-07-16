@@ -55,6 +55,35 @@ fs::path make_perm_add(const fs::path& dir,
     return p;
 }
 
+// A DBF with four C(4) columns: ID, RENT, TENANT, DEPOSIT. Used for
+// column-level permission enforcement (RCB 07/16/2026).
+void make_dbf4(const fs::path& p) {
+    const char* cols[] = {"ID", "RENT", "TENANT", "DEPOSIT"};
+    std::vector<std::uint8_t> file;
+    auto push = [&](const void* d, std::size_t n) {
+        const auto* b = static_cast<const std::uint8_t*>(d);
+        file.insert(file.end(), b, b + n);
+    };
+    std::array<std::uint8_t, 32> hdr{};
+    hdr[0]  = 0x03;
+    const std::uint16_t hlen = 32 + 32 * 4 + 1;
+    hdr[8]  = static_cast<std::uint8_t>(hlen & 0xFF);
+    hdr[9]  = static_cast<std::uint8_t>(hlen >> 8);
+    hdr[10] = 1 + 4 * 4;   // record len: delete flag + 4 * C(4)
+    push(hdr.data(), hdr.size());
+    for (const char* cn : cols) {
+        std::array<std::uint8_t, 32> f{};
+        std::strncpy(reinterpret_cast<char*>(f.data()), cn, 11);
+        f[11] = 'C'; f[16] = 4;
+        push(f.data(), f.size());
+    }
+    file.push_back(0x0D);
+    file.push_back(0x1A);
+    std::ofstream(p, std::ios::binary).write(
+        reinterpret_cast<const char*>(file.data()),
+        static_cast<std::streamsize>(file.size()));
+}
+
 // Connect to a DD as a given user.
 ADSHANDLE connect_as(const fs::path& add_path,
                       const char* user, const char* pwd) {
@@ -637,4 +666,90 @@ TEST_CASE("Perms: level 0 blocks table metadata visibility") {
 
     REQUIRE(AdsDisconnect(hConn) == 0);
     fs::remove_all(dir, ec);
+}
+
+// RCB 07/16/2026: end-to-end column-level SELECT enforcement. SAP grants a
+// group table access but restricts it to specific columns; OpenADS used to
+// leak the whole table. Now: SELECT * exposes only permitted columns, and an
+// explicit forbidden column is denied.
+TEST_CASE("Perms: column-level SELECT enforcement") {
+    using DD = openads::engine::DataDict;
+    auto dir = fs::temp_directory_path() / "openads_colperm_enf";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    make_dbf4(dir / "tbl.dbf");
+
+    auto add = dir / "test.add";
+    openads_test::make_dd(add,
+        "TABLE tbl=tbl.dbf\n"
+        "USER bob\n"
+        "USERPROP bob;prop_1101=pw\n"
+        "GROUP General\n"
+        "MEMBER bob=General\n"
+        "DBPROP prop_5=1\n"           // logins required
+        "TABLEPERM tbl;General=1\n"); // table-level SELECT for General
+
+    // General may SELECT only RENT and TENANT (not ID, not DEPOSIT).
+    {
+        auto opened = DD::open(add.string());
+        REQUIRE(opened.has_value());
+        DD dd = std::move(opened).value();
+        REQUIRE(dd.grant_column_permission("tbl", "RENT",   "General",
+                    DD::DD_PERM_SELECT).has_value());
+        REQUIRE(dd.grant_column_permission("tbl", "TENANT", "General",
+                    DD::DD_PERM_SELECT).has_value());
+    }
+
+    ADSHANDLE hConn = connect_as(add, "bob", "pw");
+    REQUIRE(hConn != 0);
+    ADSHANDLE hStmt = 0;
+    REQUIRE(AdsCreateSQLStatement(hConn, &hStmt) == 0);
+
+    // SELECT * → only the two permitted columns are exposed.
+    {
+        UNSIGNED8 sql[64] = "SELECT * FROM tbl";
+        ADSHANDLE hc = 0;
+        REQUIRE(AdsExecuteSQLDirect(hStmt, sql, &hc) == 0);
+        UNSIGNED16 nf = 0;
+        REQUIRE(AdsGetNumFields(hc, &nf) == 0);
+        CHECK(nf == 2);                 // RENT + TENANT, NOT ID/DEPOSIT
+        std::vector<std::string> names;
+        for (UNSIGNED16 i = 1; i <= nf; ++i) {
+            UNSIGNED8 nm[64] = {0};
+            UNSIGNED16 cap = sizeof(nm);
+            AdsGetFieldName(hc, i, nm, &cap);
+            names.emplace_back(reinterpret_cast<char*>(nm), cap);
+        }
+        CHECK(std::find(names.begin(), names.end(), "RENT")    != names.end());
+        CHECK(std::find(names.begin(), names.end(), "TENANT")  != names.end());
+        CHECK(std::find(names.begin(), names.end(), "DEPOSIT") == names.end());
+        CHECK(std::find(names.begin(), names.end(), "ID")      == names.end());
+        AdsCloseTable(hc);
+    }
+
+    // Explicit forbidden column → access denied.
+    {
+        UNSIGNED8 sql[64] = "SELECT DEPOSIT FROM tbl";
+        ADSHANDLE hc = 0;
+        UNSIGNED32 rc = AdsExecuteSQLDirect(hStmt, sql, &hc);
+        CHECK(rc == openads::AE_ACCESS_DENIED);
+        if (hc) AdsCloseTable(hc);
+    }
+
+    // Explicit permitted column → allowed.
+    {
+        UNSIGNED8 sql[64] = "SELECT RENT FROM tbl";
+        ADSHANDLE hc = 0;
+        REQUIRE(AdsExecuteSQLDirect(hStmt, sql, &hc) == 0);
+        UNSIGNED16 nf = 0;
+        REQUIRE(AdsGetNumFields(hc, &nf) == 0);
+        CHECK(nf == 1);
+        AdsCloseTable(hc);
+    }
+
+    // (adssys/DB:Admin bypass is covered by the DataDict unit test.)
+
+    REQUIRE(AdsCloseSQLStatement(hStmt) == 0);
+    REQUIRE(AdsDisconnect(hConn) == 0);
+    fs::remove_all(dir);
 }

@@ -26962,6 +26962,29 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         ? derived_cur
         : s.registry.register_object(HandleKind::Table, tbl);
 
+    // RCB 07/16/2026: column-level permission enforcement. If the connected
+    // user is column-restricted on the source table, the cursor must expose
+    // ONLY the columns they may SELECT — SAP grants a group table access but
+    // hides specific columns, and OpenADS used to leak the whole table. We
+    // reuse the existing cursor-projection mechanism: SELECT * projects the
+    // permitted columns; an explicit projection naming a forbidden column is
+    // denied (matching SAP). Only reached for simple single-table SELECTs;
+    // join/aggregate queries take the materialisation path above.
+    std::optional<std::unordered_set<std::string>> allowed_cols;
+    if (c->has_dd() && !c->username().empty()) {
+        auto* dd = c->dd();
+        if (dd != nullptr && dd->has_any_column_acl()) {
+            allowed_cols = dd->permitted_columns(
+                c->username(), parsed.value().table,
+                openads::engine::DataDict::DD_PERM_SELECT);
+        }
+    }
+    auto col_lower = [](std::string s) {
+        for (auto& ch : s)
+            ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        return s;
+    };
+
     if (!parsed.value().projection.empty()) {
         std::vector<std::uint16_t> proj;
         proj.reserve(parsed.value().projection.size());
@@ -26970,7 +26993,23 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             if (fidx < 0) {
                 return fail(openads::AE_COLUMN_NOT_FOUND, col.c_str());
             }
+            if (allowed_cols &&
+                allowed_cols->find(col_lower(col)) == allowed_cols->end()) {
+                return fail(openads::AE_ACCESS_DENIED,
+                            ("no column permission: " + col).c_str());
+            }
             proj.push_back(static_cast<std::uint16_t>(fidx));
+        }
+        cursor_projections()[gh] = std::move(proj);
+    } else if (allowed_cols) {
+        // SELECT * by a column-restricted user → project only permitted columns,
+        // in table order.
+        std::vector<std::uint16_t> proj;
+        const std::uint16_t nf = static_cast<std::uint16_t>(tbl->field_count());
+        for (std::uint16_t i = 0; i < nf; ++i) {
+            const std::string& fname = tbl->field_descriptor(i).name;
+            if (allowed_cols->find(col_lower(fname)) != allowed_cols->end())
+                proj.push_back(i);
         }
         cursor_projections()[gh] = std::move(proj);
     }
