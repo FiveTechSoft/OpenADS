@@ -901,6 +901,19 @@ int main(int argc, char** argv) {
                 if (!r) warnings.push_back("create_user(" + canonical + "): " + r.error().message);
                 else    warnings.push_back(canonical + " created (SAP built-in, not in export)");
             }
+            // RCB 07/16/2026: preserve the admin password so the imported DD
+            // authenticates the same adssys/password that was just verified
+            // against SAP. OpenADS stores the DD user password in user property
+            // "prop_1101" (checked at AdsConnect60 when logins are required).
+            // create_user() leaves it empty, so a re-import used to lock out
+            // adssys/<password> and only accept adssys/<blank>. SAP user
+            // passwords are hashed and unrecoverable, so only the admin — whose
+            // plaintext password we were given on the command line — can be set.
+            {
+                auto r = dd.set_user_property(canonical, "prop_1101", password);
+                if (!r) warnings.push_back("set admin password (" + canonical +
+                                           "): " + r.error().message);
+            }
             // Always ensure DB:Admin membership — idempotent if already present.
             {
                 auto r = dd.add_user_to_group(canonical, "DB:Admin");
