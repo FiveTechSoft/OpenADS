@@ -502,6 +502,46 @@ int main(int argc, char** argv) {
         }
     }
 
+    // ── Step 5c2: read per-tag index metadata from SAP ──────────────────────
+    // RCB 07/16/2026: SAP's system.indexes is one row per index TAG with the
+    // real key expression, condition, options, key length and collation — data
+    // OpenADS's DD never captured (it only knew index FILES). We read it here
+    // (SAP ACE decodes it fully) and write per-tag Index records into the dest
+    // DD so `SELECT * FROM system.indexes` matches SAP.
+    struct IdxMeta {
+        std::string name, parent, file, expr, cond, opts, keylen, coll, comment;
+    };
+    std::vector<IdxMeta> idx_meta;
+    {
+        ADSHANDLE hc = 0;
+        rc = f.execSQL(hStmt,
+            (UNSIGNED8*)"SELECT Name, Parent, Index_File_Name, Index_Expression, "
+                        "Index_Condition, Index_Options, Index_Key_Length, "
+                        "Index_Collation, Comment FROM system.indexes",
+            &hc);
+        if (rc == 0 && hc) {
+            UNSIGNED16 eof = 0;
+            while (f.atEOF(hc, &eof) == 0 && !eof) {
+                IdxMeta im;
+                im.name    = sap_field(f, hc, "Name");
+                im.parent  = sap_field(f, hc, "Parent");
+                im.file    = sap_field(f, hc, "Index_File_Name");
+                im.expr    = sap_field(f, hc, "Index_Expression");
+                im.cond    = sap_field(f, hc, "Index_Condition");
+                im.opts    = sap_field(f, hc, "Index_Options");
+                im.keylen  = sap_field(f, hc, "Index_Key_Length");
+                im.coll    = sap_field(f, hc, "Index_Collation");
+                im.comment = sap_field(f, hc, "Comment");
+                if (!im.name.empty() && !im.parent.empty())
+                    idx_meta.push_back(std::move(im));
+                f.skip(hc, 1);
+            }
+            f.close(hc);
+        } else {
+            warnings.push_back("system.indexes query failed — index metadata skipped.");
+        }
+    }
+
     // ── Step 5d: read table properties from SAP ─────────────────────────────
     struct TableProps {
         std::string name;
@@ -806,6 +846,31 @@ int main(int argc, char** argv) {
             auto r = dd.add_user_to_group(m.user, m.group);
             if (r) ++written_memberships;
             else warnings.push_back("add_user_to_group(" + m.user + "," + m.group + "): " + r.error().message);
+        }
+
+        // Per-tag index metadata: replace the file-level entries the dest DD
+        // parsed from SAP with the rich per-tag set read from system.indexes.
+        std::size_t written_indexes = 0;
+        if (!idx_meta.empty()) {
+            (void)dd.clear_indexes(/*persist=*/false);
+            for (const auto& im : idx_meta) {
+                openads::engine::DataDict::IndexEntry e;
+                e.table_alias = im.parent;
+                e.index_path  = im.file;
+                e.tag_name    = im.name;
+                e.expression  = im.expr;
+                e.condition   = im.cond;
+                e.options     = im.opts;
+                e.key_length  = im.keylen;
+                e.collation   = im.coll;
+                e.comment     = im.comment;
+                auto r = dd.add_index(e, /*persist=*/false);
+                if (r) ++written_indexes;
+                else warnings.push_back("add_index(" + im.parent + "." +
+                                        im.name + "): " + r.error().message);
+            }
+            if (auto r = dd.save(); !r)
+                warnings.push_back("save after indexes: " + r.error().message);
         }
 
         // ── Guarantee adssys user exists and is DB:Admin ──────────────────────

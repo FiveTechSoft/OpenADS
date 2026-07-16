@@ -31,6 +31,58 @@ TEST_CASE("DataDict create + add_table + reopen + resolve") {
     fs::remove(p);
 }
 
+// RCB 07/16/2026: per-tag index metadata (Name/expression/condition/options/
+// key_length/collation) must survive a save/reopen, so system.indexes can
+// report SAP-parity rows. Before enrichment the DD only stored index FILES.
+TEST_CASE("DataDict add_index per-tag metadata round-trips") {
+    auto p = fs::temp_directory_path() / "openads_dd_idx_meta.add";
+    fs::remove(p);
+    {
+        auto created = DataDict::create(p.string());
+        REQUIRE(created.has_value());
+        DataDict dd = std::move(created).value();
+        REQUIRE(dd.add_table("landlords", "landlords.adt").has_value());
+
+        DataDict::IndexEntry e1;
+        e1.table_alias = "landlords"; e1.index_path = "landlords.adi";
+        e1.tag_name = "LANDLORDID"; e1.expression = "LandLordID";
+        e1.options = "2051"; e1.key_length = "25";
+        REQUIRE(dd.add_index(e1).has_value());
+
+        // A second tag in the SAME file — must be a distinct entry, not a
+        // dedup collision (they share index_path but differ by tag).
+        DataDict::IndexEntry e2;
+        e2.table_alias = "landlords"; e2.index_path = "landlords.adi";
+        e2.tag_name = "BYCITY"; e2.expression = "City;Zip"; e2.condition = "inactive=0";
+        e2.options = "2"; e2.key_length = "40";
+        REQUIRE(dd.add_index(e2).has_value());
+    }
+    {
+        auto opened = DataDict::open(p.string());
+        REQUIRE(opened.has_value());
+        DataDict dd = std::move(opened).value();
+        const auto& idx = dd.indexes();
+        REQUIRE(idx.size() == 2);
+        // Find each by tag and verify every per-tag field survived.
+        auto find = [&](const std::string& tag) -> const DataDict::IndexEntry* {
+            for (const auto& e : idx) if (e.tag_name == tag) return &e;
+            return nullptr;
+        };
+        const auto* a = find("LANDLORDID");
+        REQUIRE(a);
+        CHECK(a->table_alias == "landlords");
+        CHECK(a->expression  == "LandLordID");
+        CHECK(a->options     == "2051");
+        CHECK(a->key_length  == "25");
+        const auto* b = find("BYCITY");
+        REQUIRE(b);
+        CHECK(b->expression == "City;Zip");
+        CHECK(b->condition  == "inactive=0");
+        CHECK(b->options    == "2");
+    }
+    fs::remove(p);
+}
+
 // -------------------------------------------------------------------------
 // Legacy format rejection
 // -------------------------------------------------------------------------

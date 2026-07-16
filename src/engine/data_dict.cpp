@@ -1671,13 +1671,26 @@ util::Result<void> DataDict::load_() {
             }
 
         } else if (obj_type == "Index") {
-            // OBJ_NAME=table_alias, OBJ_KEY=index_path, JSON={comment}
+            // OBJ_NAME=table_alias, OBJ_KEY=index_path,
+            // JSON={comment, tag, expr, cond, opts, keylen, coll}.
+            // The per-tag fields (RCB 07/16/2026) are absent in legacy DDs and
+            // just come back empty.
             IndexEntry e;
             e.table_alias = obj_name;
             e.index_path  = obj_key;
             if (!json.empty()) {
                 auto m = json_parse_flat(json);
-                if (m.count("comment")) e.comment = m.at("comment");
+                auto get = [&](const char* k) -> std::string {
+                    auto it = m.find(k);
+                    return it != m.end() ? it->second : std::string();
+                };
+                e.comment    = get("comment");
+                e.tag_name   = get("tag");
+                e.expression = get("expr");
+                e.condition  = get("cond");
+                e.options    = get("opts");
+                e.key_length = get("keylen");
+                e.collation  = get("coll");
             }
             indexes_.push_back(std::move(e));
 
@@ -1871,10 +1884,24 @@ util::Result<void> DataDict::save() {
         }
     }
 
-    // Indexes
+    // Indexes. RCB 07/16/2026: one record per index TAG (SAP parity) — the
+    // per-tag fields ride in the JSON, so old readers still see comment and
+    // new readers pick up the rest. Multiple tags in one file share obj_key
+    // (index_path); the record rows carry distinct tag/expr in JSON.
     for (auto& e : indexes_) {
-        mk("Index", e.table_alias, e.index_path,
-           "{\"comment\":\"" + json_escape(e.comment) + "\"}");
+        std::string j = "{\"comment\":\"" + json_escape(e.comment) + "\"";
+        auto add = [&](const char* k, const std::string& v) {
+            if (!v.empty()) j += ",\"" + std::string(k) + "\":\"" +
+                                 json_escape(v) + "\"";
+        };
+        add("tag",    e.tag_name);
+        add("expr",   e.expression);
+        add("cond",   e.condition);
+        add("opts",   e.options);
+        add("keylen", e.key_length);
+        add("coll",   e.collation);
+        j += "}";
+        mk("Index", e.table_alias, e.index_path, j);
     }
 
     // Users (with their properties embedded in JSON)
@@ -2160,6 +2187,33 @@ DataDict::add_index_file(const std::string& table_alias,
     indexes_.push_back(std::move(e));
     invalidate_metadata_indexes_();
     return save();
+}
+
+util::Result<void>
+DataDict::add_index(const IndexEntry& in, bool persist) {
+    // Replace an existing entry for the same tag (table+tag), else the same
+    // file when the entry is file-only (no tag). Otherwise append.
+    for (auto& e : indexes_) {
+        const bool same_tag = !in.tag_name.empty() &&
+            e.table_alias == in.table_alias && e.tag_name == in.tag_name;
+        const bool same_file = in.tag_name.empty() &&
+            e.table_alias == in.table_alias && e.index_path == in.index_path;
+        if (same_tag || same_file) {
+            e = in;
+            invalidate_metadata_indexes_();
+            return persist ? save() : util::Result<void>{};
+        }
+    }
+    indexes_.push_back(in);
+    invalidate_metadata_indexes_();
+    return persist ? save() : util::Result<void>{};
+}
+
+util::Result<void>
+DataDict::clear_indexes(bool persist) {
+    indexes_.clear();
+    invalidate_metadata_indexes_();
+    return persist ? save() : util::Result<void>{};
 }
 
 util::Result<void>

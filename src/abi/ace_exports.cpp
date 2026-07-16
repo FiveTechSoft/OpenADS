@@ -18044,15 +18044,40 @@ build_system_table(Connection* c, std::string sys_name,
         return build(cols, rows);
     }
     if (sys_name == "indexes") {
+        // RCB 07/16/2026: SAP ADS system.indexes is one row per index TAG with
+        // full metadata (Name/Expression/Condition/Options/Key_Length/...), not
+        // one row per file. The DD IndexEntry now carries the per-tag fields
+        // (populated by import_dd from SAP, or by CREATE INDEX); this projects
+        // them into SAP's exact column shape. Column names + order match SAP so
+        // a client that reads by name gets the same result on both engines.
         const std::vector<Col> cols = {
-            {"TABLE_NAME", 'C', 200, 0},
-            {"INDEX_FILE", 'C', 250, 0},
-            {"COMMENT",    'C', 200, 0},
+            {"Name",                        'C', 200, 0},
+            {"Parent",                      'C', 200, 0},
+            {"Index_File_Name",             'C', 250, 0},
+            {"Index_Expression",            'C', 250, 0},
+            {"Index_Condition",             'C', 250, 0},
+            {"Index_Options",               'C',  20, 0},
+            {"Index_Key_Length",            'C',  20, 0},
+            {"Index_FTS_Min_Length",        'C',  20, 0},
+            {"Index_FTS_Delimiters",        'C', 100, 0},
+            {"Index_FTS_Noise",             'C', 100, 0},
+            {"Index_FTS_Drop_Chars",        'C', 100, 0},
+            {"Index_FTS_Conditional_Chars", 'C', 100, 0},
+            {"Comment",                     'C', 200, 0},
+            {"Index_Collation",             'C', 100, 0},
         };
         std::vector<std::vector<std::string>> rows;
         auto add_index_row = [&](const auto& e) {
             if (!dd_can_view_object_metadata(c, e.table_alias)) return;
-            rows.push_back({e.table_alias, e.index_path, e.comment});
+            // SAP reports the bare file name ("landlords.adi"), not the DD's
+            // stored relative path (".\\landlords.adi").
+            std::string file =
+                std::filesystem::path(e.index_path).filename().string();
+            rows.push_back({
+                e.tag_name, e.table_alias, file, e.expression, e.condition,
+                e.options, e.key_length,
+                "0", "", "", "", "",   // FTS fields — empty on non-FTS indexes
+                e.comment, e.collation});
         };
         if (filter && filter->table_name) {
             for (const auto* e : dd->indexes_for_table(*filter->table_name))

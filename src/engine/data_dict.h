@@ -95,10 +95,28 @@ public:
         std::string table_alias;
         std::string index_path;
         std::string comment;
+        // RCB 07/16/2026: per-tag metadata so system.indexes matches SAP ADS
+        // (one row per index TAG, not per file). Empty on legacy/file-only
+        // entries; populated by import_dd (from SAP system.indexes) and by
+        // OpenADS CREATE INDEX. Stored in the Index record's JSON, so old DDs
+        // that lack these fields still load (the fields just come back empty).
+        std::string tag_name;    // SAP Index Name
+        std::string expression;  // SAP Index_Expression (key)
+        std::string condition;   // SAP Index_Condition (FOR clause)
+        std::string options;     // SAP Index_Options (flags, decimal text)
+        std::string key_length;  // SAP Index_Key_Length (decimal text)
+        std::string collation;   // SAP Index_Collation
     };
     util::Result<void> add_index_file   (const std::string& table_alias,
                                          const std::string& index_path,
                                          const std::string& comment);
+    // Add or replace a per-tag index entry. Dedups by (table_alias, tag_name)
+    // when tag_name is set, else by (table_alias, index_path). Pass
+    // persist=false to batch many adds (e.g. import) and call save() once.
+    util::Result<void> add_index(const IndexEntry& e, bool persist = true);
+    // Drop every index entry. Used by import to replace the file-level entries
+    // parsed from a SAP DD with the per-tag set read from SAP's system.indexes.
+    util::Result<void> clear_indexes(bool persist = true);
     util::Result<void> remove_index_file(const std::string& table_alias,
                                          const std::string& index_path);
     const std::vector<IndexEntry>& indexes() const noexcept { return indexes_; }
