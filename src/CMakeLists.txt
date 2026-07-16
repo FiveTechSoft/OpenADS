@@ -44,6 +44,7 @@ add_library(openads_core STATIC
     engine/tx_log.cpp
     engine/lsn_map.cpp
     engine/data_dict.cpp
+    engine/dd_native.cpp
     engine/backup.cpp
     engine/fts.cpp
     engine/codepage.cpp

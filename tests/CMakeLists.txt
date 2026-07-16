@@ -243,6 +243,7 @@ add_executable(openads_unit_tests
     unit/sql_acl_store_test.cpp
     unit/enterprise_config_test.cpp
     unit/legacy_crt_shims_test.cpp
+    unit/dd_native_codec_test.cpp
     unit/dll_test.cpp
     unit/network_client_test.cpp
     unit/abi_dd_invoicing_test.cpp
