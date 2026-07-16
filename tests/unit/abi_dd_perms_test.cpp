@@ -4,6 +4,8 @@
 #include "openads/error.h"
 #include "test_dd_make.h"
 
+#include <algorithm>  // RCB 07/16/2026: std::find — libstdc++ (Linux CI) does
+                      // not pull it in transitively the way libc++/MSVC-STL do
 #include <array>
 #include <cstdint>
 #include <cstring>
