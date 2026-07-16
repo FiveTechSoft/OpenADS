@@ -730,8 +730,15 @@ util::Result<void> DataDict::load_add_binary_(const std::string& buf) {
             std::string idx_path = rec.property;
             auto nul = idx_path.find('\0');
             if (nul != std::string::npos) idx_path.resize(nul);
-            if (!tbl_alias.empty() && !idx_path.empty())
-                indexes_.push_back({tbl_alias, idx_path, {}});
+            if (!tbl_alias.empty() && !idx_path.empty()) {
+                // RCB 07/16/2026: name the object rather than brace-init a
+                // subset — IndexEntry grew per-tag metadata fields, and clang
+                // -Werror=missing-field-initializers rejects a partial {a,b,{}}.
+                IndexEntry e;
+                e.table_alias = tbl_alias;
+                e.index_path = idx_path;
+                indexes_.push_back(std::move(e));
+            }
 
         } else if (rec.obj_type == "User" && !rec.obj_name.empty()) {
             // RCB 2026-06-27: Imported SAP user object names can arrive in

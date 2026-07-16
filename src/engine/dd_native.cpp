@@ -43,8 +43,13 @@ struct Reader {
     }
     std::uint16_t u16() {
         if (!need(2)) return 0;
-        std::uint16_t v = static_cast<std::uint16_t>(p[pos]) |
-                          (static_cast<std::uint16_t>(p[pos + 1]) << 8);
+        // RCB 07/16/2026: the <<8 integer-promotes the operands to int, so the
+        // whole OR is int — cast back explicitly or clang -Werror=conversion
+        // flags the narrowing on assignment (u32 below is exempt: uint32_t
+        // outranks int, so no promotion occurs).
+        std::uint16_t v = static_cast<std::uint16_t>(
+                          static_cast<std::uint16_t>(p[pos]) |
+                          (static_cast<std::uint16_t>(p[pos + 1]) << 8));
         pos += 2; return v;
     }
     std::uint32_t u32() {
