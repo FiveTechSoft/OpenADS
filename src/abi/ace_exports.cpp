@@ -82,6 +82,8 @@
 #include "drivers/adm/adm_memo.h"
 #include "drivers/fpt/fpt_memo.h"
 #include "drivers/memory/memory_driver.h"
+#include "engine/script/exec.h"
+#include "engine/script/parser.h"
 #include "platform/path.h"
 #include "platform/proc.h"
 #include "platform/time.h"
@@ -20790,329 +20792,248 @@ bool dispatch_sp_builtin_cursor(
 } // extern "C"  — temporarily closed so proc:: helpers get C++ linkage
 
 // ============================================================
-// Procedural-body mini-interpreter for DD stored functions.
-// Handles the xHarbour-style body language:
-//   DECLARE var TYPE;
-//   var = expression;
-//   IF cond THEN ... [ELSE ...] END IF;
-//   RETURN expression;
-// Expressions: literals, variables, arithmetic, CREATETIMESTAMP,
-// DATEDIFF, STR, TRIM family, CAST (ignored), and recursive DD
-// function calls (executed via SELECT ... FROM system.iota).
+// Script-engine bridge (docs/script-engine.md par 4.2 / 4.5).
+//
+// RCB 07/17/2026: this replaces the old string-based "proc" mini-
+// interpreter. DD stored functions now run through the typed script
+// engine (src/engine/script); this bridge is the SqlBridge the engine
+// uses to delegate embedded SQL and subqueries back into the ONE SQL
+// executor (AdsExecuteSQLDirect on the caller's statement), and to
+// resolve UDF-to-UDF calls by direct recursion.
 // ============================================================
-namespace proc {
+namespace scriptbridge {
 
-using Scope = std::unordered_map<std::string, std::string>;
+using openads::script::Type;
+using openads::script::Value;
 
-static std::string xtrim(const std::string& s) {
-    std::size_t f = s.find_first_not_of(" \t\r\n");
-    if (f == std::string::npos) return "";
-    std::size_t l = s.find_last_not_of(" \t\r\n");
-    return s.substr(f, l - f + 1);
-}
-static std::string xupper(const std::string& s) {
-    std::string r; r.reserve(s.size());
-    for (char c : s) r.push_back(static_cast<char>(std::toupper((unsigned char)c)));
-    return r;
-}
-
-// Split body into semicolon-terminated statements (respects strings + parens).
-static std::vector<std::string> split_stmts(const std::string& body) {
-    std::vector<std::string> out;
-    std::string cur;
-    int depth = 0; bool in_str = false;
-    for (std::size_t i = 0; i < body.size(); ++i) {
-        char c = body[i];
-        if (in_str) {
-            cur.push_back(c);
-            if (c=='\'' && i+1<body.size() && body[i+1]=='\'') cur.push_back(body[++i]);
-            else if (c=='\'') in_str=false;
-        } else {
-            if      (c=='\'') { in_str=true; cur.push_back(c); }
-            else if (c=='(')  { ++depth; cur.push_back(c); }
-            else if (c==')')  { --depth; cur.push_back(c); }
-            else if (c==';' && depth==0) {
-                std::string t=xtrim(cur); if (!t.empty()) out.push_back(t); cur.clear();
-            } else cur.push_back(c);
-        }
-    }
-    std::string t=xtrim(cur); if (!t.empty()) out.push_back(t);
-    return out;
-}
-
-// Split a top-level comma-separated argument list.
-static std::vector<std::string> split_args(const std::string& s) {
-    std::vector<std::string> out;
-    std::string cur;
-    int depth=0; bool in_str=false;
-    for (std::size_t i=0; i<s.size(); ++i) {
-        char c=s[i];
-        if (in_str) {
-            cur.push_back(c);
-            if (c=='\'' && i+1<s.size() && s[i+1]=='\'') cur.push_back(s[++i]);
-            else if (c=='\'') in_str=false;
-        } else {
-            if      (c=='\'') { in_str=true; cur.push_back(c); }
-            else if (c=='(')  { ++depth; cur.push_back(c); }
-            else if (c==')')  { --depth; cur.push_back(c); }
-            else if (c==',' && depth==0) {
-                out.push_back(xtrim(cur)); cur.clear();
-            } else cur.push_back(c);
-        }
-    }
-    std::string t=xtrim(cur); if (!t.empty()) out.push_back(t);
-    return out;
-}
-
-// Convert date string (MM/DD/YYYY or YYYY-MM-DD) to Julian Day Number.
-static long date_to_jdn(int y, int m, int d) {
-    long a=(14-m)/12, y2=y+4800-a, m2=m+12*a-3;
-    return d+(153*m2+2)/5+365*y2+y2/4-y2/100+y2/400-32045;
-}
-static long parse_jdn(const std::string& s) {
-    if (s.size()==10 && s[2]=='/' && s[5]=='/') {
-        int mo=std::atoi(s.substr(0,2).c_str()), d=std::atoi(s.substr(3,2).c_str()), y=std::atoi(s.substr(6).c_str());
-        return date_to_jdn(y,mo,d);
-    }
-    if (s.size()==10 && s[4]=='-' && s[7]=='-') {
-        int y=std::atoi(s.substr(0,4).c_str()), mo=std::atoi(s.substr(5,2).c_str()), d=std::atoi(s.substr(8).c_str());
-        return date_to_jdn(y,mo,d);
-    }
-    return 0;
-}
-
-// Forward declaration.
-static std::string eval(const std::string& expr, Scope& scope, ADSHANDLE hStmt);
-
-// Evaluate a function call whose arguments have already been evaluated.
-static std::string call_builtin(const std::string& fn_up, const std::vector<std::string>& ev,
-                                Scope& /*scope*/, ADSHANDLE /*hStmt*/) {
-    if (fn_up=="CREATETIMESTAMP" && ev.size()>=3) {
-        int y=std::atoi(ev[0].c_str()), mo=std::atoi(ev[1].c_str()), d=std::atoi(ev[2].c_str());
-        char buf[16]; std::snprintf(buf,sizeof(buf),"%02d/%02d/%04d",mo,d,y); return buf;
-    }
-    if (fn_up=="DATEDIFF" && ev.size()>=2) {
-        long j1=parse_jdn(ev[0]), j2=parse_jdn(ev[1]);
-        char buf[16]; std::snprintf(buf,sizeof(buf),"%ld",j1-j2); return buf;
-    }
-    if (fn_up=="STR" && !ev.empty()) {
-        double n=std::strtod(ev[0].c_str(),nullptr);
-        int len=ev.size()>=2?std::atoi(ev[1].c_str()):10;
-        int dec=ev.size()>=3?std::atoi(ev[2].c_str()):0;
-        char fmt[16]; std::snprintf(fmt,sizeof(fmt),"%%%d.%df",len,dec);
-        char buf[64]; std::snprintf(buf,sizeof(buf),fmt,n); return buf;
-    }
-    if ((fn_up=="LTRIM"||fn_up=="RTRIM"||fn_up=="TRIM"||fn_up=="ALLTRIM") && !ev.empty()) {
-        std::string s=ev[0];
-        if (fn_up!="RTRIM") { auto p=s.find_first_not_of(' '); s=(p!=std::string::npos)?s.substr(p):""; }
-        if (fn_up!="LTRIM") { auto p=s.find_last_not_of(' ');  if (p!=std::string::npos) s.resize(p+1); else s=""; }
-        return s;
-    }
-    if ((fn_up=="LEN"||fn_up=="LENGTH") && !ev.empty()) {
-        char buf[16]; std::snprintf(buf,sizeof(buf),"%zu",ev[0].size()); return buf;
-    }
-    // CAST(x AS type) — ignore type, return value as-is
-    if (fn_up=="CAST" && !ev.empty()) return ev[0];
-    // IIF(cond, t, f)
-    if (fn_up=="IIF" && ev.size()>=3) {
-        bool c=(ev[0]!="0" && ev[0]!="" && ev[0]!="false" && ev[0]!=".F.");
-        return c ? ev[1] : ev[2];
-    }
-    if ((fn_up=="INT"||fn_up=="VAL") && !ev.empty()) {
-        char buf[32]; std::snprintf(buf,sizeof(buf),"%.0f",std::strtod(ev[0].c_str(),nullptr)); return buf;
-    }
-    return ""; // not a known builtin
-}
-
-static std::string eval(const std::string& expr_in, Scope& scope, ADSHANDLE hStmt) {
-    std::string e = xtrim(expr_in);
-    if (e.empty()) return "";
-
-    // Numeric literal
+// Parse-once program cache, keyed by the body text itself (bodies are
+// immutable strings; identical text -> identical program).
+inline openads::util::Result<std::shared_ptr<const openads::script::Program>>
+compiled(const std::string& body) {
+    static std::mutex mu;
+    static std::unordered_map<std::string,
+        std::shared_ptr<const openads::script::Program>> cache;
     {
-        std::size_t i=0;
-        if (i<e.size() && (e[i]=='+'||e[i]=='-')) ++i;
-        std::size_t s2=i;
-        while (i<e.size() && (std::isdigit((unsigned char)e[i])||e[i]=='.')) ++i;
-        if (i>s2 && i==e.size()) return e;  // pure number
+        std::lock_guard<std::mutex> lk(mu);
+        auto it = cache.find(body);
+        if (it != cache.end()) return it->second;
     }
+    auto prog = openads::script::compile(body);
+    if (!prog) return prog.error();
+    std::lock_guard<std::mutex> lk(mu);
+    cache[body] = prog.value();
+    return std::move(prog).value();
+}
 
-    // String literal
-    if (!e.empty() && e.front()=='\'') {
-        std::string r;
-        for (std::size_t i=1; i<e.size(); ) {
-            if (e[i]=='\'' && i+1<e.size() && e[i+1]=='\'') { r.push_back('\''); i+=2; }
-            else if (e[i]=='\'') break;
-            else r.push_back(e[i++]);
-        }
-        return r;
-    }
-
-    // Strip balanced outer parens
-    if (!e.empty() && e.front()=='(') {
-        int pd=0; bool all=true;
-        for (std::size_t i=0; i<e.size(); ++i) {
-            if (e[i]=='(') ++pd; else if (e[i]==')') { --pd; if (pd==0 && i+1<e.size()) { all=false; break; } }
-        }
-        if (all && pd==0) return eval(e.substr(1,e.size()-2), scope, hStmt);
-    }
-
-    // Find rightmost top-level + or - (handles arithmetic and string concat)
-    {
-        int dp=0; bool in_s=false;
-        std::size_t op_pos=std::string::npos; char op_c=0;
-        for (std::size_t i=0; i<e.size(); ++i) {
-            char c=e[i];
-            if (in_s) { if (c=='\'' && i+1<e.size() && e[i+1]=='\'') ++i; else if (c=='\'') in_s=false; continue; }
-            if (c=='\'') { in_s=true; continue; }
-            if (c=='(') ++dp; else if (c==')') --dp;
-            if (dp==0 && (c=='+'||c=='-') && i>0) {
-                char p=e[i-1];
-                if (p!='('&&p!='+'&&p!='-'&&p!='*'&&p!='/'&&p!=',') { op_pos=i; op_c=c; }
+// Convert a display-format string into a typed Value for a declared slot.
+// Dates accept both MM/DD/YYYY (the display format) and YYYY-MM-DD.
+inline Value value_from_text(const std::string& text, Type t) {
+    auto trimmed = text;
+    while (!trimmed.empty() && trimmed.back() == ' ') trimmed.pop_back();
+    if (trimmed.empty() && t != Type::Char) return Value::typed_null(t);
+    switch (t) {
+        case Type::Integer:
+            return Value::integer(std::strtoll(trimmed.c_str(), nullptr, 10));
+        case Type::Double:
+            return Value::real(std::strtod(trimmed.c_str(), nullptr));
+        case Type::Logical:
+            return Value::logical(!trimmed.empty() &&
+                (trimmed[0] == 'T' || trimmed[0] == 't' ||
+                 trimmed[0] == '1' || trimmed[0] == 'Y'));
+        case Type::Date: {
+            int y = 0, m = 0, d = 0;
+            if (trimmed.size() >= 10 && trimmed[2] == '/' && trimmed[5] == '/') {
+                m = std::atoi(trimmed.substr(0, 2).c_str());
+                d = std::atoi(trimmed.substr(3, 2).c_str());
+                y = std::atoi(trimmed.substr(6, 4).c_str());
+            } else if (trimmed.size() >= 10 && trimmed[4] == '-' &&
+                       trimmed[7] == '-') {
+                y = std::atoi(trimmed.substr(0, 4).c_str());
+                m = std::atoi(trimmed.substr(5, 2).c_str());
+                d = std::atoi(trimmed.substr(8, 2).c_str());
             }
+            if (y == 0) return Value::typed_null(Type::Date);
+            return Value::date(openads::script::jdn_from_ymd(y, m, d));
         }
-        if (op_pos!=std::string::npos) {
-            std::string lv=eval(e.substr(0,op_pos),scope,hStmt);
-            std::string rv=eval(e.substr(op_pos+1),scope,hStmt);
-            // Both numeric → arithmetic
-            char *ep1,*ep2;
-            double a=std::strtod(lv.c_str(),&ep1), b=std::strtod(rv.c_str(),&ep2);
-            if (ep1!=lv.c_str()&&*ep1=='\0' && ep2!=rv.c_str()&&*ep2=='\0') {
-                double r=(op_c=='+')?a+b:a-b;
-                char buf[32]; if(r==std::floor(r)) std::snprintf(buf,sizeof(buf),"%.0f",r); else std::snprintf(buf,sizeof(buf),"%g",r); return buf;
+        case Type::Timestamp: {
+            Value dv = value_from_text(trimmed.substr(0, 10), Type::Date);
+            if (dv.is_null) return Value::typed_null(Type::Timestamp);
+            std::int64_t ms = 0;
+            if (trimmed.size() >= 19) {
+                int hh = std::atoi(trimmed.substr(11, 2).c_str());
+                int mi = std::atoi(trimmed.substr(14, 2).c_str());
+                int ss = std::atoi(trimmed.substr(17, 2).c_str());
+                if (trimmed.find("PM") != std::string::npos && hh < 12)
+                    hh += 12;
+                ms = (static_cast<std::int64_t>(hh) * 3600 + mi * 60 + ss) *
+                     1000;
             }
-            if (op_c=='+') return lv+rv; // string concat
-            return lv;
+            return Value::timestamp(dv.i * 86400000 + ms);
+        }
+        case Type::Char:
+        case Type::Null:
+            return Value::character(text);
+    }
+    return Value::character(text);
+}
+
+// Typed row access over an AdsExecuteSQLDirect cursor.
+struct AbiSqlCursor final : openads::script::SqlCursor {
+    ADSHANDLE h = 0;
+    bool first = true;
+    explicit AbiSqlCursor(ADSHANDLE hc) : h(hc) {}
+    ~AbiSqlCursor() override { if (h) AdsCloseTable(h); }
+
+    bool next() override {
+        if (!first) AdsSkip(h, 1);
+        first = false;
+        UNSIGNED16 eof = 1;
+        AdsAtEOF(h, &eof);
+        return eof == 0;
+    }
+    std::size_t field_count() const override {
+        UNSIGNED16 n = 0;
+        AdsGetNumFields(h, &n);
+        return n;
+    }
+    Value field(std::size_t idx) override {
+        UNSIGNED8 fname[256] = {0};
+        UNSIGNED16 cap = sizeof(fname) - 1;
+        if (AdsGetFieldName(h, static_cast<UNSIGNED16>(idx + 1), fname,
+                            &cap) != 0)
+            return Value::null();
+        fname[cap] = 0;
+        UNSIGNED16 ftype = 0;
+        AdsGetFieldType(h, fname, &ftype);
+        std::vector<char> buf(65536, 0);
+        UNSIGNED32 len = static_cast<UNSIGNED32>(buf.size() - 1);
+        if (AdsGetString(h, fname, reinterpret_cast<UNSIGNED8*>(buf.data()),
+                         &len, 0) != 0)
+            return Value::null();
+        std::string text(buf.data(), len);
+        switch (ftype) {
+            case ADS_NUMERIC: case ADS_DOUBLE: case ADS_CURDOUBLE:
+            case ADS_MONEY:
+                return value_from_text(text, Type::Double);
+            case ADS_INTEGER: case ADS_SHORTINT: case ADS_AUTOINC:
+                return value_from_text(text, Type::Integer);
+            case ADS_DATE:
+                return value_from_text(text, Type::Date);
+            case ADS_TIMESTAMP:
+                return value_from_text(text, Type::Timestamp);
+            case ADS_LOGICAL:
+                return value_from_text(text, Type::Logical);
+            default:
+                return Value::character(text);
         }
     }
+};
 
-    // Function call: identifier (possibly @-prefixed) followed by '('
-    {
-        std::size_t fe=0;
-        if (fe<e.size() && e[fe]=='@') ++fe;  // allow @func() syntax (rare but possible)
-        while (fe<e.size() && (std::isalnum((unsigned char)e[fe])||e[fe]=='_')) ++fe;
-        std::size_t lp=fe;
-        while (lp<e.size() && std::isspace((unsigned char)e[lp])) ++lp;
-        if (fe>0 && lp<e.size() && e[lp]=='(') {
-            std::string fname=e.substr(0,fe);
-            std::string fu=xupper(fname);
-            // extract balanced arg list
-            std::string arglist; int dp=1; std::size_t k=lp+1;
-            while (k<e.size() && dp>0) {
-                char c=e[k++];
-                if      (c=='(') ++dp;
-                else if (c==')') { --dp; if (dp==0) break; }
-                arglist.push_back(c);
-            }
-            // evaluate each arg
-            std::vector<std::string> raw_args=split_args(arglist);
-            std::vector<std::string> ev_args;
-            ev_args.reserve(raw_args.size());
-            for (auto& a : raw_args) ev_args.push_back(eval(a,scope,hStmt));
+openads::util::Result<Value> run_dd_function(
+    Connection* c, ADSHANDLE hStmt, const std::string& name,
+    const std::vector<Value>& args);
 
-            // Try built-ins first
-            std::string bres=call_builtin(fu,ev_args,scope,hStmt);
-            if (!bres.empty()) return bres;
+struct AbiBridge final : openads::script::SqlBridge {
+    Connection* c = nullptr;
+    ADSHANDLE hStmt = 0;
+    AbiBridge(Connection* conn, ADSHANDLE hs) : c(conn), hStmt(hs) {}
 
-            // Try as DD function: SELECT fname(quoted_args) FROM system.iota
-            {
-                std::string sel_args;
-                for (std::size_t i=0; i<ev_args.size(); ++i) {
-                    if (i) sel_args+=", ";
-                    char *ep; std::strtod(ev_args[i].c_str(),&ep);
-                    bool is_num=(*ep=='\0' && !ev_args[i].empty());
-                    if (is_num) sel_args+=ev_args[i];
-                    else {
-                        sel_args+='\'';
-                        for (char c : ev_args[i]) { if (c=='\'') sel_args+='\''; sel_args+=c; }
-                        sel_args+='\'';
-                    }
-                }
-                std::string sel="SELECT "+fname+"("+sel_args+") FROM system.iota";
-                std::vector<UNSIGNED8> sbuf(sel.size()+1);
-                std::memcpy(sbuf.data(),sel.c_str(),sel.size()+1);
-                ADSHANDLE tc=0;
-                if (AdsExecuteSQLDirect(hStmt,sbuf.data(),&tc)==openads::AE_SUCCESS && tc!=0) {
-                    AdsGotoTop(tc);
-                    UNSIGNED16 nf=0; AdsGetNumFields(tc,&nf);
-                    std::string r;
-                    if (nf>0) {
-                        UNSIGNED8 fn[256]={}; UNSIGNED16 fl=sizeof(fn)-1;
-                        AdsGetFieldName(tc,1,fn,&fl); fn[fl]=0;
-                        UNSIGNED32 vl=256; std::vector<char> vb(vl+1,'\0');
-                        AdsGetString(tc,fn,(UNSIGNED8*)vb.data(),&vl,0);
-                        r=std::string(vb.data(),(std::size_t)vl);
-                    }
-                    AdsCloseTable(tc);
-                    return r;
+    openads::util::Result<std::unique_ptr<openads::script::SqlCursor>>
+    exec(const std::string& sql) override {
+        std::vector<UNSIGNED8> sbuf(sql.size() + 1);
+        std::memcpy(sbuf.data(), sql.c_str(), sql.size() + 1);
+        ADSHANDLE hc = 0;
+        UNSIGNED32 rc = AdsExecuteSQLDirect(hStmt, sbuf.data(), &hc);
+        if (rc != 0)
+            return openads::util::Error{static_cast<std::int32_t>(rc), 0,
+                "embedded SQL failed: " + sql.substr(0, 80), ""};
+        if (hc == 0)
+            return std::unique_ptr<openads::script::SqlCursor>{};
+        return std::unique_ptr<openads::script::SqlCursor>(
+            new AbiSqlCursor(hc));
+    }
+
+    const openads::engine::DataDict::FunctionEntry*
+    find_udf(const std::string& name) const {
+        if (!c->has_dd()) return nullptr;
+        auto* dd = c->dd();
+        if (!dd) return nullptr;
+        std::string up = name;
+        for (auto& ch : up)
+            ch = static_cast<char>(std::toupper((unsigned char)ch));
+        for (const auto& kv : dd->functions()) {
+            std::string k = kv.first;
+            for (auto& ch : k)
+                ch = static_cast<char>(std::toupper((unsigned char)ch));
+            if (k == up) return &kv.second;
+        }
+        return nullptr;
+    }
+
+    bool has_udf(const std::string& name) override {
+        return find_udf(name) != nullptr;
+    }
+
+    openads::util::Result<Value>
+    call_udf(const std::string& name,
+             const std::vector<Value>& args) override {
+        return run_dd_function(c, hStmt, name, args);
+    }
+};
+
+// Execute a DD stored function through the script engine. Shared by the
+// SELECT evaluator (K::Udf) and UDF-to-UDF recursion via the bridge.
+// The recursion guard is here so both entries are covered; SAP's exact
+// depth limit is open question 9.8 in the design doc - 32 is safely
+// below any real script.
+openads::util::Result<Value> run_dd_function(
+    Connection* c, ADSHANDLE hStmt, const std::string& name,
+    const std::vector<Value>& args) {
+    static thread_local int depth = 0;
+    if (depth >= 32)
+        return openads::util::Error{openads::script::kScriptError, 0,
+            "UDF recursion too deep at " + name, ""};
+
+    AbiBridge bridge(c, hStmt);
+    const auto* fe = bridge.find_udf(name);
+    if (fe == nullptr)
+        return openads::util::Error{openads::script::kScriptError, 0,
+            "unknown function '" + name + "'", ""};
+
+    auto prog = compiled(fe->implementation);
+    if (!prog) return prog.error();
+
+    openads::script::Executor ex(&bridge);
+    auto params = openads::script::parse_params(fe->input_params);
+    if (params) {
+        const auto& ps = params.value();
+        for (std::size_t i = 0; i < ps.size(); ++i) {
+            Value v = i < args.size() ? args[i] : Value::null();
+            // Coerce the caller's value into the declared parameter type
+            // (display-text -> typed when the caller passed text).
+            if (!v.is_null && ps[i].type != Type::Null &&
+                v.type != ps[i].type) {
+                if (v.type == Type::Char && ps[i].type != Type::Char)
+                    v = value_from_text(v.s, ps[i].type);
+                else {
+                    auto cv = openads::script::coerce_assign(
+                        ps[i].type, v, ps[i].char_limit);
+                    if (cv) v = std::move(cv).value();
                 }
             }
-            return "";
+            ex.set_param(ps[i].name, std::move(v));
         }
     }
 
-    // Plain identifier / keyword / variable reference
-    std::string eu=xupper(e);
-    if (eu==".T."||eu=="TRUE")  return "1";
-    if (eu==".F."||eu=="FALSE") return "0";
-    // scope lookup (case-insensitive, @-prefix preserved)
-    auto it=scope.find(eu);
-    if (it!=scope.end()) return it->second;
-    return "";
+    ++depth;
+    auto r = ex.run(*prog.value());
+    --depth;
+    if (!r) return r.error();
+    if (!r.value().returned) return Value::null();
+    return std::move(r.value().return_value);
 }
 
-// Execute a procedural body with `scope` pre-populated from param substitution.
-// Returns the value of the RETURN statement, or "" if none reached.
-static std::string exec_body(const std::string& body, Scope& scope, ADSHANDLE hStmt) {
-    auto stmts=split_stmts(body);
-    for (auto& s : stmts) {
-        std::string su=xupper(s);
-        // DECLARE varname TYPE
-        if (su.rfind("DECLARE ",0)==0) {
-            std::string rest=xtrim(s.substr(8));
-            std::size_t ve=0;
-            while (ve<rest.size() && (std::isalnum((unsigned char)rest[ve])||rest[ve]=='_'||rest[ve]=='@')) ++ve;
-            std::string vn=rest.substr(0,ve);
-            if (!vn.empty()) scope[xupper(vn)]="";
-            continue;
-        }
-        // RETURN expression
-        if (su.rfind("RETURN",0)==0 && (su.size()==6||!std::isalnum((unsigned char)su[6]))) {
-            return eval(xtrim(s.substr(6)),scope,hStmt);
-        }
-        // IF cond THEN stmts [ELSE stmts] END IF
-        // (Implemented as a single-pass block search within the statement list.
-        //  For now, skip IF blocks — they are handled by re-parsing the body
-        //  with IF as a sub-body delimiter.)
-        if (su.rfind("IF ",0)==0) {
-            // Minimal IF: find THEN and ELSE/END within subsequent statements.
-            // Build true/false sub-bodies from the statement stream.
-            // This is complex; skip for first pass — most DD functions
-            // don't need it when expressions use IIF() instead.
-            continue;
-        }
-        // Assignment: find top-level '='
-        std::size_t eq=std::string::npos;
-        { bool in_s=false; int dp=0;
-          for (std::size_t i=0; i<s.size(); ++i) {
-              char c=s[i];
-              if (in_s) { if (c=='\'' && i+1<s.size() && s[i+1]=='\'') ++i; else if (c=='\'') in_s=false; continue; }
-              if (c=='\'') { in_s=true; continue; }
-              if (c=='(') ++dp; else if (c==')') --dp;
-              if (dp==0&&c=='='&&i>0) { char p=s[i-1],n=(i+1<s.size()?s[i+1]:'\0');
-                if (p!='<'&&p!='>'&&p!='!'&&p!='='&&n!='=') { eq=i; break; } }
-          }
-        }
-        if (eq!=std::string::npos) {
-            std::string lhs=xupper(xtrim(s.substr(0,eq)));
-            std::string rhs=xtrim(s.substr(eq+1));
-            scope[lhs]=eval(rhs,scope,hStmt);
-        }
-    }
-    return "";
-}
-
-} // namespace proc
+} // namespace scriptbridge
 
 namespace {
 
@@ -26687,67 +26608,115 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         case K::Rtrim: val = trim_right(std::move(raw)); break;
 
                         case K::Udf: {
-                            // Look up function in the DD (case-insensitive).
+                            // RCB 07/17/2026: DD stored functions run through
+                            // the typed script engine (docs/script-engine.md).
+                            // Errors PROPAGATE and fail the SELECT — SAP
+                            // returns 7200 for a failing UDF, and the old
+                            // silent "" here is how EoM produced 02/00/2026.
                             if (!c->has_dd()) break;
-                            auto* dd2 = c->dd();
-                            std::string udf_impl, udf_params;
-                            {
-                                std::string fn_up = fc.fn_name;
-                                for (auto& ch2 : fn_up) ch2 = static_cast<char>(std::toupper((unsigned char)ch2));
-                                for (const auto& kv : dd2->functions()) {
-                                    std::string kv_up = kv.first;
-                                    for (auto& ch2 : kv_up) ch2 = static_cast<char>(std::toupper((unsigned char)ch2));
-                                    if (kv_up == fn_up) {
-                                        udf_impl   = kv.second.implementation;
-                                        udf_params = kv.second.input_params;
-                                        break;
-                                    }
-                                }
-                            }
-                            if (udf_impl.empty()) break;
-
-                            // Build scope from named parameters, then run the
-                            // procedural body through the mini-interpreter.
-                            {
-                                proc::Scope scope;
-                                // Parse "name TYPE, name TYPE, ..." → parameter names
-                                std::vector<std::string> pnames;
-                                {
-                                    std::size_t ix = 0;
-                                    while (ix < udf_params.size()) {
-                                        while (ix < udf_params.size() && std::isspace((unsigned char)udf_params[ix])) ++ix;
-                                        std::string pn;
-                                        while (ix < udf_params.size() &&
-                                               !std::isspace((unsigned char)udf_params[ix]) &&
-                                               udf_params[ix] != ',')
-                                            pn.push_back(udf_params[ix++]);
-                                        if (!pn.empty()) pnames.push_back(pn);
-                                        while (ix < udf_params.size() && udf_params[ix] != ',') ++ix;
-                                        if (ix < udf_params.size()) ++ix;
-                                    }
-                                }
-                                // Populate scope with evaluated argument values.
-                                for (std::size_t pi = 0; pi < pnames.size() && pi < fc.args.size(); ++pi) {
-                                    const auto& arg = fc.args[pi];
-                                    std::string aval;
-                                    if (!arg.is_column) {
-                                        if (arg.is_numeric) {
-                                            char buf[32];
-                                            if (arg.number == std::floor(arg.number) && std::abs(arg.number) < 1e15)
-                                                std::snprintf(buf, sizeof(buf), "%.0f", arg.number);
-                                            else
-                                                std::snprintf(buf, sizeof(buf), "%g", arg.number);
-                                            aval = buf;
-                                        } else if (arg.is_call) {
-                                            aval = proc::eval(arg.text, scope, hStatement);
-                                        } else {
-                                            aval = arg.text; // string literal stored unquoted
+                            using SV = openads::script::Value;
+                            using ST = openads::script::Type;
+                            std::vector<SV> sargs;
+                            sargs.reserve(fc.args.size());
+                            for (const auto& arg : fc.args) {
+                                if (arg.is_column) {
+                                    // Read the CURRENT row's value, typed by
+                                    // the field descriptor.
+                                    auto ci_eq = [](const std::string& x,
+                                                    const std::string& y) {
+                                        if (x.size() != y.size()) return false;
+                                        for (std::size_t z = 0; z < x.size(); ++z)
+                                            if (std::toupper((unsigned char)x[z]) !=
+                                                std::toupper((unsigned char)y[z]))
+                                                return false;
+                                        return true;
+                                    };
+                                    std::uint16_t nfld = tbl->field_count();
+                                    std::uint16_t fi = nfld;
+                                    for (std::uint16_t k2 = 0; k2 < nfld; ++k2) {
+                                        if (ci_eq(tbl->field_descriptor(k2).name,
+                                                  arg.column)) {
+                                            fi = k2;
+                                            break;
                                         }
                                     }
-                                    scope[proc::xupper(pnames[pi])] = aval;
+                                    if (fi == nfld)
+                                        return fail(openads::AE_COLUMN_NOT_FOUND,
+                                                    arg.column.c_str());
+                                    auto v2 = tbl->read_field(fi);
+                                    if (!v2) return fail(v2.error());
+                                    const auto& fd2 = tbl->field_descriptor(fi);
+                                    using FT = openads::drivers::DbfFieldType;
+                                    switch (fd2.type) {
+                                        case FT::Numeric: case FT::Float:
+                                        case FT::Double: case FT::Currency:
+                                            sargs.push_back(SV::real(
+                                                v2.value().as_double));
+                                            break;
+                                        case FT::Integer: case FT::ShortInt:
+                                        case FT::AutoInc:
+                                            sargs.push_back(SV::integer(
+                                                static_cast<std::int64_t>(
+                                                    v2.value().as_double)));
+                                            break;
+                                        case FT::Date: case FT::AdtDate:
+                                            sargs.push_back(
+                                                scriptbridge::value_from_text(
+                                                    v2.value().as_string,
+                                                    ST::Date));
+                                            break;
+                                        case FT::DateTime: case FT::AdtTimestamp:
+                                            sargs.push_back(
+                                                scriptbridge::value_from_text(
+                                                    v2.value().as_string,
+                                                    ST::Timestamp));
+                                            break;
+                                        case FT::Logical:
+                                            sargs.push_back(
+                                                scriptbridge::value_from_text(
+                                                    v2.value().as_string,
+                                                    ST::Logical));
+                                            break;
+                                        default: {
+                                            std::string sv2 =
+                                                v2.value().as_string;
+                                            while (!sv2.empty() &&
+                                                   sv2.back() == ' ')
+                                                sv2.pop_back();
+                                            sargs.push_back(
+                                                SV::character(std::move(sv2)));
+                                        }
+                                    }
+                                } else if (arg.is_numeric) {
+                                    if (arg.number == std::floor(arg.number) &&
+                                        std::abs(arg.number) < 1e15)
+                                        sargs.push_back(SV::integer(
+                                            static_cast<std::int64_t>(
+                                                arg.number)));
+                                    else
+                                        sargs.push_back(SV::real(arg.number));
+                                } else if (arg.is_call) {
+                                    // Nested call text (e.g. CurDate()) —
+                                    // evaluate through the engine itself.
+                                    auto pr = scriptbridge::compiled(
+                                        "RETURN " + arg.text + ";");
+                                    if (!pr) return fail(pr.error());
+                                    scriptbridge::AbiBridge br(c, hStatement);
+                                    openads::script::Executor ex2(&br);
+                                    auto rr = ex2.run(*pr.value());
+                                    if (!rr) return fail(rr.error());
+                                    sargs.push_back(
+                                        rr.value().returned
+                                            ? std::move(rr.value().return_value)
+                                            : SV::null());
+                                } else {
+                                    sargs.push_back(SV::character(arg.text));
                                 }
-                                val = proc::exec_body(udf_impl, scope, hStatement);
                             }
+                            auto rv = scriptbridge::run_dd_function(
+                                c, hStatement, fc.fn_name, sargs);
+                            if (!rv) return fail(rv.error());
+                            val = openads::script::to_display(rv.value());
                             break;
                         }
                         case K::Substr:

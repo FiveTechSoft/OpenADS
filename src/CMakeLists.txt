@@ -49,6 +49,10 @@ add_library(openads_core STATIC
     engine/fts.cpp
     engine/codepage.cpp
     engine/oem_collation.cpp
+    engine/script/value.cpp
+    engine/script/lexer.cpp
+    engine/script/parser.cpp
+    engine/script/exec.cpp
     sql/parser.cpp
     drivers/dbf_common.cpp
     drivers/cache/cached_driver.cpp

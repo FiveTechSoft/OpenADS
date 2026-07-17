@@ -172,3 +172,38 @@ todos; `bcc7.4` no tiene ninguno; `gcc6.3` sólo le falta MONEY):
 ADSSETDATE, ADSSETLOGICAL, ADSSETMONEY, ADSSETBINARY, ADSSETNULL,
 ADSSETTIMESTAMP` (familia completa: 21 wrappers `ADSSET*`, incluyendo los de
 configuración `ADSSETAOF`, `ADSSETDATEFORMAT`, etc., que sí suelen estar).
+
+---
+
+## 2026-07-17 — Script Engine (SQL scripting: stored procs / UDFs / triggers)
+
+**Design doc: `docs/script-engine.md` (accepted 2026-07-17).** OpenADS had no
+real script execution: a ~310-line string interpreter for UDFs (untyped, only
+`+`/`-`, IF skipped), NO path at all for DD script procs (`EXECUTE PROCEDURE`
+→ 5000), a third fragment for triggers that silently swallowed failures, and
+no `EXECUTE IMMEDIATE`. Replacement: ONE typed engine in `src/engine/script/`
+(lexer → parser → AST cached per body → typed interpreter); embedded SQL and
+subqueries delegate through a `SqlBridge` into the one SQL executor.
+
+**Language rules are oracle-verified** — 34 probes against SAP `ace64.dll`
+recorded in the doc §10. Highlights: strict typing (`'5'+1` errors, CHAR ↔
+number assigns error), integer division, only `=`/`<>`, `LEAVE` (not BREAK),
+`TRY…CATCH ALL…END TRY` + `RAISE name(code,'msg')` + `__errcode/__errtext`,
+3-valued NULL logic, `{d '…'}` literals, case-insensitive variables that
+error on column-name collision.
+
+**S1 (language core) status:** engine implemented (`value/lexer/parser/exec` +
+`parse_params`), 21 unit tests / 205 assertions green
+(`tests/unit/script_engine_test.cpp`, each case mirrors a probe). UDF call
+site (`K::Udf`) switched to the engine via `scriptbridge::` in
+`ace_exports.cpp`; the old `proc::` interpreter is DELETED. UDF errors now
+PROPAGATE and fail the SELECT (SAP parity) instead of silently returning "".
+Typed column/literal/nested-call arguments; UDF→UDF recursion is direct (no
+SQL round-trip), depth-capped at 32.
+
+**Next:** S2 = `EXECUTE PROCEDURE` for DD script procs (`__input`/`__output`),
+trigger bodies through the engine with error propagation (failing trigger
+must fail the DML), parameter binding for embedded SQL. S3 = cursors
+(`DECLARE … CURSOR`, `WHILE FETCH`), `EXECUTE IMMEDIATE`, builtin sweep.
+Gates run against the SAP oracle; PMSYS is the integration fixture, not the
+target.

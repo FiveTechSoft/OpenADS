@@ -258,10 +258,10 @@ green across the full construct matrix.
 
 ## 9. Open questions (each becomes an oracle probe before its phase)
 
-1. Loop-exit keyword inside WHILE (`BREAK`? `LEAVE`?) and `CONTINUE`?
-2. Exact TRY/CATCH grammar: `CATCH ALL`? error object/variable exposed?
-3. `RAISE` syntax and how user errors surface to the client (code, class).
-4. Variable-vs-column resolution order inside embedded statements.
+Answered 2026-07-17 (probes P1–P34 against `ace64.dll`, see §10):
+1, 2, 3, 4, 9 — see §10.
+
+Still open (S2/S3 probes):
 5. `FETCH <cur>` forms (`FETCH NEXT`? `INTO`?) and cursor updatability
    (`WHERE CURRENT OF`?).
 6. Trigger failure semantics: exact error code, and whether the failed DML
@@ -269,6 +269,48 @@ green across the full construct matrix.
 7. Transaction statements inside procs when the caller already has an open
    transaction.
 8. Recursion depth limit and its error code.
-9. `DECLARE` without `@`: scoping rules when a parameter and a DECLAREd
-   variable collide, case sensitivity of variable names.
 10. Which `::connection`/`LASTAUTOINC`-class system values scripts can read.
+11. `FINALLY` clause grammar; `CATCH <specific>` (non-ALL) forms.
+12. `__errclass`; RAISE error surfacing to the client when uncaught.
+
+## 10. Oracle probe results (2026-07-17, SAP ADS 11 local, probes P1–P34)
+
+**Mechanism.** `AdsExecuteSQLDirect` accepts full multi-statement scripts;
+the cursor returned is the last SELECT's result; a script ending without a
+SELECT returns rc=0 and no cursor. Bare `RETURN;` is legal in a script.
+
+**Variables.** `@name` and plain `name` both legal; case-INSENSITIVE;
+`DECLARE` initializes to NULL; a variable sharing a name with a column of a
+table referenced in an embedded statement is an **error** (no silent
+precedence) — P24.
+
+**Control flow.** `IF c THEN s [ELSEIF c THEN s]* [ELSE s] ENDIF` — both
+`ENDIF` and `END IF` accepted; `WHILE c DO s END WHILE`; loop exit is
+**`LEAVE`** (`BREAK` is a parse error); `CONTINUE` supported.
+
+**TRY/CATCH.** `TRY s CATCH ALL s END TRY`; `RAISE name(code, 'msg')`;
+inside CATCH, `__errcode` (=1234) and `__errtext` (='msg') are readable.
+
+**Types are STRICT.** `'5' + 1` → error; `@c CHAR(10); @c = 5` → error;
+`IIF(cond, 1, 'x')` (mismatched branch types) → error; `CONVERT('5',
+SQL_INTEGER) + 1` = 6. Numeric↔numeric assign allowed with truncation
+(`@i INTEGER = 3.7` → 3). `CHAR(N)` assignment truncates to N. Integer
+division: `7/2` = 3; `7.0/2` = 3.5; `%` and `MOD()` both work.
+
+**Comparisons.** Only `=` and `<>` (`!=` and `==` are errors); trailing
+spaces ignored (`'a' = 'a  '` true); standard precedence (`2+3*4`=14),
+unary minus fine.
+
+**NULL.** Three-valued logic: `@null > 0 OR TRUE` → true, `@null > 0 AND
+TRUE` → not-true; `NULL = NULL` → false; `IS NULL` works; `@null + 1`
+propagates NULL (AdsGetField renders numeric NULL as "0"); the untyped
+literal `'x' + NULL` is an **error**.
+
+**Dates.** No `CTOD`/`CREATEDATE` — dates come from `{d 'YYYY-MM-DD'}`
+literals, `CURDATE()`, or `CAST(CREATETIMESTAMP(y,m,d,h,mi,s,ms) AS
+SQL_DATE)`. `DATE + int` → DATE; `DATE − DATE` → integer days.
+
+**Misc.** Simple and searched `CASE` work in script assignments;
+`@x = (SELECT …)` subquery-into-variable works; scalar library confirmed:
+`SUBSTRING(s,p,n)`, `POSITION(a IN b)`, `UPPER/LOWER`, `LENGTH`, `TRIM`,
+`REPEAT`, `RIGHT`, `CONVERT(v, SQL_T)`, `MOD`, `IIF`.
