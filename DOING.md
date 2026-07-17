@@ -152,3 +152,23 @@ hasta que pide una navegación.
 - [ ] Verificar que el fix funciona con la app real del usuario FWH
 - [ ] Investigar por qué customer.cdx tiene tag con nombre vacío
       (posiblemente creado por herramienta que no pone nombre al tag default)
+
+---
+
+## 2026-07-15 — rddads: HB_FUNC wrappers de setters tipados en `adsfunc.c` — DONE / no es gap de OpenADS
+
+**Resuelto 2026-07-17 (RCB):** los wrappers `HB_FUNC( ADSSET* )` viven en el
+`rddads` que cada usuario compila con SU Harbour — es un asunto de la
+distribución de Harbour, no de OpenADS. RCB lo coordinará con los
+mantenedores de Harbour. Si el `rddads.lib` de un usuario no trae estos
+wrappers, simplemente no podrá llamarlos desde `.prg`; el RDD normal
+(`REPLACE`/`FIELD->x :=`) no los usa y funciona igual.
+
+Para referencia, los `HB_FUNC` de setters tipados de valor que un
+`adsfunc.c` completo debe exponer (el árbol `f:\harbour3.2-bcc7.3` los tiene
+todos; `bcc7.4` no tiene ninguno; `gcc6.3` sólo le falta MONEY):
+
+`ADSSETFIELD, ADSSETSTRING, ADSSETLONG, ADSSETDOUBLE, ADSSETSHORT,
+ADSSETDATE, ADSSETLOGICAL, ADSSETMONEY, ADSSETBINARY, ADSSETNULL,
+ADSSETTIMESTAMP` (familia completa: 21 wrappers `ADSSET*`, incluyendo los de
+configuración `ADSSETAOF`, `ADSSETDATEFORMAT`, etc., que sí suelen estar).
