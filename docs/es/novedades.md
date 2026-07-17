@@ -6,11 +6,70 @@ nav_order: 0
 permalink: /es/novedades/
 ---
 
-# Novedades (v1.0.0-rc29 → v1.8.13)
+# Novedades (v1.0.0-rc29 → v1.8.14)
 
 Esta página resume los cambios más destacados desde la versión
 v1.0.0-rc29. Para el historial completo de commits, consulta el
 [CHANGELOG](https://github.com/FiveTechSoft/OpenADS/blob/main/CHANGELOG.md).
+
+---
+
+## Destacados v1.8.14
+
+### SQL — el cursor del resultado ya no empieza en una fila vacía fantasma
+
+`AdsExecuteSQLDirect` / `AdsExecuteSQL` dejaban el cursor del
+resultado *antes* de la primera fila, donde SAP ADS lo posiciona
+*sobre* la primera fila — leer el registro actual justo después de
+ejecutar devolvía una fila vacía fantasma en cada consulta. El
+resultado ahora aterriza en la fila 1, igual que SAP, para tablas del
+motor, resultados `system.*`/agregados, cursores de backends SQL y
+clientes remotos por igual. Los llamadores que ya hacen `AdsGotoTop`
+primero no se ven afectados.
+
+### REMOTO — read-ahead hacia atrás (PgUp)
+
+El read-ahead era solo hacia adelante: un browse con `Skip(-1)`
+pagaba un viaje de red por fila. Los recorridos inversos ahora
+también precargan — un recorrido inverso de 300 filas pasó de 299
+peticiones de red a 7 — y un nuevo bit de capacidad mantiene
+correctas las combinaciones de cliente/servidor antiguos y nuevos en
+ambas direcciones.
+
+### La versión real del servidor ahora es visible desde el cliente
+
+Los repetidos informes de "la corrección no funcionó" seguían
+resolviéndose en un `openads_serverd` antiguo aún en ejecución (un
+servicio de Windows activo mantiene su exe abierto, así que copiar
+una actualización encima puede fallar en silencio) — y no había forma
+de demostrarlo desde el cliente: el handshake del protocolo y
+`AdsMgGetInstallInfo` respondían cadenas fijas. Ahora el handshake
+lleva la versión real de compilación (`openads/1.8.14`), y
+`AdsMgGetInstallInfo` sobre un handle de gestión **remoto** informa
+de la versión del **servidor** — contra cualquier servidor publicado
+(las versiones antiguas se identifican como `0.3.2`). Desde Harbour:
+`AdsMgConnect("host:port")`, `AdsMgGetInstallInfo()[3]`,
+`AdsMgDisconnect()`.
+
+### REMOTO — `CloseTable` dejaba los ficheros de la tabla abiertos en el servidor
+
+Cerrar una tabla remota liberaba la vista del cliente, pero el handle
+"sombra" del lado servidor (usado para navegación ordenada, scopes y
+bloqueos) seguía abierto hasta desconectar la sesión — así que borrar,
+renombrar o reabrir en exclusiva el `.dbf`/`.cdx`/`.fpt` recién
+cerrado fallaba con "fichero en uso", y los bucles de reintento de la
+aplicación lo convertían en segundos de espera o un aparente cuelgue
+al cerrar todos los ficheros. `CloseTable` ahora cierra el handle
+sombra junto con la tabla.
+
+Actualiza `openads_serverd` para la corrección de CloseTable;
+actualiza también `openace64.dll` para ver la versión del servidor
+desde el cliente. Nuevo ejemplo:
+`examples/fivewin/xbpaint_delscope.prg` (registra la versión del
+servidor y reproduce la forma exacta de repintado de xBrowse —
+lecturas de página, `AdsGetRelKeyPos`/`AdsSetRelKeyPos`, arrastres de
+la barra de scroll — sobre una tabla remota con scope y
+`SET DELETED ON`).
 
 ---
 

@@ -6,11 +6,64 @@ nav_order: 0
 permalink: /en/whatsnew/
 ---
 
-# What's New (v1.0.0-rc29 → v1.8.13)
+# What's New (v1.0.0-rc29 → v1.8.14)
 
 This page summarises the most notable changes since the
 v1.0.0-rc29 release. For the full commit-by-commit history see
 the [CHANGELOG](https://github.com/FiveTechSoft/OpenADS/blob/main/CHANGELOG.md).
+
+---
+
+## v1.8.14 Highlights
+
+### SQL — result cursor no longer starts at a phantom empty row
+
+`AdsExecuteSQLDirect` / `AdsExecuteSQL` left the result cursor
+*before* the first row, where SAP ADS positions it *on* the first
+row — so reading the current record right after executing returned
+a phantom empty row on every query. The result now lands on row 1,
+matching SAP, for engine tables, `system.*`/aggregate results,
+SQL-backend cursors and remote clients alike. Callers that already
+issue `AdsGotoTop` first are unaffected.
+
+### REMOTE — backward (PgUp) read-ahead
+
+Read-ahead was forward-only: a `Skip(-1)` browse paid one round-trip
+per row. Reverse scans now prefetch too — a 300-row reverse scan
+dropped from 299 wire requests to 7 — and a new capability bit keeps
+mixed old/new client-server pairs correct in both directions.
+
+### The server's real version is now visible from the client
+
+Repeated "the fix didn't help" reports keep resolving to an old
+`openads_serverd` still running (a live Windows service holds its
+exe open, so copying an update over it can fail silently) — and
+there was no way to prove it from the client side: the wire
+handshake and `AdsMgGetInstallInfo` both answered hardcoded strings.
+Now the handshake carries the real build version
+(`openads/1.8.14`), and `AdsMgGetInstallInfo` on a **remote**
+management handle reports the **server's** version — against any
+server ever shipped (old builds identify themselves as `0.3.2`).
+From Harbour: `AdsMgConnect("host:port")`,
+`AdsMgGetInstallInfo()[3]`, `AdsMgDisconnect()`.
+
+### REMOTE — `CloseTable` kept the table files open on the server
+
+Closing a remote table released the client's view of it, but the
+server-side "shadow" handle (used for ordered navigation, scopes and
+locks) stayed open until the session disconnected — so erasing,
+renaming or reopening the just-closed `.dbf`/`.cdx`/`.fpt` in
+exclusive mode failed with "file in use", and app-level retry loops
+turned that into seconds of delay or an apparent hang at
+close-all-files time. `CloseTable` now closes the shadow handle with
+the table.
+
+Update `openads_serverd` for the CloseTable fix; update
+`openace64.dll` too to see the server's version from the client. New
+example: `examples/fivewin/xbpaint_delscope.prg` (logs the server
+version, then drives the exact xBrowse repaint shape — page reads,
+`AdsGetRelKeyPos`/`AdsSetRelKeyPos`, scrollbar drags — over a remote
+scoped table with `SET DELETED ON`).
 
 ---
 

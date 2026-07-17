@@ -1,4 +1,4 @@
-## Unreleased
+## 1.8.14 — 2026-07-17
 
 ### Fixed — SQL result cursor was left at BOF after execute (wrong data on every query)
 
