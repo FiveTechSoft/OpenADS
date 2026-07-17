@@ -17989,6 +17989,23 @@ build_system_table(Connection* c, std::string sys_name,
         return build_memory_result("system." + sys_name, cols, rows);
     };
 
+    // RCB 07/16/2026: size a text column to its longest actual value instead
+    // of a fixed CHAR width. system.{storedprocedures,functions} declared
+    // their body columns as C(255), so multi-KB SQL bodies (pmsys:
+    // sp_SaveIntoAuditLog is 5359 bytes) came back as a 255-byte prefix —
+    // silent data loss in the catalog even though the DD and the execution
+    // path hold the full text. Memory-table records cap at 64 KB total, so
+    // clamp each column defensively below that.
+    auto fit_width = [](const std::vector<std::vector<std::string>>& rows,
+                        std::size_t col_idx, std::size_t min_w)
+                        -> std::uint16_t {
+        std::size_t w = min_w;
+        for (const auto& r : rows)
+            if (col_idx < r.size() && r[col_idx].size() > w)
+                w = r[col_idx].size();
+        return static_cast<std::uint16_t>(std::min<std::size_t>(w, 60000));
+    };
+
     if (sys_name == "tables") {
         // Column set matches SAP ADS system.tables for compatibility.
         const std::vector<Col> cols = {
@@ -18759,18 +18776,6 @@ build_system_table(Connection* c, std::string sys_name,
     if (sys_name == "triggers") {
         // TIMING decodes SAP binary timing byte: 1=BEFORE 2=INSTEAD OF 4=AFTER
         // EVENT_MASK is the SAP event type byte: 1=INSERT 2=UPDATE 3=DELETE
-        const std::vector<Col> cols = {
-            {"TRIG_NAME",    'C', 200, 0},
-            {"TABLE_NAME",   'C', 200, 0},
-            {"EVENT_MASK",   'N',  10, 0},
-            {"TIMING",       'C',  15, 0},
-            {"EVENT",        'C',  20, 0},
-            {"CONTAINER",    'C', 4096, 0},
-            {"PROC",         'C', 200, 0},
-            {"PRIORITY",     'N',  10, 0},
-            {"ENABLED",      'L',   1, 0},
-            {"TRIG_OPTIONS", 'N',  10, 0},
-        };
         auto timing_str = [](std::uint32_t t) -> std::string {
             if (t == 1) return "BEFORE";
             if (t == 2) return "INSTEAD OF";
@@ -18802,53 +18807,72 @@ build_system_table(Connection* c, std::string sys_name,
             for (const auto& kv : dd->triggers())
                 add_trigger_row(kv.second);
         }
+        // RCB 07/16/2026: CONTAINER sized to content (was fixed C(4096) —
+        // enough for pmsys but silently truncates any larger trigger body).
+        const std::vector<Col> cols = {
+            {"TRIG_NAME",    'C', 200, 0},
+            {"TABLE_NAME",   'C', 200, 0},
+            {"EVENT_MASK",   'N',  10, 0},
+            {"TIMING",       'C',  15, 0},
+            {"EVENT",        'C',  20, 0},
+            {"CONTAINER",    'C', fit_width(rows, 5, 4096), 0},
+            {"PROC",         'C', 200, 0},
+            {"PRIORITY",     'N',  10, 0},
+            {"ENABLED",      'L',   1, 0},
+            {"TRIG_OPTIONS", 'N',  10, 0},
+        };
         return build(cols, rows);
     }
     if (sys_name == "storedprocedures") {
-        const std::vector<Col> cols = {
-            {"PROC_NAME",  'C', 200, 0},
-            {"CONTAINER",  'C', 250, 0},
-            {"PROCEDURE",  'C', 255, 0},
-            {"INPUT",      'C', 250, 0},
-            {"OUTPUT",     'C', 250, 0},
-        };
         std::vector<std::vector<std::string>> rows;
         for (const auto& kv : dd->procs()) {
             const auto& e = kv.second;
             rows.push_back({e.name, e.container, e.procedure,
                             e.input_params, e.output_params});
         }
+        // RCB 07/16/2026: rows built first so the text columns can be sized
+        // to the real content — a fixed C(255) truncated multi-KB SQL bodies.
+        const std::vector<Col> cols = {
+            {"PROC_NAME",  'C', 200, 0},
+            {"CONTAINER",  'C', fit_width(rows, 1, 250), 0},
+            {"PROCEDURE",  'C', fit_width(rows, 2, 255), 0},
+            {"INPUT",      'C', fit_width(rows, 3, 250), 0},
+            {"OUTPUT",     'C', fit_width(rows, 4, 250), 0},
+        };
         return build(cols, rows);
     }
     if (sys_name == "functions") {
-        // Column names capped at 10 chars (DBF field descriptor limit in build()).
-        const std::vector<Col> cols = {
-            {"FUNC_NAME",  'C', 200, 0},
-            {"CONTAINER",  'C', 250, 0},
-            {"RET_TYPE",   'C',  50, 0},
-            {"IN_PARAMS",  'C', 200, 0},
-            {"FUNC_BODY",  'C', 255, 0},
-            {"COMMENT",    'C', 200, 0},
-        };
         std::vector<std::vector<std::string>> rows;
         for (const auto& kv : dd->functions()) {
             const auto& e = kv.second;
             rows.push_back({e.name, e.container, e.return_type,
                             e.input_params, e.implementation, e.comment});
         }
+        // RCB 07/16/2026: FUNC_BODY sized to content — C(255) truncated real
+        // UDF bodies (pmsys NewSeqKey is 1517 bytes).
+        const std::vector<Col> cols = {
+            {"FUNC_NAME",  'C', 200, 0},
+            {"CONTAINER",  'C', fit_width(rows, 1, 250), 0},
+            {"RET_TYPE",   'C',  50, 0},
+            {"IN_PARAMS",  'C', fit_width(rows, 3, 200), 0},
+            {"FUNC_BODY",  'C', fit_width(rows, 4, 255), 0},
+            {"COMMENT",    'C', 200, 0},
+        };
         return build(cols, rows);
     }
     if (sys_name == "views") {
-        const std::vector<Col> cols = {
-            {"VIEW_NAME", 'C', 200, 0},
-            {"VIEW_SQL",  'C', 250, 0},
-            {"COMMENT",   'C', 200, 0},
-        };
         std::vector<std::vector<std::string>> rows;
         for (const auto& kv : dd->views()) {
             const auto& e = kv.second;
             rows.push_back({e.name, e.sql, e.comment});
         }
+        // RCB 07/16/2026: VIEW_SQL sized to content (same C(255)-class
+        // truncation as storedprocedures/functions).
+        const std::vector<Col> cols = {
+            {"VIEW_NAME", 'C', 200, 0},
+            {"VIEW_SQL",  'C', fit_width(rows, 1, 250), 0},
+            {"COMMENT",   'C', 200, 0},
+        };
         return build(cols, rows);
     }
     if (sys_name == "dictionary") {

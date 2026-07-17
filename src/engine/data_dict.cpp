@@ -876,31 +876,76 @@ util::Result<void> DataDict::load_add_binary_(const std::string& buf) {
                             }
                         }
                     }
-                    for (; pos + 1 < PL; ++pos) {
-                        if (static_cast<uint8_t>(buf[PS + pos])   == 0x0D &&
-                            static_cast<uint8_t>(buf[PS + pos+1]) == 0x0A) break;
+                    // RCB 07/16/2026: after the output-params lstr the SAP
+                    // layout is STRUCTURED (verified by hex-dump of pmsys.add):
+                    //   [le16 invoke_option][le32 reserved][le16 body_len][body…]
+                    // body_len counts the WHOLE body; the inline zone holds the
+                    // first PL-pos bytes and the .am continuation the rest.
+                    // The old code scanned forward to the first CRLF to find
+                    // the body start — but the first CRLF is the END of the
+                    // body's FIRST LINE, so every proc lost its opening line
+                    // (e.g. sp_GetPhysicalPath lost "DECLARE @sql STRING;").
+                    bool structured = false;
+                    if (pos + 8 <= PL) {
+                        uint16_t invoke = le16(buf, PS + pos);
+                        uint16_t blen   = le16(buf, PS + pos + 6);
+                        if (invoke < 0x100 && blen > 0 && blen != 0xFFFFu) {
+                            std::size_t bpos     = pos + 8;
+                            std::size_t inline_n = std::min<std::size_t>(
+                                blen, PL - bpos);
+                            e.procedure = buf.substr(PS + bpos, inline_n);
+                            std::size_t remaining = blen - inline_n;
+                            if (remaining > 0) {
+                                // Continuation: exactly `remaining` bytes from
+                                // the .am block — no printable-scan heuristics
+                                // needed because the length is authoritative.
+                                auto am_block =
+                                      static_cast<uint32_t>(rec.more_property[0])
+                                    | (static_cast<uint32_t>(rec.more_property[1]) <<  8)
+                                    | (static_cast<uint32_t>(rec.more_property[2]) << 16)
+                                    | (static_cast<uint32_t>(rec.more_property[3]) << 24);
+                                std::size_t am_off =
+                                    static_cast<std::size_t>(am_block) * 8;
+                                if (am_block > 0 && am_off < am_buf.size()) {
+                                    std::size_t take = std::min<std::size_t>(
+                                        remaining, am_buf.size() - am_off);
+                                    e.procedure += am_buf.substr(am_off, take);
+                                }
+                            }
+                            auto lc = e.procedure.find_last_not_of(" \t\r\n\0",
+                                                                   std::string::npos, 5);
+                            if (lc != std::string::npos) e.procedure.resize(lc + 1);
+                            else e.procedure.clear();
+                            structured = true;
+                        }
                     }
-                    if (pos + 1 < PL) {
-                        std::size_t end = PL;
-                        for (std::size_t j = pos; j < PL; ++j)
-                            if (buf[PS + j] == '\0') { end = j; break; }
-                        std::string body = buf.substr(PS + pos, end - pos);
-                        auto f = body.find_first_not_of(" \t\r\n");
-                        if (f != std::string::npos) body = body.substr(f);
-                        auto l = body.find_last_not_of(" \t\r\n");
-                        if (l != std::string::npos) body.resize(l + 1);
-                        e.procedure = std::move(body);
+                    if (!structured) {
+                        // Legacy fallback: CRLF scan (pre-structured layouts).
+                        for (; pos + 1 < PL; ++pos) {
+                            if (static_cast<uint8_t>(buf[PS + pos])   == 0x0D &&
+                                static_cast<uint8_t>(buf[PS + pos+1]) == 0x0A) break;
+                        }
+                        if (pos + 1 < PL) {
+                            std::size_t end = PL;
+                            for (std::size_t j = pos; j < PL; ++j)
+                                if (buf[PS + j] == '\0') { end = j; break; }
+                            std::string body = buf.substr(PS + pos, end - pos);
+                            auto f = body.find_first_not_of(" \t\r\n");
+                            if (f != std::string::npos) body = body.substr(f);
+                            auto l = body.find_last_not_of(" \t\r\n");
+                            if (l != std::string::npos) body.resize(l + 1);
+                            e.procedure = std::move(body);
+                        }
+                        // SAP .am body is a NUL-terminated C string; strip from
+                        // first NUL.
+                        const auto body_end = e.procedure.size();
+                        append_am(e.procedure, rec.more_property);
+                        auto nul = e.procedure.find('\0', body_end);
+                        if (nul != std::string::npos) e.procedure.resize(nul);
+                        auto lc = e.procedure.find_last_not_of(" \t\r\n");
+                        if (lc != std::string::npos) e.procedure.resize(lc + 1);
+                        else e.procedure.clear();
                     }
-                }
-                // SAP .am body is a NUL-terminated C string; strip from first NUL.
-                {
-                    const auto body_end = e.procedure.size();
-                    append_am(e.procedure, rec.more_property);
-                    auto nul = e.procedure.find('\0', body_end);
-                    if (nul != std::string::npos) e.procedure.resize(nul);
-                    auto lc = e.procedure.find_last_not_of(" \t\r\n");
-                    if (lc != std::string::npos) e.procedure.resize(lc + 1);
-                    else e.procedure.clear();
                 }
             }
             procs_[e.name] = std::move(e);

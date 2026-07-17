@@ -254,3 +254,41 @@ TEST_CASE("AdsDDDropView — unknown view returns error") {
     UNSIGNED8 name[32] = "no_such_view";
     CHECK(AdsDDDropView(f.hConn, name) != 0);
 }
+
+// RCB 07/16/2026: system.storedprocedures declared its PROCEDURE column as a
+// fixed CHAR(255), so any SQL body longer than 255 bytes came back as a
+// truncated prefix — silent data loss in the catalog even though the DD and
+// the execution path hold the full text (pmsys sp_SaveIntoAuditLog is 5359
+// bytes). The column is now sized to the longest actual value. Same fix
+// applies to system.functions FUNC_BODY, system.triggers CONTAINER and
+// system.views VIEW_SQL.
+TEST_CASE("system.storedprocedures returns >255-byte bodies untruncated") {
+    PvFixture f;
+
+    std::string body = "DECLARE @pad STRING;\r\n";
+    while (body.size() < 1200)
+        body += "  @pad = 'padding padding padding padding';\r\n";
+    body += "  INSERT INTO __output VALUES ('END_MARKER_OK');";
+
+    UNSIGNED8 name[32] = "sp_longbody";
+    REQUIRE(AdsDDCreateProcedure(f.hConn, name, nullptr,
+                (UNSIGNED8*)body.c_str(), 0, nullptr, nullptr, nullptr) == 0);
+
+    ADSHANDLE hStmt = 0, hCur = 0;
+    REQUIRE(AdsCreateSQLStatement(f.hConn, &hStmt) == 0);
+    UNSIGNED8 sql[64] = "SELECT * FROM system.storedprocedures";
+    REQUIRE(AdsExecuteSQLDirect(hStmt, sql, &hCur) == 0);
+
+    std::vector<UNSIGNED8> val(16384, 0);
+    UNSIGNED32 vlen = static_cast<UNSIGNED32>(val.size() - 1);
+    UNSIGNED8 fld[16] = "PROCEDURE";
+    REQUIRE(AdsGetField(hCur, fld, val.data(), &vlen, 0) == 0);
+    std::string got(reinterpret_cast<char*>(val.data()), vlen);
+    while (!got.empty() && got.back() == ' ') got.pop_back();
+
+    CHECK(got.size() > 1200);                       // not the 255-byte prefix
+    CHECK(got.find("END_MARKER_OK") != std::string::npos);
+
+    AdsCloseTable(hCur);
+    AdsCloseSQLStatement(hStmt);
+}

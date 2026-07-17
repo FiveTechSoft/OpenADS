@@ -323,3 +323,78 @@ TEST_CASE("DataDict remove_table + reopen no longer has the alias") {
     }
     fs::remove(p);
 }
+
+// RCB 07/16/2026: SAP-binary Procedure records carry the SQL body in a
+// STRUCTURED layout after the params: [le16 invoke_option][le32 reserved]
+// [le16 body_len][body...]. The old parser scanned forward to the first
+// CRLF to locate the body — but the first CRLF is the END of the body's
+// FIRST LINE, so every imported proc silently lost its opening statement
+// (pmsys sp_GetPhysicalPath lost "DECLARE @sql STRING;", breaking it).
+// This fabricates a minimal SAP-binary .add with one Procedure record in
+// that layout and asserts the body round-trips VERBATIM, first line included.
+TEST_CASE("DataDict SAP-binary proc parse keeps the body's first line") {
+    auto p = fs::temp_directory_path() / "openads_dd_sap_procbody.add";
+    fs::remove(p);
+    fs::remove(fs::temp_directory_path() / "openads_dd_sap_procbody.am");
+
+    const std::string body =
+        "  DECLARE @first STRING;\r\n"
+        "  @first = 'line one must survive';\r\n"
+        "  INSERT INTO __output VALUES (@first);";
+    const std::string in_params = "a,CHAR,5;";
+
+    constexpr std::size_t kHdr = 2200, kRec = 524;
+    std::string buf(kHdr + kRec, '\0');
+    std::memcpy(&buf[0], "ADS Data Dictionary", 19);
+    auto p32at = [&](std::size_t off, std::uint32_t v) {
+        buf[off]     = static_cast<char>( v        & 0xFF);
+        buf[off + 1] = static_cast<char>((v >>  8) & 0xFF);
+        buf[off + 2] = static_cast<char>((v >> 16) & 0xFF);
+        buf[off + 3] = static_cast<char>((v >> 24) & 0xFF);
+    };
+    p32at(0x20, kHdr);
+    p32at(0x24, kRec);
+
+    std::size_t base = kHdr;
+    buf[base] = 0x04;                                   // active
+    p32at(base + 5, 1);                                 // obj_id
+    std::memset(&buf[base + 13], ' ', 10);
+    std::memcpy(&buf[base + 13], "Procedure", 9);       // obj_type
+    std::memset(&buf[base + 23], ' ', 200);
+    std::memcpy(&buf[base + 23], "sp_firstline", 12);   // obj_name
+
+    // Property zone: [in_params\0][6x 0xFF][le16 invoke=4][le32 reserved]
+    //                [le16 body_len][body]
+    const std::uint16_t plen =
+        static_cast<std::uint16_t>(in_params.size() + 1);
+    buf[base + 223] = static_cast<char>(plen & 0xFF);
+    buf[base + 224] = static_cast<char>((plen >> 8) & 0xFF);
+    std::size_t pp = base + 225;
+    std::memcpy(&buf[pp], in_params.data(), in_params.size());
+    pp += plen;                                         // includes the NUL
+    for (int i = 0; i < 6; ++i) buf[pp++] = static_cast<char>(0xFF);
+    buf[pp++] = 0x04; buf[pp++] = 0x00;                 // invoke_option
+    pp += 4;                                            // reserved le32 = 0..
+    buf[pp - 4] = 0x04;                                 // ..matches SAP dumps
+    const std::uint16_t blen = static_cast<std::uint16_t>(body.size());
+    buf[pp++] = static_cast<char>(blen & 0xFF);
+    buf[pp++] = static_cast<char>((blen >> 8) & 0xFF);
+    std::memcpy(&buf[pp], body.data(), body.size());
+    // more_property [498..506] stays zero: body is fully inline.
+
+    std::ofstream(p, std::ios::binary).write(buf.data(),
+        static_cast<std::streamsize>(buf.size()));
+
+    auto opened = DataDict::open(p.string());
+    REQUIRE(opened.has_value());
+    DataDict dd = std::move(opened).value();
+    REQUIRE(dd.has_proc("sp_firstline"));
+    const auto& e = dd.procs().at("sp_firstline");
+    CHECK(e.input_params == in_params);
+    // The regression: the old CRLF scan dropped everything before the first
+    // CRLF, i.e. the whole first line.
+    CHECK(e.procedure == body);
+    CHECK(e.procedure.find("DECLARE @first") != std::string::npos);
+
+    fs::remove(p);
+}
