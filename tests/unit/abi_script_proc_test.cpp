@@ -227,6 +227,84 @@ TEST_CASE("trigger: SQL DELETE failing BEFORE trigger blocks the delete (Q6)") {
     CHECK(f.scalar("SELECT COUNT(*) AS n FROM orders") == "1");  // still there
 }
 
+// ---- S3: cursors (docs/script-engine.md §11) ------------------------------
+
+TEST_CASE("S3 proc: WHILE FETCH cursor copies rows table-to-table (C21c)") {
+    SpFixture f("openads_s3_curcopy");
+    REQUIRE(f.run("INSERT INTO orders(ID) VALUES (1)") == 0);
+    REQUIRE(f.run("INSERT INTO orders(ID) VALUES (2)") == 0);
+    REQUIRE(f.run("INSERT INTO orders(ID) VALUES (3)") == 0);
+    f.create_proc("sp_copy",
+                  "DECLARE c CURSOR AS SELECT * FROM orders; "
+                  "OPEN c; "
+                  "WHILE FETCH c DO "
+                  "  INSERT INTO audit(ID) VALUES (c.ID); "
+                  "END WHILE; "
+                  "CLOSE c;",
+                  "", "");
+    UNSIGNED32 rc = f.run("EXECUTE PROCEDURE sp_copy()");
+    INFO("sp_copy error: " << f.last_msg);
+    CHECK(rc == 0);
+    CHECK(f.scalar("SELECT COUNT(*) AS n FROM audit") == "3");
+}
+
+TEST_CASE("S3 proc: cursor over EXECUTE PROCEDURE result (C23)") {
+    SpFixture f("openads_s3_curproc");
+    f.create_proc("sp_rows",
+                  "INSERT INTO __output(v) VALUES (10); "
+                  "INSERT INTO __output(v) VALUES (32);",
+                  "", "v,INTEGER;");
+    f.create_proc("sp_sum",
+                  "DECLARE c CURSOR AS EXECUTE PROCEDURE sp_rows(); "
+                  "DECLARE @n INTEGER; "
+                  "@n = 0; OPEN c; "
+                  "WHILE FETCH c DO @n = @n + c.v; END WHILE; CLOSE c; "
+                  "INSERT INTO __output(total) VALUES (@n);",
+                  "", "total,INTEGER;");
+    CHECK(f.scalar("EXECUTE PROCEDURE sp_sum()") == "42");
+}
+
+TEST_CASE("S3 proc: FETCH boolean + CATCH specific + FINALLY (F-probes)") {
+    SpFixture f("openads_s3_tryfin");
+    f.create_proc("sp_fin",
+                  "DECLARE @s CHAR(20); "
+                  "@s = 'x'; "
+                  "TRY RAISE boom(9,'b'); "
+                  "CATCH boom @s = TRIM(@s) + 'c'; "
+                  "FINALLY @s = TRIM(@s) + 'f'; "
+                  "END TRY; "
+                  "INSERT INTO __output(r) VALUES (@s);",
+                  "", "r,CHAR,20;");
+    CHECK(f.scalar("EXECUTE PROCEDURE sp_fin()") == "xcf");
+}
+
+TEST_CASE("S3 trigger: cursor over __new row image, typed fields (Trig_Container shape)") {
+    SpFixture f("openads_s3_trigcur");
+    // n.ID is numeric (N field) — `n.ID > 1` requires the typed row image.
+    f.create_trigger("t1", "orders", ADS_AFTER_INSERT,
+                     "DECLARE n CURSOR AS SELECT * FROM __new; "
+                     "OPEN n; FETCH n; "
+                     "IF n.ID > 1 THEN "
+                     "  INSERT INTO audit(ID) VALUES (n.ID); "
+                     "ENDIF; "
+                     "CLOSE n;");
+    UNSIGNED32 rc = f.run("INSERT INTO orders(ID) VALUES (1)");
+    INFO("first insert: " << f.last_msg);
+    CHECK(rc == 0);
+    CHECK(f.run("INSERT INTO orders(ID) VALUES (7)") == 0);
+    // Only the second insert (ID 7 > 1) audits.
+    CHECK(f.scalar("SELECT COUNT(*) AS n FROM audit") == "1");
+    CHECK(f.scalar("SELECT ID FROM audit") == "7");
+}
+
+TEST_CASE("S3: declare-after-executable fails the statement (C28)") {
+    SpFixture f("openads_s3_declorder");
+    f.create_proc("sp_bad",
+                  "DECLARE @a INTEGER; @a = 1; DECLARE @b INTEGER;",
+                  "", "");
+    CHECK(f.run("EXECUTE PROCEDURE sp_bad()") != 0);
+}
+
 TEST_CASE("trigger: script control flow runs in trigger bodies now") {
     // The old fragment skipped IF entirely; the body below writes only
     // when the condition holds.

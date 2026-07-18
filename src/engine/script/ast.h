@@ -36,7 +36,9 @@ enum class ExprKind : std::uint8_t {
     Subquery,    // raw "(SELECT …)" body text (without outer parens)
     InList,      // a IN (args…)  — negated for NOT IN
     Between,     // a BETWEEN b AND c
-    CursorField, // name.field — S3 (parsed now so bodies compile later)
+    CursorField, // name.field — current-row field of an open cursor
+    Fetch,       // FETCH <cursor> as a boolean condition (C24/C25): true
+                 // while a row was fetched, false past the last row
 };
 
 struct Expr {
@@ -62,31 +64,44 @@ using StmtPtr = std::unique_ptr<Stmt>;
 using Block   = std::vector<StmtPtr>;
 
 enum class StmtKind : std::uint8_t {
-    Declare,     // name, decl_type, char_limit; cursor_sql non-empty for
-                 // DECLARE <name> CURSOR AS <raw sql>
+    Declare,     // name, decl_type, char_limit; is_cursor for
+                 // DECLARE <name> CURSOR [AS <raw sql>]
     Assign,      // name = expr
     If,          // branches (cond, block)…, else_block
-    While,       // cond, body
+    While,       // cond, body (WHILE FETCH parses cond as a Fetch expr)
     Leave,
     Continue,
     Return,      // optional expr
-    Try,         // body, catch_block
+    Try,         // body, catches, finally_block (≥1 catch or finally — F0)
     Raise,       // raise_name, args (code, message)
     Sql,         // raw embedded statement text
     ExecImmediate, // EXECUTE IMMEDIATE <string-expr>
+    OpenCursor,  // OPEN <name> [AS <raw sql>] — raw empty = bare OPEN
+    FetchCursor, // FETCH <name>; as a statement (result discarded)
+    CloseCursor, // CLOSE <name>
+};
+
+// One CATCH clause: name empty = CATCH ALL; otherwise the RAISE name it
+// catches (case-insensitive — F4/F6).
+struct CatchClause {
+    std::string name_upper;
+    Block       block;
 };
 
 struct Stmt {
     StmtKind kind = StmtKind::Sql;
-    std::string name, upper;           // Declare/Assign target, Raise name
+    std::string name, upper;           // Declare/Assign/cursor target, Raise name
     Type        decl_type = Type::Null;
     std::size_t char_limit = 0;
-    std::string raw;                   // Sql / Declare-cursor text
+    bool        is_cursor = false;     // Declare: DECLARE … CURSOR form
+    std::string raw;                   // Sql / cursor bound-statement text
     ExprPtr     expr;                  // Assign value / Return value / While cond
     std::vector<std::pair<ExprPtr, Block>> branches;   // If
     Block       else_block;            // If
     Block       body;                  // While / Try
-    Block       catch_block;           // Try
+    std::vector<CatchClause> catches;  // Try
+    Block       finally_block;         // Try (runs even on uncaught — F3)
+    bool        has_finally = false;   // Try
     std::vector<ExprPtr> args;         // Raise(code, msg)
     std::size_t pos = 0;
 };

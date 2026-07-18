@@ -83,6 +83,7 @@
 #include "drivers/fpt/fpt_memo.h"
 #include "drivers/memory/memory_driver.h"
 #include "engine/script/exec.h"
+#include "engine/script/lexer.h"
 #include "engine/script/parser.h"
 #include "platform/path.h"
 #include "platform/proc.h"
@@ -9007,13 +9008,44 @@ UNSIGNED32 ENTRYPOINT AdsGetServerTime(ADSHANDLE  /*hConnect*/,
 // Returns true if at least one INSTEAD OF trigger was fired (caller should
 // skip the actual DML in that case).
 
+// One collected trigger row-image field: display text + a canonical type
+// char ('C','N','I','L','D','T'), so the script layer can hand cursors and
+// expressions a properly TYPED value (S3 — `n.recurring > 0` must see a
+// number, not text).
+struct TrigField_ {
+    std::string text;
+    char        type = 'C';
+};
+
+// Canonical type char for a driver field type. Time/RowVersion/blob-ish
+// types stay 'C' (raw text) — the script engine has no representation for
+// them and text round-trips safely.
+inline char trig_type_char_(openads::drivers::DbfFieldType t) {
+    using FT = openads::drivers::DbfFieldType;
+    switch (t) {
+        case FT::Numeric: case FT::Float: case FT::Currency:
+        case FT::Double: case FT::AdtMoney:
+            return 'N';
+        case FT::Integer: case FT::ShortInt: case FT::AutoInc:
+            return 'I';
+        case FT::Logical:
+            return 'L';
+        case FT::Date: case FT::AdtDate:
+            return 'D';
+        case FT::DateTime: case FT::AdtTimestamp:
+            return 'T';
+        default:
+            return 'C';
+    }
+}
+
 // RCB 07/17/2026 (S2): trigger bodies run through the script engine. The
 // runner is defined after the scriptbridge machinery (much later in this
 // file, at global scope); declared here so fire_triggers_ can call it.
 extern "C++" openads::util::Result<void> script_run_trigger_body(
     Connection* conn, ADSHANDLE hConn, const std::string& body,
-    const std::map<std::string, std::string>& new_f,
-    const std::map<std::string, std::string>& old_f,
+    const std::map<std::string, TrigField_>& new_f,
+    const std::map<std::string, TrigField_>& old_f,
     bool is_instead_of);
 
 namespace {
@@ -9057,11 +9089,11 @@ static const std::string& trigger_sql_body(const openads::engine::DataDict::Trig
 // function returning a C++-incompatible type) under /W4 /WX.
 extern "C++" {
 
-using TrigFieldMap_ = std::map<std::string, std::string>;
+using TrigFieldMap_ = std::map<std::string, TrigField_>;
 
 // SQL-quote a raw string value (escape embedded quotes, wrap in single quotes).
-// Collect all field values from a Table into a lowercase-keyed string map.
-// Char fields are space-trimmed; numeric/date fields use as_string representation.
+// Collect all field values from a Table into a lowercase-keyed map of
+// (display text, field type char). Char fields are space-trimmed.
 static void trig_collect_row_(Table* t, TrigFieldMap_& m) {
     if (!t) return;
     std::uint16_t nf = t->field_count();
@@ -9070,11 +9102,12 @@ static void trig_collect_row_(Table* t, TrigFieldMap_& m) {
         std::string name = fd.name;
         for (auto& ch : name)
             ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        char tc = trig_type_char_(fd.type);
         auto v = t->read_field(i);
-        if (!v) { m[name] = ""; continue; }
+        if (!v) { m[name] = TrigField_{"", tc}; continue; }
         std::string sv = v.value().as_string;
         while (!sv.empty() && sv.back() == ' ') sv.pop_back();
-        m[name] = std::move(sv);
+        m[name] = TrigField_{std::move(sv), tc};
     }
 }
 
@@ -9126,18 +9159,22 @@ bool fire_triggers_(Handle hConn, Connection* conn,
                 std::uint16_t nf = t->field_count();
                 for (std::uint16_t i = 0; i < nf; ++i) {
                     const auto& fd = t->field_descriptor(i);
-                    // Skip memo (M), blob (B), binary (U/W) field types
-                    char ft = static_cast<char>(
-                        std::toupper(static_cast<unsigned char>(fd.type)));
-                    if (ft == 'M' || ft == 'B' || ft == 'U' || ft == 'W') continue;
+                    // Skip memo and blob field types (NO MEMOS option).
+                    // RCB 07/18/2026: was a char-vs-enum comparison that
+                    // never matched — fixed to compare the enum.
+                    using FT = openads::drivers::DbfFieldType;
+                    if (fd.type == FT::Memo || fd.type == FT::Binary ||
+                        fd.type == FT::Varbinary)
+                        continue;
                     std::string name = fd.name;
                     for (auto& ch : name)
                         ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+                    char tc = trig_type_char_(fd.type);
                     auto v = t->read_field(i);
-                    if (!v) { m[name] = ""; continue; }
+                    if (!v) { m[name] = TrigField_{"", tc}; continue; }
                     std::string sv = v.value().as_string;
                     while (!sv.empty() && sv.back() == ' ') sv.pop_back();
-                    m[name] = std::move(sv);
+                    m[name] = TrigField_{std::move(sv), tc};
                 }
             };
             collect_no_memo(new_tbl, new_fields);
@@ -20668,6 +20705,9 @@ struct AbiSqlCursor final : openads::script::SqlCursor {
     bool first = true;
     explicit AbiSqlCursor(ADSHANDLE hc) : h(hc) {}
     ~AbiSqlCursor() override { if (h) AdsCloseTable(h); }
+    // Hand the underlying cursor handle to the caller (top-level script
+    // result — S3 §10 mechanism); the wrapper stops owning it.
+    ADSHANDLE release_handle() { ADSHANDLE x = h; h = 0; return x; }
 
     bool next() override {
         if (!first) AdsSkip(h, 1);
@@ -20681,18 +20721,49 @@ struct AbiSqlCursor final : openads::script::SqlCursor {
         AdsGetNumFields(h, &n);
         return n;
     }
+    std::string field_name(std::size_t idx) const override {
+        // Script cursor field access (c.name — S3 §11).
+        UNSIGNED8 nm[128] = {0};
+        UNSIGNED16 cap = sizeof(nm) - 1;
+        if (AdsGetFieldName(h, static_cast<UNSIGNED16>(idx + 1), nm, &cap)
+                != 0)
+            return "";
+        std::string s(reinterpret_cast<char*>(nm), cap);
+        while (!s.empty() && s.back() == ' ') s.pop_back();
+        return s;
+    }
     Value field(std::size_t idx) override {
-        // Ordinal (ADSFIELD) access — aggregate/expression columns can have
-        // names AdsGetFieldType won't resolve ("COUNT(*)").
+        // RCB 07/18/2026 (S3 probe C22): prefer BY-NAME access — on a
+        // projected SELECT the engine's ordinal path can reach the BASE
+        // table's ordinal (returning the wrong column), while name lookup
+        // respects the projection. Ordinal stays as the fallback for
+        // aggregate/expression columns whose names don't resolve
+        // ("COUNT(*)").
         UNSIGNED8* ord = reinterpret_cast<UNSIGNED8*>(
             static_cast<std::uintptr_t>(idx + 1));
+        UNSIGNED8 nmbuf[128] = {0};
+        UNSIGNED16 nmlen = sizeof(nmbuf) - 1;
+        bool have_name =
+            AdsGetFieldName(h, static_cast<UNSIGNED16>(idx + 1), nmbuf,
+                            &nmlen) == 0 && nmlen > 0;
+        if (have_name) nmbuf[nmlen] = 0;
         UNSIGNED16 ftype = 0;
-        AdsGetFieldType(h, ord, &ftype);
         std::vector<char> buf(65536, 0);
         UNSIGNED32 len = static_cast<UNSIGNED32>(buf.size() - 1);
-        if (AdsGetString(h, ord, reinterpret_cast<UNSIGNED8*>(buf.data()),
-                         &len, 0) != 0)
-            return Value::null();
+        bool got = false;
+        if (have_name &&
+            AdsGetFieldType(h, nmbuf, &ftype) == 0 &&
+            AdsGetString(h, nmbuf, reinterpret_cast<UNSIGNED8*>(buf.data()),
+                         &len, 0) == 0)
+            got = true;
+        if (!got) {
+            len = static_cast<UNSIGNED32>(buf.size() - 1);
+            AdsGetFieldType(h, ord, &ftype);
+            if (AdsGetString(h, ord,
+                             reinterpret_cast<UNSIGNED8*>(buf.data()),
+                             &len, 0) != 0)
+                return Value::null();
+        }
         std::string text(buf.data(), len);
         switch (ftype) {
             case ADS_NUMERIC: case ADS_DOUBLE: case ADS_CURDOUBLE:
@@ -20734,6 +20805,18 @@ struct AbiBridge final : openads::script::SqlBridge {
                     new OneValueCursor(std::move(*lit)));
             }
         }
+        // Expression fast path: "SELECT <expr> FROM system.iota" with a
+        // script-evaluable projection ("SELECT LENGTH(@t) …" after variable
+        // substitution). The SQL engine has no expression projections yet;
+        // the script evaluator's builtin/operator set covers the idiom
+        // (probes N5, C-series result selects).
+        {
+            auto v = expr_iota_value(sql);
+            if (v.has_value()) {
+                return std::unique_ptr<openads::script::SqlCursor>(
+                    new OneValueCursor(std::move(*v)));
+            }
+        }
         std::vector<UNSIGNED8> sbuf(sql.size() + 1);
         std::memcpy(sbuf.data(), sql.c_str(), sql.size() + 1);
         ADSHANDLE hc = 0;
@@ -20745,6 +20828,38 @@ struct AbiBridge final : openads::script::SqlBridge {
             return std::unique_ptr<openads::script::SqlCursor>{};
         return std::unique_ptr<openads::script::SqlCursor>(
             new AbiSqlCursor(hc));
+    }
+
+    // Evaluate the projection of a "SELECT <expr> FROM system.iota"
+    // through the script expression evaluator. nullopt = not that shape or
+    // not script-evaluable (caller falls through to the SQL engine).
+    std::optional<Value> expr_iota_value(const std::string& sql) {
+        auto trim = [](std::string s) {
+            auto b = s.find_first_not_of(" \t\r\n");
+            auto e = s.find_last_not_of(" \t\r\n;");
+            if (b == std::string::npos) return std::string();
+            return s.substr(b, e - b + 1);
+        };
+        std::string s = trim(sql);
+        std::string up = s;
+        for (auto& ch : up)
+            ch = static_cast<char>(std::toupper((unsigned char)ch));
+        if (up.compare(0, 7, "SELECT ") != 0) return std::nullopt;
+        auto fp = up.rfind(" FROM ");
+        if (fp == std::string::npos) return std::nullopt;
+        std::string src = trim(s.substr(fp + 6));
+        for (auto& ch : src)
+            ch = static_cast<char>(std::tolower((unsigned char)ch));
+        if (src != "system.iota") return std::nullopt;
+        std::string proj = trim(s.substr(7, fp - 7));
+        if (proj.empty() || proj.find(',') != std::string::npos)
+            return std::nullopt;               // single projection only
+        auto prog = openads::script::compile("RETURN " + proj + ";");
+        if (!prog) return std::nullopt;
+        openads::script::Executor ex(this);    // subqueries recurse here
+        auto r = ex.run(*prog.value());
+        if (!r || !r.value().returned) return std::nullopt;
+        return std::move(r.value().return_value);
     }
 
     const openads::engine::DataDict::FunctionEntry*
@@ -21009,35 +21124,101 @@ inline openads::util::Result<std::string> run_dd_procedure(
 // failure keeps it. The old fragment skipped IF/WHILE/EXECUTE and swallowed
 // errors entirely.
 
-// SQL literal for a raw trigger row-image value: numbers pass bare, all
-// else quoted (the row images are display strings).
-inline std::string trig_literal(const std::string& s) {
-    if (!s.empty()) {
-        char* end = nullptr;
-        std::strtod(s.c_str(), &end);
-        if (end == s.c_str() + s.size()) return s;   // pure number
+// Typed value for a collected trigger row-image field (S3): the DBF/ADT
+// field type char decides the script type, so `n.recurring > 0` sees a
+// number and `n.[When]` a timestamp. Raw driver formats: Date "YYYYMMDD",
+// DateTime "YYYYMMDDHHMMSS" (dbf_common decode_field).
+inline Value trig_value(const TrigField_& f) {
+    const std::string& s = f.text;
+    switch (f.type) {   // canonical chars from trig_type_char_
+        case 'N':
+            if (s.empty()) return Value::typed_null(Type::Double);
+            return Value::real(std::strtod(s.c_str(), nullptr));
+        case 'I':
+            if (s.empty()) return Value::typed_null(Type::Integer);
+            return Value::integer(std::strtoll(s.c_str(), nullptr, 10));
+        case 'L':
+            if (s.empty()) return Value::typed_null(Type::Logical);
+            return Value::logical(s[0] == 'T' || s[0] == 't' ||
+                                  s[0] == 'Y' || s[0] == '1');
+        case 'D': {
+            if (s.size() < 8) return Value::typed_null(Type::Date);
+            int y = std::atoi(s.substr(0, 4).c_str());
+            int m = std::atoi(s.substr(4, 2).c_str());
+            int d = std::atoi(s.substr(6, 2).c_str());
+            if (y == 0) return Value::typed_null(Type::Date);
+            return Value::date(openads::script::jdn_from_ymd(y, m, d));
+        }
+        case 'T': {
+            if (s.size() < 8) return Value::typed_null(Type::Timestamp);
+            int y = std::atoi(s.substr(0, 4).c_str());
+            int m = std::atoi(s.substr(4, 2).c_str());
+            int d = std::atoi(s.substr(6, 2).c_str());
+            if (y == 0) return Value::typed_null(Type::Timestamp);
+            std::int64_t ms = 0;
+            if (s.size() >= 14) {
+                int hh = std::atoi(s.substr(8, 2).c_str());
+                int mi = std::atoi(s.substr(10, 2).c_str());
+                int ss = std::atoi(s.substr(12, 2).c_str());
+                ms = (static_cast<std::int64_t>(hh) * 3600 + mi * 60 + ss) *
+                     1000;
+            }
+            return Value::timestamp(
+                openads::script::jdn_from_ymd(y, m, d) * 86400000 + ms);
+        }
+        default:
+            return Value::character(s);
     }
-    std::string out = "'";
-    for (char c : s) { if (c == '\'') out += '\''; out += c; }
-    out += '\'';
-    return out;
 }
+
+// SQL literal for a row-image field — typed rendering ({d '…'} for dates,
+// bare numbers, quoted strings) via the script engine's own renderer.
+inline std::string trig_literal(const TrigField_& f) {
+    return openads::script::to_sql_literal(trig_value(f));
+}
+
+// One-row cursor over a full trigger row image — backs
+// `DECLARE n CURSOR AS SELECT * FROM __new` (pmsys Trig_Container).
+// std::map ordering keeps the column order deterministic.
+struct TrigRowCursor final : openads::script::SqlCursor {
+    const std::map<std::string, TrigField_>* m;
+    std::vector<const std::pair<const std::string, TrigField_>*> rows;
+    bool done = false;
+    explicit TrigRowCursor(const std::map<std::string, TrigField_>* mm)
+        : m(mm) {
+        if (m != nullptr)
+            for (const auto& kv : *m) rows.push_back(&kv);
+    }
+    bool next() override {
+        if (done) return false;
+        done = true;
+        return m != nullptr;
+    }
+    std::size_t field_count() const override { return rows.size(); }
+    std::string field_name(std::size_t idx) const override {
+        return idx < rows.size() ? rows[idx]->first : "";
+    }
+    Value field(std::size_t idx) override {
+        return idx < rows.size() ? trig_value(rows[idx]->second)
+                                 : Value::null();
+    }
+};
 
 struct TriggerBridge final : openads::script::SqlBridge {
     AbiBridge inner;
-    const std::map<std::string, std::string>* new_f;
-    const std::map<std::string, std::string>* old_f;
+    const std::map<std::string, TrigField_>* new_f;
+    const std::map<std::string, TrigField_>* old_f;
     bool instead_of = false;
 
     TriggerBridge(Connection* conn, ADSHANDLE hs,
-                  const std::map<std::string, std::string>* nf,
-                  const std::map<std::string, std::string>* of,
+                  const std::map<std::string, TrigField_>* nf,
+                  const std::map<std::string, TrigField_>* of,
                   bool io)
         : inner(conn, hs), new_f(nf), old_f(of), instead_of(io) {}
 
-    const std::string* row_field(const std::map<std::string,
-                                 std::string>* m,
-                                 std::string name) const {
+    const TrigField_* row_field(const std::map<std::string,
+                                TrigField_>* m,
+                                std::string name) const {
         if (m == nullptr) return nullptr;
         for (auto& ch : name)
             ch = static_cast<char>(std::tolower((unsigned char)ch));
@@ -21118,8 +21299,8 @@ struct TriggerBridge final : openads::script::SqlBridge {
                            (std::isalnum((unsigned char)sql[fe]) ||
                             sql[fe] == '_'))
                         ++fe;
-                    const std::string* v = row_field(isn ? new_f : old_f,
-                                                     sql.substr(fs, fe - fs));
+                    const TrigField_* v = row_field(isn ? new_f : old_f,
+                                                    sql.substr(fs, fe - fs));
                     s += v ? trig_literal(*v) : std::string("NULL");
                     i = fe;
                     continue;
@@ -21158,10 +21339,17 @@ struct TriggerBridge final : openads::script::SqlBridge {
                             col.back() == ']')
                             col = col.substr(1, col.size() - 2);
                         const auto* m = (src == "__old") ? old_f : new_f;
-                        const std::string* v = row_field(m, col);
+                        // SELECT * FROM __new|__old — full row image as a
+                        // cursor (pmsys Trig_Container: DECLARE n CURSOR AS
+                        // SELECT * FROM __new; …; n.field).
+                        if (col == "*")
+                            return std::unique_ptr<
+                                openads::script::SqlCursor>(
+                                new TrigRowCursor(m));
+                        const TrigField_* v = row_field(m, col);
                         return std::unique_ptr<openads::script::SqlCursor>(
                             new OneValueCursor(
-                                v ? Value::character(*v) : Value::null()));
+                                v ? trig_value(*v) : Value::null()));
                     }
                 }
             }
@@ -21180,8 +21368,9 @@ struct TriggerBridge final : openads::script::SqlBridge {
             if (refs && !instead_of)
                 return std::unique_ptr<openads::script::SqlCursor>{};
             if (refs) {
-                // v1: substitute bare field identifiers, then map the
-                // virtual table to system.iota (single-row source).
+                // v1: substitute bare field identifiers (typed literals),
+                // then map the virtual table to system.iota (single-row
+                // source).
                 if (new_f != nullptr)
                     for (const auto& kv : *new_f)
                         s = rewrite_word(s, kv.first,
@@ -21202,6 +21391,160 @@ struct TriggerBridge final : openads::script::SqlBridge {
     }
 };
 
+// ---- S3: top-level scripts through AdsExecuteSQLDirect -------------------
+// SAP mechanism (doc §10): AdsExecuteSQLDirect accepts full multi-statement
+// scripts; the returned cursor is the last SELECT's result; a script with no
+// SELECT returns rc=0 and no cursor. OpenADS previously executed only single
+// statements — ad-hoc scripts, the qa-diff probe battery, and pmsys
+// sp_GetPhysicalPath's EXECUTE IMMEDIATE (a full script string) all need
+// this entry.
+
+// Is this input a script (vs a single SQL statement the dispatcher owns)?
+// Lexed with the script lexer so ';' inside strings/brackets never counts.
+inline bool is_script_input(const std::string& sql) {
+    auto toks = openads::script::lex(sql);
+    if (!toks) return false;              // not even lexable → SQL engine
+    const auto& t = toks.value();
+    if (t.empty()) return false;
+    using Tok = openads::script::Tok;
+    if (t[0].kind == Tok::Ident) {
+        const std::string& k = t[0].upper;
+        // Script-only leading constructs.
+        if (k == "DECLARE" || k == "TRY" || k == "WHILE" || k == "IF" ||
+            k == "RAISE" || k == "RETURN")
+            return true;
+        if (k == "EXECUTE" && t.size() > 1 && t[1].kind == Tok::Ident &&
+            t[1].upper == "IMMEDIATE")
+            return true;
+    }
+    // Multi-statement: a ';' followed by another real token.
+    for (std::size_t i = 0; i + 1 < t.size(); ++i)
+        if (t[i].kind == Tok::Semi && t[i + 1].kind != Tok::End)
+            return true;
+    return false;
+}
+
+// Execute a top-level script. The last SELECT's cursor either carries a real
+// ADS handle (AbiSqlCursor — handed straight to the caller) or is an
+// engine-internal cursor (literal fast path, trigger row image) that gets
+// materialized into a temp FREE DBF, mirroring the EXECUTE PROCEDURE result
+// machinery.
+inline openads::util::Result<void> run_top_level_script(
+    Connection* c, ADSHANDLE hStmt, const std::string& sql,
+    ADSHANDLE* phCursor) {
+    auto prog = compiled(sql);
+    if (!prog) return prog.error();
+    AbiBridge bridge(c, hStmt);
+    openads::script::Executor ex(&bridge);
+    ex.set_user(c->username());
+    auto r = ex.run(*prog.value());
+    if (!r) {
+        // Uncaught RAISE surfaces in SAP's shape (§11 F3c/F5): rc 7200,
+        // "{[name] code : msg}".
+        if (r.error().sub_code == openads::script::kRaiseSubCode) {
+            return openads::util::Error{openads::script::kScriptError, 2224,
+                "An exception is raised in the SQL script. {[" +
+                    r.error().context + "] " +
+                    std::to_string(r.error().code) + " : " +
+                    r.error().message + "}",
+                r.error().context};
+        }
+        return r.error();
+    }
+    *phCursor = 0;
+    auto cur = std::move(r.value().last_select);
+    if (!cur) return {};
+
+    // Real SQL cursor: pass its handle through.
+    if (auto* abi = dynamic_cast<AbiSqlCursor*>(cur.get())) {
+        *phCursor = abi->release_handle();
+        return {};
+    }
+
+    // Engine-internal cursor: materialize rows into a temp DBF.
+    std::size_t nc = cur->field_count();
+    if (nc == 0) return {};
+    if (nc > 64) nc = 64;                 // DBF sanity cap
+    std::vector<std::string> names;
+    for (std::size_t k = 0; k < nc; ++k) {
+        std::string nm = cur->field_name(k);
+        if (nm.empty()) nm = nc == 1 ? "EXPR" : "COL" + std::to_string(k + 1);
+        if (nm.size() > 10) nm.resize(10);   // DBF field-name limit
+        names.push_back(std::move(nm));
+    }
+    std::vector<std::vector<std::string>> rows;
+    while (cur->next()) {
+        std::vector<std::string> row;
+        for (std::size_t k = 0; k < nc; ++k)
+            row.push_back(openads::script::to_display(cur->field(k)));
+        rows.push_back(std::move(row));
+        if (rows.size() >= 65000) break;  // DBF row sanity cap
+    }
+
+    namespace fs = std::filesystem;
+    char nb[64];
+    std::snprintf(nb, sizeof(nb), "_scr_%llx.dbf",
+                  static_cast<unsigned long long>(
+                      openads::platform::monotonic_nanos()));
+    fs::path dbf = fs::path(c->data_dir()) / nb;
+    constexpr std::size_t kW = 254;       // every column CHAR(254)
+    std::vector<std::uint8_t> file;
+    std::array<std::uint8_t, 32> hdr{};
+    hdr[0] = 0x03;
+    stamp_dbf_header_today(hdr.data());
+    std::uint32_t nrec = static_cast<std::uint32_t>(rows.size());
+    hdr[4] = static_cast<std::uint8_t>( nrec        & 0xFFu);
+    hdr[5] = static_cast<std::uint8_t>((nrec >>  8) & 0xFFu);
+    hdr[6] = static_cast<std::uint8_t>((nrec >> 16) & 0xFFu);
+    hdr[7] = static_cast<std::uint8_t>((nrec >> 24) & 0xFFu);
+    std::uint16_t hl = static_cast<std::uint16_t>(32 + 32 * nc + 1);
+    std::uint16_t rl = static_cast<std::uint16_t>(1 + kW * nc);
+    hdr[8]  = static_cast<std::uint8_t>( hl       & 0xFFu);
+    hdr[9]  = static_cast<std::uint8_t>((hl >> 8) & 0xFFu);
+    hdr[10] = static_cast<std::uint8_t>( rl       & 0xFFu);
+    hdr[11] = static_cast<std::uint8_t>((rl >> 8) & 0xFFu);
+    file.insert(file.end(), hdr.begin(), hdr.end());
+    for (std::size_t k = 0; k < nc; ++k) {
+        std::array<std::uint8_t, 32> fd{};
+        std::memcpy(fd.data(), names[k].c_str(),
+                    names[k].size() < 11 ? names[k].size() : 10);
+        fd[11] = 'C';
+        fd[16] = static_cast<std::uint8_t>(kW);
+        file.insert(file.end(), fd.begin(), fd.end());
+    }
+    file.push_back(0x0D);
+    for (const auto& row : rows) {
+        file.push_back(' ');
+        for (std::size_t k = 0; k < nc; ++k) {
+            const std::string& v = row[k];
+            for (std::size_t i = 0; i < kW; ++i)
+                file.push_back(i < v.size()
+                    ? static_cast<std::uint8_t>(v[i]) : ' ');
+        }
+    }
+    file.push_back(0x1A);
+    {
+        std::ofstream f(dbf, std::ios::binary);
+        if (!f)
+            return openads::util::Error{openads::AE_INTERNAL_ERROR, 0,
+                "script result temp DBF open failed", ""};
+        f.write(reinterpret_cast<const char*>(file.data()),
+                static_cast<std::streamsize>(file.size()));
+    }
+    auto th = c->open_table(dbf.filename().string(),
+                            openads::engine::TableType::Cdx,
+                            openads::engine::OpenMode::Read);
+    if (!th) return th.error();
+    openads::engine::Table* tbl = c->lookup_table(th.value());
+    if (!tbl)
+        return openads::util::Error{openads::AE_INTERNAL_ERROR, 0,
+            "script result post-open", ""};
+    auto& s = state();
+    std::lock_guard<std::recursive_mutex> lk(s.mu);
+    *phCursor = s.registry.register_object(HandleKind::Table, tbl);
+    return {};
+}
+
 } // namespace scriptbridge
 
 // Run one trigger body through the script engine. Declared ahead of the
@@ -21209,8 +21552,8 @@ struct TriggerBridge final : openads::script::SqlBridge {
 // namespace) and defined here at global scope.
 extern "C++" openads::util::Result<void> script_run_trigger_body(
     Connection* conn, ADSHANDLE hConn, const std::string& body,
-    const std::map<std::string, std::string>& new_f,
-    const std::map<std::string, std::string>& old_f,
+    const std::map<std::string, TrigField_>& new_f,
+    const std::map<std::string, TrigField_>& old_f,
     bool is_instead_of) {
     auto prog = scriptbridge::compiled(body);
     if (!prog) return prog.error();
@@ -21623,6 +21966,18 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
     Connection* c = it->second->conn;
     if (!c) return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
     auto sql = openads::abi::to_internal(pucSQL, 0);
+
+    // S3 (§10 mechanism): full multi-statement scripts route through the
+    // script engine; the last SELECT's cursor comes back as the statement
+    // cursor. Single statements fall through to the SQL dispatcher below —
+    // the script engine's embedded statements re-enter here one at a time,
+    // so per-statement ACL checks still apply.
+    if (scriptbridge::is_script_input(sql)) {
+        auto r = scriptbridge::run_top_level_script(c, hStatement, sql,
+                                                    phCursor);
+        if (!r) return fail(r.error());
+        return ok();
+    }
 
     // Open a table by name, transparently resolving "system.*" virtual tables
     // to memory tables materialized from DD state.

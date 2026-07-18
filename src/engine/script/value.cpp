@@ -292,13 +292,17 @@ util::Result<Value> coerce_assign(Type slot, const Value& v,
                                   std::size_t char_limit) {
     if (v.is_null) return Value::typed_null(slot);
     switch (slot) {
-        case Type::Char:
+        case Type::Char: {
             if (v.type != Type::Char)
                 return type_err("cannot assign non-character to CHAR");
-            if (char_limit > 0 && v.s.size() > char_limit) {
-                Value r = v; r.s.resize(char_limit); return r;  // P26
-            }
-            return v;
+            if (char_limit == 0) return v;   // STRING/MEMO: unlimited
+            // CHAR(N) both truncates (P26) and space-PADS to N (N2-N5):
+            // the padded value is what concatenation sees — SAP's
+            // `@s CHAR(10) = 'a'; @s + 'b'` is 'a' + 9 spaces + 'b'.
+            Value r = v;
+            r.s.resize(char_limit, ' ');
+            return r;
+        }
         case Type::Integer:
             if (v.type == Type::Integer) return v;
             if (v.type == Type::Double)

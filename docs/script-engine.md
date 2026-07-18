@@ -261,17 +261,18 @@ green across the full construct matrix.
 Answered 2026-07-17 (probes P1–P34 against `ace64.dll`, see §10):
 1, 2, 3, 4, 9 — see §10.
 
-Still open (S2/S3 probes):
-5. `FETCH <cur>` forms (`FETCH NEXT`? `INTO`?) and cursor updatability
-   (`WHERE CURRENT OF`?).
+Answered 2026-07-18 (S3 probes C1–C34/F0–F6/N1–N5, see §11):
+5 (no FETCH NEXT/INTO, no WHERE CURRENT OF), 11 (FINALLY + CATCH <name>),
+12 (uncaught RAISE = 7200/2224 `{[name] code : msg}`; `__errclass` still
+unprobed).
+
+Still open (S3/S4 probes):
 6. Trigger failure semantics: exact error code, and whether the failed DML
    rolls back statement-wide or record-wise on SAP.
 7. Transaction statements inside procs when the caller already has an open
    transaction.
 8. Recursion depth limit and its error code.
 10. Which `::connection`/`LASTAUTOINC`-class system values scripts can read.
-11. `FINALLY` clause grammar; `CATCH <specific>` (non-ALL) forms.
-12. `__errclass`; RAISE error surfacing to the client when uncaught.
 
 ## 10. Oracle probe results (2026-07-17, SAP ADS 11 local, probes P1–P34)
 
@@ -314,3 +315,80 @@ SQL_DATE)`. `DATE + int` → DATE; `DATE − DATE` → integer days.
 `@x = (SELECT …)` subquery-into-variable works; scalar library confirmed:
 `SUBSTRING(s,p,n)`, `POSITION(a IN b)`, `UPPER/LOWER`, `LENGTH`, `TRIM`,
 `REPEAT`, `RIGHT`, `CONVERT(v, SQL_T)`, `MOD`, `IIF`.
+
+## 11. S3 oracle probe results (2026-07-18, SAP ADS 11 local, probes C1–C34/F0–F6/N1–N5)
+
+Probe driver: `tools/qa-diff/dd_meta_dump.exe --sql` (ad-hoc script mode) against
+`F:\ads11\ace64.dll` on a free-table directory connection; battery script
+`tools/qa-diff/s3_probes.ps1`. These settle §9 Q5/Q11 and the empty-string
+question raised by F1.
+
+**Cursor grammar (Q5).** `DECLARE <c> CURSOR [AS <stmt>];` /
+`OPEN <c> [AS <stmt>];` / `FETCH <c>;` / `CLOSE <c>;` /
+`WHILE FETCH <c> DO … END WHILE;` (`END;` also accepted — C3). The bound
+statement may be a SELECT or an `EXECUTE PROCEDURE` (C23). There is **no**
+`FETCH NEXT` (C4), **no** `FETCH … INTO` (C5), **no**
+`UPDATE … WHERE CURRENT OF` (C26) — all parse errors.
+
+**FETCH is boolean-valued.** `IF FETCH c THEN …` works; false once no more
+rows (C24, C25). `LEAVE` exits a `WHILE FETCH` loop (C30). Fetching past EOF
+is itself harmless — only *field access* errors there (C6).
+
+**Cursor state errors** (all rc=7200; NativeError in the message text):
+| Condition | NativeError | Message core |
+|---|---|---|
+| OPEN of undeclared name | 2218 | The variable is not found: c |
+| bare OPEN of an AS-less cursor | 2219 | Cursor is not defined |
+| FETCH / CLOSE / field access, cursor not open | 2220 | Error using a closed cursor: c |
+| second OPEN while open | 2221 | Cursor is already opened. c |
+| field access before first FETCH or at/after EOF | 2223 | The cursor is before first row or after last row. Referencing: c |
+| unknown field (SQL context) | 2122 | Table or alias not found: c |
+
+**Cursor behavior.** `OPEN c AS …` rebinds even over a `DECLARE … AS` binding
+(C15); CLOSE then re-OPEN rescans from the top (C11); two cursors are fully
+independent instances (C34); a cursor may be re-opened per-row inside an outer
+`WHILE FETCH` loop (C27 — the `sp_mgGetAllLocksAllTablesAllUsers` pattern).
+Field access: `c.field`, `c.[bracketed name]` (C16), `@c.field` (C17), all
+case-insensitive (C18); usable in script expressions (C20/C32), inside
+embedded DML (`INSERT … VALUES (c.id)` — C21c), in embedded subqueries
+(`WHERE id = c.id` — C22), and as `EXECUTE PROCEDURE` arguments (C33b).
+
+**Script structure.** ALL `DECLARE`s must precede the first executable
+statement; a later DECLARE → 2217 "Variable declaration is not allowed in the
+script body" (C28, C21).
+
+**TRY/CATCH/FINALLY (Q11).** `TRY` requires at least one `CATCH` or `FINALLY`
+block (2219 — F0). Order on error: body → CATCH → FINALLY (F2b: "xcf").
+FINALLY also runs when the error is *uncaught*, before it propagates (F3c/F3d).
+`CATCH <name>` (non-ALL) catches only a `RAISE <name>` with a matching name,
+case-insensitively (F4/F6); a non-matching name propagates (F5). Uncaught
+RAISE surfaces as 2224: `An exception is raised in the SQL script.
+{[name] code : msg}`.
+
+**CHAR(N) padding (N1–N5, explains F1).** Assignment into a declared CHAR(N)
+space-pads the value to N (and truncates over N). `LENGTH()` reports the
+right-trimmed length (N2/N3), but concatenation uses the padded value:
+`@s CHAR(10) = 'a'; @s + 'b'` → `'a' + 9 spaces + 'b'`, LENGTH 11 (N4/N5).
+Hence `@s = ''; @s = @s + 'a'` stays visually empty — 10 spaces + `'a'`
+truncated back to 10 spaces (F1d). `''` is NOT NULL (N1).
+
+**EXECUTE IMMEDIATE (EI probe).** The inner text is a full script with its
+own DECLARE header (fresh scope). The inner script's last SELECT does **NOT**
+become the outer statement's cursor — SAP returns rc=0 and no cursor; the
+result travels via `__output` (or side effects), which is exactly how pmsys
+`sp_GetPhysicalPath` uses it. The declare-first rule applies inside the inner
+script too (2217 on violation).
+
+**Misc S3.** A script's final statement may omit its trailing `;` (SAP
+accepts it). The uncaught-RAISE client shape is
+`rc 7200 / NativeError 2224 / "An exception is raised in the SQL script.
+{[name] code : msg}"` — implemented at the top-level script entry via the
+`kRaiseSubCode` marker.
+
+**OpenADS parity notes (2026-07-18).** The C/F/N battery passes against
+`openace64.dll` with two known divergences, both SQL-engine (not script)
+gaps: bracketed column aliases (`SELECT x AS [my name]` — C16 errors) and
+column-list-less `INSERT INTO t VALUES (…)`. Fixed along the way: ordinal
+field access on projected SELECT cursors returned the BASE table's column
+(C22) — `AbiSqlCursor::field` now resolves by name first, ordinal as the
+aggregate-column fallback.

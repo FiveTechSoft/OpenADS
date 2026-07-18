@@ -233,6 +233,46 @@ before now run through the engine (`scriptbridge::` in `ace_exports.cpp`):
   block-vs-persist on all three DML verbs, trigger→proc chains), all green;
   full unit suite green.
 
-**Next:** S3 = cursors (`DECLARE … CURSOR` / `WHILE FETCH` execution),
-remaining `EXECUTE IMMEDIATE` edge cases, builtin sweep. Gates run against the
-SAP oracle; PMSYS is the integration fixture, not the target.
+**S3 (cursors + completions) status — DONE 2026-07-18.** Probe-first per the
+design: 40+ new oracle probes against SAP ADS 11 recorded in
+`docs/script-engine.md` §11 (battery script `tools/qa-diff/s3_probes.ps1`,
+driver `dd_meta_dump --sql`); they settled §9 Q5 (no `FETCH NEXT`/`INTO`, no
+`WHERE CURRENT OF`; FETCH is boolean; the 2218-2224 error matrix) and Q11/Q12
+(FINALLY always runs — even uncaught; `CATCH <name>` matches case-insensitively;
+uncaught RAISE = 7200/2224 `{[name] code : msg}`).
+
+- **Cursors** end-to-end: `DECLARE c CURSOR [AS]`, `OPEN [AS]` (rebinds),
+  `FETCH`, `CLOSE`, `WHILE FETCH … DO`, `IF FETCH c THEN`, `c.field` /
+  `c.[br field]` / `@c.field` in expressions AND substituted into embedded
+  SQL + `EXECUTE PROCEDURE` args; re-open rescans; nested per-row re-open
+  (the `sp_mgGetAllLocksAllTablesAllUsers` pattern). SAP error-state parity:
+  closed 2220 / double-open 2221 / unbound 2219 / undeclared 2218 /
+  no-row 2223 messages.
+- **TRY/CATCH/FINALLY** per F-probes (≥1 CATCH-or-FINALLY required; order
+  body→catch→finally; FINALLY on uncaught before propagation).
+- **CHAR(N) pad-on-assign** + rtrim `LENGTH` (N-probes) — explains SAP's
+  `''+'a'` behavior. **Declare-first rule** (2217) enforced.
+- **Top-level scripts through `AdsExecuteSQLDirect`** (§10 mechanism): full
+  multi-statement scripts run through the engine; last SELECT's cursor is
+  the statement cursor (real handle passed through; engine-internal cursors
+  materialize to a temp DBF). This is what the probe battery, ARC-style
+  ad-hoc scripts, and pmsys `sp_GetPhysicalPath`'s full-script
+  `EXECUTE IMMEDIATE` needed. EI itself discards the inner cursor
+  (oracle-checked).
+- **Typed trigger row images**: `TrigField_` carries the field type char, so
+  `DECLARE n CURSOR AS SELECT * FROM __new` + `n.recurring > 0` sees numbers
+  (Trig_Container shape); fixed the S2 enum-vs-char memo-skip latent bug.
+- **Bug found by the differential battery (C22)**: ordinal field access on a
+  projected SELECT cursor returned the BASE table's column;
+  `AbiSqlCursor::field` now resolves by name first.
+- **Tests**: +17 engine cases (fake-bridge cursor/FINALLY/padding, each
+  mirroring a probe) and +5 ABI cases (cursor copy loop, cursor over
+  `EXECUTE PROCEDURE`, typed `__new` trigger cursor, declare-order); C/F/N
+  battery green against `openace64.dll` except two known SQL-engine (not
+  script) gaps: bracketed column aliases (C16) and column-list-less INSERT.
+
+**Next:** S4 candidates = transactions in scripts (Q7), recursion-limit probe
+(Q8), `LASTAUTOINC`/`::conn` system values (Q10), the two SQL-engine gaps
+above, builtin sweep continuation. PMSYS proc-parity run
+(`sp_GetPhysicalPath`, `sp_SaveIntoAuditLog`, `sp_ChargeLateFees`, …) against
+the converted DD is the natural S4 gate.

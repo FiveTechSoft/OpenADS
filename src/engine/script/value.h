@@ -20,6 +20,13 @@ namespace openads::script {
 // error in SQL" family the SAP oracle returns for these cases.
 inline constexpr std::int32_t kScriptError = 7200;
 
+// sub_code marker on an Error produced by RAISE. Call sites that surface an
+// uncaught RAISE to a client rewrap it in SAP's shape: rc 7200, NativeError
+// 2224, message "An exception is raised in the SQL script. {[name] code :
+// msg}" (§11 F3c/F5). Inside the engine the user's code/message stay
+// untouched so __errcode/__errtext and CATCH <name> keep working.
+inline constexpr std::int32_t kRaiseSubCode = 2224;
+
 enum class Type : std::uint8_t {
     Null,        // typeless NULL (a DECLAREd-but-unassigned var keeps its
                  // declared type with is_null set; bare NULL literal is this)

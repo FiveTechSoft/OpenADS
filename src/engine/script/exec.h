@@ -24,6 +24,9 @@ struct SqlCursor {
     virtual bool next() = 0;                 // first call → first row
     virtual std::size_t field_count() const = 0;
     virtual Value field(std::size_t idx) = 0;
+    // Column name for script cursor field access (c.name — S3). "" when the
+    // producer has no names (single-value fast paths).
+    virtual std::string field_name(std::size_t) const { return ""; }
 };
 
 struct SqlBridge {
@@ -42,6 +45,11 @@ struct SqlBridge {
 struct ExecResult {
     bool  returned = false;
     Value return_value;
+    // The last top-level SELECT's cursor (§10 mechanism: a script run via
+    // AdsExecuteSQLDirect returns the last SELECT's result; none → no
+    // cursor). Retained only for statement-position SELECTs — subquery and
+    // cursor-OPEN results are consumed internally.
+    std::unique_ptr<SqlCursor> last_select;
 };
 
 class Executor {
@@ -68,8 +76,21 @@ private:
         Value ret;
     };
 
+    // Cursor state (§11 C-probes). `bound_sql` comes from DECLARE … AS or
+    // the last OPEN … AS (which rebinds — C15); `on_row` is false before
+    // the first FETCH and past the last row (field access then errors with
+    // the SAP 2223 message).
+    struct Cursor {
+        std::string bound_sql;
+        std::unique_ptr<SqlCursor> cur;      // non-null = open
+        bool on_row = false;
+        std::vector<std::string> col_upper;  // resolved at OPEN
+    };
+
     SqlBridge* bridge_;
     std::unordered_map<std::string, Slot> scope_;   // key: upper-cased name
+    std::unordered_map<std::string, Cursor> cursors_;  // key: upper-cased
+    std::unique_ptr<SqlCursor> last_select_;  // → ExecResult::last_select
     std::string user_;
     Value err_code_;   // __errcode / __errtext inside CATCH
     Value err_text_;
@@ -79,7 +100,10 @@ private:
     util::Result<Value> eval(const Expr& e);
     util::Result<Value> eval_call(const Expr& e);
     util::Result<Value> eval_subquery(const std::string& raw);
-    util::Result<std::string> substitute(const std::string& raw) const;
+    util::Result<Value> cursor_field(const std::string& upper_name,
+                                     const std::string& disp_name,
+                                     const std::string& field);
+    util::Result<std::string> substitute(const std::string& raw);
 };
 
 // Render a value as a SQL literal for the substitution fallback (design

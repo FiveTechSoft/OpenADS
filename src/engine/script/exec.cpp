@@ -105,6 +105,7 @@ Result<ExecResult> Executor::run(const Program& p) {
         r.returned = true;
         r.return_value = std::move(f.value().ret);
     }
+    r.last_select = std::move(last_select_);
     return r;
 }
 
@@ -120,9 +121,12 @@ Result<Executor::Flow> Executor::exec_block(const Block& b) {
 Result<Executor::Flow> Executor::exec_stmt(const Stmt& s) {
     switch (s.kind) {
         case StmtKind::Declare: {
-            if (!s.raw.empty())
-                return serr("cursors are not supported yet (S3): DECLARE " +
-                            s.name + " CURSOR");
+            if (s.is_cursor) {
+                Cursor c;
+                c.bound_sql = s.raw;   // may be empty (bound at OPEN AS)
+                cursors_[s.upper] = std::move(c);
+                return Flow{};
+            }
             Slot slot;
             slot.declared = s.decl_type;
             slot.char_limit = s.char_limit;
@@ -153,9 +157,6 @@ Result<Executor::Flow> Executor::exec_stmt(const Stmt& s) {
             return exec_block(s.else_block);
         }
         case StmtKind::While: {
-            if (!s.name.empty())   // WHILE FETCH <cursor> DO — S3
-                return serr("cursor loops are not supported yet (S3): "
-                            "WHILE FETCH " + s.name);
             for (;;) {
                 auto c = eval(*s.expr);
                 if (!c) return c.error();
@@ -184,17 +185,40 @@ Result<Executor::Flow> Executor::exec_stmt(const Stmt& s) {
             return f;
         }
         case StmtKind::Try: {
+            // §11 F-probes: body → matching CATCH → FINALLY; FINALLY runs
+            // even when the error is uncaught, before it propagates (F3).
             auto f = exec_block(s.body);
-            if (f) return f;                   // no error → done (flow up)
-            // Error caught: expose __errcode/__errtext, run CATCH.
-            err_code_ = Value::integer(f.error().code);
-            err_text_ = Value::character(f.error().message);
-            // RAISE carries the user text verbatim in message; system errors
-            // carry the engine message — both are what SAP's __errtext shows.
-            auto cf = exec_block(s.catch_block);
-            err_code_ = Value::null();
-            err_text_ = Value::null();
-            return cf;
+            if (!f) {
+                // Find a matching CATCH: ALL (empty name) matches
+                // everything; a named clause matches the RAISE name
+                // carried in the error context, case-insensitively (F4-F6).
+                const CatchClause* match = nullptr;
+                std::string raised = upper(f.error().context);
+                for (const auto& cc : s.catches) {
+                    if (cc.name_upper.empty() || cc.name_upper == raised) {
+                        match = &cc;
+                        break;
+                    }
+                }
+                if (match != nullptr) {
+                    err_code_ = Value::integer(f.error().code);
+                    err_text_ = Value::character(f.error().message);
+                    auto cf = exec_block(match->block);
+                    err_code_ = Value::null();
+                    err_text_ = Value::null();
+                    f = std::move(cf);
+                }
+            }
+            if (s.has_finally) {
+                auto ff = exec_block(s.finally_block);
+                // A FINALLY error wins only if the try/catch outcome was
+                // clean; otherwise the original error propagates.
+                if (!ff && f) return ff;
+                if (ff && ff.value().k != Flow::Normal && f &&
+                    f.value().k == Flow::Normal)
+                    return ff;
+            }
+            return f;
         }
         case StmtKind::Raise: {
             std::int64_t code = 0;
@@ -212,7 +236,8 @@ Result<Executor::Flow> Executor::exec_stmt(const Stmt& s) {
                 if (!m) return m.error();
                 if (m.value().type == Type::Char) msg = m.value().s;
             }
-            return Error{static_cast<std::int32_t>(code), 0, msg, s.name};
+            return Error{static_cast<std::int32_t>(code), kRaiseSubCode,
+                         msg, s.name};
         }
         case StmtKind::Sql: {
             if (bridge_ == nullptr)
@@ -222,6 +247,16 @@ Result<Executor::Flow> Executor::exec_stmt(const Stmt& s) {
             if (!sub) return sub.error();
             auto cur = bridge_->exec(sub.value());
             if (!cur) return cur.error();
+            // §10 mechanism: the LAST statement-position SELECT's cursor is
+            // the script's result.
+            if (cur.value()) {
+                std::size_t b = s.raw.find_first_not_of(" \t\r\n");
+                if (b != std::string::npos && s.raw.size() - b >= 6) {
+                    std::string kw = upper(s.raw.substr(b, 6));
+                    if (kw == "SELECT")
+                        last_select_ = std::move(cur).value();
+                }
+            }
             return Flow{};
         }
         case StmtKind::ExecImmediate: {
@@ -233,18 +268,100 @@ Result<Executor::Flow> Executor::exec_stmt(const Stmt& s) {
                 return serr("EXECUTE IMMEDIATE needs a character statement");
             // Dynamic SQL goes through the same bridge, so the caller's
             // rewrites (__output, trigger row images) apply to it too.
+            // Oracle-checked: the inner script's SELECT cursor does NOT
+            // become the outer statement's result (EI probe, 2026-07-18) —
+            // the cursor is discarded here.
             auto cur = bridge_->exec(v.value().s);
             if (!cur) return cur.error();
+            return Flow{};
+        }
+        // ---- Cursor statements (§11 C-probes) ----------------------------
+        case StmtKind::OpenCursor: {
+            auto it = cursors_.find(s.upper);
+            if (it == cursors_.end())
+                return serr("the variable is not found: " + s.name);  // 2218
+            Cursor& c = it->second;
+            if (c.cur != nullptr)
+                return serr("cursor is already opened: " + s.name);   // 2221
+            if (!s.raw.empty())
+                c.bound_sql = s.raw;   // OPEN … AS rebinds (C15)
+            if (c.bound_sql.empty())
+                return serr("cursor is not defined: " + s.name);      // 2219
+            if (bridge_ == nullptr)
+                return serr("cursors require a connection");
+            // Variables AND other cursors' fields substitute as literals at
+            // OPEN time (C33b: OPEN l AS EXECUTE PROCEDURE p(c.name)).
+            auto sub = substitute(c.bound_sql);
+            if (!sub) return sub.error();
+            auto cur = bridge_->exec(sub.value());
+            if (!cur) return cur.error();
+            if (!cur.value())
+                return serr("cursor statement returned no result: " +
+                            s.name);
+            c.cur = std::move(cur).value();
+            c.on_row = false;
+            c.col_upper.clear();
+            std::size_t nf = c.cur->field_count();
+            c.col_upper.reserve(nf);
+            for (std::size_t k = 0; k < nf; ++k)
+                c.col_upper.push_back(upper(c.cur->field_name(k)));
+            return Flow{};
+        }
+        case StmtKind::FetchCursor: {
+            // Statement form: advance, discard the row-available flag.
+            // Fetching past EOF is harmless (C6) — only field access errors.
+            auto it = cursors_.find(s.upper);
+            if (it == cursors_.end())
+                return serr("the variable is not found: " + s.name);
+            if (it->second.cur == nullptr)
+                return serr("error using a closed cursor: " + s.name); // 2220
+            it->second.on_row = it->second.cur->next();
+            return Flow{};
+        }
+        case StmtKind::CloseCursor: {
+            auto it = cursors_.find(s.upper);
+            if (it == cursors_.end())
+                return serr("the variable is not found: " + s.name);
+            if (it->second.cur == nullptr)
+                return serr("error using a closed cursor: " + s.name); // 2220
+            it->second.cur.reset();
+            it->second.on_row = false;
+            it->second.col_upper.clear();
             return Flow{};
         }
     }
     return serr("unhandled statement");
 }
 
+// Current-row field of an open cursor, with the SAP error progression
+// (§11): closed → 2220, before-first/after-last → 2223, unknown field →
+// alias-not-found.
+Result<Value> Executor::cursor_field(const std::string& upper_name,
+                                     const std::string& disp_name,
+                                     const std::string& field) {
+    auto it = cursors_.find(upper_name);
+    if (it == cursors_.end())
+        return serr("unknown identifier '" + disp_name + "'");
+    Cursor& c = it->second;
+    if (c.cur == nullptr)
+        return serr("error using a closed cursor: " + disp_name);      // 2220
+    if (!c.on_row)
+        return serr("the cursor is before first row or after last row. "
+                    "Referencing: " + disp_name);                      // 2223
+    std::string want = upper(field);
+    for (std::size_t k = 0; k < c.col_upper.size(); ++k)
+        if (c.col_upper[k] == want) return c.cur->field(k);
+    return serr("table or alias not found: " + disp_name + "." + field);
+}
+
 // ---- Variable substitution into raw SQL (design §4.2 fallback mode) ------
 // Whole-word identifiers matching scope variables are replaced by literals;
-// quoted strings and [bracketed] names pass through untouched.
-Result<std::string> Executor::substitute(const std::string& raw) const {
+// `c.field` references to OPEN script cursors are replaced by the current
+// row value (C21c/C22/C33b); quoted strings and [bracketed] names pass
+// through untouched. A SQL alias that merely shadows a cursor name is not a
+// concern: SAP itself resolves the cursor first (C22 works because the
+// cursor value wins).
+Result<std::string> Executor::substitute(const std::string& raw) {
     std::string out;
     out.reserve(raw.size() + 16);
     std::size_t i = 0, n = raw.size();
@@ -275,11 +392,37 @@ Result<std::string> Executor::substitute(const std::string& raw) const {
                              raw[j] == '_'))
                 ++j;
             std::string word = raw.substr(i, j - i);
+            bool prev_dot = (i > 0 && raw[i - 1] == '.');
+            // cursor.field / cursor.[field] → current-row literal.
+            if (!prev_dot && j < n && raw[j] == '.' &&
+                cursors_.count(upper(word)) != 0) {
+                std::size_t f0 = j + 1, fe = f0;
+                std::string fld;
+                if (fe < n && raw[fe] == '[') {
+                    std::size_t rb = raw.find(']', fe);
+                    if (rb != std::string::npos) {
+                        fld = raw.substr(fe + 1, rb - fe - 1);
+                        fe = rb + 1;
+                    }
+                } else {
+                    while (fe < n &&
+                           (std::isalnum(static_cast<unsigned char>(raw[fe])) ||
+                            raw[fe] == '_'))
+                        ++fe;
+                    fld = raw.substr(f0, fe - f0);
+                }
+                if (!fld.empty()) {
+                    auto v = cursor_field(upper(word), word, fld);
+                    if (!v) return v.error();
+                    out += to_sql_literal(v.value());
+                    i = fe;
+                    continue;
+                }
+            }
             auto it = scope_.find(upper(word));
             // Don't substitute if it's a qualified name part (x.y) or a
             // function call (name().
-            bool qualified = (j < n && raw[j] == '.') ||
-                             (i > 0 && raw[i - 1] == '.');
+            bool qualified = (j < n && raw[j] == '.') || prev_dot;
             std::size_t k = j;
             while (k < n && raw[k] == ' ') ++k;
             bool is_call = (k < n && raw[k] == '(');
@@ -425,8 +568,18 @@ Result<Value> Executor::eval(const Expr& e) {
         case ExprKind::Subquery: return eval_subquery(e.raw);
         case ExprKind::FnCall:   return eval_call(e);
         case ExprKind::CursorField:
-            return serr("cursor fields are not supported yet (S3): " +
-                        e.name + "." + e.field);
+            return cursor_field(e.upper, e.name, e.field);
+        case ExprKind::Fetch: {
+            // Boolean FETCH (C24/C25): advances the cursor, true while a
+            // row was produced. Past-EOF fetches are harmless (C6).
+            auto it = cursors_.find(e.upper);
+            if (it == cursors_.end())
+                return serr("the variable is not found: " + e.name);
+            if (it->second.cur == nullptr)
+                return serr("error using a closed cursor: " + e.name);
+            it->second.on_row = it->second.cur->next();
+            return Value::logical(it->second.on_row);
+        }
     }
     return serr("bad expression");
 }
@@ -562,7 +715,11 @@ Result<Value> Executor::eval_call(const Expr& e) {
     if ((fn == "LENGTH" || fn == "LEN" || fn == "CHAR_LENGTH") && need(1)) {
         if (a[0].is_null) return Value::typed_null(Type::Integer);
         if (a[0].type != Type::Char) return serr("LENGTH needs a string");
-        return Value::integer(static_cast<std::int64_t>(a[0].s.size()));
+        // Trailing blanks don't count (N2/N3: LENGTH of a CHAR(10) holding
+        // 'a' is 1) — interior blanks do (N5).
+        std::size_t len = a[0].s.find_last_not_of(' ');
+        return Value::integer(len == std::string::npos
+                              ? 0 : static_cast<std::int64_t>(len + 1));
     }
     if (fn == "POSITION" && need(2)) {
         if (a[0].is_null || a[1].is_null)

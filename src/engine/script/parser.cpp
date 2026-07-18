@@ -40,6 +40,7 @@ private:
     const std::string& src_;
     std::vector<Token> t_;
     std::size_t i_ = 0;
+    bool seen_exec_ = false;   // a non-DECLARE statement has been parsed
 
     const Token& cur() const { return t_[i_]; }
     const Token& peek(std::size_t k = 1) const {
@@ -55,6 +56,9 @@ private:
     bool eat_kw(const char* kw) {
         if (at_kw(kw)) { advance(); return true; } return false;
     }
+    // Statement terminator: ';' — optional on the script's last statement
+    // (SAP accepts a final statement without one).
+    bool eat_stmt_semi() { return eat(Tok::Semi) || at(Tok::End); }
 
     // Is the current token one of the block-stop keywords?
     static bool in_stops(const std::vector<const char*>& stops,
@@ -85,6 +89,10 @@ private:
         if (cur().kind == Tok::Ident) {
             const std::string& kw = cur().upper;
             if (kw == "DECLARE")  return parse_declare();
+            // DECLAREs must precede every executable statement (C28: SAP
+            // 2217 "Variable declaration is not allowed in the script
+            // body"). Everything below marks the script body as started.
+            seen_exec_ = true;
             if (kw == "IF")       return parse_if();
             if (kw == "WHILE")    return parse_while();
             if (kw == "TRY")      return parse_try();
@@ -101,7 +109,7 @@ private:
                 auto e = parse_expr();
                 if (!e) return e.error();
                 s->expr = std::move(e).value();
-                if (!eat(Tok::Semi))
+                if (!eat_stmt_semi())
                     return perr("';' expected after EXECUTE IMMEDIATE",
                                 cur().pos);
                 return StmtPtr(std::move(s));
@@ -112,7 +120,7 @@ private:
                                           : StmtKind::Continue;
                 s->pos = cur().pos;
                 advance();
-                if (!eat(Tok::Semi))
+                if (!eat_stmt_semi())
                     return perr("';' expected after " + kw, cur().pos);
                 return StmtPtr(std::move(s));
             }
@@ -123,6 +131,44 @@ private:
                 advance();
                 return parse_assign();
             }
+            // Cursor statements (§11 grammar): OPEN <c> [AS <stmt>];
+            // FETCH <c>; CLOSE <c>;  A non-matching shape falls through to
+            // raw SQL (e.g. OPEN inside some future dialect statement).
+            if (kw == "OPEN" && peek().kind == Tok::Ident) {
+                auto s = std::make_unique<Stmt>();
+                s->kind = StmtKind::OpenCursor;
+                s->pos = cur().pos;
+                advance();
+                s->name  = cur().text;
+                s->upper = cur().upper;
+                advance();
+                if (eat_kw("AS")) {
+                    std::size_t start = cur().pos;
+                    while (!at(Tok::End) && !at(Tok::Semi)) advance();
+                    s->raw = src_.substr(start, cur().pos - start);
+                    if (s->raw.empty())
+                        return perr("statement expected after OPEN " +
+                                    s->name + " AS", cur().pos);
+                }
+                if (!eat_stmt_semi())
+                    return perr("';' expected after OPEN " + s->name,
+                                cur().pos);
+                return StmtPtr(std::move(s));
+            }
+            if ((kw == "FETCH" || kw == "CLOSE") &&
+                peek().kind == Tok::Ident &&
+                (peek(2).kind == Tok::Semi || peek(2).kind == Tok::End)) {
+                auto s = std::make_unique<Stmt>();
+                s->kind = (kw == "FETCH") ? StmtKind::FetchCursor
+                                          : StmtKind::CloseCursor;
+                s->pos = cur().pos;
+                advance();
+                s->name  = cur().text;
+                s->upper = cur().upper;
+                advance();
+                eat(Tok::Semi);   // optional on the script's last statement
+                return StmtPtr(std::move(s));
+            }
             // Assignment: <ident> = <expr> ;
             if (peek().kind == Tok::Eq) return parse_assign();
         }
@@ -130,6 +176,12 @@ private:
     }
 
     Result<StmtPtr> parse_declare() {
+        // C28/C21: SAP rejects a DECLARE after the first executable
+        // statement ("Variable declaration is not allowed in the script
+        // body", NativeError 2217).
+        if (seen_exec_)
+            return perr("variable declaration is not allowed in the "
+                        "script body", cur().pos);
         auto s = std::make_unique<Stmt>();
         s->kind = StmtKind::Declare;
         s->pos = cur().pos;
@@ -141,18 +193,15 @@ private:
         advance();
 
         if (at_kw("CURSOR")) {
-            // DECLARE <name> CURSOR [AS <raw sql>] ;  — executed in S3;
-            // parsed now so bodies compile and give a clear runtime error
-            // instead of a parse failure. The AS-less form binds its
-            // statement later at OPEN <name> AS <sql>.
+            // DECLARE <name> CURSOR [AS <raw sql>] ;  — the AS-less form
+            // binds its statement later at OPEN <name> AS <sql> (C12).
             advance();
+            s->is_cursor = true;
             if (eat_kw("AS")) {
                 std::size_t start = cur().pos;
                 while (!at(Tok::End) && !at(Tok::Semi)) advance();
                 std::size_t end = cur().pos;
                 s->raw = src_.substr(start, end - start);
-            } else {
-                s->raw = " ";   // cursor marker even without a bound stmt
             }
             eat(Tok::Semi);
             s->decl_type = Type::Null;
@@ -204,7 +253,7 @@ private:
             return perr("unknown type '" + cur().text + "' in DECLARE",
                         cur().pos);
         }
-        if (!eat(Tok::Semi))
+        if (!eat_stmt_semi())
             return perr("';' expected after DECLARE", cur().pos);
         return StmtPtr(std::move(s));
     }
@@ -220,7 +269,7 @@ private:
         auto e = parse_expr();
         if (!e) return e.error();
         s->expr = std::move(e).value();
-        if (!eat(Tok::Semi))
+        if (!eat_stmt_semi())
             return perr("';' expected after assignment", cur().pos);
         return StmtPtr(std::move(s));
     }
@@ -299,48 +348,60 @@ private:
         s->kind = StmtKind::While;
         s->pos = cur().pos;
         advance();  // WHILE
-        // WHILE FETCH <cursor> DO … — the idiomatic ADS cursor loop. Parsed
-        // now so cursor bodies compile; execution is S3 (the executor emits
-        // a clean "cursors not supported yet" runtime error). `name` marks
-        // it as the FETCH form.
-        if (at_kw("FETCH")) {
-            advance();
-            if (cur().kind != Tok::Ident)
-                return perr("cursor name expected after WHILE FETCH",
-                            cur().pos);
-            s->name  = cur().text;
-            s->upper = cur().upper;
-            advance();
-        } else {
-            auto cond = parse_expr();
-            if (!cond) return cond.error();
-            s->expr = std::move(cond).value();
-        }
+        // WHILE FETCH <cursor> DO … — the idiomatic ADS cursor loop; the
+        // condition is just a Fetch expression (FETCH is boolean-valued,
+        // C24/C25), so the generic while machinery drives it.
+        auto cond = parse_expr();
+        if (!cond) return cond.error();
+        s->expr = std::move(cond).value();
         if (!eat_kw("DO"))
             return perr("DO expected in WHILE", cur().pos);
         auto blk = parse_block({"END"});
         if (!blk) return blk.error();
         s->body = std::move(blk).value();
-        if (!eat_kw("END") || !eat_kw("WHILE"))
+        if (!eat_kw("END"))
             return perr("END WHILE expected", cur().pos);
+        eat_kw("WHILE");   // both "END WHILE;" and bare "END;" close (C3)
         eat(Tok::Semi);
         return StmtPtr(std::move(s));
     }
 
     Result<StmtPtr> parse_try() {
+        // TRY s CATCH [ALL|<name>] s … [FINALLY s] END TRY — §11 F-probes:
+        // at least one CATCH or FINALLY is required (F0); CATCH <name>
+        // catches only a matching RAISE, case-insensitively (F4/F6).
         auto s = std::make_unique<Stmt>();
         s->kind = StmtKind::Try;
         s->pos = cur().pos;
         advance();  // TRY
-        auto body = parse_block({"CATCH", "END"});
+        auto body = parse_block({"CATCH", "FINALLY", "END"});
         if (!body) return body.error();
         s->body = std::move(body).value();
-        if (eat_kw("CATCH")) {
-            eat_kw("ALL");   // CATCH ALL (specific forms are open Q11)
-            auto cb = parse_block({"END"});
+        while (eat_kw("CATCH")) {
+            CatchClause cc;
+            if (eat_kw("ALL")) {
+                // name_upper stays empty: catches everything
+            } else if (cur().kind == Tok::Ident) {
+                cc.name_upper = cur().upper;
+                advance();
+            } else {
+                return perr("ALL or an error name expected after CATCH",
+                            cur().pos);
+            }
+            auto cb = parse_block({"CATCH", "FINALLY", "END"});
             if (!cb) return cb.error();
-            s->catch_block = std::move(cb).value();
+            cc.block = std::move(cb).value();
+            s->catches.push_back(std::move(cc));
         }
+        if (eat_kw("FINALLY")) {
+            s->has_finally = true;
+            auto fb = parse_block({"END"});
+            if (!fb) return fb.error();
+            s->finally_block = std::move(fb).value();
+        }
+        if (s->catches.empty() && !s->has_finally)
+            return perr("TRY statement must have at least one CATCH or "
+                        "FINALLY block", cur().pos);
         if (!eat_kw("END") || !eat_kw("TRY"))
             return perr("END TRY expected", cur().pos);
         eat(Tok::Semi);
@@ -366,7 +427,7 @@ private:
         }
         if (!eat(Tok::RParen))
             return perr("')' expected in RAISE", cur().pos);
-        if (!eat(Tok::Semi))
+        if (!eat_stmt_semi())
             return perr("';' expected after RAISE", cur().pos);
         return StmtPtr(std::move(s));
     }
@@ -666,6 +727,18 @@ private:
             if (up == "TRUE")  { advance(); return lit(Value::logical(true)); }
             if (up == "FALSE") { advance(); return lit(Value::logical(false)); }
             if (up == "CASE")  return parse_case();
+            // FETCH <cursor> — boolean condition form (WHILE FETCH c DO /
+            // IF FETCH c THEN, probes C24/C25). Advances the cursor.
+            if (up == "FETCH" && peek().kind == Tok::Ident) {
+                auto e = std::make_unique<Expr>();
+                e->kind = ExprKind::Fetch;
+                e->pos = p0;
+                advance();
+                e->name  = cur().text;
+                e->upper = cur().upper;
+                advance();
+                return ExprPtr(std::move(e));
+            }
 
             std::string name = cur().text;
             advance();
@@ -673,12 +746,17 @@ private:
             if (at(Tok::LParen)) return parse_call(name, up, p0);
 
             if (at(Tok::Dot) && peek().kind == Tok::Ident) {
-                // cursor.field — resolved in S3.
+                // cursor.field — current-row access on an open cursor.
+                // The lexer hands [bracketed names] through as one Ident
+                // with the brackets kept (C16) — strip them here.
                 auto e = std::make_unique<Expr>();
                 e->kind = ExprKind::CursorField;
                 e->name = name; e->upper = up;
                 advance();                    // '.'
                 e->field = cur().text;
+                if (e->field.size() >= 2 && e->field.front() == '[' &&
+                    e->field.back() == ']')
+                    e->field = e->field.substr(1, e->field.size() - 2);
                 advance();
                 e->pos = p0;
                 return ExprPtr(std::move(e));
