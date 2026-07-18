@@ -52,6 +52,9 @@ public:
     // lookup is case-insensitive.
     void set_param(const std::string& name, Value v);
 
+    // Connection user name, surfaced to scripts as USER().
+    void set_user(std::string u) { user_ = std::move(u); }
+
     util::Result<ExecResult> run(const Program& p);
 
 private:
@@ -67,6 +70,7 @@ private:
 
     SqlBridge* bridge_;
     std::unordered_map<std::string, Slot> scope_;   // key: upper-cased name
+    std::string user_;
     Value err_code_;   // __errcode / __errtext inside CATCH
     Value err_text_;
 

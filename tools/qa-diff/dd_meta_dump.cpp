@@ -82,6 +82,8 @@ using PFN_GetField   = UNSIGNED32 (ADS_CALL*)(ADSHANDLE, UNSIGNED8*, UNSIGNED8*,
 using PFN_NumFields  = UNSIGNED32 (ADS_CALL*)(ADSHANDLE, UNSIGNED16*);
 using PFN_FieldName  = UNSIGNED32 (ADS_CALL*)(ADSHANDLE, UNSIGNED16, UNSIGNED8*,
                                               UNSIGNED16*);
+using PFN_LastError  = UNSIGNED32 (ADS_CALL*)(UNSIGNED32*, UNSIGNED8*,
+                                              UNSIGNED16*);
 
 struct Api {
     PFN_Connect    connect;
@@ -95,6 +97,7 @@ struct Api {
     PFN_NumFields  numFields;
     PFN_FieldName  fieldName;
     PFN_Disconnect gotoTop;   // AdsGotoTop(handle) — same signature shape
+    PFN_LastError  lastError = nullptr;
     bool           do_gototop = false;
 };
 
@@ -148,9 +151,23 @@ static bool dump_query(const Api& f, ADSHANDLE hConn, const char* sql,
     UNSIGNED32 rc = f.execSQL(hStmt,
         reinterpret_cast<UNSIGNED8*>(const_cast<char*>(q.c_str())), &hCur);
     if (rc != 0 || hCur == 0) {
-        char buf[64];
-        std::snprintf(buf, sizeof(buf), "{\"error\":\"rc=%u\"}", rc);
+        // RCB 07/17/2026: include AdsGetLastError text — indispensable when
+        // probing script-engine failures.
+        char emsg[600] = {0};
+        if (f.lastError) {
+            UNSIGNED32 ecode = 0;
+            UNSIGNED16 elen = sizeof(emsg) - 1;
+            f.lastError(&ecode, reinterpret_cast<UNSIGNED8*>(emsg), &elen);
+            emsg[elen < sizeof(emsg) ? elen : sizeof(emsg) - 1] = 0;
+        }
+        char buf[700];
+        std::snprintf(buf, sizeof(buf), "{\"error\":\"rc=%u\",\"msg\":\"", rc);
         out += buf;
+        for (const char* p = emsg; *p; ++p) {
+            if (*p == '"' || *p == '\\') out += '\\';
+            if (static_cast<unsigned char>(*p) >= 0x20) out += *p;
+        }
+        out += "\"}";
         f.close(hStmt);
         return false;
     }
@@ -261,6 +278,7 @@ int main(int argc, char** argv) {
     f.numFields  = (PFN_NumFields)  lib_sym(h, "AdsGetNumFields");
     f.fieldName  = (PFN_FieldName)  lib_sym(h, "AdsGetFieldName");
     f.gotoTop    = (PFN_Disconnect) lib_sym(h, "AdsGotoTop");
+    f.lastError  = (PFN_LastError)  lib_sym(h, "AdsGetLastError");
     for (int i = 1; i < argc; ++i)
         if (std::string(argv[i]) == "--gototop") f.do_gototop = true;
     if (!f.connect || !f.createStmt || !f.execSQL || !f.atEOF ||

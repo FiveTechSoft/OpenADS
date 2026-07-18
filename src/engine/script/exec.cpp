@@ -153,6 +153,9 @@ Result<Executor::Flow> Executor::exec_stmt(const Stmt& s) {
             return exec_block(s.else_block);
         }
         case StmtKind::While: {
+            if (!s.name.empty())   // WHILE FETCH <cursor> DO — S3
+                return serr("cursor loops are not supported yet (S3): "
+                            "WHILE FETCH " + s.name);
             for (;;) {
                 auto c = eval(*s.expr);
                 if (!c) return c.error();
@@ -218,6 +221,19 @@ Result<Executor::Flow> Executor::exec_stmt(const Stmt& s) {
             auto sub = substitute(s.raw);
             if (!sub) return sub.error();
             auto cur = bridge_->exec(sub.value());
+            if (!cur) return cur.error();
+            return Flow{};
+        }
+        case StmtKind::ExecImmediate: {
+            if (bridge_ == nullptr)
+                return serr("EXECUTE IMMEDIATE requires a connection");
+            auto v = eval(*s.expr);
+            if (!v) return v.error();
+            if (v.value().is_null || v.value().type != Type::Char)
+                return serr("EXECUTE IMMEDIATE needs a character statement");
+            // Dynamic SQL goes through the same bridge, so the caller's
+            // rewrites (__output, trigger row images) apply to it too.
+            auto cur = bridge_->exec(v.value().s);
             if (!cur) return cur.error();
             return Flow{};
         }
@@ -452,7 +468,7 @@ Result<Value> Executor::eval_call(const Expr& e) {
         return Value::timestamp(jdn * 86400000 +
                                 (h * 3600 + mi * 60 + s) * 1000 + ms);
     }
-    if (fn == "CURDATE" ) {
+    if (fn == "CURDATE" || fn == "NOW" || fn == "CURTIMESTAMP") {
         std::time_t t = std::time(nullptr);
         std::tm tmv{};
 #ifdef _WIN32
@@ -460,8 +476,20 @@ Result<Value> Executor::eval_call(const Expr& e) {
 #else
         localtime_r(&t, &tmv);
 #endif
-        return Value::date(jdn_from_ymd(tmv.tm_year + 1900, tmv.tm_mon + 1,
-                                        tmv.tm_mday));
+        std::int64_t jdn = jdn_from_ymd(tmv.tm_year + 1900, tmv.tm_mon + 1,
+                                        tmv.tm_mday);
+        if (fn == "CURDATE") return Value::date(jdn);
+        return Value::timestamp(jdn * 86400000 +
+            (static_cast<std::int64_t>(tmv.tm_hour) * 3600 +
+             tmv.tm_min * 60 + tmv.tm_sec) * 1000);
+    }
+    if (fn == "USER") return Value::character(user_);
+    if ((fn == "CHAR" || fn == "CHR") && need(1) && a[0].numeric()) {
+        // Char(13) — ASCII code to 1-char string (pmsys audit proc builds
+        // CRLF this way). The type name CHAR never reaches here (it only
+        // appears inside DECLARE / CAST, both handled by the parser).
+        return Value::character(std::string(
+            1, static_cast<char>(int_at(0) & 0xFF)));
     }
     if ((fn == "YEAR" || fn == "MONTH" || fn == "DAY") && need(1)) {
         const Value& v = a[0];

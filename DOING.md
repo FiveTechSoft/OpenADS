@@ -201,9 +201,38 @@ PROPAGATE and fail the SELECT (SAP parity) instead of silently returning "".
 Typed column/literal/nested-call arguments; UDF→UDF recursion is direct (no
 SQL round-trip), depth-capped at 32.
 
-**Next:** S2 = `EXECUTE PROCEDURE` for DD script procs (`__input`/`__output`),
-trigger bodies through the engine with error propagation (failing trigger
-must fail the DML), parameter binding for embedded SQL. S3 = cursors
-(`DECLARE … CURSOR`, `WHILE FETCH`), `EXECUTE IMMEDIATE`, builtin sweep.
-Gates run against the SAP oracle; PMSYS is the integration fixture, not the
-target.
+**S2 (DD procs + triggers) status — DONE:** the two paths that did not exist
+before now run through the engine (`scriptbridge::` in `ace_exports.cpp`):
+
+- **`EXECUTE PROCEDURE` → DD SQL-script procs** (`run_dd_procedure` +
+  `ProcBridge`). Inputs bind as scope variables; `(SELECT p FROM __input)` is
+  rewritten (`__input`→`system.iota`, param→literal) so it resolves to a plain
+  select. Output params create a per-call temp `AS FREE TABLE`; the body
+  `INSERT`s into `__output` and that table is returned as the statement cursor,
+  SAP-style. Dispatched from `exec_sql_direct` ahead of the native-AEP path;
+  script-proc errors fail the statement.
+- **Trigger bodies through the engine** (`script_run_trigger_body` +
+  `TriggerBridge`, replacing the old error-swallowing fragment).
+  `__new.field`/`__old.field` substitute from the collected row image; a bare
+  `SELECT col FROM __new/__old/__input` takes a one-value fast path; normal
+  triggers that re-reference `__new/__old` skip (no double-write), INSTEAD OF
+  runs the write. `INSERT INTO __error(code,'msg')` surfaces as an error.
+  Failures PROPAGATE via `fire_triggers_`' `out_err` → oracle probe Q6:
+  **BEFORE** failure returns error + blocks the write, **AFTER** returns error
+  + keeps it. Verified on INSERT/UPDATE/DELETE and trigger→`EXECUTE PROCEDURE`
+  chains.
+- **pmsys-driven builtins/syntax** picked up along the way: `USER()`,
+  `CHAR()`/`CHR()`, `NOW()`/`CURTIMESTAMP`, `SET @x = …` assignment form,
+  `[bracketed identifiers]`, and Char→numeric coercion so
+  `@n = (SELECT COUNT(*) …)` (aggregate columns arrive as text) assigns to a
+  numeric slot. `EXECUTE IMMEDIATE` also landed early (routes through the same
+  bridge). Cursor `DECLARE … CURSOR` / `WHILE FETCH` now PARSE but raise a
+  clean "not supported yet (S3)" runtime error instead of a parse failure.
+- **Tests:** `tests/unit/abi_script_proc_test.cpp` — 12 integration cases
+  (proc `__output`/`__input`, control flow, error propagation, BEFORE/AFTER
+  block-vs-persist on all three DML verbs, trigger→proc chains), all green;
+  full unit suite green.
+
+**Next:** S3 = cursors (`DECLARE … CURSOR` / `WHILE FETCH` execution),
+remaining `EXECUTE IMMEDIATE` edge cases, builtin sweep. Gates run against the
+SAP oracle; PMSYS is the integration fixture, not the target.

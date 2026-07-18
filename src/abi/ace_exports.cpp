@@ -9007,6 +9007,15 @@ UNSIGNED32 ENTRYPOINT AdsGetServerTime(ADSHANDLE  /*hConnect*/,
 // Returns true if at least one INSTEAD OF trigger was fired (caller should
 // skip the actual DML in that case).
 
+// RCB 07/17/2026 (S2): trigger bodies run through the script engine. The
+// runner is defined after the scriptbridge machinery (much later in this
+// file, at global scope); declared here so fire_triggers_ can call it.
+extern "C++" openads::util::Result<void> script_run_trigger_body(
+    Connection* conn, ADSHANDLE hConn, const std::string& body,
+    const std::map<std::string, std::string>& new_f,
+    const std::map<std::string, std::string>& old_f,
+    bool is_instead_of);
+
 namespace {
 thread_local int tl_trigger_depth = 0;
 static constexpr int kTrigMaxDepth = 64;
@@ -9051,66 +9060,6 @@ extern "C++" {
 using TrigFieldMap_ = std::map<std::string, std::string>;
 
 // SQL-quote a raw string value (escape embedded quotes, wrap in single quotes).
-static std::string trig_sql_quote_(const std::string& s) {
-    std::string out;
-    out.reserve(s.size() + 2);
-    out += '\'';
-    for (char c : s) {
-        if (c == '\'') out += "''";
-        else out += c;
-    }
-    out += '\'';
-    return out;
-}
-
-// Trim leading and trailing whitespace from a string.
-static std::string trig_trim_(const std::string& s) {
-    std::size_t b = 0, e = s.size();
-    while (b < e && (s[b] == ' ' || s[b] == '\t' || s[b] == '\r' || s[b] == '\n')) ++b;
-    while (e > b && (s[e-1] == ' ' || s[e-1] == '\t' || s[e-1] == '\r' || s[e-1] == '\n')) --e;
-    return s.substr(b, e - b);
-}
-
-// Case-insensitive prefix check.
-static bool trig_ci_pfx_(const std::string& s, const char* prefix, std::size_t plen) {
-    if (s.size() < plen) return false;
-    for (std::size_t i = 0; i < plen; ++i) {
-        if (std::tolower(static_cast<unsigned char>(s[i])) !=
-            std::tolower(static_cast<unsigned char>(prefix[i]))) return false;
-    }
-    return true;
-}
-
-// Split trigger body into statements at ';' boundaries, respecting string literals.
-static std::vector<std::string> trig_split_stmts_(const std::string& body) {
-    std::vector<std::string> out;
-    std::string cur;
-    bool in_sq = false;
-    for (std::size_t i = 0; i < body.size(); ++i) {
-        char c = body[i];
-        if (in_sq) {
-            cur += c;
-            if (c == '\'' && i + 1 < body.size() && body[i+1] == '\'') {
-                cur += body[++i];  // escaped ''
-            } else if (c == '\'') {
-                in_sq = false;
-            }
-        } else if (c == '\'') {
-            in_sq = true;
-            cur += c;
-        } else if (c == ';') {
-            auto ts = trig_trim_(cur);
-            if (!ts.empty()) out.push_back(std::move(ts));
-            cur.clear();
-        } else {
-            cur += c;
-        }
-    }
-    auto ts = trig_trim_(cur);
-    if (!ts.empty()) out.push_back(std::move(ts));
-    return out;
-}
-
 // Collect all field values from a Table into a lowercase-keyed string map.
 // Char fields are space-trimmed; numeric/date fields use as_string representation.
 static void trig_collect_row_(Table* t, TrigFieldMap_& m) {
@@ -9129,296 +9078,12 @@ static void trig_collect_row_(Table* t, TrigFieldMap_& m) {
     }
 }
 
-// Evaluate a SET expression RHS, returning a SQL-ready value string.
-// __new/old field refs → SQL-quoted string.  SQL functions/literals → as-is.
-static std::string trig_eval_rhs_(
-    const std::string& rhs,
-    const TrigFieldMap_& new_f,
-    const TrigFieldMap_& old_f,
-    const TrigFieldMap_& vars)
-{
-    auto lc = [](char x) { return static_cast<char>(std::tolower(static_cast<unsigned char>(x))); };
-    std::string t = trig_trim_(rhs);
-    // __new.field or __old.field
-    if (t.size() > 6) {
-        bool is_new = (lc(t[0])=='_' && lc(t[1])=='_' && lc(t[2])=='n' &&
-                       lc(t[3])=='e' && lc(t[4])=='w' && t[5]=='.');
-        bool is_old = (lc(t[0])=='_' && lc(t[1])=='_' && lc(t[2])=='o' &&
-                       lc(t[3])=='l' && lc(t[4])=='d' && t[5]=='.');
-        if (is_new || is_old) {
-            std::string fname = trig_trim_(t.substr(6));
-            for (auto& c : fname) c = lc(c);
-            const auto& fmap = is_new ? new_f : old_f;
-            auto it = fmap.find(fname);
-            return (it != fmap.end()) ? trig_sql_quote_(it->second) : "NULL";
-        }
-    }
-    // @var reference
-    if (!t.empty() && t[0] == '@') {
-        std::string vname = t.substr(1);
-        for (auto& c : vname) c = lc(c);
-        auto it = vars.find(vname);
-        return (it != vars.end()) ? it->second : "NULL";
-    }
-    // Subquery: ( SELECT field FROM __new ) or ( SELECT field FROM __old ) or __input
-    // Pattern: ( SELECT <field> FROM __new|__old|__input )
-    if (!t.empty() && t.front() == '(') {
-        std::string inner = trig_trim_(t.substr(1, t.size() - 2));
-        if (trig_ci_pfx_(inner, "SELECT", 6)) {
-            std::size_t p = 6;
-            while (p < inner.size() && inner[p] == ' ') ++p;
-            // Extract field name (up to whitespace or FROM)
-            std::size_t fs = p;
-            while (p < inner.size() &&
-                   (std::isalnum(static_cast<unsigned char>(inner[p])) ||
-                    inner[p] == '_' || inner[p] == '[' || inner[p] == ']')) ++p;
-            std::string field = inner.substr(fs, p - fs);
-            // Strip brackets
-            if (!field.empty() && field.front() == '[') field = field.substr(1);
-            if (!field.empty() && field.back() == ']') field.pop_back();
-            for (auto& c : field) c = lc(c);
-            while (p < inner.size() && inner[p] == ' ') ++p;
-            if (p + 4 <= inner.size() &&
-                lc(inner[p])=='f' && lc(inner[p+1])=='r' &&
-                lc(inner[p+2])=='o' && lc(inner[p+3])=='m') {
-                p += 4;
-                while (p < inner.size() && inner[p] == ' ') ++p;
-                std::size_t ts = p;
-                while (p < inner.size() && !std::isspace(static_cast<unsigned char>(inner[p]))) ++p;
-                std::string src = inner.substr(ts, p - ts);
-                for (auto& c : src) c = lc(c);
-                const TrigFieldMap_* fmap = nullptr;
-                if (src == "__new")   fmap = &new_f;
-                else if (src == "__old")   fmap = &old_f;
-                else if (src == "__input") fmap = &new_f;  // __input: params passed as new_f
-                if (fmap) {
-                    auto it = fmap->find(field);
-                    return (it != fmap->end()) ? trig_sql_quote_(it->second) : "NULL";
-                }
-            }
-        }
-    }
-    // String literal (already SQL-quoted) or SQL expression/function: pass through
-    return t;
-}
-
-// Substitute __new.field, __old.field, and @var references in a SQL statement.
-// String literals inside the statement are passed through unchanged.
-static std::string trig_substitute_(
-    const std::string& stmt,
-    const TrigFieldMap_& new_f,
-    const TrigFieldMap_& old_f,
-    const TrigFieldMap_& vars)
-{
-    auto lc = [](char x) { return static_cast<char>(std::tolower(static_cast<unsigned char>(x))); };
-    std::string out;
-    out.reserve(stmt.size() * 2);
-    std::size_t i = 0;
-    bool in_str = false;
-    while (i < stmt.size()) {
-        char c = stmt[i];
-        if (in_str) {
-            out += c; ++i;
-            if (c == '\'' && i < stmt.size() && stmt[i] == '\'') {
-                out += stmt[i++];  // escaped ''
-            } else if (c == '\'') {
-                in_str = false;
-            }
-            continue;
-        }
-        if (c == '\'') { in_str = true; out += c; ++i; continue; }
-        // __new.field or __old.field
-        if (c == '_' && i + 6 <= stmt.size()) {
-            bool is_new = (lc(stmt[i+0])=='_' && lc(stmt[i+1])=='_' && lc(stmt[i+2])=='n' &&
-                           lc(stmt[i+3])=='e' && lc(stmt[i+4])=='w' && stmt[i+5]=='.');
-            bool is_old = (!is_new && lc(stmt[i+0])=='_' && lc(stmt[i+1])=='_' &&
-                           lc(stmt[i+2])=='o' && lc(stmt[i+3])=='l' &&
-                           lc(stmt[i+4])=='d' && stmt[i+5]=='.');
-            if (is_new || is_old) {
-                i += 6;
-                std::size_t fs = i;
-                while (i < stmt.size() &&
-                       (std::isalnum(static_cast<unsigned char>(stmt[i])) || stmt[i]=='_'))
-                    ++i;
-                std::string fname = stmt.substr(fs, i - fs);
-                for (auto& ch : fname) ch = lc(ch);
-                const auto& fmap = is_new ? new_f : old_f;
-                auto it = fmap.find(fname);
-                out += (it != fmap.end()) ? trig_sql_quote_(it->second) : "NULL";
-                continue;
-            }
-        }
-        // @var reference
-        if (c == '@') {
-            std::size_t vs = i + 1, ve = vs;
-            while (ve < stmt.size() &&
-                   (std::isalnum(static_cast<unsigned char>(stmt[ve])) || stmt[ve]=='_'))
-                ++ve;
-            if (ve > vs) {
-                std::string vname = stmt.substr(vs, ve - vs);
-                for (auto& ch : vname) ch = lc(ch);
-                auto it = vars.find(vname);
-                if (it != vars.end()) { out += it->second; i = ve; continue; }
-            }
-        }
-        out += c; ++i;
-    }
-    return out;
-}
-
 // Error info returned from a trigger body (via INSERT INTO __error).
 struct TrigError_ {
     bool        has_error = false;
     std::uint32_t errno_val = 0;
     std::string   message;
 };
-
-// Parse: INSERT INTO __error [(errno, message)] VALUES (num, 'msg')
-// or INSERT INTO __error (message) VALUES ('msg')
-static TrigError_ trig_parse_error_insert_(const std::string& ts) {
-    TrigError_ e;
-    // Locate VALUES keyword
-    auto vu = ts; for (auto& c : vu) c = static_cast<char>(std::toupper((unsigned char)c));
-    auto vpos = vu.find("VALUES");
-    if (vpos == std::string::npos) return e;
-    // Find the opening paren after VALUES
-    auto p = ts.find('(', vpos + 6);
-    if (p == std::string::npos) return e;
-    auto q = ts.rfind(')');
-    if (q == std::string::npos || q <= p) return e;
-    std::string inner = trig_trim_(ts.substr(p + 1, q - p - 1));
-    // Try to parse: <num> , 'message'  OR  'message'
-    e.has_error = true;
-    // Check if first token is numeric
-    std::size_t i = 0;
-    bool neg = (i < inner.size() && inner[i] == '-'); if (neg) ++i;
-    bool is_num = (i < inner.size() && std::isdigit((unsigned char)inner[i]));
-    if (is_num) {
-        std::size_t ns = i;
-        while (i < inner.size() && std::isdigit((unsigned char)inner[i])) ++i;
-        e.errno_val = static_cast<std::uint32_t>(
-            std::atoi(inner.substr(neg ? 1 : ns, i - ns).c_str()));
-        // Skip comma
-        while (i < inner.size() && (inner[i] == ' ' || inner[i] == ',')) ++i;
-    }
-    // Remaining is the message string literal
-    if (i < inner.size() && inner[i] == '\'') {
-        ++i;
-        while (i < inner.size() && inner[i] != '\'') {
-            if (inner[i] == '\'' && i + 1 < inner.size() && inner[i+1] == '\'') {
-                e.message += '\''; i += 2;
-            } else {
-                e.message += inner[i++];
-            }
-        }
-    }
-    return e;
-}
-
-// Execute an ADS procedural trigger body.  Handles DECLARE @var, SET @var = expr,
-// __new/__old field substitution, and @variable substitution before SQL execution.
-// When is_instead_of=true, INSERT...SELECT...FROM __new is executed (the trigger
-// body must manually write the row).  Returns error info if the body wrote to __error.
-static TrigError_ trig_execute_body_(
-    Handle hConn,
-    const std::string& body,
-    const TrigFieldMap_& new_f,
-    const TrigFieldMap_& old_f,
-    bool is_instead_of = false)
-{
-    auto stmts = trig_split_stmts_(body);
-    TrigFieldMap_ vars;
-    auto lc = [](char x) { return static_cast<char>(std::tolower(static_cast<unsigned char>(x))); };
-
-    for (const auto& raw : stmts) {
-        std::string ts = trig_trim_(raw);
-        if (ts.empty()) continue;
-
-        // DECLARE @var [TYPE] — register variable; DECLARE name CURSOR — skip
-        if (trig_ci_pfx_(ts, "DECLARE", 7)) {
-            std::size_t p = 7;
-            while (p < ts.size() && ts[p] == ' ') ++p;
-            if (p < ts.size() && ts[p] == '@') {
-                std::size_t ns = p + 1, ne = ns;
-                while (ne < ts.size() &&
-                       (std::isalnum(static_cast<unsigned char>(ts[ne])) || ts[ne]=='_')) ++ne;
-                std::string vname = ts.substr(ns, ne - ns);
-                for (auto& c : vname) c = lc(c);
-                vars.emplace(vname, "NULL");
-            }
-            // Cursor declarations (DECLARE name CURSOR AS SELECT ...) are skipped entirely
-            continue;
-        }
-
-        // SET @var = expr
-        if (trig_ci_pfx_(ts, "SET", 3) && ts.size() > 3 &&
-            (ts[3] == ' ' || ts[3] == '\t')) {
-            std::size_t p = 3;
-            while (p < ts.size() && ts[p] == ' ') ++p;
-            if (p < ts.size() && ts[p] == '@') {
-                std::size_t ns = p + 1, ne = ns;
-                while (ne < ts.size() &&
-                       (std::isalnum(static_cast<unsigned char>(ts[ne])) || ts[ne]=='_')) ++ne;
-                std::string vname = ts.substr(ns, ne - ns);
-                for (auto& c : vname) c = lc(c);
-                std::size_t eq = ne;
-                while (eq < ts.size() && ts[eq] == ' ') ++eq;
-                if (eq < ts.size() && ts[eq] == '=') {
-                    ++eq;
-                    while (eq < ts.size() && ts[eq] == ' ') ++eq;
-                    vars[vname] = trig_eval_rhs_(ts.substr(eq), new_f, old_f, vars);
-                }
-            }
-            continue;
-        }
-
-        // OPEN cursor AS SELECT ... — cursor loops not supported; skip
-        if (trig_ci_pfx_(ts, "OPEN", 4)) continue;
-        // FETCH / CLOSE cursor — skip
-        if (trig_ci_pfx_(ts, "FETCH", 5)) continue;
-        if (trig_ci_pfx_(ts, "CLOSE", 5)) continue;
-        // WHILE ... DO ... END (cursor loop) — skip entire block
-        if (trig_ci_pfx_(ts, "WHILE", 5)) continue;
-        // IF ... THEN / ELSE / END — skip conditional blocks
-        if (trig_ci_pfx_(ts, "IF ", 3) || trig_ci_pfx_(ts, "ELSEIF", 6) ||
-            trig_ci_pfx_(ts, "ELSE", 4) || trig_ci_pfx_(ts, "END", 3)) continue;
-        // EXECUTE IMMEDIATE / EXECUTE PROCEDURE — not supported; skip
-        if (trig_ci_pfx_(ts, "EXECUTE", 7)) continue;
-        // DROP TABLE #... — session temp tables; skip
-        if (trig_ci_pfx_(ts, "DROP TABLE #", 12)) continue;
-        // INSERT INTO __error (errno, message) VALUES (...) — capture error and stop
-        {
-            std::string tsu = ts;
-            for (auto& c : tsu) c = static_cast<char>(std::toupper((unsigned char)c));
-            if (tsu.find("__ERROR") != std::string::npos &&
-                trig_ci_pfx_(ts, "INSERT", 6)) {
-                return trig_parse_error_insert_(ts);
-            }
-        }
-        // For non-INSTEAD OF triggers: INSERT ... SELECT ... FROM __new or __old is
-        // a trigger trying to re-insert the source row — skip to avoid duplicate writes.
-        // For INSTEAD OF triggers: this INSERT is the actual write the trigger performs;
-        // fall through and execute it.
-        if (!is_instead_of && trig_ci_pfx_(ts, "INSERT", 6) &&
-            (ts.find("__new") != std::string::npos ||
-             ts.find("__old") != std::string::npos)) continue;
-
-        // Plain SQL: substitute references and execute
-        std::string sql = trig_trim_(trig_substitute_(ts, new_f, old_f, vars));
-        if (sql.empty()) continue;
-
-        ADSHANDLE hStmt = 0;
-        if (AdsCreateSQLStatement(hConn, &hStmt) != openads::AE_SUCCESS) continue;
-        ADSHANDLE hCursor = 0;
-        AdsExecuteSQLDirect(
-            hStmt,
-            reinterpret_cast<UNSIGNED8*>(const_cast<char*>(sql.c_str())),
-            &hCursor);
-        if (hCursor) AdsCloseTable(hCursor);
-        AdsCloseSQLStatement(hStmt);
-    }
-    return TrigError_{};
-}
 
 }  // extern "C++"  — trig_ helpers regain C++ linkage (silences C4190)
 
@@ -9428,7 +9093,8 @@ static TrigError_ trig_execute_body_(
 bool fire_triggers_(Handle hConn, Connection* conn,
                     const std::string& table_alias, std::uint32_t event_mask,
                     std::uint32_t timing,
-                    Table* new_tbl = nullptr, Table* old_tbl = nullptr) {
+                    Table* new_tbl = nullptr, Table* old_tbl = nullptr,
+                    TrigError_* out_err = nullptr) {
     if (tl_trigger_depth >= kTrigMaxDepth) return false; // depth limit
     if (conn->triggers_disabled()) return false;          // connection-level disable
     auto* dd = conn->dd();
@@ -9493,13 +9159,23 @@ bool fire_triggers_(Handle hConn, Connection* conn,
             body_copy.pop_back();
         }
 
-        TrigError_ err = trig_execute_body_(hConn, body_copy, new_fields, old_fields,
-                                             timing == 2u /*is_instead_of*/);
+        // RCB 07/17/2026 (S2): the body runs through the typed script
+        // engine (full IF/WHILE/TRY, EXECUTE PROCEDURE into DD script
+        // procs, RAISE). A failure is REPORTED to the caller — the old
+        // fragment silently swallowed it, so pmsys audit triggers "fired"
+        // while writing nothing and the DML still reported success.
+        auto r = script_run_trigger_body(conn, hConn, body_copy,
+                                         new_fields, old_fields,
+                                         timing == 2u /*is_instead_of*/);
         if (timing == 2u) instead_of_fired = true;
-        // If the trigger wrote to __error, propagate the error but continue
-        // (per SAP semantics, remaining triggers still fire; the error is
-        // returned to the client after all triggers complete).
-        (void)err; // future: propagate error code back to client
+        if (!r && out_err != nullptr && !out_err->has_error) {
+            // Per SAP semantics remaining triggers still fire; the first
+            // error is what the client sees after all of them complete.
+            out_err->has_error = true;
+            out_err->errno_val =
+                static_cast<std::uint32_t>(r.error().code);
+            out_err->message = r.error().message;
+        }
     }
     --tl_trigger_depth;
     return instead_of_fired;
@@ -9759,16 +9435,27 @@ UNSIGNED32 ENTRYPOINT AdsWriteRecord(ADSHANDLE hTable) {
     }
 
     // Trigger firing order: INSTEAD OF → (skip flush) OR BEFORE → flush → AFTER
+    // RCB 07/17/2026 (S2): trigger failures propagate to the client (SAP
+    // oracle probe Q6): BEFORE/INSTEAD OF failure blocks the write; AFTER
+    // failure returns the error but the write persists.
+    TrigError_ terr;
     if (Connection* conn = conn_for_table(t)) {
         std::string alias = ri_alias_for_path(conn, t->path());
         if (!alias.empty()) {
             Handle hConn = handle_for_conn(conn);
             if (hConn) {
                 // INSTEAD OF trigger: fire and skip the actual write
-                if (fire_triggers_(hConn, conn, alias, event_mask, 2u /*INSTEAD_OF*/, t))
+                if (fire_triggers_(hConn, conn, alias, event_mask,
+                                   2u /*INSTEAD_OF*/, t, nullptr, &terr)) {
+                    if (terr.has_error)
+                        return fail(static_cast<int>(terr.errno_val), terr.message.c_str());
                     return ok();
+                }
                 // BEFORE trigger: fire before the write
-                fire_triggers_(hConn, conn, alias, event_mask, 1u /*BEFORE*/, t);
+                fire_triggers_(hConn, conn, alias, event_mask,
+                               1u /*BEFORE*/, t, nullptr, &terr);
+                if (terr.has_error)
+                    return fail(static_cast<int>(terr.errno_val), terr.message.c_str());
             }
         }
     }
@@ -9783,7 +9470,12 @@ UNSIGNED32 ENTRYPOINT AdsWriteRecord(ADSHANDLE hTable) {
         if (!alias.empty()) {
             Handle hConn = handle_for_conn(conn);
             // AFTER trigger: __new = current record (new values for UPDATE, inserted for INSERT)
-            if (hConn) fire_triggers_(hConn, conn, alias, event_mask, 4u /*AFTER*/, t);
+            if (hConn) {
+                fire_triggers_(hConn, conn, alias, event_mask,
+                               4u /*AFTER*/, t, nullptr, &terr);
+                if (terr.has_error)
+                    return fail(static_cast<int>(terr.errno_val), terr.message.c_str());
+            }
         }
     }
     return ok();
@@ -9909,16 +9601,25 @@ UNSIGNED32 ENTRYPOINT AdsDeleteRecord(ADSHANDLE hTable) {
     }
 
     // Trigger firing order for DELETE: INSTEAD OF → (skip delete) OR BEFORE → delete → AFTER
+    // RCB 07/17/2026 (S2): failures propagate (probe Q6 semantics).
+    TrigError_ terr;
     if (Connection* conn = conn_for_table(t)) {
         std::string alias = ri_alias_for_path(conn, t->path());
         if (!alias.empty()) {
             Handle hConn = handle_for_conn(conn);
             if (hConn) {
                 // INSTEAD OF DELETE: __old = current record
-                if (fire_triggers_(hConn, conn, alias, 3u, 2u /*INSTEAD_OF*/, nullptr, t))
+                if (fire_triggers_(hConn, conn, alias, 3u, 2u /*INSTEAD_OF*/,
+                                   nullptr, t, &terr)) {
+                    if (terr.has_error)
+                        return fail(static_cast<int>(terr.errno_val), terr.message.c_str());
                     return ok();
+                }
                 // BEFORE DELETE: __old = current record (about to be deleted)
-                fire_triggers_(hConn, conn, alias, 3u, 1u /*BEFORE*/, nullptr, t);
+                fire_triggers_(hConn, conn, alias, 3u, 1u /*BEFORE*/,
+                               nullptr, t, &terr);
+                if (terr.has_error)
+                    return fail(static_cast<int>(terr.errno_val), terr.message.c_str());
             }
         }
     }
@@ -9931,7 +9632,12 @@ UNSIGNED32 ENTRYPOINT AdsDeleteRecord(ADSHANDLE hTable) {
         if (!alias.empty()) {
             Handle hConn = handle_for_conn(conn);
             // AFTER DELETE: __old = the deleted record
-            if (hConn) fire_triggers_(hConn, conn, alias, 3u, 4u /*AFTER*/, nullptr, t);
+            if (hConn) {
+                fire_triggers_(hConn, conn, alias, 3u, 4u /*AFTER*/,
+                               nullptr, t, &terr);
+                if (terr.has_error)
+                    return fail(static_cast<int>(terr.errno_val), terr.message.c_str());
+            }
         }
     }
     return ok();
@@ -20877,6 +20583,85 @@ inline Value value_from_text(const std::string& text, Type t) {
     return Value::character(text);
 }
 
+// One-value cursor: answers single-value fast paths (literal iota
+// selects, trigger row-image reads) without a SQL round-trip.
+struct OneValueCursor final : openads::script::SqlCursor {
+    Value v;
+    bool done = false;
+    explicit OneValueCursor(Value val) : v(std::move(val)) {}
+    bool next() override {
+        if (done) return false;
+        done = true;
+        return true;
+    }
+    std::size_t field_count() const override { return 1; }
+    Value field(std::size_t) override { return v; }
+};
+
+// If `sql` is exactly "SELECT <literal> FROM system.iota", return the
+// literal's value; otherwise empty. Recognizes numbers, 'strings', NULL,
+// TRUE/FALSE and {d '...'}/{ts '...'} — precisely what the executor's
+// variable substitution can produce.
+inline std::optional<Value> literal_iota_select(const std::string& sql) {
+    auto trim = [](std::string s) {
+        auto b = s.find_first_not_of(" \t\r\n");
+        auto e = s.find_last_not_of(" \t\r\n;");
+        if (b == std::string::npos) return std::string();
+        return s.substr(b, e - b + 1);
+    };
+    std::string s = trim(sql);
+    if (s.size() < 12) return std::nullopt;
+    auto up = s;
+    for (auto& ch : up)
+        ch = static_cast<char>(std::toupper((unsigned char)ch));
+    if (up.compare(0, 7, "SELECT ") != 0) return std::nullopt;
+    auto fp = up.rfind(" FROM ");
+    if (fp == std::string::npos) return std::nullopt;
+    std::string src = trim(s.substr(fp + 6));
+    for (auto& ch : src)
+        ch = static_cast<char>(std::tolower((unsigned char)ch));
+    if (src != "system.iota") return std::nullopt;
+    std::string lit = trim(s.substr(7, fp - 7));
+    if (lit.empty()) return std::nullopt;
+    std::string lup = lit;
+    for (auto& ch : lup)
+        ch = static_cast<char>(std::toupper((unsigned char)ch));
+    if (lup == "NULL")  return Value::null();
+    if (lup == "TRUE")  return Value::logical(true);
+    if (lup == "FALSE") return Value::logical(false);
+    if (lit.size() >= 2 && lit.front() == '\'' && lit.back() == '\'') {
+        std::string v2;
+        for (std::size_t i = 1; i + 1 < lit.size(); ++i) {
+            if (lit[i] == '\'' && i + 2 < lit.size() && lit[i + 1] == '\'')
+                { v2 += '\''; ++i; }
+            else if (lit[i] == '\'') return std::nullopt;  // 'a','b' etc.
+            else v2 += lit[i];
+        }
+        return Value::character(v2);
+    }
+    if (lit.front() == '{') {
+        // {d 'YYYY-MM-DD'} / {ts '...'} — reuse the text parser.
+        auto q1 = lit.find('\'');
+        auto q2 = lit.rfind('\'');
+        if (q1 == std::string::npos || q2 <= q1) return std::nullopt;
+        std::string inner = lit.substr(q1 + 1, q2 - q1 - 1);
+        bool is_ts = lup.compare(0, 3, "{TS") == 0;
+        Value v2 = value_from_text(inner,
+                                   is_ts ? Type::Timestamp : Type::Date);
+        if (v2.is_null) return std::nullopt;
+        return v2;
+    }
+    char* end = nullptr;
+    double d = std::strtod(lit.c_str(), &end);
+    if (end == lit.c_str() + lit.size()) {
+        if (lit.find('.') == std::string::npos &&
+            d == static_cast<double>(static_cast<std::int64_t>(d)))
+            return Value::integer(static_cast<std::int64_t>(d));
+        return Value::real(d);
+    }
+    return std::nullopt;
+}
+
 // Typed row access over an AdsExecuteSQLDirect cursor.
 struct AbiSqlCursor final : openads::script::SqlCursor {
     ADSHANDLE h = 0;
@@ -20897,17 +20682,15 @@ struct AbiSqlCursor final : openads::script::SqlCursor {
         return n;
     }
     Value field(std::size_t idx) override {
-        UNSIGNED8 fname[256] = {0};
-        UNSIGNED16 cap = sizeof(fname) - 1;
-        if (AdsGetFieldName(h, static_cast<UNSIGNED16>(idx + 1), fname,
-                            &cap) != 0)
-            return Value::null();
-        fname[cap] = 0;
+        // Ordinal (ADSFIELD) access — aggregate/expression columns can have
+        // names AdsGetFieldType won't resolve ("COUNT(*)").
+        UNSIGNED8* ord = reinterpret_cast<UNSIGNED8*>(
+            static_cast<std::uintptr_t>(idx + 1));
         UNSIGNED16 ftype = 0;
-        AdsGetFieldType(h, fname, &ftype);
+        AdsGetFieldType(h, ord, &ftype);
         std::vector<char> buf(65536, 0);
         UNSIGNED32 len = static_cast<UNSIGNED32>(buf.size() - 1);
-        if (AdsGetString(h, fname, reinterpret_cast<UNSIGNED8*>(buf.data()),
+        if (AdsGetString(h, ord, reinterpret_cast<UNSIGNED8*>(buf.data()),
                          &len, 0) != 0)
             return Value::null();
         std::string text(buf.data(), len);
@@ -20940,6 +20723,17 @@ struct AbiBridge final : openads::script::SqlBridge {
 
     openads::util::Result<std::unique_ptr<openads::script::SqlCursor>>
     exec(const std::string& sql) override {
+        // Fast path: "SELECT <literal> FROM system.iota" — the shape that
+        // variable substitution leaves behind for "(SELECT param FROM
+        // __input)". Answered directly; also sidesteps the SQL engine's
+        // current lack of literal-only projections (S2-4 gap list).
+        {
+            auto lit = literal_iota_select(sql);
+            if (lit.has_value()) {
+                return std::unique_ptr<openads::script::SqlCursor>(
+                    new OneValueCursor(std::move(*lit)));
+            }
+        }
         std::vector<UNSIGNED8> sbuf(sql.size() + 1);
         std::memcpy(sbuf.data(), sql.c_str(), sql.size() + 1);
         ADSHANDLE hc = 0;
@@ -21004,6 +20798,7 @@ openads::util::Result<Value> run_dd_function(
     if (!prog) return prog.error();
 
     openads::script::Executor ex(&bridge);
+    ex.set_user(c->username());
     auto params = openads::script::parse_params(fe->input_params);
     if (params) {
         const auto& ps = params.value();
@@ -21033,7 +20828,405 @@ openads::util::Result<Value> run_dd_function(
     return std::move(r.value().return_value);
 }
 
+// ---- S2: DD SQL-script stored procedures (RCB 07/17/2026) ----------------
+//
+// Case-insensitive whole-word table-name rewrite outside 'strings' and
+// [brackets]. Used to map the proc virtual tables onto real ones:
+//   __input  → system.iota (every __input column reference is a parameter
+//              name, and parameters are substituted to literals by the
+//              executor first, so "(SELECT Month FROM __input)" becomes
+//              "(SELECT 2 FROM system.iota)")
+//   __output → a per-call temp FREE table created from the declared output
+//              parameters; returned as the statement cursor, SAP-style.
+inline std::string rewrite_word(const std::string& sql,
+                                const std::string& from,
+                                const std::string& to) {
+    std::string out;
+    out.reserve(sql.size() + 16);
+    std::size_t i = 0, n = sql.size();
+    auto eq_ci = [](char a, char b) {
+        return std::toupper((unsigned char)a) == std::toupper((unsigned char)b);
+    };
+    while (i < n) {
+        char c = sql[i];
+        if (c == '\'') {
+            std::size_t j = i + 1;
+            while (j < n) {
+                if (sql[j] == '\'' && j + 1 < n && sql[j + 1] == '\'') j += 2;
+                else if (sql[j] == '\'') { ++j; break; }
+                else ++j;
+            }
+            out.append(sql, i, j - i);
+            i = j;
+            continue;
+        }
+        if (c == '[') {
+            std::size_t j = sql.find(']', i);
+            j = (j == std::string::npos) ? n : j + 1;
+            out.append(sql, i, j - i);
+            i = j;
+            continue;
+        }
+        if ((std::isalpha((unsigned char)c) || c == '_')) {
+            std::size_t j = i + 1;
+            while (j < n && (std::isalnum((unsigned char)sql[j]) ||
+                             sql[j] == '_'))
+                ++j;
+            bool match = (j - i == from.size());
+            if (match)
+                for (std::size_t k = 0; k < from.size(); ++k)
+                    if (!eq_ci(sql[i + k], from[k])) { match = false; break; }
+            if (match) out += to;
+            else out.append(sql, i, j - i);
+            i = j;
+            continue;
+        }
+        out.push_back(c);
+        ++i;
+    }
+    return out;
+}
+
+// Bridge for procedure bodies: rewrites the virtual-table names on every
+// embedded statement, then delegates to the ordinary bridge.
+struct ProcBridge final : openads::script::SqlBridge {
+    AbiBridge inner;
+    std::string out_table;   // empty = no output params
+    ProcBridge(Connection* conn, ADSHANDLE hs) : inner(conn, hs) {}
+
+    openads::util::Result<std::unique_ptr<openads::script::SqlCursor>>
+    exec(const std::string& sql) override {
+        std::string s = rewrite_word(sql, "__input", "system.iota");
+        if (!out_table.empty())
+            s = rewrite_word(s, "__output", "[" + out_table + "]");
+        return inner.exec(s);
+    }
+    bool has_udf(const std::string& name) override {
+        return inner.has_udf(name);
+    }
+    openads::util::Result<Value>
+    call_udf(const std::string& name,
+             const std::vector<Value>& args) override {
+        return inner.call_udf(name, args);
+    }
+};
+
+// SQL column type for a declared output parameter (temp __output table).
+inline std::string sql_type_of(const openads::script::Param& p) {
+    switch (p.type) {
+        case Type::Char: {
+            std::size_t n = p.char_limit ? p.char_limit : 254;
+            if (n > 254) n = 254;
+            return "CHAR(" + std::to_string(n) + ")";
+        }
+        case Type::Integer:   return "INTEGER";
+        case Type::Double:    return "DOUBLE";
+        case Type::Logical:   return "LOGICAL";
+        case Type::Date:      return "DATE";
+        case Type::Timestamp: return "TIMESTAMP";
+        case Type::Null:      break;
+    }
+    return "CHAR(254)";
+}
+
+// Execute a DD SQL-script stored procedure. Returns the name of the temp
+// __output table ("" when the proc declares no outputs); the caller opens
+// it as the statement cursor.
+inline openads::util::Result<std::string> run_dd_procedure(
+    Connection* c, ADSHANDLE hStmt,
+    const openads::engine::DataDict::ProcEntry& pe,
+    const std::vector<openads::sql::ExecuteProcedureArg>& args) {
+    auto prog = compiled(pe.procedure);
+    if (!prog) return prog.error();
+
+    ProcBridge bridge(c, hStmt);
+
+    // Output params → temp FREE table the body INSERTs into.
+    auto outs = openads::script::parse_params(pe.output_params);
+    if (outs && !outs.value().empty()) {
+        char nb[48];
+        std::snprintf(nb, sizeof(nb), "_spout_%llx",
+                      static_cast<unsigned long long>(
+                          openads::platform::monotonic_nanos()));
+        std::string ddl = "CREATE TABLE [" + std::string(nb) + "] (";
+        bool first = true;
+        for (const auto& p : outs.value()) {
+            if (!first) ddl += ", ";
+            first = false;
+            ddl += "[" + p.name + "] " + sql_type_of(p);
+        }
+        ddl += ") AS FREE TABLE";
+        auto cr = bridge.inner.exec(ddl);
+        if (!cr) return cr.error();
+        bridge.out_table = nb;
+    }
+
+    // Input params become scope variables; bodies read them either directly
+    // or via "(SELECT <param> FROM __input)", which the substitution +
+    // __input→system.iota rewrite turns into a literal select.
+    openads::script::Executor ex(&bridge);
+    ex.set_user(c->username());
+    auto ins = openads::script::parse_params(pe.input_params);
+    if (ins) {
+        const auto& ps = ins.value();
+        for (std::size_t i = 0; i < ps.size(); ++i) {
+            Value v = Value::null();
+            if (i < args.size()) {
+                const auto& a = args[i];
+                if (a.is_numeric) {
+                    if (a.number == std::floor(a.number) &&
+                        std::abs(a.number) < 1e15)
+                        v = Value::integer(
+                            static_cast<std::int64_t>(a.number));
+                    else
+                        v = Value::real(a.number);
+                } else {
+                    v = Value::character(a.text);
+                }
+                if (!v.is_null && ps[i].type != Type::Null &&
+                    v.type != ps[i].type) {
+                    if (v.type == Type::Char && ps[i].type != Type::Char)
+                        v = value_from_text(v.s, ps[i].type);
+                    else {
+                        auto cv = openads::script::coerce_assign(
+                            ps[i].type, v, ps[i].char_limit);
+                        if (cv) v = std::move(cv).value();
+                    }
+                }
+            }
+            ex.set_param(ps[i].name, std::move(v));
+        }
+    }
+
+    auto r = ex.run(*prog.value());
+    if (!r) return r.error();
+    return bridge.out_table;
+}
+
+// ---- S2: trigger bodies (RCB 07/17/2026) ---------------------------------
+// Oracle-verified semantics (probe Q6, sweep copy): a failing trigger makes
+// the DML statement return 7200; BEFORE failure blocks the write, AFTER
+// failure keeps it. The old fragment skipped IF/WHILE/EXECUTE and swallowed
+// errors entirely.
+
+// SQL literal for a raw trigger row-image value: numbers pass bare, all
+// else quoted (the row images are display strings).
+inline std::string trig_literal(const std::string& s) {
+    if (!s.empty()) {
+        char* end = nullptr;
+        std::strtod(s.c_str(), &end);
+        if (end == s.c_str() + s.size()) return s;   // pure number
+    }
+    std::string out = "'";
+    for (char c : s) { if (c == '\'') out += '\''; out += c; }
+    out += '\'';
+    return out;
+}
+
+struct TriggerBridge final : openads::script::SqlBridge {
+    AbiBridge inner;
+    const std::map<std::string, std::string>* new_f;
+    const std::map<std::string, std::string>* old_f;
+    bool instead_of = false;
+
+    TriggerBridge(Connection* conn, ADSHANDLE hs,
+                  const std::map<std::string, std::string>* nf,
+                  const std::map<std::string, std::string>* of,
+                  bool io)
+        : inner(conn, hs), new_f(nf), old_f(of), instead_of(io) {}
+
+    const std::string* row_field(const std::map<std::string,
+                                 std::string>* m,
+                                 std::string name) const {
+        if (m == nullptr) return nullptr;
+        for (auto& ch : name)
+            ch = static_cast<char>(std::tolower((unsigned char)ch));
+        auto it = m->find(name);
+        return it == m->end() ? nullptr : &it->second;
+    }
+
+    openads::util::Result<std::unique_ptr<openads::script::SqlCursor>>
+    exec(const std::string& sql) override {
+        // 1. INSERT INTO __error … VALUES (code, 'msg') — the classic ADS
+        //    way for a trigger to fail the DML. Surface it as an error.
+        {
+            std::string up = sql;
+            for (auto& ch : up)
+                ch = static_cast<char>(std::toupper((unsigned char)ch));
+            if (up.find("__ERROR") != std::string::npos &&
+                up.compare(0, 6, "INSERT") == 0) {
+                std::int32_t code = openads::script::kScriptError;
+                std::string  msg  = "trigger error";
+                auto vp = up.find("VALUES");
+                if (vp != std::string::npos) {
+                    auto p = sql.find('(', vp);
+                    auto q = sql.rfind(')');
+                    if (p != std::string::npos && q != std::string::npos &&
+                        q > p) {
+                        std::string innr = sql.substr(p + 1, q - p - 1);
+                        // number, 'msg'   |   'msg'
+                        std::size_t k = 0;
+                        while (k < innr.size() && innr[k] == ' ') ++k;
+                        if (k < innr.size() && innr[k] != '\'') {
+                            code = std::atoi(innr.c_str() + k);
+                            auto comma = innr.find(',', k);
+                            k = comma == std::string::npos ? innr.size()
+                                                           : comma + 1;
+                        }
+                        auto q1 = innr.find('\'', k);
+                        if (q1 != std::string::npos) {
+                            std::string m2;
+                            for (std::size_t z = q1 + 1; z < innr.size(); ++z) {
+                                if (innr[z] == '\'' && z + 1 < innr.size() &&
+                                    innr[z + 1] == '\'') { m2 += '\''; ++z; }
+                                else if (innr[z] == '\'') break;
+                                else m2 += innr[z];
+                            }
+                            msg = m2;
+                        }
+                    }
+                }
+                return openads::util::Error{code, 0, msg, "__error"};
+            }
+        }
+
+        // 2. Replace __new.field / __old.field inline references.
+        std::string s;
+        s.reserve(sql.size());
+        for (std::size_t i = 0; i < sql.size();) {
+            char c = sql[i];
+            if (c == '\'') {
+                std::size_t j = i + 1;
+                while (j < sql.size()) {
+                    if (sql[j] == '\'' && j + 1 < sql.size() &&
+                        sql[j + 1] == '\'') j += 2;
+                    else if (sql[j] == '\'') { ++j; break; }
+                    else ++j;
+                }
+                s.append(sql, i, j - i);
+                i = j;
+                continue;
+            }
+            if (c == '_' && i + 6 < sql.size() && sql[i + 1] == '_') {
+                std::string w = sql.substr(i, 5);
+                for (auto& ch : w)
+                    ch = static_cast<char>(std::tolower((unsigned char)ch));
+                bool isn = (w == "__new"), iso = (w == "__old");
+                if ((isn || iso) && sql[i + 5] == '.') {
+                    std::size_t fs = i + 6, fe = fs;
+                    while (fe < sql.size() &&
+                           (std::isalnum((unsigned char)sql[fe]) ||
+                            sql[fe] == '_'))
+                        ++fe;
+                    const std::string* v = row_field(isn ? new_f : old_f,
+                                                     sql.substr(fs, fe - fs));
+                    s += v ? trig_literal(*v) : std::string("NULL");
+                    i = fe;
+                    continue;
+                }
+            }
+            s.push_back(c);
+            ++i;
+        }
+
+        // 3. Fast path: SELECT <field> FROM __new|__old — one-value cursor.
+        {
+            std::string t = s;
+            std::size_t b = t.find_first_not_of(" \t\r\n");
+            if (b != std::string::npos) t = t.substr(b);
+            std::string up = t;
+            for (auto& ch : up)
+                ch = static_cast<char>(std::toupper((unsigned char)ch));
+            if (up.compare(0, 7, "SELECT ") == 0) {
+                auto fp = up.find(" FROM ");
+                if (fp != std::string::npos) {
+                    std::string src = t.substr(fp + 6);
+                    auto e2 = src.find_first_of(" \t\r\n;");
+                    if (e2 != std::string::npos) src = src.substr(0, e2);
+                    for (auto& ch : src)
+                        ch = static_cast<char>(
+                            std::tolower((unsigned char)ch));
+                    if (src == "__new" || src == "__old" ||
+                        src == "__input") {
+                        std::string col = t.substr(7, fp - 7);
+                        auto ce = col.find_last_not_of(" \t\r\n");
+                        col = (ce == std::string::npos)
+                            ? "" : col.substr(0, ce + 1);
+                        auto cb = col.find_first_not_of(" \t\r\n");
+                        if (cb != std::string::npos) col = col.substr(cb);
+                        if (!col.empty() && col.front() == '[' &&
+                            col.back() == ']')
+                            col = col.substr(1, col.size() - 2);
+                        const auto* m = (src == "__old") ? old_f : new_f;
+                        const std::string* v = row_field(m, col);
+                        return std::unique_ptr<openads::script::SqlCursor>(
+                            new OneValueCursor(
+                                v ? Value::character(*v) : Value::null()));
+                    }
+                }
+            }
+        }
+
+        // 4. Statements still referencing the bare __new/__old tables:
+        //    a normal trigger re-inserting its source row would double-write
+        //    (old-fragment parity: skip); an INSTEAD OF trigger's write is
+        //    the real one — run it with the row image as literals.
+        {
+            std::string low = s;
+            for (auto& ch : low)
+                ch = static_cast<char>(std::tolower((unsigned char)ch));
+            bool refs = low.find("__new") != std::string::npos ||
+                        low.find("__old") != std::string::npos;
+            if (refs && !instead_of)
+                return std::unique_ptr<openads::script::SqlCursor>{};
+            if (refs) {
+                // v1: substitute bare field identifiers, then map the
+                // virtual table to system.iota (single-row source).
+                if (new_f != nullptr)
+                    for (const auto& kv : *new_f)
+                        s = rewrite_word(s, kv.first,
+                                         trig_literal(kv.second));
+                s = rewrite_word(s, "__new", "system.iota");
+                s = rewrite_word(s, "__old", "system.iota");
+            }
+        }
+        return inner.exec(s);
+    }
+    bool has_udf(const std::string& name) override {
+        return inner.has_udf(name);
+    }
+    openads::util::Result<Value>
+    call_udf(const std::string& name,
+             const std::vector<Value>& args) override {
+        return inner.call_udf(name, args);
+    }
+};
+
 } // namespace scriptbridge
+
+// Run one trigger body through the script engine. Declared ahead of the
+// DML machinery (which lives earlier in this file, inside an anonymous
+// namespace) and defined here at global scope.
+extern "C++" openads::util::Result<void> script_run_trigger_body(
+    Connection* conn, ADSHANDLE hConn, const std::string& body,
+    const std::map<std::string, std::string>& new_f,
+    const std::map<std::string, std::string>& old_f,
+    bool is_instead_of) {
+    auto prog = scriptbridge::compiled(body);
+    if (!prog) return prog.error();
+    ADSHANDLE hStmt = 0;
+    if (AdsCreateSQLStatement(hConn, &hStmt) != openads::AE_SUCCESS)
+        return openads::util::Error{openads::AE_INTERNAL_ERROR, 0,
+            "trigger: statement alloc failed", ""};
+    scriptbridge::TriggerBridge bridge(conn, hStmt, &new_f, &old_f,
+                                       is_instead_of);
+    openads::script::Executor ex(&bridge);
+    ex.set_user(conn->username());
+    auto r = ex.run(*prog.value());
+    AdsCloseSQLStatement(hStmt);
+    if (!r) return r.error();
+    return {};
+}
 
 namespace {
 
@@ -22038,6 +22231,40 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 return brc;
             }
         }
+        // RCB 07/17/2026 (S2): DD SQL-script stored procedures run through
+        // the script engine (docs/script-engine.md §4.3). This is the path
+        // that did not exist at all — script procs previously fell through
+        // to "procedure not registered". Native (AEP DLL) procs still take
+        // the registered-fn path below.
+        if (c->has_dd()) {
+            auto* dd = c->dd();
+            const openads::engine::DataDict::ProcEntry* pe = nullptr;
+            if (dd != nullptr) {
+                std::string up = ep.value().name;
+                for (auto& ch : up) ch = static_cast<char>(
+                    std::toupper(static_cast<unsigned char>(ch)));
+                for (const auto& kv : dd->procs()) {
+                    std::string k = kv.first;
+                    for (auto& ch : k) ch = static_cast<char>(
+                        std::toupper(static_cast<unsigned char>(ch)));
+                    if (k == up) { pe = &kv.second; break; }
+                }
+            }
+            if (pe != nullptr && !pe->procedure.empty()) {
+                std::lock_guard<std::recursive_mutex> lk2(s.mu);
+                auto outn = scriptbridge::run_dd_procedure(
+                    c, hStatement, *pe, ep.value().args);
+                if (!outn) return fail(outn.error());
+                if (outn.value().empty()) {           // no output params
+                    *phCursor = 0;
+                    return ok();
+                }
+                std::string sel = "SELECT * FROM [" + outn.value() + "]";
+                std::vector<UNSIGNED8> sb(sel.size() + 1);
+                std::memcpy(sb.data(), sel.c_str(), sel.size() + 1);
+                return AdsExecuteSQLDirect(hStatement, sb.data(), phCursor);
+            }
+        }
         std::lock_guard<std::recursive_mutex> lk(s.mu);
         std::string packed;
         for (std::size_t i = 0; i < ep.value().args.size(); ++i) {
@@ -22215,13 +22442,24 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             tbl->set_filter(std::move(compiled).value());
         }
         // Trigger: INSTEAD OF UPDATE supersedes the actual write; BEFORE fires first.
+        // RCB 07/17/2026 (S2): failures propagate (probe Q6): BEFORE/
+        // INSTEAD OF failure blocks the write, AFTER failure keeps it.
         std::string upd_alias = ri_alias_for_path(c, tbl->path());
         Handle upd_hConn = !upd_alias.empty() ? handle_for_conn(c) : Handle{0};
         bool upd_instead_of = false;
+        TrigError_ upd_terr;
         if (upd_hConn) {
-            upd_instead_of = fire_triggers_(upd_hConn, c, upd_alias, 2u, 2u /*INSTEAD_OF*/);
+            upd_instead_of = fire_triggers_(upd_hConn, c, upd_alias, 2u,
+                                            2u /*INSTEAD_OF*/, nullptr,
+                                            nullptr, &upd_terr);
             if (!upd_instead_of)
-                fire_triggers_(upd_hConn, c, upd_alias, 2u, 1u /*BEFORE*/);
+                fire_triggers_(upd_hConn, c, upd_alias, 2u, 1u /*BEFORE*/,
+                               nullptr, nullptr, &upd_terr);
+            if (upd_terr.has_error) {
+                tbl->clear_filter();
+                c->close_table(th.value());
+                return fail(static_cast<int>(upd_terr.errno_val), upd_terr.message.c_str());
+            }
         }
         if (!upd_instead_of) {
             std::uint32_t rcount = tbl->record_count();
@@ -22244,9 +22482,18 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             }
             if (auto fl = tbl->flush(); !fl) return fail(fl.error());
         }
-        // Fire AFTER UPDATE triggers (only when no INSTEAD OF ran).
-        if (!upd_instead_of && upd_hConn)
-            fire_triggers_(upd_hConn, c, upd_alias, 2u, 4u /*AFTER*/);
+        // Fire AFTER UPDATE triggers (only when no INSTEAD OF ran). The
+        // table sits on the last updated row, so single-row updates (the
+        // common WHERE pk = x case) give the trigger a real __new image.
+        if (!upd_instead_of && upd_hConn) {
+            fire_triggers_(upd_hConn, c, upd_alias, 2u, 4u /*AFTER*/, tbl,
+                           nullptr, &upd_terr);
+            if (upd_terr.has_error) {
+                tbl->clear_filter();
+                c->close_table(th.value());
+                return fail(static_cast<int>(upd_terr.errno_val), upd_terr.message.c_str());
+            }
+        }
         tbl->clear_filter();
         c->close_table(th.value());
         *phCursor = 0;
@@ -22355,13 +22602,23 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             tbl->set_filter(std::move(compiled).value());
         }
         // Trigger: INSTEAD OF DELETE supersedes the actual delete; BEFORE fires first.
+        // RCB 07/17/2026 (S2): failures propagate (probe Q6 semantics).
         std::string del_alias = ri_alias_for_path(c, tbl->path());
         Handle del_hConn = !del_alias.empty() ? handle_for_conn(c) : Handle{0};
         bool del_instead_of = false;
+        TrigError_ del_terr;
         if (del_hConn) {
-            del_instead_of = fire_triggers_(del_hConn, c, del_alias, 3u, 2u /*INSTEAD_OF*/);
+            del_instead_of = fire_triggers_(del_hConn, c, del_alias, 3u,
+                                            2u /*INSTEAD_OF*/, nullptr,
+                                            nullptr, &del_terr);
             if (!del_instead_of)
-                fire_triggers_(del_hConn, c, del_alias, 3u, 1u /*BEFORE*/);
+                fire_triggers_(del_hConn, c, del_alias, 3u, 1u /*BEFORE*/,
+                               nullptr, nullptr, &del_terr);
+            if (del_terr.has_error) {
+                tbl->clear_filter();
+                c->close_table(th.value());
+                return fail(static_cast<int>(del_terr.errno_val), del_terr.message.c_str());
+            }
         }
         if (!del_instead_of) {
             std::uint32_t rcount = tbl->record_count();
@@ -22374,8 +22631,15 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             if (auto fl = tbl->flush(); !fl) return fail(fl.error());
         }
         // Fire AFTER DELETE triggers (only when no INSTEAD OF ran).
-        if (!del_instead_of && del_hConn)
-            fire_triggers_(del_hConn, c, del_alias, 3u, 4u /*AFTER*/);
+        if (!del_instead_of && del_hConn) {
+            fire_triggers_(del_hConn, c, del_alias, 3u, 4u /*AFTER*/,
+                           nullptr, nullptr, &del_terr);
+            if (del_terr.has_error) {
+                tbl->clear_filter();
+                c->close_table(th.value());
+                return fail(static_cast<int>(del_terr.errno_val), del_terr.message.c_str());
+            }
+        }
         tbl->clear_filter();
         c->close_table(th.value());
         *phCursor = 0;
@@ -22484,11 +22748,22 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 return fail(fl.error());
             }
             // Fire AFTER INSERT triggers (event_mask=1) for INSERT...SELECT.
+            // RCB 07/17/2026 (S2): failures propagate (probe Q6).
             {
                 std::string alias = ri_alias_for_path(c, tbl->path());
                 if (!alias.empty()) {
                     Handle hConn = handle_for_conn(c);
-                    if (hConn) fire_triggers_(hConn, c, alias, 1u, 4u /*AFTER*/);
+                    if (hConn) {
+                        TrigError_ terr;
+                        fire_triggers_(hConn, c, alias, 1u, 4u /*AFTER*/,
+                                       tbl, nullptr, &terr);
+                        if (terr.has_error) {
+                            AdsCloseTable(srcCur);
+                            c->close_table(th.value());
+                            return fail(static_cast<int>(terr.errno_val),
+                                        terr.message.c_str());
+                        }
+                    }
                 }
             }
             AdsCloseTable(srcCur);
@@ -22530,13 +22805,23 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             return std::monostate{};
         };
         // Trigger: INSTEAD OF INSERT supersedes the actual insert; BEFORE fires first.
+        // RCB 07/17/2026 (S2): failures propagate (probe Q6): BEFORE/
+        // INSTEAD OF failure blocks the write, AFTER failure keeps it.
         std::string ins_alias = ri_alias_for_path(c, tbl->path());
         Handle ins_hConn = !ins_alias.empty() ? handle_for_conn(c) : Handle{0};
         bool ins_instead_of = false;
+        TrigError_ ins_terr;
         if (ins_hConn) {
-            ins_instead_of = fire_triggers_(ins_hConn, c, ins_alias, 1u, 2u /*INSTEAD_OF*/);
+            ins_instead_of = fire_triggers_(ins_hConn, c, ins_alias, 1u,
+                                            2u /*INSTEAD_OF*/, nullptr,
+                                            nullptr, &ins_terr);
             if (!ins_instead_of)
-                fire_triggers_(ins_hConn, c, ins_alias, 1u, 1u /*BEFORE*/);
+                fire_triggers_(ins_hConn, c, ins_alias, 1u, 1u /*BEFORE*/,
+                               nullptr, nullptr, &ins_terr);
+            if (ins_terr.has_error) {
+                c->close_table(th.value());
+                return fail(static_cast<int>(ins_terr.errno_val), ins_terr.message.c_str());
+            }
         }
         if (!ins_instead_of) {
             if (!ins.value().rows.empty()) {
@@ -22552,8 +22837,14 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         }
         // Fire AFTER INSERT triggers (only when no INSTEAD OF ran).
         // Pass tbl so __new fields are available for the body.
-        if (!ins_instead_of && ins_hConn)
-            fire_triggers_(ins_hConn, c, ins_alias, 1u, 4u /*AFTER*/, tbl);
+        if (!ins_instead_of && ins_hConn) {
+            fire_triggers_(ins_hConn, c, ins_alias, 1u, 4u /*AFTER*/, tbl,
+                           nullptr, &ins_terr);
+            if (ins_terr.has_error) {
+                c->close_table(th.value());
+                return fail(static_cast<int>(ins_terr.errno_val), ins_terr.message.c_str());
+            }
+        }
         c->close_table(th.value());
         *phCursor = 0;
         return ok();

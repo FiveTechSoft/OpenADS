@@ -14,8 +14,9 @@ static Error lex_err(const std::string& what, std::size_t pos) {
 }
 
 static bool ident_start(char c) {
+    // '@' = variables; '#' = ADS session temp tables (#MyTrigTbl).
     return std::isalpha(static_cast<unsigned char>(c)) || c == '_' ||
-           c == '@';
+           c == '@' || c == '#';
 }
 static bool ident_char(char c) {
     return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
@@ -49,6 +50,25 @@ Result<std::vector<Token>> lex(const std::string& src) {
             while (i + 1 < n && !(src[i] == '*' && src[i + 1] == '/')) ++i;
             if (i + 1 >= n) return lex_err("unterminated /* comment", start);
             i += 2;
+            continue;
+        }
+
+        // [bracketed identifier] — ADS quoted column/table name. Lexed as
+        // one Ident so it survives inside raw-captured embedded SQL and can
+        // serve as a primary in expressions. The text keeps the brackets.
+        if (c == '[') {
+            std::size_t start = i++;
+            std::string v = "[";
+            while (i < n && src[i] != ']') v.push_back(src[i++]);
+            if (i >= n) return lex_err("unterminated [identifier]", start);
+            v.push_back(src[i++]);   // ']'
+            Token t; t.kind = Tok::Ident; t.pos = start;
+            t.text = v;
+            t.upper.reserve(v.size());
+            for (char ch : v)
+                t.upper.push_back(static_cast<char>(
+                    std::toupper(static_cast<unsigned char>(ch))));
+            out.push_back(std::move(t));
             continue;
         }
 

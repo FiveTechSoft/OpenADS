@@ -90,6 +90,22 @@ private:
             if (kw == "TRY")      return parse_try();
             if (kw == "RAISE")    return parse_raise();
             if (kw == "RETURN")   return parse_return();
+            // EXECUTE IMMEDIATE <string-expr>;  (EXECUTE PROCEDURE stays a
+            // raw embedded statement — the SQL dispatcher owns it.)
+            if (kw == "EXECUTE" && peek().kind == Tok::Ident &&
+                peek().upper == "IMMEDIATE") {
+                auto s = std::make_unique<Stmt>();
+                s->kind = StmtKind::ExecImmediate;
+                s->pos = cur().pos;
+                advance(); advance();
+                auto e = parse_expr();
+                if (!e) return e.error();
+                s->expr = std::move(e).value();
+                if (!eat(Tok::Semi))
+                    return perr("';' expected after EXECUTE IMMEDIATE",
+                                cur().pos);
+                return StmtPtr(std::move(s));
+            }
             if (kw == "LEAVE" || kw == "CONTINUE") {
                 auto s = std::make_unique<Stmt>();
                 s->kind = (kw == "LEAVE") ? StmtKind::Leave
@@ -99,6 +115,13 @@ private:
                 if (!eat(Tok::Semi))
                     return perr("';' expected after " + kw, cur().pos);
                 return StmtPtr(std::move(s));
+            }
+            // SET <ident> = <expr> ;  — SAP accepts SET-prefixed
+            // assignments (pmsys sp_SaveIntoAuditLog uses them).
+            if (kw == "SET" && peek().kind == Tok::Ident &&
+                peek(2).kind == Tok::Eq) {
+                advance();
+                return parse_assign();
             }
             // Assignment: <ident> = <expr> ;
             if (peek().kind == Tok::Eq) return parse_assign();
@@ -118,18 +141,21 @@ private:
         advance();
 
         if (at_kw("CURSOR")) {
-            // DECLARE <name> CURSOR AS <raw sql> ;  — executed in S3; parsed
-            // now so bodies compile and give a clear runtime error instead
-            // of a parse failure.
+            // DECLARE <name> CURSOR [AS <raw sql>] ;  — executed in S3;
+            // parsed now so bodies compile and give a clear runtime error
+            // instead of a parse failure. The AS-less form binds its
+            // statement later at OPEN <name> AS <sql>.
             advance();
-            if (!eat_kw("AS"))
-                return perr("AS expected after CURSOR", cur().pos);
-            std::size_t start = cur().pos;
-            while (!at(Tok::End) && !at(Tok::Semi)) advance();
-            std::size_t end = cur().pos;
-            s->raw = src_.substr(start, end - start);
+            if (eat_kw("AS")) {
+                std::size_t start = cur().pos;
+                while (!at(Tok::End) && !at(Tok::Semi)) advance();
+                std::size_t end = cur().pos;
+                s->raw = src_.substr(start, end - start);
+            } else {
+                s->raw = " ";   // cursor marker even without a bound stmt
+            }
             eat(Tok::Semi);
-            s->decl_type = Type::Null;  // cursor marker: raw non-empty
+            s->decl_type = Type::Null;
             return StmtPtr(std::move(s));
         }
 
@@ -273,9 +299,23 @@ private:
         s->kind = StmtKind::While;
         s->pos = cur().pos;
         advance();  // WHILE
-        auto cond = parse_expr();
-        if (!cond) return cond.error();
-        s->expr = std::move(cond).value();
+        // WHILE FETCH <cursor> DO … — the idiomatic ADS cursor loop. Parsed
+        // now so cursor bodies compile; execution is S3 (the executor emits
+        // a clean "cursors not supported yet" runtime error). `name` marks
+        // it as the FETCH form.
+        if (at_kw("FETCH")) {
+            advance();
+            if (cur().kind != Tok::Ident)
+                return perr("cursor name expected after WHILE FETCH",
+                            cur().pos);
+            s->name  = cur().text;
+            s->upper = cur().upper;
+            advance();
+        } else {
+            auto cond = parse_expr();
+            if (!cond) return cond.error();
+            s->expr = std::move(cond).value();
+        }
         if (!eat_kw("DO"))
             return perr("DO expected in WHILE", cur().pos);
         auto blk = parse_block({"END"});

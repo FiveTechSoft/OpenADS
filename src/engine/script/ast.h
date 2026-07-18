@@ -73,6 +73,7 @@ enum class StmtKind : std::uint8_t {
     Try,         // body, catch_block
     Raise,       // raise_name, args (code, message)
     Sql,         // raw embedded statement text
+    ExecImmediate, // EXECUTE IMMEDIATE <string-expr>
 };
 
 struct Stmt {

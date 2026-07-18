@@ -19,6 +19,7 @@ endif()
 add_executable(openads_unit_tests
     unit/doctest_main.cpp
     unit/script_engine_test.cpp
+    unit/abi_script_proc_test.cpp
     unit/util_result_test.cpp
     unit/util_span_test.cpp
     unit/util_log_test.cpp

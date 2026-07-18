@@ -4,6 +4,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 
 namespace openads::script {
 
@@ -299,15 +300,35 @@ util::Result<Value> coerce_assign(Type slot, const Value& v,
             }
             return v;
         case Type::Integer:
-            if (!v.numeric())
-                return type_err("cannot assign non-numeric to INTEGER");
             if (v.type == Type::Integer) return v;
-            return Value::integer(static_cast<std::int64_t>(v.d));   // P32
+            if (v.type == Type::Double)
+                return Value::integer(static_cast<std::int64_t>(v.d)); // P32
+            // RCB 07/17/2026: OpenADS types aggregate/expression SQL columns
+            // (COUNT/SUM/AVG…) as Character text; a numeric-valued Char
+            // flowing in from `@n = (SELECT COUNT(*) …)` coerces to the
+            // numeric slot. `@i = 'abc'` still errors (non-numeric, P19);
+            // this diverges from SAP only on the never-written `@i = '5'`
+            // literal case.
+            if (v.type == Type::Char) {
+                char* e = nullptr;
+                double d = std::strtod(v.s.c_str(), &e);
+                while (e && *e == ' ') ++e;
+                if (e && *e == '\0' && !v.s.empty())
+                    return Value::integer(static_cast<std::int64_t>(d));
+            }
+            return type_err("cannot assign non-numeric to INTEGER");
         case Type::Double:
-            if (!v.numeric())
-                return type_err("cannot assign non-numeric to NUMERIC");
             if (v.type == Type::Double) return v;
-            return Value::real(static_cast<double>(v.i));
+            if (v.type == Type::Integer)
+                return Value::real(static_cast<double>(v.i));
+            if (v.type == Type::Char) {
+                char* e = nullptr;
+                double d = std::strtod(v.s.c_str(), &e);
+                while (e && *e == ' ') ++e;
+                if (e && *e == '\0' && !v.s.empty())
+                    return Value::real(d);
+            }
+            return type_err("cannot assign non-numeric to NUMERIC");
         case Type::Logical:
             if (v.type != Type::Logical)
                 return type_err("cannot assign non-logical to LOGICAL");
