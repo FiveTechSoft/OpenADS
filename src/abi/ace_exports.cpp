@@ -6660,6 +6660,43 @@ static inline bool sql_like_match(const std::string& s,
     return pi == pat.size();
 }
 
+// LIKE with optional case folding — CICHAR columns match LIKE
+// case-insensitively (oracle-verified), plain CHAR byte-wise.
+static inline bool sql_like_match_t(const std::string& s,
+                                    const std::string& pat, bool ci) {
+    if (!ci) return sql_like_match(s, pat);
+    std::string s2 = s, p2 = pat;
+    for (char& ch : s2)
+        ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+    for (char& ch : p2)
+        ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+    return sql_like_match(s2, p2);
+}
+
+// S4 — case sensitivity is a FIELD-TYPE property (oracle-verified on
+// pmsys): CICHAR (ADT type 20) columns compare case-insensitively in
+// `=`, LIKE, BETWEEN and IN; plain CHAR compares byte-wise. SAP's
+// system.* catalog columns are CICHAR, which is why
+// `WHERE Parent = 'PROPERTIES'` matches 'properties' there.
+static inline int where_str_cmp(const std::string& a, const std::string& b,
+                                bool ci) {
+    if (!ci) return a.compare(b);
+    std::size_t n = std::min(a.size(), b.size());
+    for (std::size_t i = 0; i < n; ++i) {
+        int ca = std::toupper(static_cast<unsigned char>(a[i]));
+        int cb = std::toupper(static_cast<unsigned char>(b[i]));
+        if (ca != cb) return ca < cb ? -1 : 1;
+    }
+    if (a.size() == b.size()) return 0;
+    return a.size() < b.size() ? -1 : 1;
+}
+
+static inline bool field_is_cichar(const openads::engine::Table& t,
+                                   std::uint16_t fi) {
+    return t.field_descriptor(fi).type ==
+           openads::drivers::DbfFieldType::CiCharacter;
+}
+
 // ADS dialect — apply the optional UPPER()/LOWER() case-fold from a
 // WHERE left-hand side to a cell value before it is compared. A no-op
 // for WhereFn::None, so callers can apply it unconditionally.
@@ -23069,7 +23106,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             bool is_num     = w.is_numeric;
             double num      = w.number;
             openads::sql::WhereFn lhs_fn = w.lhs_fn;
-            return Pred{[fi, op, lit, is_num, num, lhs_fn]
+            bool ci_f = field_is_cichar(*tbl, fi);
+            return Pred{[fi, op, lit, is_num, num, lhs_fn, ci_f]
                         (openads::engine::Table& t) {
                 auto v = t.read_field(fi);
                 if (!v) return false;
@@ -23091,7 +23129,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     std::string rv2 = lit;
                     while (!rv2.empty() && rv2.back() == ' ')
                         rv2.pop_back();
-                    cmp = lv.compare(rv2);
+                    cmp = where_str_cmp(lv, rv2, ci_f);
                 }
                 switch (op) {
                     case openads::sql::WhereOp::Eq: return cmp == 0;
@@ -23433,7 +23471,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 bool is_num     = w.is_numeric;
                 double num      = w.number;
                 openads::sql::WhereFn lhs_fn = w.lhs_fn;
-                return Pred{[fi, op, lit, is_num, num, lhs_fn]
+                bool ci_f = field_is_cichar(*tbl, fi);
+                return Pred{[fi, op, lit, is_num, num, lhs_fn, ci_f]
                             (openads::engine::Table& t) {
                     auto v = t.read_field(fi);
                     if (!v) return false;
@@ -23449,8 +23488,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         if      (d < num) cmp = -1;
                         else if (d > num) cmp =  1;
                     } else {
-                        cmp = apply_where_fn(v.value().as_string, lhs_fn)
-                                  .compare(lit);
+                        cmp = where_str_cmp(
+                            apply_where_fn(v.value().as_string, lhs_fn),
+                            lit, ci_f);
                     }
                     switch (op) {
                         case openads::sql::WhereOp::Eq: return cmp == 0;
@@ -23593,7 +23633,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 bool is_num     = w.is_numeric;
                 double num      = w.number;
                 openads::sql::WhereFn lhs_fn = w.lhs_fn;
-                return Pred{[fi, op, lit, is_num, num, lhs_fn]
+                bool ci_f = field_is_cichar(*tbl, fi);
+                return Pred{[fi, op, lit, is_num, num, lhs_fn, ci_f]
                             (openads::engine::Table& t) {
                     auto v = t.read_field(fi);
                     if (!v) return false;
@@ -23609,8 +23650,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         if      (d < num) cmp = -1;
                         else if (d > num) cmp =  1;
                     } else {
-                        cmp = apply_where_fn(v.value().as_string, lhs_fn)
-                                  .compare(lit);
+                        cmp = where_str_cmp(
+                            apply_where_fn(v.value().as_string, lhs_fn),
+                            lit, ci_f);
                     }
                     switch (op) {
                         case openads::sql::WhereOp::Eq: return cmp == 0;
@@ -25171,8 +25213,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     std::string lit2 = w.literal2;
                     double num2 = w.number2;
                     openads::sql::WhereFn lhs_fn = w.lhs_fn;
+                    bool ci_f = field_is_cichar(*ctbl, f);
                     return Pred{[f, op, lit, lit2, is_num, num, num2,
-                                 contains_hits, lhs_fn]
+                                 contains_hits, lhs_fn, ci_f]
                                 (openads::engine::Table& t) {
                         if (op == openads::sql::WhereOp::Contains) {
                             if (!contains_hits) return false;
@@ -25198,12 +25241,13 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                                 return d >= num && d <= num2;
                             }
                             auto sv = apply_where_fn(v.value().as_string, lhs_fn);
-                            return sv.compare(lit) >= 0 && sv.compare(lit2) <= 0;
+                            return where_str_cmp(sv, lit,  ci_f) >= 0 &&
+                                   where_str_cmp(sv, lit2, ci_f) <= 0;
                         }
                         if (op == openads::sql::WhereOp::Like) {
                             auto sv = apply_where_fn(v.value().as_string, lhs_fn);
                             while (!sv.empty() && sv.back() == ' ') sv.pop_back();
-                            return sql_like_match(sv, lit);
+                            return sql_like_match_t(sv, lit, ci_f);
                         }
                         int cmp = 0;
                         if (is_num) {
@@ -25211,8 +25255,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                             if      (d < num) cmp = -1;
                             else if (d > num) cmp =  1;
                         } else {
-                            cmp = apply_where_fn(v.value().as_string, lhs_fn)
-                                      .compare(lit);
+                            cmp = where_str_cmp(
+                                apply_where_fn(v.value().as_string, lhs_fn),
+                                lit, ci_f);
                         }
                         switch (op) {
                             case openads::sql::WhereOp::Eq: return cmp == 0;
@@ -25231,15 +25276,23 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         openads::AE_COLUMN_NOT_FOUND, 0,
                         node.in_clause.column.c_str(), ""};
                     std::uint16_t fi = static_cast<std::uint16_t>(fidx);
-                    auto set = std::make_shared<std::unordered_set<std::string>>(
-                        node.in_clause.literals.begin(),
-                        node.in_clause.literals.end());
-                    return Pred{[fi, set](openads::engine::Table& t) {
+                    bool ci_f = field_is_cichar(*ctbl, fi);
+                    auto fold = [ci_f](std::string s2) {
+                        if (ci_f)
+                            for (char& ch : s2)
+                                ch = static_cast<char>(std::toupper(
+                                    static_cast<unsigned char>(ch)));
+                        return s2;
+                    };
+                    auto set = std::make_shared<std::unordered_set<std::string>>();
+                    for (const auto& l2 : node.in_clause.literals)
+                        set->insert(fold(l2));
+                    return Pred{[fi, set, fold](openads::engine::Table& t) {
                         auto v = t.read_field(fi);
                         if (!v) return false;
                         auto sv = v.value().as_string;
                         while (!sv.empty() && sv.back() == ' ') sv.pop_back();
-                        return set->count(sv) > 0;
+                        return set->count(fold(sv)) > 0;
                     }};
                 }
                 return openads::util::Error{
@@ -25896,6 +25949,38 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     return Pred{[p = std::move(inner).value()]
                                 (openads::engine::Table& t){return !p(t);}};
                 }
+                if (node.kind == Kind::In) {
+                    // S4 — IN under an aggregate WHERE (COUNT(*) WHERE x
+                    // IN (...)); literal lists only, CICHAR folds case.
+                    std::int32_t fidx =
+                        tbl->field_index(node.in_clause.column);
+                    if (fidx < 0) {
+                        return openads::util::Error{
+                            openads::AE_COLUMN_NOT_FOUND, 0,
+                            node.in_clause.column.c_str(), ""};
+                    }
+                    std::uint16_t infi = static_cast<std::uint16_t>(fidx);
+                    bool in_ci = field_is_cichar(*tbl, infi);
+                    auto fold = [in_ci](std::string s2) {
+                        while (!s2.empty() && s2.back() == ' ')
+                            s2.pop_back();
+                        if (in_ci)
+                            for (char& ch : s2)
+                                ch = static_cast<char>(std::toupper(
+                                    static_cast<unsigned char>(ch)));
+                        return s2;
+                    };
+                    auto set =
+                        std::make_shared<std::unordered_set<std::string>>();
+                    for (const auto& l2 : node.in_clause.literals)
+                        set->insert(fold(l2));
+                    return Pred{[infi, set, fold]
+                                (openads::engine::Table& t) {
+                        auto v = t.read_field(infi);
+                        if (!v) return false;
+                        return set->count(fold(v.value().as_string)) > 0;
+                    }};
+                }
                 const auto& w = node.cmp;
                 std::int32_t fidx = tbl->field_index(w.column);
                 if (fidx < 0) {
@@ -25909,18 +25994,25 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 bool is_num     = w.is_numeric;
                 double num      = w.number;
                 openads::sql::WhereFn lhs_fn = w.lhs_fn;
-                return Pred{[fi, op, lit, is_num, num, lhs_fn]
+                bool ci_f = field_is_cichar(*tbl, fi);
+                return Pred{[fi, op, lit, is_num, num, lhs_fn, ci_f]
                             (openads::engine::Table& t) {
                     auto v = t.read_field(fi);
                     if (!v) return false;
+                    if (op == openads::sql::WhereOp::Like) {
+                        auto sv = apply_where_fn(v.value().as_string, lhs_fn);
+                        while (!sv.empty() && sv.back() == ' ') sv.pop_back();
+                        return sql_like_match_t(sv, lit, ci_f);
+                    }
                     int cmp = 0;
                     if (is_num) {
                         double d = v.value().as_double;
                         if      (d < num) cmp = -1;
                         else if (d > num) cmp =  1;
                     } else {
-                        cmp = apply_where_fn(v.value().as_string, lhs_fn)
-                                  .compare(lit);
+                        cmp = where_str_cmp(
+                            apply_where_fn(v.value().as_string, lhs_fn),
+                            lit, ci_f);
                     }
                     switch (op) {
                         case openads::sql::WhereOp::Eq: return cmp == 0;
@@ -26265,15 +26357,23 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         openads::AE_COLUMN_NOT_FOUND, 0,
                         n.in_clause.column.c_str(), ""};
                     std::uint16_t fi2 = static_cast<std::uint16_t>(fidx);
-                    auto set = std::make_shared<std::unordered_set<std::string>>(
-                        n.in_clause.literals.begin(),
-                        n.in_clause.literals.end());
-                    return AggPred{[fi2, set](openads::engine::Table& t) {
+                    bool ci_f = field_is_cichar(*tbl, fi2);
+                    auto fold = [ci_f](std::string s2) {
+                        if (ci_f)
+                            for (char& ch : s2)
+                                ch = static_cast<char>(std::toupper(
+                                    static_cast<unsigned char>(ch)));
+                        return s2;
+                    };
+                    auto set = std::make_shared<std::unordered_set<std::string>>();
+                    for (const auto& l2 : n.in_clause.literals)
+                        set->insert(fold(l2));
+                    return AggPred{[fi2, set, fold](openads::engine::Table& t) {
                         auto v = t.read_field(fi2);
                         if (!v) return false;
                         auto sv = v.value().as_string;
                         while (!sv.empty() && sv.back() == ' ') sv.pop_back();
-                        return set->count(sv) > 0;
+                        return set->count(fold(sv)) > 0;
                     }};
                 }
                 if (n.kind != K::Cmp) {
@@ -26308,8 +26408,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     }
                 }
                 openads::sql::WhereFn lhs_fn = w.lhs_fn;
+                bool ci_f = field_is_cichar(*tbl, f);
                 return AggPred{[f, op, lit, lit2, is_num, num, num2,
-                                contains_hits, lhs_fn]
+                                contains_hits, lhs_fn, ci_f]
                                (openads::engine::Table& t) {
                     if (op == openads::sql::WhereOp::Contains) {
                         if (!contains_hits) return false;
@@ -26335,12 +26436,13 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                             return d >= num && d <= num2;
                         }
                         auto sv = apply_where_fn(v.value().as_string, lhs_fn);
-                        return sv.compare(lit) >= 0 && sv.compare(lit2) <= 0;
+                        return where_str_cmp(sv, lit,  ci_f) >= 0 &&
+                               where_str_cmp(sv, lit2, ci_f) <= 0;
                     }
                     if (op == openads::sql::WhereOp::Like) {
                         auto sv = apply_where_fn(v.value().as_string, lhs_fn);
                         while (!sv.empty() && sv.back() == ' ') sv.pop_back();
-                        return sql_like_match(sv, lit);
+                        return sql_like_match_t(sv, lit, ci_f);
                     }
                     int cmp = 0;
                     if (is_num) {
@@ -26348,8 +26450,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         if      (d < num) cmp = -1;
                         else if (d > num) cmp =  1;
                     } else {
-                        cmp = apply_where_fn(v.value().as_string, lhs_fn)
-                                  .compare(lit);
+                        cmp = where_str_cmp(
+                            apply_where_fn(v.value().as_string, lhs_fn),
+                            lit, ci_f);
                     }
                     switch (op) {
                         case openads::sql::WhereOp::Eq: return cmp == 0;
@@ -26689,8 +26792,21 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     while (!sl.empty() && sl.back() == ' ') sl.pop_back();
                     return sl;
                 };
+                // CICHAR columns fold case in IN membership (S4); the
+                // fold applies ONLY to the membership set and probe —
+                // the correlated path's inner-WHERE literal compares
+                // stay byte-wise (their columns are checked separately).
+                bool in_ci = field_is_cichar(*tbl, fi);
+                auto in_fold = [in_ci](std::string sl) {
+                    if (in_ci)
+                        for (char& ch : sl)
+                            ch = static_cast<char>(std::toupper(
+                                static_cast<unsigned char>(ch)));
+                    return sl;
+                };
                 auto set = std::make_shared<std::unordered_set<std::string>>();
-                for (auto& lit : node.in_clause.literals) set->insert(lit);
+                for (auto& lit : node.in_clause.literals)
+                    set->insert(in_fold(trim_trailing(lit)));
                 if (node.in_clause.subquery) {
                     // M10.35 — detect correlation in subquery's WHERE.
                     bool correlated = false;
@@ -26853,15 +26969,16 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         auto v = stbl->read_field(
                             static_cast<std::uint16_t>(scol));
                         if (!v) continue;
-                        set->insert(trim_trailing(v.value().as_string));
+                        set->insert(in_fold(trim_trailing(v.value().as_string)));
                     }
                     c->close_table(sh.value());
                 }
-                return Pred{[fi, set, trim_trailing]
+                return Pred{[fi, set, trim_trailing, in_fold]
                             (openads::engine::Table& t) {
                     auto v = t.read_field(fi);
                     if (!v) return false;
-                    return set->find(trim_trailing(v.value().as_string)) !=
+                    return set->find(in_fold(
+                               trim_trailing(v.value().as_string))) !=
                            set->end();
                 }};
             }
@@ -26884,8 +27001,13 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             term.lhs_fn      = w.lhs_fn;
             // M11.7 — stamp collation onto the term when the
             // connection is in nocase mode and the cmp involves
-            // string operands.
-            if (conn_nocase && !w.is_numeric) {
+            // string operands. S4: CICHAR (ADT type 20) columns compare
+            // case-insensitively regardless of connection collation
+            // (oracle-verified: = and LIKE both fold on CICHAR, plain
+            // CHAR stays byte-wise).
+            if ((conn_nocase ||
+                 field_is_cichar(*tbl, term.field_index)) &&
+                !w.is_numeric) {
                 term.nocase   = true;
                 term.literal  = to_lower_ascii(term.literal);
                 term.literal2 = to_lower_ascii(term.literal2);
@@ -27211,6 +27333,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                                term.literal.back() == ' ') {
                             term.literal.pop_back();
                         }
+                        if (term.nocase)
+                            term.literal = to_lower_ascii(term.literal);
                         found = true;
                         break;
                     }
@@ -27697,15 +27821,23 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     openads::AE_COLUMN_NOT_FOUND, 0,
                     node.in_clause.column.c_str(), ""};
                 std::uint16_t fi2 = static_cast<std::uint16_t>(fidx);
-                auto set = std::make_shared<std::unordered_set<std::string>>(
-                    node.in_clause.literals.begin(),
-                    node.in_clause.literals.end());
-                return CondPred{[fi2, set](openads::engine::Table& t) {
+                bool ci_f = field_is_cichar(*tbl, fi2);
+                auto fold = [ci_f](std::string s2) {
+                    if (ci_f)
+                        for (char& ch : s2)
+                            ch = static_cast<char>(std::toupper(
+                                static_cast<unsigned char>(ch)));
+                    return s2;
+                };
+                auto set = std::make_shared<std::unordered_set<std::string>>();
+                for (const auto& l2 : node.in_clause.literals)
+                    set->insert(fold(l2));
+                return CondPred{[fi2, set, fold](openads::engine::Table& t) {
                     auto v = t.read_field(fi2);
                     if (!v) return false;
                     auto sv = v.value().as_string;
                     while (!sv.empty() && sv.back() == ' ') sv.pop_back();
-                    return set->count(sv) > 0;
+                    return set->count(fold(sv)) > 0;
                 }};
             }
             if (node.kind != K::Cmp) {
@@ -27741,8 +27873,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 }
             }
             openads::sql::WhereFn lhs_fn = w.lhs_fn;
+            bool ci_f = field_is_cichar(*tbl, f);
             return CondPred{[f, op, lit, lit2, is_num, num, num2,
-                             contains_hits, lhs_fn]
+                             contains_hits, lhs_fn, ci_f]
                             (openads::engine::Table& t) {
                 if (op == openads::sql::WhereOp::Contains) {
                     if (!contains_hits) return false;
@@ -27767,13 +27900,13 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         return d >= num && d <= num2;
                     }
                     auto sv = apply_where_fn(v.value().as_string, lhs_fn);
-                    return sv.compare(lit)  >= 0 &&
-                           sv.compare(lit2) <= 0;
+                    return where_str_cmp(sv, lit,  ci_f) >= 0 &&
+                           where_str_cmp(sv, lit2, ci_f) <= 0;
                 }
                 if (op == openads::sql::WhereOp::Like) {
                     auto sv = apply_where_fn(v.value().as_string, lhs_fn);
                     while (!sv.empty() && sv.back() == ' ') sv.pop_back();
-                    return sql_like_match(sv, lit);
+                    return sql_like_match_t(sv, lit, ci_f);
                 }
                 int cmp = 0;
                 if (is_num) {
@@ -27781,8 +27914,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     if      (d < num) cmp = -1;
                     else if (d > num) cmp =  1;
                 } else {
-                    cmp = apply_where_fn(v.value().as_string, lhs_fn)
-                              .compare(lit);
+                    cmp = where_str_cmp(
+                        apply_where_fn(v.value().as_string, lhs_fn),
+                        lit, ci_f);
                 }
                 switch (op) {
                     case openads::sql::WhereOp::Eq: return cmp == 0;
