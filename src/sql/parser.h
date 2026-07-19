@@ -365,6 +365,30 @@ struct DeleteStmt {
 
 util::Result<DeleteStmt> parse_delete(const std::string& sql);
 
+// S4 — `MERGE [INTO] <table> ON <cond> [WHEN MATCHED THEN UPDATE SET
+// <col> = <expr>, …] [WHEN NOT MATCHED THEN INSERT [(<cols>)] VALUES
+// (<expr>, …)]` — the UPSERT form (master_merge.htm). The USING
+// (table-to-table) form is not supported yet and parses to an error.
+// SET / VALUES right-hand sides are captured as verbatim expression
+// text; the executor evaluates them through the script engine (SET
+// with the matched row's columns bound as parameters).
+struct MergeSet {
+    std::string column;
+    std::string expr_text;      // verbatim RHS; "NULL" handled by eval
+};
+
+struct MergeStmt {
+    std::string                  table;
+    std::unique_ptr<WhereExpr>   on;
+    bool                         has_update = false;
+    bool                         has_insert = false;
+    std::vector<MergeSet>        sets;
+    std::vector<std::string>     insert_columns;      // empty = VALUES-only
+    std::vector<std::string>     insert_value_texts;  // verbatim expressions
+};
+
+util::Result<MergeStmt> parse_merge(const std::string& sql);
+
 // M10.9 — `CREATE TABLE <name> (<col> <type> [(<len> [, <dec>])] …)`.
 struct CreateTableColumn {
     std::string  name;
@@ -399,6 +423,7 @@ util::Result<CreateIndexStmt> parse_create_index(const std::string& sql);
 bool sql_is_insert(const std::string& sql);
 bool sql_is_update(const std::string& sql);
 bool sql_is_delete(const std::string& sql);
+bool sql_is_merge(const std::string& sql);
 bool sql_is_create_table(const std::string& sql);
 bool sql_is_create_index(const std::string& sql);
 bool sql_is_create_procedure(const std::string& sql);

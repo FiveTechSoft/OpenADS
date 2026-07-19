@@ -4996,6 +4996,13 @@ UNSIGNED32 sql_uri_check_sql_rights(
             obj_name = p.value().table;
             op = SqlOp::Delete;
         }
+    } else if (openads::sql::sql_is_merge(sql)) {
+        // MERGE mutates like UPDATE (and may INSERT); gate on update
+        // rights.
+        if (auto p = openads::sql::parse_merge(sql)) {
+            obj_name = p.value().table;
+            op = SqlOp::Update;
+        }
     } else if (openads::sql::sql_is_select(sql)) {
         if (auto p = openads::sql::parse_select(sql)) {
             obj_name = p.value().table;
@@ -20746,6 +20753,50 @@ inline Type infer_expr_type(const openads::script::Expr& e) {
     }
 }
 
+// Bind every column of tbl's CURRENT row as a typed script parameter,
+// under both bare and [bracketed] spellings (the script lexer keeps
+// brackets in the identifier token). Used by ScriptCall projections and
+// MERGE SET evaluation.
+inline void bind_row_params(openads::script::Executor& ex,
+                            openads::engine::Table& tbl) {
+    using FT = openads::drivers::DbfFieldType;
+    std::uint16_t nfld = tbl.field_count();
+    for (std::uint16_t k2 = 0; k2 < nfld; ++k2) {
+        auto v2 = tbl.read_field(k2);
+        if (!v2) continue;
+        const auto& fd2 = tbl.field_descriptor(k2);
+        Value sv;
+        if (v2.value().is_null) {
+            sv = Value::null();
+        } else switch (fd2.type) {
+            case FT::Numeric: case FT::Float: case FT::Double:
+            case FT::Currency: case FT::AdtMoney:
+                sv = Value::real(v2.value().as_double);
+                break;
+            case FT::Integer: case FT::ShortInt: case FT::AutoInc:
+                sv = Value::integer(
+                    static_cast<std::int64_t>(v2.value().as_double));
+                break;
+            case FT::Date: case FT::AdtDate:
+                sv = value_from_text(v2.value().as_string, Type::Date);
+                break;
+            case FT::DateTime: case FT::AdtTimestamp: case FT::ModTime:
+                sv = value_from_text(v2.value().as_string, Type::Timestamp);
+                break;
+            case FT::Logical:
+                sv = value_from_text(v2.value().as_string, Type::Logical);
+                break;
+            default: {
+                std::string s2 = v2.value().as_string;
+                while (!s2.empty() && s2.back() == ' ') s2.pop_back();
+                sv = Value::character(std::move(s2));
+            }
+        }
+        ex.set_param("[" + fd2.name + "]", sv);
+        ex.set_param(fd2.name, std::move(sv));
+    }
+}
+
 // One-value cursor: answers single-value fast paths (literal iota
 // selects, trigger row-image reads) without a SQL round-trip.
 struct OneValueCursor final : openads::script::SqlCursor {
@@ -22159,6 +22210,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         } else if (openads::sql::sql_is_delete(sql)) {
             if (auto p = openads::sql::parse_delete(sql))
                 { obj_name = p.value().table; op = SqlOp::Delete; }
+        } else if (openads::sql::sql_is_merge(sql)) {
+            if (auto p = openads::sql::parse_merge(sql))
+                { obj_name = p.value().table; op = SqlOp::Update; }
         } else {
             // SELECT or EXECUTE PROCEDURE
             if (auto p = openads::sql::parse_select(sql)) {
@@ -22814,6 +22868,325 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         if (!tbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
         ADSHANDLE gh = s.registry.register_object(HandleKind::Table, tbl);
         *phCursor = gh;
+        return ok();
+    }
+
+    // S4 — MERGE, UPSERT form (master_merge.htm): probe the ON condition;
+    // matched rows take the UPDATE specification with SET expressions
+    // evaluated through the script engine (the matched row's columns are
+    // bound as parameters, so `Sequence = Sequence + 1` and IIF(...) work);
+    // no match desugars to a plain INSERT INTO so defaults / RI / triggers
+    // ride the normal INSERT path.
+    if (openads::sql::sql_is_merge(sql)) {
+        auto mg = openads::sql::parse_merge(sql);
+        if (!mg) return fail(mg.error());
+        auto th = c->open_table(mg.value().table,
+                                stmt_table_type(*it->second),
+                                stmt_open_mode(*it->second, true),
+                                stmt_locking_mode(*it->second));
+        if (!th) return fail(th.error());
+        openads::engine::Table* tbl = c->lookup_table(th.value());
+        if (!tbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
+
+        // Compile the ON tree with the same closure shape the UPDATE
+        // branch below uses (helper extraction still deferred).
+        using Pred = std::function<bool(openads::engine::Table&)>;
+        std::function<openads::util::Result<Pred>(
+            const openads::sql::WhereExpr&)> compile;
+        compile = [&](const openads::sql::WhereExpr& node)
+                  -> openads::util::Result<Pred> {
+            using Kind = openads::sql::WhereExpr::Kind;
+            if (node.kind == Kind::And || node.kind == Kind::Or) {
+                std::vector<Pred> ks;
+                for (auto& cn : node.children) {
+                    auto r = compile(*cn);
+                    if (!r) return r.error();
+                    ks.push_back(std::move(r).value());
+                }
+                bool is_and = node.kind == Kind::And;
+                return Pred{[ks = std::move(ks), is_and]
+                            (openads::engine::Table& t) {
+                    for (auto& k : ks) {
+                        if (k(t) != is_and) return !is_and;
+                    }
+                    return is_and;
+                }};
+            }
+            if (node.kind == Kind::Not) {
+                auto inner = compile(*node.child);
+                if (!inner) return inner.error();
+                return Pred{[p = std::move(inner).value()]
+                            (openads::engine::Table& t) { return !p(t); }};
+            }
+            const auto& w = node.cmp;
+            std::int32_t fidx = tbl->field_index(w.column);
+            if (fidx < 0) {
+                return openads::util::Error{
+                    openads::AE_COLUMN_NOT_FOUND, 0, w.column.c_str(), ""};
+            }
+            std::uint16_t fi = static_cast<std::uint16_t>(fidx);
+            openads::sql::WhereOp op = w.op;
+            std::string lit = w.literal;
+            bool is_num     = w.is_numeric;
+            double num      = w.number;
+            openads::sql::WhereFn lhs_fn = w.lhs_fn;
+            return Pred{[fi, op, lit, is_num, num, lhs_fn]
+                        (openads::engine::Table& t) {
+                auto v = t.read_field(fi);
+                if (!v) return false;
+                if (op == openads::sql::WhereOp::IsNull ||
+                    op == openads::sql::WhereOp::IsNotNull) {
+                    bool null_ish = t.is_field_empty(fi);
+                    return op == openads::sql::WhereOp::IsNull
+                        ? null_ish : !null_ish;
+                }
+                int cmp = 0;
+                if (is_num) {
+                    double d = v.value().as_double;
+                    if      (d < num) cmp = -1;
+                    else if (d > num) cmp =  1;
+                } else {
+                    std::string lv = apply_where_fn(v.value().as_string,
+                                                    lhs_fn);
+                    while (!lv.empty() && lv.back() == ' ') lv.pop_back();
+                    std::string rv2 = lit;
+                    while (!rv2.empty() && rv2.back() == ' ')
+                        rv2.pop_back();
+                    cmp = lv.compare(rv2);
+                }
+                switch (op) {
+                    case openads::sql::WhereOp::Eq: return cmp == 0;
+                    case openads::sql::WhereOp::Ne: return cmp != 0;
+                    case openads::sql::WhereOp::Lt: return cmp <  0;
+                    case openads::sql::WhereOp::Gt: return cmp >  0;
+                    case openads::sql::WhereOp::Le: return cmp <= 0;
+                    case openads::sql::WhereOp::Ge: return cmp >= 0;
+                    default: return false;
+                }
+                return false;
+            }};
+        };
+        auto mpred = compile(*mg.value().on);
+        if (!mpred) {
+            c->close_table(th.value());
+            return fail(mpred.error());
+        }
+        auto pred = std::move(mpred).value();
+
+        std::vector<std::uint32_t> matches;
+        std::uint32_t rcount = tbl->record_count();
+        for (std::uint32_t r = 1; r <= rcount; ++r) {
+            if (auto g = tbl->goto_record(r); !g) continue;
+            if (tbl->is_deleted()) continue;
+            if (pred(*tbl)) matches.push_back(r);
+        }
+
+        // Evaluate one captured expression text through the script engine;
+        // bind_row = true binds the table's current row columns.
+        auto eval_expr = [&](const std::string& text, bool bind_row)
+            -> openads::util::Result<openads::script::Value> {
+            auto pr = scriptbridge::compiled("RETURN " + text + ";");
+            if (!pr) return pr.error();
+            scriptbridge::AbiBridge br(c, hStatement);
+            openads::script::Executor ex2(&br);
+            ex2.set_user(c->username());
+            if (bind_row) scriptbridge::bind_row_params(ex2, *tbl);
+            auto rr = ex2.run(*pr.value());
+            if (!rr) return rr.error();
+            if (!rr.value().returned)
+                return openads::script::Value::null();
+            return std::move(rr.value().return_value);
+        };
+
+        if (!matches.empty()) {
+            if (!mg.value().has_update) {   // spec: no action on match
+                c->close_table(th.value());
+                *phCursor = 0;
+                return ok();
+            }
+            struct MAssn {
+                std::uint16_t                 fi;
+                const openads::sql::MergeSet* ms;
+            };
+            std::vector<MAssn> massns;
+            massns.reserve(mg.value().sets.size());
+            for (const auto& msitem : mg.value().sets) {
+                std::int32_t fidx = tbl->field_index(msitem.column);
+                if (fidx < 0) {
+                    c->close_table(th.value());
+                    return fail(openads::AE_COLUMN_NOT_FOUND,
+                                msitem.column.c_str());
+                }
+                massns.push_back(
+                    {static_cast<std::uint16_t>(fidx), &msitem});
+            }
+            // Triggers: same UPDATE sequence as the UPDATE branch below.
+            std::string mg_alias = ri_alias_for_path(c, tbl->path());
+            Handle mg_hConn =
+                !mg_alias.empty() ? handle_for_conn(c) : Handle{0};
+            bool mg_instead = false;
+            TrigError_ mg_terr;
+            if (mg_hConn) {
+                mg_instead = fire_triggers_(mg_hConn, c, mg_alias, 2u,
+                                            2u /*INSTEAD_OF*/, nullptr,
+                                            nullptr, &mg_terr);
+                if (!mg_instead)
+                    fire_triggers_(mg_hConn, c, mg_alias, 2u,
+                                   1u /*BEFORE*/, nullptr, nullptr,
+                                   &mg_terr);
+                if (mg_terr.has_error) {
+                    c->close_table(th.value());
+                    return fail(static_cast<int>(mg_terr.errno_val),
+                                mg_terr.message.c_str());
+                }
+            }
+            if (!mg_instead) {
+                for (std::uint32_t r : matches) {
+                    if (auto g = tbl->goto_record(r); !g) continue;
+                    for (const auto& a : massns) {
+                        auto ev = eval_expr(a.ms->expr_text, true);
+                        if (!ev) {
+                            c->close_table(th.value());
+                            return fail(ev.error());
+                        }
+                        const auto& rv = ev.value();
+                        using ST = openads::script::Type;
+                        openads::util::Result<void> wr = [&]()
+                            -> openads::util::Result<void> {
+                            if (rv.is_null)
+                                return tbl->set_field_null(a.fi);
+                            switch (rv.type) {
+                                case ST::Integer:
+                                    return tbl->set_field(a.fi,
+                                        static_cast<double>(rv.i));
+                                case ST::Double:
+                                    return tbl->set_field(a.fi, rv.d);
+                                case ST::Logical:
+                                    return tbl->set_field(a.fi,
+                                        std::string(rv.i ? "T" : "F"));
+                                case ST::Date: {
+                                    int y2, m2, d2;
+                                    openads::script::ymd_from_jdn(
+                                        rv.i, y2, m2, d2);
+                                    char db[16];
+                                    std::snprintf(db, sizeof(db),
+                                        "%04d%02d%02d", y2, m2, d2);
+                                    return tbl->set_field(a.fi,
+                                                          std::string(db));
+                                }
+                                case ST::Timestamp: {
+                                    std::int64_t jdn = rv.i / 86400000;
+                                    std::int64_t ms2 = rv.i % 86400000;
+                                    int y2, m2, d2;
+                                    openads::script::ymd_from_jdn(
+                                        jdn, y2, m2, d2);
+                                    char db[24];
+                                    std::snprintf(db, sizeof(db),
+                                        "%04d%02d%02d%02d%02d%02d",
+                                        y2, m2, d2,
+                                        static_cast<int>(ms2 / 3600000),
+                                        static_cast<int>((ms2 / 60000) %
+                                                         60),
+                                        static_cast<int>((ms2 / 1000) %
+                                                         60));
+                                    return tbl->set_field(a.fi,
+                                                          std::string(db));
+                                }
+                                default:
+                                    return tbl->set_field(a.fi, rv.s);
+                            }
+                        }();
+                        if (!wr) {
+                            c->close_table(th.value());
+                            return fail(wr.error());
+                        }
+                    }
+                }
+                if (auto fl = tbl->flush(); !fl) {
+                    c->close_table(th.value());
+                    return fail(fl.error());
+                }
+            }
+            if (!mg_instead && mg_hConn) {
+                fire_triggers_(mg_hConn, c, mg_alias, 2u, 4u /*AFTER*/,
+                               tbl, nullptr, &mg_terr);
+                if (mg_terr.has_error) {
+                    c->close_table(th.value());
+                    return fail(static_cast<int>(mg_terr.errno_val),
+                                mg_terr.message.c_str());
+                }
+            }
+            c->close_table(th.value());
+            *phCursor = 0;
+            return ok();
+        }
+
+        // No match — INSERT specification (if present). Values are
+        // evaluated (no row context) and rendered as literals into a
+        // plain INSERT INTO statement.
+        if (!mg.value().has_insert) {
+            c->close_table(th.value());
+            *phCursor = 0;
+            return ok();
+        }
+        std::vector<std::string> lits;
+        lits.reserve(mg.value().insert_value_texts.size());
+        for (const auto& vt : mg.value().insert_value_texts) {
+            auto ev = eval_expr(vt, false);
+            if (!ev) {
+                c->close_table(th.value());
+                return fail(ev.error());
+            }
+            const auto& rv = ev.value();
+            using ST = openads::script::Type;
+            if (rv.is_null) {
+                lits.push_back("NULL");
+            } else if (rv.type == ST::Integer) {
+                lits.push_back(std::to_string(rv.i));
+            } else if (rv.type == ST::Double) {
+                char nb2[40];
+                std::snprintf(nb2, sizeof(nb2), "%.10g", rv.d);
+                lits.push_back(nb2);
+            } else if (rv.type == ST::Logical) {
+                lits.push_back(rv.i ? "'T'" : "'F'");
+            } else {
+                // Char / Date / Timestamp: quoted display text with ''
+                // escaping (dates render via to_display; the INSERT
+                // writer stores text through the field encoder).
+                std::string s2 = openads::script::to_display(rv);
+                std::string q  = "'";
+                for (char ch : s2) {
+                    q.push_back(ch);
+                    if (ch == '\'') q.push_back('\'');
+                }
+                q.push_back('\'');
+                lits.push_back(std::move(q));
+            }
+        }
+        c->close_table(th.value());
+        std::string ins = "INSERT INTO " + mg.value().table;
+        if (!mg.value().insert_columns.empty()) {
+            ins += " (";
+            for (std::size_t i2 = 0; i2 < mg.value().insert_columns.size();
+                 ++i2) {
+                if (i2) ins += ", ";
+                ins += mg.value().insert_columns[i2];
+            }
+            ins += ")";
+        }
+        ins += " VALUES (";
+        for (std::size_t i2 = 0; i2 < lits.size(); ++i2) {
+            if (i2) ins += ", ";
+            ins += lits[i2];
+        }
+        ins += ")";
+        std::vector<UNSIGNED8> ibuf(ins.size() + 1);
+        std::memcpy(ibuf.data(), ins.c_str(), ins.size() + 1);
+        ADSHANDLE hc2 = 0;
+        UNSIGNED32 rc2 = AdsExecuteSQLDirect(hStatement, ibuf.data(), &hc2);
+        if (rc2 != 0) return rc2;
+        if (hc2 != 0) AdsCloseTable(hc2);
+        *phCursor = 0;
         return ok();
     }
 
@@ -27430,69 +27803,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                             scriptbridge::AbiBridge br(c, hStatement);
                             openads::script::Executor ex2(&br);
                             ex2.set_user(c->username());
-                            {
-                                using SV = openads::script::Value;
-                                using ST = openads::script::Type;
-                                using FT = openads::drivers::DbfFieldType;
-                                std::uint16_t nfld = tbl->field_count();
-                                for (std::uint16_t k2 = 0; k2 < nfld; ++k2) {
-                                    auto v2 = tbl->read_field(k2);
-                                    if (!v2) continue;
-                                    const auto& fd2 =
-                                        tbl->field_descriptor(k2);
-                                    SV sv;
-                                    if (v2.value().is_null) {
-                                        sv = SV::null();
-                                    } else switch (fd2.type) {
-                                        case FT::Numeric: case FT::Float:
-                                        case FT::Double: case FT::Currency:
-                                        case FT::AdtMoney:
-                                            sv = SV::real(
-                                                v2.value().as_double);
-                                            break;
-                                        case FT::Integer: case FT::ShortInt:
-                                        case FT::AutoInc:
-                                            sv = SV::integer(
-                                                static_cast<std::int64_t>(
-                                                    v2.value().as_double));
-                                            break;
-                                        case FT::Date: case FT::AdtDate:
-                                            sv = scriptbridge::
-                                                value_from_text(
-                                                    v2.value().as_string,
-                                                    ST::Date);
-                                            break;
-                                        case FT::DateTime:
-                                        case FT::AdtTimestamp:
-                                        case FT::ModTime:
-                                            sv = scriptbridge::
-                                                value_from_text(
-                                                    v2.value().as_string,
-                                                    ST::Timestamp);
-                                            break;
-                                        case FT::Logical:
-                                            sv = scriptbridge::
-                                                value_from_text(
-                                                    v2.value().as_string,
-                                                    ST::Logical);
-                                            break;
-                                        default: {
-                                            std::string s2 =
-                                                v2.value().as_string;
-                                            while (!s2.empty() &&
-                                                   s2.back() == ' ')
-                                                s2.pop_back();
-                                            sv = SV::character(
-                                                std::move(s2));
-                                        }
-                                    }
-                                    // Both bare and [bracketed] spellings —
-                                    // the script lexer keeps brackets in
-                                    // the identifier token.
-                                    ex2.set_param("[" + fd2.name + "]", sv);
-                                    ex2.set_param(fd2.name, std::move(sv));
-                                }
-                            }
+                            scriptbridge::bind_row_params(ex2, *tbl);
                             auto rr = ex2.run(*pr.value());
                             if (!rr) return fail(rr.error());
                             if (!rr.value().returned ||

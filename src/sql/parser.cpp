@@ -1859,6 +1859,11 @@ bool sql_is_delete(const std::string& sql) {
     return c.match_keyword("DELETE");
 }
 
+bool sql_is_merge(const std::string& sql) {
+    Cursor c(sql);
+    return c.match_keyword("MERGE");
+}
+
 bool sql_is_create_table(const std::string& sql) {
     Cursor c(sql);
     return c.match_keyword("CREATE") && c.match_keyword("TABLE");
@@ -2191,6 +2196,170 @@ util::Result<UpdateStmt> parse_update(const std::string& sql) {
         auto root = parse_or_expr(c, sql);
         if (!root) return root.error();
         stmt.where = std::move(root).value();
+    }
+    c.match_char(';');
+    return stmt;
+}
+
+util::Result<MergeStmt> parse_merge(const std::string& sql) {
+    Cursor c(sql);
+    if (!c.match_keyword("MERGE")) {
+        return util::Error{7200, 0, "expected MERGE", sql};
+    }
+    c.match_keyword("INTO");                       // INTO is optional
+    MergeStmt stmt;
+    stmt.table = c.read_identifier_or_filename();
+    if (stmt.table.empty()) {
+        return util::Error{7200, 0, "expected table name after MERGE", sql};
+    }
+    if (c.match_keyword("AS")) c.read_identifier();  // alias (unused)
+    if (c.peek_keyword("USING")) {
+        return util::Error{7200, 0,
+            "MERGE USING <table> is not supported yet (UPSERT form only)",
+            sql};
+    }
+    if (!c.match_keyword("ON")) {
+        return util::Error{7200, 0, "expected ON in MERGE", sql};
+    }
+    {
+        auto root = parse_or_expr(c, sql);
+        if (!root) return root.error();
+        stmt.on = std::move(root).value();
+    }
+
+    // Capture one verbatim expression: stops at a TOP-LEVEL ',' / ';' /
+    // end, at ')' when stop_paren, and at a top-level `WHEN MATCHED` /
+    // `WHEN NOT` boundary (so CASE … WHEN inside an expression doesn't
+    // terminate it). peek_* skip leading whitespace permanently, which
+    // drops inter-token spacing from the capture — harmless for the
+    // script parser downstream.
+    auto capture_expr = [&](bool stop_paren) -> std::string {
+        std::string raw;
+        int  depth  = 0;
+        bool in_str = false;
+        for (;;) {
+            if (!in_str && depth == 0) {
+                if (c.eof() || c.peek_char(',') || c.peek_char(';')) break;
+                if (stop_paren && c.peek_char(')')) break;
+                if (c.peek_keyword("WHEN")) {
+                    std::size_t save = c.save();
+                    c.match_keyword("WHEN");
+                    bool boundary = c.peek_keyword("MATCHED") ||
+                                    c.peek_keyword("NOT");
+                    c.restore(save);
+                    if (boundary) break;
+                }
+            }
+            if (c.eof()) break;
+            char ch = c.consume_char();
+            raw.push_back(ch);
+            if (in_str) { if (ch == '\'') in_str = false; continue; }
+            if (ch == '\'') in_str = true;
+            else if (ch == '(' || ch == '{') ++depth;
+            else if (ch == ')' || ch == '}') --depth;
+        }
+        while (!raw.empty() &&
+               std::isspace(static_cast<unsigned char>(raw.back())))
+            raw.pop_back();
+        return raw;
+    };
+
+    while (c.match_keyword("WHEN")) {
+        if (c.match_keyword("MATCHED")) {
+            if (!c.match_keyword("THEN") || !c.match_keyword("UPDATE")) {
+                return util::Error{7200, 0,
+                    "expected THEN UPDATE after WHEN MATCHED", sql};
+            }
+            if (c.peek_keyword("WITH")) {
+                return util::Error{7200, 0,
+                    "MERGE UPDATE WITH DELETE/RECALL is not supported", sql};
+            }
+            if (!c.match_keyword("SET")) {
+                return util::Error{7200, 0, "expected SET in MERGE", sql};
+            }
+            stmt.has_update = true;
+            for (;;) {
+                MergeSet ms;
+                ms.column = c.read_identifier();
+                if (ms.column.empty()) {
+                    return util::Error{7200, 0,
+                        "expected column name in MERGE SET", sql};
+                }
+                if (!c.match_char('=')) {
+                    return util::Error{7200, 0,
+                        "expected '=' in MERGE SET", sql};
+                }
+                ms.expr_text = capture_expr(false);
+                if (ms.expr_text.empty()) {
+                    return util::Error{7200, 0,
+                        "expected expression in MERGE SET", sql};
+                }
+                stmt.sets.push_back(std::move(ms));
+                if (c.match_char(',')) continue;
+                break;
+            }
+        } else if (c.match_keyword("NOT")) {
+            if (!c.match_keyword("MATCHED") || !c.match_keyword("THEN") ||
+                !c.match_keyword("INSERT")) {
+                return util::Error{7200, 0,
+                    "expected NOT MATCHED THEN INSERT in MERGE", sql};
+            }
+            if (c.peek_keyword("WITH")) {
+                return util::Error{7200, 0,
+                    "MERGE INSERT WITH DELETE is not supported", sql};
+            }
+            if (c.peek_keyword("DEFAULT")) {
+                return util::Error{7200, 0,
+                    "MERGE INSERT DEFAULT VALUES is not supported", sql};
+            }
+            stmt.has_insert = true;
+            if (!c.peek_keyword("VALUES") && c.match_char('(')) {
+                for (;;) {
+                    std::string col = c.read_identifier();
+                    if (col.empty()) {
+                        return util::Error{7200, 0,
+                            "expected column name in MERGE INSERT", sql};
+                    }
+                    stmt.insert_columns.push_back(std::move(col));
+                    if (c.match_char(',')) continue;
+                    break;
+                }
+                if (!c.match_char(')')) {
+                    return util::Error{7200, 0,
+                        "expected ')' after MERGE INSERT columns", sql};
+                }
+            }
+            if (!c.match_keyword("VALUES") || !c.match_char('(')) {
+                return util::Error{7200, 0,
+                    "expected VALUES (...) in MERGE INSERT", sql};
+            }
+            for (;;) {
+                std::string vt = capture_expr(true);
+                if (vt.empty()) {
+                    return util::Error{7200, 0,
+                        "expected value expression in MERGE INSERT", sql};
+                }
+                stmt.insert_value_texts.push_back(std::move(vt));
+                if (c.match_char(',')) continue;
+                break;
+            }
+            if (!c.match_char(')')) {
+                return util::Error{7200, 0,
+                    "expected ')' to close MERGE INSERT values", sql};
+            }
+        } else {
+            return util::Error{7200, 0,
+                "expected MATCHED or NOT MATCHED after WHEN", sql};
+        }
+    }
+    if (!stmt.has_update && !stmt.has_insert) {
+        return util::Error{7200, 0,
+            "MERGE needs WHEN MATCHED and/or WHEN NOT MATCHED", sql};
+    }
+    if (!stmt.insert_columns.empty() &&
+        stmt.insert_columns.size() != stmt.insert_value_texts.size()) {
+        return util::Error{7200, 0,
+            "MERGE INSERT column/value count mismatch", sql};
     }
     c.match_char(';');
     return stmt;
