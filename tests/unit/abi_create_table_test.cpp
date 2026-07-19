@@ -82,6 +82,55 @@ TEST_CASE("M9.5 AdsCreateTable: parse field defs + write DBF + open") {
     fs::remove_all(dir, ec);
 }
 
+TEST_CASE("AdsCreateTable: drive-rooted client path lands under the data dir") {
+    const auto dir = fs::temp_directory_path() / "openads_abs_create";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+
+    UNSIGNED8 srv[256];
+    std::memcpy(srv, dir.string().c_str(), dir.string().size() + 1);
+    ADSHANDLE hConn = 0;
+    REQUIRE(AdsConnect60(srv, ADS_LOCAL_SERVER,
+                         nullptr, nullptr, 0, &hConn) == 0);
+
+    // Client (rddads / X#) passes an absolute path rooted at the data
+    // dir's own drive. Its relative remainder is a single leaf, so the
+    // fix must strip the root and write the table under the data dir —
+    // NOT at the drive root the client happened to name.
+    const std::string root = fs::path(dir).root_path().string();  // e.g. "C:\"
+    const std::string leaf = "openads_abs_stray";
+    const std::string abs_name = (fs::path(root) / (leaf + ".dbf")).string();
+
+    UNSIGNED8 name[512];
+    std::memcpy(name, abs_name.c_str(), abs_name.size() + 1);
+    UNSIGNED8 alias[64]   = "stray";
+    UNSIGNED8 fields[128] = "ID,Numeric,4,0;NAME,Character,8";
+
+    ADSHANDLE hTable = 0;
+    REQUIRE(AdsCreateTable(hConn, name, alias, ADS_CDX, 0, 0, 0, 64,
+                           fields, &hTable) == 0);
+    REQUIRE(AdsCloseTable(hTable) == 0);
+
+    // Landed under the data dir, not at the drive root the client named.
+    CHECK(fs::exists(dir / (leaf + ".dbf")));
+    CHECK_FALSE(fs::exists(fs::path(abs_name)));
+
+    // A later open by the bare leaf must resolve to the very same file.
+    UNSIGNED8 openname[64];
+    std::memcpy(openname, leaf.c_str(), leaf.size() + 1);
+    hTable = 0;
+    REQUIRE(AdsOpenTable(hConn, openname, alias, ADS_CDX, 0, 0, 0, 0,
+                         &hTable) == 0);
+    UNSIGNED16 nflds = 0;
+    REQUIRE(AdsGetNumFields(hTable, &nflds) == 0);
+    CHECK(nflds == 2);
+    REQUIRE(AdsCloseTable(hTable) == 0);
+
+    REQUIRE(AdsDisconnect(hConn) == 0);
+    fs::remove_all(dir, ec);
+}
+
 TEST_CASE("M12.23 AdsCreateTable with an M field stages an empty .fpt; memo writes work") {
     const auto dir = fs::temp_directory_path() / "openads_m1223_creatememo";
     std::error_code ec;

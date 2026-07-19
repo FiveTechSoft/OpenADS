@@ -170,6 +170,8 @@ target_include_directories(openads_core
 
 target_link_libraries(openads_core PRIVATE openads_aes_impl)
 
+set_source_files_properties(abi/ace_exports.cpp PROPERTIES COMPILE_OPTIONS "/bigobj")
+
 if(UNIX)
     # RCB 2026-07-10 — CMAKE_DL_LIBS for dladdr in platform/path.cpp
     # (module_directory(), used to find adslocal.cfg next to the DLL).

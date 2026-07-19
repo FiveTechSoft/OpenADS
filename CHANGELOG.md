@@ -1,3 +1,24 @@
+## 1.8.15 — 2026-07-19
+
+### Fixed — AdsCreateTable wrote the file next to the client app instead of the ADS data directory
+
+When a client (Harbour rddads, X# ADSRDD, …) passed `AdsCreateTable` an
+absolute or drive-rooted table name derived from its own working directory,
+the create path joined that verbatim onto the connection's data directory.
+Because joining an absolute path replaces the base, the data directory was
+silently dropped and the new `.dbf`/`.adt` landed next to the application —
+then a later `AdsOpenTable` with the same bare name resolved *under* the data
+directory and found nothing.
+
+`Connection::resolve_table_file` now strips the root and keeps only the
+relative remainder (subdirs + filename) before joining, so a table always
+lands under the configured data directory and a subsequent open by the same
+name resolves to the very same file. `AdsCreateTable` routes its target
+through the same resolver (rather than an independent join) so create and open
+agree byte-for-byte on the physical path, for CDX, VFP and ADT alike.
+Regression test added: a drive-rooted create lands under the data dir, does
+*not* appear at the client-named absolute path, and reopens by bare leaf.
+
 ## 1.8.14 — 2026-07-17
 
 ### Fixed — SQL result cursor was left at BOF after execute (wrong data on every query)

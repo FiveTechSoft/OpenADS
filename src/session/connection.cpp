@@ -80,7 +80,21 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
     namespace fs = std::filesystem;
     std::string effective = relative_path;
     if (dd_.has_value()) effective = dd_->resolve(relative_path);
-    fs::path full = fs::path(data_dir_) / effective;
+    // The connection's data_dir is the directory the server owns; every
+    // table name is resolved *relative to* it. Clients (Harbour rddads,
+    // X# ADSRDD, …) routinely pass an absolute or drive-rooted path that
+    // they derived from their own working directory. Joining that
+    // verbatim (`data_dir_ / "C:\\app\\foo.dbf"`) yields the absolute
+    // client path and silently drops the configured data directory, so
+    // DbCreate / AdsCreateTable would write the file next to the
+    // application instead of in the ADS-pointed folder. Drop the root and
+    // keep only the relative remainder (subdirs + filename) before
+    // joining, so the table always lands under data_dir_ and a later
+    // AdsOpenTable with the same name resolves to the very same file.
+    fs::path rel = fs::path(effective);
+    if (rel.is_absolute() || rel.has_root_directory())
+        rel = rel.relative_path();
+    fs::path full = fs::path(data_dir_) / rel;
     // Auto-append .dbf when the caller (typically rddads / Clipper)
     // passed a bare table alias without an extension.  If .dbf does not
     // exist but .adt does, open as ADT (e.g. SQL SELECT FROM <alias>

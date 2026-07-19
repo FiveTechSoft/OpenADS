@@ -174,10 +174,16 @@ public:
     }
     const std::string& username() const noexcept { return username_; }
 
-private:
-    util::Result<void> recover_orphan_tx_();
+    // Resolve a caller-supplied table name (DD alias, bare leaf, or path)
+    // to the absolute on-disk file the driver opens. Public so the ACE
+    // create path can land a new table in the very file a later
+    // AdsOpenTable(name) will resolve to. `type` may be updated when the
+    // extension implies a different driver than the caller's default.
     std::string resolve_table_file(const std::string& relative_path,
                                    engine::TableType&  type);
+
+private:
+    util::Result<void> recover_orphan_tx_();
     std::uint16_t table_cache_mode_(const std::string& relative_path) const;
     std::string                                                data_dir_;
     std::string                                                dd_path_;   // full .add path if DD opened

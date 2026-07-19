@@ -6990,7 +6990,15 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
     }
 
     namespace fs = std::filesystem;
-    fs::path full = fs::path(c->data_dir()) / rel;
+    // Resolve the create target through the connection's table resolver so
+    // the freshly-written file lands in the same place a later
+    // AdsOpenTable(name) will look for it (the ADS data directory), even
+    // when the caller passes an absolute / drive-rooted path.
+    openads::engine::TableType create_type =
+        (usTableType == ADS_ADT) ? openads::engine::TableType::Adt
+        : (usTableType == ADS_VFP) ? openads::engine::TableType::Vfp
+        : openads::engine::TableType::Cdx;
+    fs::path full(c->resolve_table_file(rel, create_type));
     const bool is_adt = (usTableType == ADS_ADT);
     if (!full.has_extension()) full.replace_extension(is_adt ? ".adt" : ".dbf");
 
@@ -7796,10 +7804,28 @@ UNSIGNED32 ENTRYPOINT AdsExtractKey(ADSHANDLE hIndex, UNSIGNED8* pucBuf,
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown index");
     openads::drivers::IIndex* idx = iindex_for_handle(hIndex);
     if (!idx) return fail(openads::AE_INTERNAL_ERROR, "index not loaded");
-    auto k = openads::engine::evaluate_index_expr(*t, idx->expression(),
-                                                  idx->key_length());
-    if (!k) return fail(k.error());
-    openads::abi::copy_to_caller(pucBuf, pusLen, k.value());
+    // Return the key in its STORED encoding — rddads' OrdKeyVal decodes
+    // the buffer by key type (HB_ORD2DBL for ADS_NUMERIC), so a numeric
+    // (FoxNumeric) tag must yield the 8-byte order-preserving binary key,
+    // not the ASCII expression text (which OrdKeyVal printed as "*****").
+    // Mirrors Table::compute_index_key_.
+    std::string key;
+    if (idx->key_encoding() == openads::drivers::KeyEncoding::FoxNumeric) {
+        double d = 0.0;
+        openads::engine::evaluate_index_expr_number(*t, idx->expression(), d);
+        key = openads::engine::fox_numeric_key(d);
+    } else if (idx->key_encoding() == openads::drivers::KeyEncoding::NtxNumeric) {
+        double d = 0.0;
+        openads::engine::evaluate_index_expr_number(*t, idx->expression(), d);
+        key = openads::engine::ntx_numeric_key(d, idx->key_length(),
+                                               idx->key_decimals());
+    } else {
+        auto k = openads::engine::evaluate_index_expr(*t, idx->expression(),
+                                                      idx->key_length());
+        if (!k) return fail(k.error());
+        key = std::move(k).value();
+    }
+    openads::abi::copy_to_caller(pucBuf, pusLen, key);
     return ok();
 }
 
@@ -15168,6 +15194,7 @@ UNSIGNED32 ENTRYPOINT AdsSeek(ADSHANDLE hIndex,
         : -1;
     bool dk_numeric = false;
     bool dk_date    = false;
+    bool dk_logical = false;
     if (dk_fidx >= 0) {
         auto dkt = t->field_descriptor(
             static_cast<std::uint16_t>(dk_fidx)).type;
@@ -15177,6 +15204,7 @@ UNSIGNED32 ENTRYPOINT AdsSeek(ADSHANDLE hIndex,
         // AdtDate keys are ADI packed binary — the ADI driver converts
         // a raw-double seek key itself, so leave those on the raw path.
         dk_date    = (dkt == openads::drivers::DbfFieldType::Date);
+        dk_logical = (dkt == openads::drivers::DbfFieldType::Logical);
     }
     const bool dk_foxnum =
         dk_idx != nullptr &&
@@ -15247,6 +15275,19 @@ UNSIGNED32 ENTRYPOINT AdsSeek(ADSHANDLE hIndex,
     } else {
         key.assign(reinterpret_cast<const char*>(pucKey),
                    static_cast<std::size_t>(u16KeyLen));
+    }
+
+    // rddads logical seek: Harbour's adsSeek sends DbSeek(.T.)/(.F.) as
+    // the 1-byte strings "1"/"0" (ads1.c HB_IS_LOGICAL branch), while a
+    // DBF logical index stores the raw field byte 'T'/'F'. SAP ACE maps
+    // the seek value onto the stored form; do the same or EVERY seek on a
+    // logical-key tag misses (GitHub #131 defect B). DBF-family only:
+    // ADT logical keys are ADI packed doubles and AdiIndex::seek_key
+    // already parses the "1"/"0" ASCII form itself.
+    if (dk_logical && u16KeyLen == 1 &&
+        (pucKey[0] == '1' || pucKey[0] == '0') &&
+        !path_ends_with_ci(t->path(), ".adt")) {
+        key = (pucKey[0] == '1') ? "T" : "F";
     }
 
     // Robustness for rddads/Val() case: if the index is FoxNumeric but the key arrived as string
