@@ -196,6 +196,94 @@ TEST_CASE("index_expr: SUBSTR slices a string field") {
     fs::remove_all(dir, ec);
 }
 
+// ---- GitHub #131 regression: fixed-width operands, PADx, natural length ----
+
+TEST_CASE("index_expr: field operands keep their declared width in compounds") {
+    // #131 defect A — a char-field operand in a `+` compound must
+    // contribute its FULL declared width (trailing blanks included),
+    // matching the key Harbour computes for DbSeek. The old evaluator
+    // used the rtrimmed decode, so a blank/short middle operand shrank
+    // the stored key and every full-width seek missed.
+    auto dir = fs::temp_directory_path() / "openads_idx_expr_fw";
+    auto p = stage_dbf(dir);
+    {
+    auto tbl = open_table(p);
+
+    // NAME C(10) holds "ALPHA     " (5 + 5 blanks), BORN D(8).
+    auto k = evaluate_index_expr(tbl, "NAME + DTOS(BORN)", 18);
+    REQUIRE(k.has_value());
+    CHECK(k.value() == "ALPHA     19990501");
+    CHECK(k.value().size() == 18);
+    }
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("index_expr: key_len 0 returns the natural, unpadded key") {
+    // The AdsCreateIndex61 composite-expression probe evaluates with
+    // key_len=0 to size the tag. That must yield the natural fixed-width
+    // key — resizing to 0 returned "" and pinned every composite tag to
+    // the 32-byte fallback width (part of #131 defect A).
+    auto dir = fs::temp_directory_path() / "openads_idx_expr_nat";
+    auto p = stage_dbf(dir);
+    {
+    auto tbl = open_table(p);
+
+    auto bare = evaluate_index_expr(tbl, "NAME", 0);
+    REQUIRE(bare.has_value());
+    CHECK(bare.value() == "ALPHA     ");       // full C(10) width
+
+    auto comp = evaluate_index_expr(tbl, "NAME + DTOS(BORN)", 0);
+    REQUIRE(comp.has_value());
+    CHECK(comp.value() == "ALPHA     19990501");
+    CHECK(comp.value().size() == 18);           // 10 + 8, not 0 / not 32
+
+    auto up = evaluate_index_expr(tbl, "UPPER(NAME)", 0);
+    REQUIRE(up.has_value());
+    CHECK(up.value() == "ALPHA     ");
+    }
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("index_expr: PADR/PADL/PADC fit a value to an exact width") {
+    // #131 defect C — nested compositions like Upper(PadR(LTrim(NAME),10))
+    // degraded to an EMPTY key because PADx was not implemented.
+    auto dir = fs::temp_directory_path() / "openads_idx_expr_pad";
+    auto p = stage_dbf(dir);
+    {
+    auto tbl = open_table(p);
+
+    auto pad = evaluate_index_expr(tbl, "PADR('AB', 5)", 5);
+    REQUIRE(pad.has_value());
+    CHECK(pad.value() == "AB   ");
+
+    auto pal = evaluate_index_expr(tbl, "PADL('AB', 5)", 5);
+    REQUIRE(pal.has_value());
+    CHECK(pal.value() == "   AB");
+
+    auto pac = evaluate_index_expr(tbl, "PADC('AB', 6)", 6);
+    REQUIRE(pac.has_value());
+    CHECK(pac.value() == "  AB  ");
+
+    // Truncation when longer than the requested width.
+    auto tr = evaluate_index_expr(tbl, "PADR('ABCDEF', 3)", 3);
+    REQUIRE(tr.has_value());
+    CHECK(tr.value() == "ABC");
+
+    // The issue's exact nested composition (NAME = "ALPHA     " C(10)):
+    // LTrim -> "ALPHA     " (no leading blanks) -> PadR 8 -> "ALPHA   "
+    // -> Upper.
+    auto nested = evaluate_index_expr(tbl, "UPPER(PADR(LTRIM(NAME),8))", 8);
+    REQUIRE(nested.has_value());
+    CHECK(nested.value() == "ALPHA   ");
+    CHECK(nested.value().size() == 8);
+    }
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+
 TEST_CASE("fox_numeric_key is 8 bytes and order-preserving (FoxPro DBL2ORD)") {
     using openads::engine::fox_numeric_key;
     // Ascending values spanning negatives, zero, fractions and large

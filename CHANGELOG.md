@@ -1,3 +1,32 @@
+## 1.8.16 — 2026-07-19
+
+### Fixed — DbSeek missed on compound, nested-function and probe-sized CDX keys (#131)
+
+Three related defects made `DbSeek` miss on local (rddads) CDX tags whose
+key expression was anything more than a bare field, because the key the
+engine *stored* differed from the full-width key Harbour computes for the
+seek:
+
+- **Compound keys lost operand width.** In a key like
+  `Upper(SYM)+Upper(SUB)+DToS(DAT)`, a CHARACTER/DATE field reference
+  decoded to its right-trimmed value, so a blank middle operand contributed
+  zero bytes and the concatenated key came out shorter than Harbour's. Field
+  references now restore trailing blanks to the declared width (Character,
+  CiCharacter, Date); Varchar and Logical are left as-is.
+- **`PADR` / `PADL` / `PADC` were unimplemented**, so a pervasive nested key
+  like `Upper(PadR(LTrim(NAME),10))` degraded to an *empty* key ("unknown
+  function") and every seek missed. The three pad functions now evaluate
+  with xBase fixed-width semantics (truncate-or-pad to n, default fill
+  space).
+- **The `AdsCreateIndex61` key-length probe was truncating.** A `key_len == 0`
+  request now returns the *natural* full-width key (bare field, `Upper(field)`,
+  and composite-expression paths) instead of a zero-length or padded key, so
+  the tag is sized correctly.
+
+Acceptance tests added (`abi_cdx_issue131_test.cpp`): compound concat width,
+logical `"1"`/`"0"` → `'T'`/`'F'` seek mapping, and the nested
+`Upper(PadR(LTrim(NAME),10))` case — all seek to the expected record.
+
 ## 1.8.15 — 2026-07-19
 
 ### Fixed — AdsCreateTable wrote the file next to the client app instead of the ADS data directory

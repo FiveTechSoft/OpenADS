@@ -365,6 +365,35 @@ Value apply_scalar_fn(const std::string& fn, const std::vector<Value>& args) {
     } else if (fn == "VAL" && args.size() >= 1) {
         v.is_number = true;
         v.n = std::strtod(args[0].s.c_str(), nullptr);
+    } else if ((fn == "PADR" || fn == "PADL" || fn == "PADC") &&
+               args.size() >= 2) {
+        // xBase PADx(): fit the value to EXACTLY n chars — truncate when
+        // longer, otherwise pad with the fill char (default space). PADR
+        // pads on the right, PADL on the left, PADC centres. Nested
+        // compositions like Upper(PadR(LTrim(NAME),10)) are pervasive in
+        // real applications; without PADx the whole expression degraded
+        // to an EMPTY key ("unknown function") and every seek missed
+        // (GitHub #131 defect C).
+        std::string s = args[0].s;
+        if (args[0].is_number && s.empty())
+            s = format_number_fn(args[0].n, 0, 0);
+        int n = args[1].is_number ? static_cast<int>(args[1].n) : 0;
+        if (n < 0) n = 0;
+        char fill = ' ';
+        if (args.size() >= 3 && !args[2].s.empty()) fill = args[2].s[0];
+        if (static_cast<int>(s.size()) > n) {
+            s.resize(static_cast<std::size_t>(n));
+        } else if (fn == "PADR") {
+            s.append(static_cast<std::size_t>(n) - s.size(), fill);
+        } else if (fn == "PADL") {
+            s.insert(0, static_cast<std::size_t>(n) - s.size(), fill);
+        } else {   // PADC
+            std::size_t total = static_cast<std::size_t>(n) - s.size();
+            std::size_t left  = total / 2;
+            s.insert(0, left, fill);
+            s.append(total - left, fill);
+        }
+        v.s = std::move(s);
     } else if ((fn == "AT" || fn == "ATNUM") && args.size() >= 2) {
         // AT(needle, haystack) / ATNUM(needle, haystack [, occurrence]) ->
         // 1-based position of the (occurrence-th) match, else 0. Used by the
@@ -485,6 +514,22 @@ private:
         } else {
             v.is_number = false;
             v.s = r.value().as_string;
+            // xBase fixed-width semantics: a CHARACTER/DATE field reference
+            // yields the FULL declared width, but decode_field rtrims the
+            // trailing blanks. Restore them here — a compound key like
+            // Upper(SYM)+Upper(SUB)+DToS(DAT) depends on every operand
+            // keeping its width: a blank middle operand must contribute
+            // its spaces, otherwise the stored key is shorter/different
+            // from the key Harbour computes for DbSeek and the seek
+            // misses (GitHub #131 defect A). Varchar is variable-length
+            // by nature and Logical is a single untrimmed byte — neither
+            // needs padding.
+            if ((f.type == drivers::DbfFieldType::Character ||
+                 f.type == drivers::DbfFieldType::CiCharacter ||
+                 f.type == drivers::DbfFieldType::Date) &&
+                v.s.size() < f.length) {
+                v.s.append(f.length - v.s.size(), ' ');
+            }
         }
         return v;
     }
@@ -572,9 +617,21 @@ evaluate_index_expr(Table& t, const std::string& expr, std::uint16_t key_len) {
             auto r = t.read_field(static_cast<std::uint16_t>(fidx));
             if (!r) return r.error();
             std::string key = r.value().as_string;
+            // key_len == 0 asks for the NATURAL key: the field's bytes at
+            // its declared width (decode rtrims trailing blanks; restore
+            // them for the fixed-width text types). Used by the
+            // AdsCreateIndex61 key-length probe.
+            if (key_len == 0) {
+                if ((f.type == drivers::DbfFieldType::Character ||
+                     f.type == drivers::DbfFieldType::CiCharacter ||
+                     f.type == drivers::DbfFieldType::Date) &&
+                    key.size() < f.length) {
+                    key.append(f.length - key.size(), ' ');
+                }
+                return key;
+            }
             if (key.size() < key_len) key.append(key_len - key.size(), ' ');
             if (key.size() > key_len) key.resize(key_len);
-            (void)f;
             return key;
         }
     }
@@ -595,6 +652,19 @@ evaluate_index_expr(Table& t, const std::string& expr, std::uint16_t key_len) {
                 const std::uint8_t* up = eval_oem_upper_table();
                 std::string key = up ? openads::engine::oem_upper(up, raw.data(), raw.size())
                                      : upper_utf8(raw);
+                // key_len == 0 -> natural key: UPPER of the full-width
+                // field value (probe path; see the bare-field branch).
+                if (key_len == 0) {
+                    const auto& f = t.field_descriptor(
+                        static_cast<std::uint16_t>(fidx));
+                    if ((f.type == drivers::DbfFieldType::Character ||
+                         f.type == drivers::DbfFieldType::CiCharacter ||
+                         f.type == drivers::DbfFieldType::Date) &&
+                        key.size() < f.length) {
+                        key.append(f.length - key.size(), ' ');
+                    }
+                    return key;
+                }
                 if (key.size() < key_len) key.append(key_len - key.size(), ' ');
                 if (key.size() > key_len) key.resize(key_len);
                 return key;
@@ -611,6 +681,7 @@ evaluate_index_expr(Table& t, const std::string& expr, std::uint16_t key_len) {
                 // For simplicity, format as the key would.
                 // In practice for CDX numeric bare is handled separately.
                 std::string key = r.value().as_string; // fallback
+                if (key_len == 0) return key;   // natural (probe) length
                 if (key.size() < key_len) key.append(key_len - key.size(), ' ');
                 if (key.size() > key_len) key.resize(key_len);
                 return key;
@@ -621,6 +692,12 @@ evaluate_index_expr(Table& t, const std::string& expr, std::uint16_t key_len) {
     Parser p(ce.toks, t);
     Value v = p.parse_expr();
     std::string s = v.s;
+    // key_len == 0 asks for the NATURAL, unpadded/untruncated key — the
+    // AdsCreateIndex61 composite-expression probe sizes the tag from it.
+    // (Resizing to 0 here returned an empty string, which silently pinned
+    // every composite CDX tag to the 32-byte fallback key length — the
+    // wrong width for compound keys; GitHub #131 defect A.)
+    if (key_len == 0) return s;
     if (s.size() < key_len) s.append(key_len - s.size(), ' ');
     if (s.size() > key_len) s.resize(key_len);
     return s;
