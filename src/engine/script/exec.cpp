@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <random>
 
 namespace openads::script {
 
@@ -637,6 +638,89 @@ Result<Value> Executor::eval_call(const Expr& e) {
              tmv.tm_min * 60 + tmv.tm_sec) * 1000);
     }
     if (fn == "USER") return Value::character(user_);
+    if (fn == "NEWIDSTRING") {
+        // GUID v4 per the SAP spec (master_newidstring_.htm): N=32-hex,
+        // D=dashed, B=[D], P=(D), C={D}, M=base64(24), F=url-safe
+        // base64(22). Oracle-verified quirks (ADS 11 ace64): the format
+        // must be a BARE keyword — a quoted string is rejected with 2159
+        // even though the nav docs allow it; the keyword must match
+        // exactly (DELIM fails, CURLYBRACES works); no argument defaults
+        // to the dashed D form; hex output is lowercase; hex forms print
+        // the GUID in Windows little-endian memory order (v4 nibble at
+        // byte 7), base64 forms in RFC order (v4 nibble at byte 6).
+        if (!a.empty())
+            return serr(
+                "invalid argument to scalar function: NEWIDSTRING");  // 2159
+        std::string f2 = e.type_name.empty() ? "D" : e.type_name;
+        static const char* kLong[][2] = {
+            {"NUMBERS", "N"},     {"DELIMITED", "D"}, {"BRACKETED", "B"},
+            {"PARENTHESIS", "P"}, {"CURLYBRACES", "C"}, {"MIME", "M"},
+            {"FILE", "F"}};
+        if (f2.size() > 1) {
+            std::string s2;
+            for (const auto& m2 : kLong)
+                if (f2 == m2[0]) { s2 = m2[1]; break; }
+            f2 = s2;
+        } else if (std::string("NDBPCMF").find(f2[0]) == std::string::npos) {
+            f2.clear();
+        }
+        if (f2.empty())
+            return serr(
+                "invalid argument to scalar function: NEWIDSTRING");  // 2159
+        static thread_local std::mt19937_64 rng{std::random_device{}()};
+        unsigned char g[16];  // RFC 4122 byte order
+        for (int k = 0; k < 16; k += 8) {
+            std::uint64_t r = rng();
+            for (int j = 0; j < 8; ++j)
+                g[k + j] = static_cast<unsigned char>(r >> (j * 8));
+        }
+        g[6] = static_cast<unsigned char>((g[6] & 0x0F) | 0x40);  // v4
+        g[8] = static_cast<unsigned char>((g[8] & 0x3F) | 0x80);  // variant
+        char c0 = f2[0];
+        if (c0 != 'M' && c0 != 'F') {
+            // Hex shapes use the Windows GUID memory layout: Data1..Data3
+            // little-endian, Data4 as-is.
+            const unsigned char m[16] = {
+                g[3], g[2], g[1],  g[0],  g[5],  g[4],  g[7],  g[6],
+                g[8], g[9], g[10], g[11], g[12], g[13], g[14], g[15]};
+            char hex[33];
+            for (int k = 0; k < 16; ++k)
+                std::snprintf(hex + k * 2, 3, "%02x", m[k]);
+            std::string h(hex, 32);
+            if (c0 == 'N') return Value::character(h);
+            std::string d = h.substr(0, 8) + "-" + h.substr(8, 4) + "-" +
+                            h.substr(12, 4) + "-" + h.substr(16, 4) + "-" +
+                            h.substr(20, 12);
+            if (c0 == 'D') return Value::character(d);
+            if (c0 == 'B') return Value::character("[" + d + "]");
+            if (c0 == 'P') return Value::character("(" + d + ")");
+            return Value::character("{" + d + "}");
+        }
+        {
+            const char* std64 =
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+                "0123456789+/";
+            const char* url64 =
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+                "0123456789-_";
+            const char* tab = (c0 == 'M') ? std64 : url64;
+            std::string o;
+            for (int k = 0; k < 15; k += 3) {
+                std::uint32_t v3 = (static_cast<std::uint32_t>(g[k]) << 16) |
+                                   (static_cast<std::uint32_t>(g[k + 1]) << 8) |
+                                   g[k + 2];
+                o.push_back(tab[(v3 >> 18) & 63]);
+                o.push_back(tab[(v3 >> 12) & 63]);
+                o.push_back(tab[(v3 >> 6) & 63]);
+                o.push_back(tab[v3 & 63]);
+            }
+            std::uint32_t last = static_cast<std::uint32_t>(g[15]) << 16;
+            o.push_back(tab[(last >> 18) & 63]);
+            o.push_back(tab[(last >> 12) & 63]);
+            if (c0 == 'M') { o += "=="; }          // 24 chars padded
+            return Value::character(o);            // F: 22 chars unpadded
+        }
+    }
     if ((fn == "CHAR" || fn == "CHR") && need(1) && a[0].numeric()) {
         // Char(13) — ASCII code to 1-char string (pmsys audit proc builds
         // CRLF this way). The type name CHAR never reaches here (it only

@@ -830,6 +830,17 @@ private:
                 return perr("')' expected in " + e->name, cur().pos);
             return ExprPtr(std::move(e));
         }
+        // NEWIDSTRING(<format>) — in SQL context the GUID format is a BARE
+        // keyword (N, D, M, F, B, P, C or their long forms); a quoted
+        // string is also legal (navigational form). Bare keyword lands in
+        // type_name; the quoted form flows through as a normal argument.
+        if (e->upper == "NEWIDSTRING" && cur().kind == Tok::Ident) {
+            e->type_name = cur().upper;
+            advance();
+            if (!eat(Tok::RParen))
+                return perr("')' expected in NEWIDSTRING", cur().pos);
+            return ExprPtr(std::move(e));
+        }
         // POSITION(needle IN haystack) — the needle is parsed at additive
         // precedence so the grammar-level IN-list operator doesn't grab the
         // IN separator.

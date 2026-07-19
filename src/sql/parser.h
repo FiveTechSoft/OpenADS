@@ -133,7 +133,13 @@ enum class ScalarFnKind {
     DateDiff, DateAdd,
     NullIf, Coalesce, IfNull,      // M10.53
     Now, Today, Date, Time,        // zero-argument date/time functions
-    Udf                            // user-defined function call
+    Udf,                           // user-defined function call
+    ScriptCall                     // S4 — builtin whose argument grammar the
+                                   // generic arg parser can't represent
+                                   // (NEWIDSTRING(<bare keyword>)); the whole
+                                   // call text is captured verbatim in
+                                   // `column` and evaluated by the script
+                                   // expression engine
 };
 
 struct ScalarFnArg {

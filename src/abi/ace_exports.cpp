@@ -26801,7 +26801,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                             static_cast<std::uint16_t>(fi));
                         o.length = static_cast<std::uint8_t>(fd.length ? fd.length : 30);
                     }
-                } else if (fc.kind == K::Udf) {
+                } else if (fc.kind == K::Udf || fc.kind == K::ScriptCall) {
                     o.name     = fc.alias.empty() ? fc.fn_name : fc.alias;
                     o.raw_type = 'C';
                     o.length   = 50;
@@ -27253,6 +27253,24 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         case K::Ltrim: val = trim_left(std::move(raw));  break;
                         case K::Rtrim: val = trim_right(std::move(raw)); break;
 
+                        case K::ScriptCall: {
+                            // S4 — whole-call text (NEWIDSTRING(<keyword>))
+                            // evaluated by the script expression engine, which
+                            // owns the bare-keyword grammar.
+                            auto pr = scriptbridge::compiled(
+                                "RETURN " + fc.column + ";");
+                            if (!pr) return fail(pr.error());
+                            scriptbridge::AbiBridge br(c, hStatement);
+                            openads::script::Executor ex2(&br);
+                            ex2.set_user(c->username());
+                            auto rr = ex2.run(*pr.value());
+                            if (!rr) return fail(rr.error());
+                            val = rr.value().returned
+                                ? openads::script::to_display(
+                                      rr.value().return_value)
+                                : std::string();
+                            break;
+                        }
                         case K::Udf: {
                             // RCB 07/17/2026: DD stored functions run through
                             // the typed script engine (docs/script-engine.md).

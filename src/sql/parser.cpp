@@ -1163,6 +1163,36 @@ util::Result<SelectStmt> parse_select(const std::string& sql) {
                 ScalarFnCall fn;
                 fn.kind    = ScalarFnKind::Udf;
                 fn.fn_name = head;   // save original (case-preserved) name
+                // NEWIDSTRING(<format>) — the GUID format is a BARE keyword
+                // in SQL context (N, MIME, CURLYBRACES, …), which the generic
+                // arg parser would misread as a column ref. Capture the whole
+                // call verbatim; the script expression engine owns the exact
+                // grammar and the oracle-verified semantics.
+                if (upper == "NEWIDSTRING") {
+                    fn.kind   = ScalarFnKind::ScriptCall;
+                    std::string raw = head;
+                    raw.push_back('(');
+                    int depth = 1;
+                    while (depth > 0) {
+                        if (c.eof())
+                            return util::Error{7200, 0,
+                                "unterminated function call in SELECT", sql};
+                        char ch = c.consume_char();
+                        raw.push_back(ch);
+                        if      (ch == '(') ++depth;
+                        else if (ch == ')') --depth;
+                    }
+                    fn.column = std::move(raw);
+                    if (c.match_keyword("AS")) fn.alias = c.read_identifier();
+                    std::size_t fi = stmt.fn_items.size();
+                    stmt.fn_items.push_back(std::move(fn));
+                    char placeholder[32];
+                    std::snprintf(placeholder, sizeof(placeholder),
+                                  "$FN_%zu", fi);
+                    stmt.projection.push_back(placeholder);
+                    if (c.match_char(',')) continue;
+                    break;
+                }
                 // Consume arguments (comma-separated literals / identifiers)
                 if (!c.peek_char(')')) {
                     for (;;) {
@@ -1173,6 +1203,29 @@ util::Result<SelectStmt> parse_select(const std::string& sql) {
                             arg.is_column  = false;
                             arg.is_numeric = false;
                             arg.text       = std::move(s).value();
+                        } else if (c.peek_char('{')) {
+                            // {d '…'} / {ts '…'} temporal literal — captured
+                            // verbatim and routed through the script
+                            // evaluator (is_call), which parses the ODBC
+                            // escape natively. S4 parity: MonthsRented(
+                            // …, {d '2016-01-01'}, …).
+                            std::string raw;
+                            raw.push_back(c.consume_char());   // '{'
+                            int depth = 1;
+                            while (depth > 0) {
+                                if (c.eof())
+                                    return util::Error{7200, 0,
+                                        "unterminated temporal literal in "
+                                        "UDF argument list", sql};
+                                char ch = c.consume_char();
+                                raw.push_back(ch);
+                                if      (ch == '{') ++depth;
+                                else if (ch == '}') --depth;
+                            }
+                            arg.is_column  = false;
+                            arg.is_numeric = false;
+                            arg.is_call    = true;
+                            arg.text       = std::move(raw);
                         } else {
                             auto n = c.read_numeric_literal();
                             if (n) {
@@ -1844,6 +1897,21 @@ parse_execute_procedure(const std::string& sql) {
                 if (!s) return s.error();
                 a.text       = std::move(s).value();
                 a.is_numeric = false;
+            } else if (c.peek_char('{')) {
+                // {d 'YYYY-MM-DD'} / {ts '…'} — keep the INNER text; the
+                // script-proc runner coerces it into the declared DATE/
+                // TIMESTAMP parameter type (S4 parity: sp_ChargeMonthlyRent(
+                // {d '2026-07-01'})).
+                c.match_char('{');
+                while (!c.eof() && !c.peek_char('\''))
+                    c.consume_char();          // skip the d/t/ts marker
+                auto s = c.read_string_literal();
+                if (!s) return s.error();
+                a.text       = std::move(s).value();
+                a.is_numeric = false;
+                if (!c.match_char('}'))
+                    return util::Error{7200, 0,
+                        "expected '}' to close temporal literal", sql};
             } else if (c.match_keyword("NULL")) {
                 // NULL argument: empty text, non-numeric — the sp_*
                 // dispatchers treat it the same as an omitted argument.
