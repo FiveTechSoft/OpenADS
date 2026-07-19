@@ -170,7 +170,15 @@ target_include_directories(openads_core
 
 target_link_libraries(openads_core PRIVATE openads_aes_impl)
 
-set_source_files_properties(abi/ace_exports.cpp PROPERTIES COMPILE_OPTIONS "/bigobj")
+# ace_exports.cpp is a very large TU that overflows the Windows COFF object
+# section limit. MSVC needs /bigobj (C1128); MinGW's GNU assembler needs the
+# equivalent -Wa,-mbig-obj. Neither flag exists on ELF/Mach-O toolchains, so
+# guard by compiler — never pass /bigobj to GCC/Clang.
+if(MSVC)
+    set_source_files_properties(abi/ace_exports.cpp PROPERTIES COMPILE_OPTIONS "/bigobj")
+elseif(MINGW)
+    set_source_files_properties(abi/ace_exports.cpp PROPERTIES COMPILE_OPTIONS "-Wa,-mbig-obj")
+endif()
 
 if(UNIX)
     # RCB 2026-07-10 — CMAKE_DL_LIBS for dladdr in platform/path.cpp
@@ -273,8 +281,26 @@ if(WIN32)
     set(OPENADS_ACE_DEF "${CMAKE_CURRENT_SOURCE_DIR}/openads_ace.def"
         CACHE FILEPATH
         "Path to the .def file driving openads_ace exports.")
-    target_sources(openads_ace PRIVATE ${OPENADS_ACE_DEF})
-    message(STATUS "openads_ace exports def: ${OPENADS_ACE_DEF}")
+    if(MINGW)
+        # GNU ld does not recognize the MSVC-style .def when it opens with
+        # `;` comment lines or a nameless `LIBRARY` line: it fails format
+        # detection, treats the file as a linker script, and errors on the
+        # first `;`. Regenerate a GNU-clean def (EXPORTS + names only) at
+        # configure time and feed that to the linker instead. Read with
+        # file(READ) — not file(STRINGS) — so the `;` in comment lines is
+        # not misparsed as a CMake list separator.
+        file(READ "${OPENADS_ACE_DEF}" _ace_def_raw)
+        string(REGEX REPLACE "(^|\n)[ \t]*;[^\n]*" "\\1" _ace_def_clean "${_ace_def_raw}")
+        string(REGEX REPLACE "(^|\n)[ \t]*LIBRARY[ \t]*(\n|$)" "\\1" _ace_def_clean "${_ace_def_clean}")
+        string(REGEX REPLACE "^[ \t\n]+" "" _ace_def_clean "${_ace_def_clean}")
+        set(_ace_def_gnu "${CMAKE_CURRENT_BINARY_DIR}/openads_ace.gnu.def")
+        file(WRITE "${_ace_def_gnu}" "${_ace_def_clean}")
+        target_sources(openads_ace PRIVATE "${_ace_def_gnu}")
+        message(STATUS "openads_ace exports def (MinGW-clean): ${_ace_def_gnu}")
+    else()
+        target_sources(openads_ace PRIVATE ${OPENADS_ACE_DEF})
+        message(STATUS "openads_ace exports def: ${OPENADS_ACE_DEF}")
+    endif()
 endif()
 
 target_include_directories(openads_ace

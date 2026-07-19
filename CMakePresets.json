@@ -40,16 +40,33 @@
                 "CMAKE_C_COMPILER": "clang",
                 "CMAKE_CXX_COMPILER": "clang++"
             }
+        },
+        {
+            "name": "mingw-x64",
+            "displayName": "MinGW-w64 GCC (x64)",
+            "inherits": "default",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/mingw-x64",
+            "cacheVariables": {
+                "CMAKE_C_COMPILER": "gcc",
+                "CMAKE_CXX_COMPILER": "g++"
+            }
         }
     ],
     "buildPresets": [
-        { "name": "default", "configurePreset": "default" },
-        { "name": "debug",   "configurePreset": "debug"   }
+        { "name": "default",   "configurePreset": "default"   },
+        { "name": "debug",     "configurePreset": "debug"     },
+        { "name": "mingw-x64", "configurePreset": "mingw-x64" }
     ],
     "testPresets": [
         {
             "name": "default",
             "configurePreset": "default",
+            "output": { "outputOnFailure": true }
+        },
+        {
+            "name": "mingw-x64",
+            "configurePreset": "mingw-x64",
             "output": { "outputOnFailure": true }
         }
     ]
