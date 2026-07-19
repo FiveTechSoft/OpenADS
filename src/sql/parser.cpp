@@ -25,6 +25,12 @@ public:
 
     bool eof() const { return pos_ >= s_.size(); }
 
+    // Snapshot/rewind for lookahead-then-reroute parsing (the projection
+    // parser retries a call through the script engine when the ad-hoc
+    // grammar can't represent its argument).
+    std::size_t save() const { return pos_; }
+    void restore(std::size_t p) { pos_ = p; }
+
     bool peek_keyword(const char* kw) const {
         std::size_t len = 0;
         while (kw[len] != '\0') ++len;
@@ -1097,10 +1103,40 @@ util::Result<SelectStmt> parse_select(const std::string& sql) {
                 else if (upper == "COALESCE") fn.kind = ScalarFnKind::Coalesce;
                 else                          fn.kind = ScalarFnKind::IfNull;
                 if (is_single_arg) {
+                    std::size_t argpos = c.save();
                     fn.column = c.read_identifier();
-                    if (fn.column.empty()) {
-                        return util::Error{7200, 0,
-                            "expected column name inside scalar function", sql};
+                    if (fn.column.empty() || !c.peek_char(')')) {
+                        // Argument isn't a bare column (nested call like
+                        // Trim(Convert(Sequence, SQL_CHAR)), [bracketed]
+                        // name, literal) — reroute the whole call through
+                        // the script engine (S4).
+                        c.restore(argpos);
+                        fn.kind = ScalarFnKind::ScriptCall;
+                        fn.fn_name = head;
+                        std::string raw = head;
+                        raw.push_back('(');
+                        int depth = 1;
+                        while (depth > 0) {
+                            if (c.eof())
+                                return util::Error{7200, 0,
+                                    "unterminated function call in SELECT",
+                                    sql};
+                            char ch = c.consume_char();
+                            raw.push_back(ch);
+                            if      (ch == '(') ++depth;
+                            else if (ch == ')') --depth;
+                        }
+                        fn.column = std::move(raw);
+                        if (c.match_keyword("AS"))
+                            fn.alias = c.read_identifier();
+                        std::size_t sfi = stmt.fn_items.size();
+                        stmt.fn_items.push_back(std::move(fn));
+                        char placeholder[32];
+                        std::snprintf(placeholder, sizeof(placeholder),
+                                      "$FN_%zu", sfi);
+                        stmt.projection.push_back(placeholder);
+                        if (c.match_char(',')) continue;
+                        break;
                     }
                 } else {
                     for (;;) {
@@ -1163,12 +1199,21 @@ util::Result<SelectStmt> parse_select(const std::string& sql) {
                 ScalarFnCall fn;
                 fn.kind    = ScalarFnKind::Udf;
                 fn.fn_name = head;   // save original (case-preserved) name
-                // NEWIDSTRING(<format>) — the GUID format is a BARE keyword
-                // in SQL context (N, MIME, CURLYBRACES, …), which the generic
-                // arg parser would misread as a column ref. Capture the whole
-                // call verbatim; the script expression engine owns the exact
-                // grammar and the oracle-verified semantics.
-                if (upper == "NEWIDSTRING") {
+                // Script-engine-routable builtins: bare-keyword arguments
+                // (NEWIDSTRING(N), TIMESTAMPDIFF(SQL_TSI_MONTH, …),
+                // CONVERT(x, SQL_CHAR)) or general expressions over columns
+                // (IIF(PurchaseDate < {d…}, …), Year([modtime])) that the
+                // generic arg parser can't represent. The whole call is
+                // captured verbatim; the SELECT evaluator runs it through
+                // the script expression engine with the current row's
+                // columns bound as parameters (S4).
+                static const char* kScriptRouted[] = {
+                    "NEWIDSTRING", "IIF", "YEAR", "MONTH", "DAY",
+                    "TIMESTAMPDIFF", "TIMESTAMPADD", "CONVERT", "CAST"};
+                bool route_script = false;
+                for (const char* rs : kScriptRouted)
+                    if (upper == rs) { route_script = true; break; }
+                if (route_script) {
                     fn.kind   = ScalarFnKind::ScriptCall;
                     std::string raw = head;
                     raw.push_back('(');

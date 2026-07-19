@@ -20626,6 +20626,13 @@ inline Value value_from_text(const std::string& text, Type t) {
                  trimmed[0] == '1' || trimmed[0] == 'Y'));
         case Type::Date: {
             int y = 0, m = 0, d = 0;
+            auto all_digits = [](const std::string& s2, std::size_t a2,
+                                 std::size_t b2) {
+                for (std::size_t k2 = a2; k2 < b2; ++k2)
+                    if (!std::isdigit(static_cast<unsigned char>(s2[k2])))
+                        return false;
+                return true;
+            };
             if (trimmed.size() >= 10 && trimmed[2] == '/' && trimmed[5] == '/') {
                 m = std::atoi(trimmed.substr(0, 2).c_str());
                 d = std::atoi(trimmed.substr(3, 2).c_str());
@@ -20635,11 +20642,39 @@ inline Value value_from_text(const std::string& text, Type t) {
                 y = std::atoi(trimmed.substr(0, 4).c_str());
                 m = std::atoi(trimmed.substr(5, 2).c_str());
                 d = std::atoi(trimmed.substr(8, 2).c_str());
+            } else if (trimmed.size() >= 8 && all_digits(trimmed, 0, 8)) {
+                // Raw engine format "YYYYMMDD" (DBF date cells and the ADT
+                // date reader's as_string both use it).
+                y = std::atoi(trimmed.substr(0, 4).c_str());
+                m = std::atoi(trimmed.substr(4, 2).c_str());
+                d = std::atoi(trimmed.substr(6, 2).c_str());
             }
             if (y == 0) return Value::typed_null(Type::Date);
             return Value::date(openads::script::jdn_from_ymd(y, m, d));
         }
         case Type::Timestamp: {
+            // Raw engine format "YYYYMMDDHHMMSS[…]" (AdtTimestamp / DBF T
+            // reader output) — digit run with no separators.
+            bool raw14 = trimmed.size() >= 8;
+            for (std::size_t k2 = 0; raw14 && k2 < 8; ++k2)
+                if (!std::isdigit(static_cast<unsigned char>(trimmed[k2])))
+                    raw14 = false;
+            if (raw14 && (trimmed.size() == 8 ||
+                          (trimmed.size() >= 9 &&
+                           std::isdigit(static_cast<unsigned char>(
+                               trimmed[8]))))) {
+                Value dv = value_from_text(trimmed.substr(0, 8), Type::Date);
+                if (dv.is_null) return Value::typed_null(Type::Timestamp);
+                std::int64_t ms = 0;
+                if (trimmed.size() >= 14) {
+                    int hh = std::atoi(trimmed.substr(8, 2).c_str());
+                    int mi = std::atoi(trimmed.substr(10, 2).c_str());
+                    int ss = std::atoi(trimmed.substr(12, 2).c_str());
+                    ms = (static_cast<std::int64_t>(hh) * 3600 + mi * 60 +
+                          ss) * 1000;
+                }
+                return Value::timestamp(dv.i * 86400000 + ms);
+            }
             Value dv = value_from_text(trimmed.substr(0, 10), Type::Date);
             if (dv.is_null) return Value::typed_null(Type::Timestamp);
             std::int64_t ms = 0;
@@ -20659,6 +20694,56 @@ inline Value value_from_text(const std::string& text, Type t) {
             return Value::character(text);
     }
     return Value::character(text);
+}
+
+// Static result-type inference for a script expression. Drives the temp
+// result-column type for ScriptCall projections so subquery consumers see
+// typed values (SAP's cursors type expression columns; ours must too).
+// Null = unknown -> C(50) fallback.
+inline Type infer_expr_type(const openads::script::Expr& e) {
+    using E = openads::script::ExprKind;
+    switch (e.kind) {
+        case E::Literal: return e.lit.type;
+        case E::FnCall: {
+            const std::string& f = e.upper;
+            if (f == "YEAR" || f == "MONTH" || f == "DAY" ||
+                f == "LENGTH" || f == "POSITION" || f == "TIMESTAMPDIFF" ||
+                f == "DAYOFMONTH" || f == "DAYOFWEEK" || f == "DAYOFYEAR" ||
+                f == "HOUR" || f == "MINUTE" || f == "SECOND")
+                return Type::Integer;
+            if (f == "CURDATE" || f == "TODAY") return Type::Date;
+            if (f == "NOW" || f == "CURTIMESTAMP" || f == "TIMESTAMPADD")
+                return Type::Timestamp;
+            if (f == "IIF" && e.args.size() == 3) {
+                Type t = infer_expr_type(*e.args[1]);
+                if (t != Type::Null) return t;
+                return infer_expr_type(*e.args[2]);
+            }
+            if (f == "CONVERT" || f == "CAST") {
+                const std::string& tn = e.type_name;
+                if (tn == "SQL_DATE" || tn == "DATE") return Type::Date;
+                if (tn == "SQL_TIMESTAMP" || tn == "TIMESTAMP")
+                    return Type::Timestamp;
+                if (tn == "SQL_INTEGER" || tn == "INTEGER" ||
+                    tn == "SQL_SMALLINT")
+                    return Type::Integer;
+                if (tn == "SQL_DOUBLE" || tn == "SQL_NUMERIC" ||
+                    tn == "SQL_FLOAT" || tn == "MONEY")
+                    return Type::Double;
+                return Type::Null;   // SQL_CHAR etc. -> C fallback
+            }
+            return Type::Null;
+        }
+        case E::Case: {
+            for (const auto& w : e.whens) {
+                Type t = infer_expr_type(*w.second);
+                if (t != Type::Null) return t;
+            }
+            if (e.else_expr) return infer_expr_type(*e.else_expr);
+            return Type::Null;
+        }
+        default: return Type::Null;
+    }
 }
 
 // One-value cursor: answers single-value fast paths (literal iota
@@ -26783,6 +26868,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             std::string  name;
             char         raw_type = 'C';
             std::uint8_t length   = 0;
+            std::uint8_t decimals = 0;
             std::int32_t src_field = -1;
             std::int32_t case_idx  = -1;
             std::int32_t fn_idx    = -1;
@@ -26793,6 +26879,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         };
         std::vector<OutCol> outs;
         outs.reserve(parsed.value().projection.size());
+        int script_expr_seq = 0;   // EXPR / EXPR_1 / … numbering (SAP)
         for (std::size_t i = 0; i < parsed.value().projection.size(); ++i) {
             const auto& p = parsed.value().projection[i];
             OutCol o;
@@ -26846,7 +26933,38 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                             static_cast<std::uint16_t>(fi));
                         o.length = static_cast<std::uint8_t>(fd.length ? fd.length : 30);
                     }
-                } else if (fc.kind == K::Udf || fc.kind == K::ScriptCall) {
+                } else if (fc.kind == K::ScriptCall) {
+                    // SAP names unaliased expression projections EXPR,
+                    // EXPR_1, … (oracle-verified). Static type inference
+                    // over the compiled expression drives the temp-column
+                    // type so subquery consumers see typed values.
+                    if (!fc.alias.empty()) o.name = fc.alias;
+                    else {
+                        o.name = script_expr_seq == 0
+                               ? "EXPR"
+                               : "EXPR_" + std::to_string(script_expr_seq);
+                        ++script_expr_seq;
+                    }
+                    o.raw_type = 'C';
+                    o.length   = 50;
+                    auto spr = scriptbridge::compiled(
+                        "RETURN " + fc.column + ";");
+                    if (spr && !spr.value()->stmts.empty() &&
+                        spr.value()->stmts[0]->expr) {
+                        using ST = openads::script::Type;
+                        switch (scriptbridge::infer_expr_type(
+                                    *spr.value()->stmts[0]->expr)) {
+                            case ST::Integer:
+                                o.raw_type = 'N'; o.length = 20; break;
+                            case ST::Double:
+                                o.raw_type = 'N'; o.length = 20;
+                                o.decimals = 6; break;
+                            case ST::Date:
+                                o.raw_type = 'D'; o.length = 8; break;
+                            default: break;
+                        }
+                    }
+                } else if (fc.kind == K::Udf) {
                     o.name     = fc.alias.empty() ? fc.fn_name : fc.alias;
                     o.raw_type = 'C';
                     o.length   = 50;
@@ -27207,6 +27325,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         std::min(o.name.size(), std::size_t{11}));
             fd[11] = static_cast<std::uint8_t>(o.raw_type);
             fd[16] = o.length;
+            fd[17] = o.decimals;
             file.insert(file.end(), fd.begin(), fd.end());
         }
         file.push_back(0x0D);
@@ -27299,21 +27418,104 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         case K::Rtrim: val = trim_right(std::move(raw)); break;
 
                         case K::ScriptCall: {
-                            // S4 — whole-call text (NEWIDSTRING(<keyword>))
-                            // evaluated by the script expression engine, which
-                            // owns the bare-keyword grammar.
+                            // S4 — whole-call text (NEWIDSTRING(<keyword>),
+                            // IIF(col < {d…}, …), Year([modtime]), nested
+                            // Trim(Convert(…))) evaluated by the script
+                            // expression engine with the CURRENT row's
+                            // columns bound as parameters. compiled() caches
+                            // by text, so the per-row cost is a hash lookup.
                             auto pr = scriptbridge::compiled(
                                 "RETURN " + fc.column + ";");
                             if (!pr) return fail(pr.error());
                             scriptbridge::AbiBridge br(c, hStatement);
                             openads::script::Executor ex2(&br);
                             ex2.set_user(c->username());
+                            {
+                                using SV = openads::script::Value;
+                                using ST = openads::script::Type;
+                                using FT = openads::drivers::DbfFieldType;
+                                std::uint16_t nfld = tbl->field_count();
+                                for (std::uint16_t k2 = 0; k2 < nfld; ++k2) {
+                                    auto v2 = tbl->read_field(k2);
+                                    if (!v2) continue;
+                                    const auto& fd2 =
+                                        tbl->field_descriptor(k2);
+                                    SV sv;
+                                    if (v2.value().is_null) {
+                                        sv = SV::null();
+                                    } else switch (fd2.type) {
+                                        case FT::Numeric: case FT::Float:
+                                        case FT::Double: case FT::Currency:
+                                        case FT::AdtMoney:
+                                            sv = SV::real(
+                                                v2.value().as_double);
+                                            break;
+                                        case FT::Integer: case FT::ShortInt:
+                                        case FT::AutoInc:
+                                            sv = SV::integer(
+                                                static_cast<std::int64_t>(
+                                                    v2.value().as_double));
+                                            break;
+                                        case FT::Date: case FT::AdtDate:
+                                            sv = scriptbridge::
+                                                value_from_text(
+                                                    v2.value().as_string,
+                                                    ST::Date);
+                                            break;
+                                        case FT::DateTime:
+                                        case FT::AdtTimestamp:
+                                        case FT::ModTime:
+                                            sv = scriptbridge::
+                                                value_from_text(
+                                                    v2.value().as_string,
+                                                    ST::Timestamp);
+                                            break;
+                                        case FT::Logical:
+                                            sv = scriptbridge::
+                                                value_from_text(
+                                                    v2.value().as_string,
+                                                    ST::Logical);
+                                            break;
+                                        default: {
+                                            std::string s2 =
+                                                v2.value().as_string;
+                                            while (!s2.empty() &&
+                                                   s2.back() == ' ')
+                                                s2.pop_back();
+                                            sv = SV::character(
+                                                std::move(s2));
+                                        }
+                                    }
+                                    // Both bare and [bracketed] spellings —
+                                    // the script lexer keeps brackets in
+                                    // the identifier token.
+                                    ex2.set_param("[" + fd2.name + "]", sv);
+                                    ex2.set_param(fd2.name, std::move(sv));
+                                }
+                            }
                             auto rr = ex2.run(*pr.value());
                             if (!rr) return fail(rr.error());
-                            val = rr.value().returned
-                                ? openads::script::to_display(
-                                      rr.value().return_value)
-                                : std::string();
+                            if (!rr.value().returned ||
+                                rr.value().return_value.is_null) {
+                                val.clear();
+                            } else if (o.raw_type == 'D') {
+                                // DBF date cell — raw YYYYMMDD.
+                                const auto& rv = rr.value().return_value;
+                                std::int64_t jdn =
+                                    rv.type ==
+                                        openads::script::Type::Timestamp
+                                        ? rv.i / 86400000 : rv.i;
+                                int y2, m2, d2;
+                                openads::script::ymd_from_jdn(jdn, y2, m2,
+                                                              d2);
+                                char db[16];
+                                std::snprintf(db, sizeof(db),
+                                              "%04d%02d%02d", y2, m2, d2);
+                                val = db;
+                            } else {
+                                val = openads::script::to_display(
+                                    rr.value().return_value);
+                            }
                             break;
                         }
                         case K::Udf: {
@@ -27375,6 +27577,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                                                     ST::Date));
                                             break;
                                         case FT::DateTime: case FT::AdtTimestamp:
+                                        case FT::ModTime:
                                             sargs.push_back(
                                                 scriptbridge::value_from_text(
                                                     v2.value().as_string,
