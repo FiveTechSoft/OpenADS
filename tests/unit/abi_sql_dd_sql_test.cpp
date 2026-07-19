@@ -363,10 +363,11 @@ TEST_CASE("system.columns virtual table") {
     uint32_t cnt = sql_count(hConn, "SELECT * FROM system.columns");
     CHECK(cnt == 1);
 
-    // Verify TABLE_NAME and COLUMN_NAME columns
-    std::string tbl = sql_field1(hConn, "SELECT * FROM system.columns", "TABLE_NAME");
+    // Verify the SAP schema: Parent (table) and Name (field) columns
+    // (oracle-verified naming — S4).
+    std::string tbl = sql_field1(hConn, "SELECT * FROM system.columns", "Parent");
     CHECK(tbl == "EMP");
-    std::string col = sql_field1(hConn, "SELECT * FROM system.columns", "COL_NAME");
+    std::string col = sql_field1(hConn, "SELECT * FROM system.columns", "Name");
     CHECK(col == "NAME");
 
     AdsDisconnect(hConn);

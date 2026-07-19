@@ -1218,6 +1218,27 @@ util::Result<void> DataDict::load_add_binary_(const std::string& buf) {
                 auto& fp = field_props_[tbl][rec.obj_name];
                 if (fp.find("ordinal") == fp.end())
                     fp["ordinal"] = std::to_string(rec.info1);
+                // SAP binary Field-record decode (oracle-verified against
+                // system.columns on pmsys.add, 2026-07-19):
+                //   - inline property (when not SQL NULL) = the DEFAULT
+                //     value expression, NUL-terminated ("FALSE", "now()").
+                //   - the extra area right after it (offset 0 when the
+                //     property is NULL) starts with a uint16 null-valid
+                //     flag: 0x0000 = NOT NULL, 0xFFFF = nullable. OpenADS
+                //     itself never writes "Field" records (it uses
+                //     FieldProp JSON), so a strict 0x0000 match is safe.
+                if (!rec.prop_null && !rec.property.empty() &&
+                    fp.find("default") == fp.end()) {
+                    std::string defv = rec.property;
+                    auto z = defv.find('\0');
+                    if (z != std::string::npos) defv.resize(z);
+                    if (!defv.empty()) fp["default"] = defv;
+                }
+                std::size_t xoff =
+                    base + 225 + (rec.prop_null ? 0 : rec.property.size());
+                if (xoff + 2 <= base + 498 && xoff + 2 <= buf.size()) {
+                    if (le16(buf, xoff) == 0x0000u) fp["required"] = "T";
+                }
             }
         }
     }

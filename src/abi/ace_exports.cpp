@@ -18684,13 +18684,37 @@ build_system_table(Connection* c, std::string sys_name,
         return build(cols, {{std::vector<std::string>{" "}}});
     }
     if (sys_name == "columns") {
+        // SAP schema (oracle-verified on pmsys.add): Name / Parent /
+        // Field_Num / Field_Type (numeric ADT code; CICHAR reports 20) /
+        // Field_Length / Field_Decimal / Field_Min_Value /
+        // Field_Max_Value / Field_Can_Be_Null (T|F) /
+        // Field_Default_Value / Field_Validation_Msg / Comment /
+        // User_Defined_Prop / Field_Options. Nullability and defaults
+        // come from the DD's Field records (field_props "required" /
+        // "default"); the rest from the physical descriptors.
         const std::vector<Col> cols = {
-            {"TABLE_NAME", 'C', 200, 0},
-            {"COL_NAME",   'C', 200, 0},
-            {"COL_NUM",    'N',   5, 0},
-            {"COL_TYPE",   'C',  10, 0},
-            {"COL_LEN",    'N',   5, 0},
-            {"COL_DEC",    'N',   3, 0},
+            {"Name",                'C', 200, 0},
+            {"Parent",              'C', 200, 0},
+            {"Field_Num",           'N',   6, 0},
+            {"Field_Type",          'N',   6, 0},
+            {"Field_Length",        'N',   8, 0},
+            {"Field_Decimal",       'N',   4, 0},
+            {"Field_Min_Value",     'C',  32, 0},
+            {"Field_Max_Value",     'C',  32, 0},
+            {"Field_Can_Be_Null",   'L',   1, 0},
+            {"Field_Default_Value", 'C', 100, 0},
+            {"Field_Validation_Msg",'C', 100, 0},
+            {"Comment",             'C', 100, 0},
+            {"User_Defined_Prop",   'C', 100, 0},
+            {"Field_Options",       'N',   6, 0},
+        };
+        auto ci_eq2 = [](const std::string& x, const std::string& y) {
+            if (x.size() != y.size()) return false;
+            for (std::size_t z = 0; z < x.size(); ++z)
+                if (std::toupper(static_cast<unsigned char>(x[z])) !=
+                    std::toupper(static_cast<unsigned char>(y[z])))
+                    return false;
+            return true;
         };
         std::vector<std::vector<std::string>> rows;
         for (const auto& kv : dd->tables()) {
@@ -18701,16 +18725,52 @@ build_system_table(Connection* c, std::string sys_name,
             if (!th) continue;
             openads::engine::Table* tbl = c->lookup_table(th.value());
             if (tbl) {
+                // DD field props for this table (nullable/default), if any.
+                const std::unordered_map<std::string,
+                    std::unordered_map<std::string, std::string>>* tfp =
+                        nullptr;
+                for (const auto& fpkv : dd->field_props()) {
+                    if (ci_eq2(fpkv.first, kv.first)) {
+                        tfp = &fpkv.second;
+                        break;
+                    }
+                }
                 std::uint16_t nf = tbl->field_count();
                 for (std::uint16_t i = 0; i < nf; ++i) {
                     const auto& fd = tbl->field_descriptor(i);
+                    bool required = false;
+                    std::string defv;
+                    if (tfp) {
+                        for (const auto& fkv : *tfp) {
+                            if (!ci_eq2(fkv.first, fd.name)) continue;
+                            auto rit = fkv.second.find("required");
+                            required = rit != fkv.second.end() &&
+                                       rit->second == "T";
+                            auto dit = fkv.second.find("default");
+                            if (dit != fkv.second.end()) defv = dit->second;
+                            break;
+                        }
+                    }
+                    // SAP reports the DD/ADT type code — CICHAR is 20
+                    // there, not the ACE sweep constant 25.
+                    unsigned tcode = fd.type ==
+                        openads::drivers::DbfFieldType::CiCharacter
+                        ? 20u : map_field_type(fd.type);
                     rows.push_back({
-                        kv.first,
                         fd.name,
+                        kv.first,
                         std::to_string(i + 1),
-                        std::string(1, fd.raw_type),
+                        std::to_string(tcode),
                         std::to_string(fd.length),
                         std::to_string(fd.decimals),
+                        "",                          // Field_Min_Value
+                        "",                          // Field_Max_Value
+                        required ? "F" : "T",        // Field_Can_Be_Null
+                        defv,
+                        "",                          // Field_Validation_Msg
+                        "",                          // Comment
+                        "",                          // User_Defined_Prop
+                        "0",                         // Field_Options
                     });
                 }
             }
@@ -20798,6 +20858,45 @@ inline void bind_row_params(openads::script::Executor& ex,
     }
 }
 
+// Write a typed script Value into a table field: numerics through the
+// double path, dates/timestamps as the engine's raw YYYYMMDD[HHMMSS]
+// text, logicals as T/F. Shared by MERGE SET and INSERT default-value
+// application.
+inline openads::util::Result<void> write_script_value(
+    openads::engine::Table& tbl, std::uint16_t fi, const Value& rv) {
+    if (rv.is_null) return tbl.set_field_null(fi);
+    switch (rv.type) {
+        case Type::Integer:
+            return tbl.set_field(fi, static_cast<double>(rv.i));
+        case Type::Double:
+            return tbl.set_field(fi, rv.d);
+        case Type::Logical:
+            return tbl.set_field(fi, std::string(rv.i ? "T" : "F"));
+        case Type::Date: {
+            int y2, m2, d2;
+            openads::script::ymd_from_jdn(rv.i, y2, m2, d2);
+            char db[16];
+            std::snprintf(db, sizeof(db), "%04d%02d%02d", y2, m2, d2);
+            return tbl.set_field(fi, std::string(db));
+        }
+        case Type::Timestamp: {
+            std::int64_t jdn = rv.i / 86400000;
+            std::int64_t ms2 = rv.i % 86400000;
+            int y2, m2, d2;
+            openads::script::ymd_from_jdn(jdn, y2, m2, d2);
+            char db[24];
+            std::snprintf(db, sizeof(db), "%04d%02d%02d%02d%02d%02d",
+                          y2, m2, d2,
+                          static_cast<int>(ms2 / 3600000),
+                          static_cast<int>((ms2 / 60000) % 60),
+                          static_cast<int>((ms2 / 1000) % 60));
+            return tbl.set_field(fi, std::string(db));
+        }
+        default:
+            return tbl.set_field(fi, rv.s);
+    }
+}
+
 // One-value cursor: answers single-value fast paths (literal iota
 // selects, trigger row-image reads) without a SQL round-trip.
 struct OneValueCursor final : openads::script::SqlCursor {
@@ -21783,6 +21882,45 @@ bool dispatch_sql_uri_acl(const std::string& sqlstr,
     *phCursor = 0;
     rc_out = ok();
     return true;
+}
+
+// S4 — DD field constraints for one table (case-insensitive lookup):
+// "required" (NOT NULL) and "default" decoded from the DD's SAP binary
+// Field records. Keyed by lower-cased field name. Used by the INSERT
+// (enforce + apply defaults) and UPDATE (reject SET col = NULL)
+// executors.
+struct DdFieldRule {
+    bool        required = false;
+    std::string def;
+};
+
+std::unordered_map<std::string, DdFieldRule>
+dd_field_rules_for(Connection* c, const std::string& table) {
+    std::unordered_map<std::string, DdFieldRule> out;
+    if (c == nullptr || !c->has_dd()) return out;
+    auto* dd = c->dd();
+    if (dd == nullptr) return out;
+    auto lower = [](std::string s) {
+        for (auto& ch : s)
+            ch = static_cast<char>(std::tolower(
+                static_cast<unsigned char>(ch)));
+        return s;
+    };
+    const std::string want = lower(table);
+    for (const auto& tkv : dd->field_props()) {
+        if (lower(tkv.first) != want) continue;
+        for (const auto& fkv : tkv.second) {
+            DdFieldRule r;
+            auto rit = fkv.second.find("required");
+            r.required = rit != fkv.second.end() && rit->second == "T";
+            auto dit = fkv.second.find("default");
+            if (dit != fkv.second.end()) r.def = dit->second;
+            if (r.required || !r.def.empty())
+                out[lower(fkv.first)] = std::move(r);
+        }
+        break;
+    }
+    return out;
 }
 
 }  // namespace
@@ -23215,6 +23353,28 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             }
             assns.push_back({static_cast<std::uint16_t>(fidx), a.value});
         }
+        // S4 — SET <col> = NULL on a DD non-nullable column fails 5147
+        // before any write (SAP: "cannot be updated to a NULL value due
+        // to a 'not NULL' constraint").
+        {
+            auto upd_rules = dd_field_rules_for(c, upd.value().table);
+            for (const auto& a : upd.value().assignments) {
+                if (!a.value.is_null || upd_rules.empty()) continue;
+                std::string key = a.column;
+                for (auto& ch : key)
+                    ch = static_cast<char>(std::tolower(
+                        static_cast<unsigned char>(ch)));
+                auto rit = upd_rules.find(key);
+                if (rit != upd_rules.end() && rit->second.required) {
+                    std::string msg =
+                        "constraint violation while updating column \"" +
+                        a.column + "\": the column cannot be updated to a "
+                        "NULL value due to a 'not NULL' constraint";
+                    return fail(openads::AE_COLUMN_CANNOT_BE_NULL,
+                                msg.c_str());
+                }
+            }
+        }
         // Walk every live record, run optional WHERE via the same
         // engine filter machinery, and apply the assignments inline.
         if (upd.value().where) {
@@ -23525,6 +23685,47 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         openads::engine::Table* tbl = c->lookup_table(th.value());
         if (!tbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
 
+        // S4 — DD field constraints (oracle-verified): SAP rejects an
+        // INSERT that leaves a non-nullable column without a value with
+        // 5147, checking fields in ordinal order; a missing column with
+        // a DD default takes the default instead (an EXPLICIT NULL does
+        // not — it violates). Applies to the VALUES paths; the
+        // INSERT...SELECT path doesn't enforce yet.
+        auto ins_rules = dd_field_rules_for(c, ins.value().table);
+        auto ins_lower = [](std::string s2) {
+            for (auto& ch : s2)
+                ch = static_cast<char>(std::tolower(
+                    static_cast<unsigned char>(ch)));
+            return s2;
+        };
+        auto ins_col_pos = [&](const std::string& fname) -> std::int32_t {
+            for (std::size_t j = 0; j < ins.value().columns.size(); ++j) {
+                if (ins_lower(ins.value().columns[j]) == ins_lower(fname))
+                    return static_cast<std::int32_t>(j);
+            }
+            return -1;
+        };
+        auto null_violation =
+            [&](const std::vector<openads::sql::InsertLiteral>& vals)
+            -> std::string {
+            if (ins_rules.empty()) return {};
+            std::uint16_t nf = tbl->field_count();
+            for (std::uint16_t i = 0; i < nf; ++i) {
+                const auto& fd = tbl->field_descriptor(i);
+                auto rit = ins_rules.find(ins_lower(fd.name));
+                if (rit == ins_rules.end() || !rit->second.required)
+                    continue;
+                std::int32_t cp = ins_col_pos(fd.name);
+                if (cp >= 0 && static_cast<std::size_t>(cp) < vals.size() &&
+                    !vals[static_cast<std::size_t>(cp)].is_null)
+                    continue;                       // value supplied
+                if (cp < 0 && !rit->second.def.empty())
+                    continue;                       // default fills it
+                return fd.name;
+            }
+            return {};
+        };
+
         // M10.41 — INSERT INTO t (cols) SELECT ...: recursively
         // execute the inner SELECT, walk its cursor, append one
         // target row per source row mapping the inner cursor's
@@ -23670,8 +23871,59 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     if (!wr) return wr.error();
                 }
             }
+            // Apply DD default values to columns the statement did not
+            // name (evaluated through the script engine: FALSE, now(),
+            // …; unparseable text falls back to a raw write).
+            for (std::uint16_t i = 0;
+                 !ins_rules.empty() && i < tbl->field_count(); ++i) {
+                const auto& fd = tbl->field_descriptor(i);
+                auto rit = ins_rules.find(ins_lower(fd.name));
+                if (rit == ins_rules.end() || rit->second.def.empty())
+                    continue;
+                if (ins_col_pos(fd.name) >= 0) continue;   // caller set it
+                bool wrote = false;
+                auto pr = scriptbridge::compiled(
+                    "RETURN " + rit->second.def + ";");
+                if (pr) {
+                    scriptbridge::AbiBridge br(c, hStatement);
+                    openads::script::Executor ex2(&br);
+                    ex2.set_user(c->username());
+                    auto rr = ex2.run(*pr.value());
+                    if (rr && rr.value().returned) {
+                        auto wr = scriptbridge::write_script_value(
+                            *tbl, i, rr.value().return_value);
+                        if (!wr) return wr.error();
+                        wrote = true;
+                    }
+                }
+                if (!wrote) {
+                    auto wr = tbl->set_field(i, rit->second.def);
+                    if (!wr) return wr.error();
+                }
+            }
             return std::monostate{};
         };
+        // S4 — NOT NULL pre-check BEFORE any trigger or write: SAP's 5147
+        // constraint violation leaves no row behind and fires nothing.
+        {
+            std::string viol;
+            if (!ins.value().rows.empty()) {
+                for (auto& row : ins.value().rows) {
+                    viol = null_violation(row);
+                    if (!viol.empty()) break;
+                }
+            } else if (ins.value().select_sql.empty()) {
+                viol = null_violation(ins.value().values);
+            }
+            if (!viol.empty()) {
+                c->close_table(th.value());
+                std::string msg =
+                    "constraint violation while updating column \"" + viol +
+                    "\": the column cannot be set to a NULL value due to a "
+                    "'not NULL' constraint";
+                return fail(openads::AE_COLUMN_CANNOT_BE_NULL, msg.c_str());
+            }
+        }
         // Trigger: INSTEAD OF INSERT supersedes the actual insert; BEFORE fires first.
         // RCB 07/17/2026 (S2): failures propagate (probe Q6): BEFORE/
         // INSTEAD OF failure blocks the write, AFTER failure keeps it.

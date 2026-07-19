@@ -44,7 +44,9 @@ $cases = [ordered]@{
 "fn_NewSeqKey"       = "SELECT NewSeqKey('rmkey') AS v FROM system.iota";
 
 # ---- trigger firing via DML (Insert/Update/Delete AuditLog on properties) -
-"trg_ins"  = "INSERT INTO properties (PropertyID) VALUES ('ZZ PARITY TEST')";
+# trg_ins is in $bothFailCases below: SAP rejects it 7200/5147 (LandLordID
+# NOT NULL) and OA rejects it 5147 — semantics equal, error TEXT can't
+# match until the AQE error-wrap gap closes.
 "chk_ins"  = "SELECT COUNT(*) AS n FROM auditlog WHERE TableKey = 'ZZ PARITY TEST'";
 "trg_upd"  = "UPDATE properties SET Notes = 'parity' WHERE PropertyID = 'ZZ PARITY TEST'";
 "chk_upd"  = "SELECT COUNT(*) AS n FROM auditlog WHERE TableKey = 'ZZ PARITY TEST'";
@@ -64,6 +66,12 @@ $shapeCases = [ordered]@{
 "guid_C"    = @("SELECT NEWIDSTRING(CURLYBRACES) AS v FROM system.iota", '^\[\{"v":"\{[0-9a-f-]{36}\}"\}\]$');
 "guid_M"    = @("SELECT NEWIDSTRING(MIME) AS v FROM system.iota",        '^\[\{"v":"[A-Za-z0-9+/]{22}=="\}\]$');
 "guid_F"    = @("SELECT NEWIDSTRING(FILE) AS v FROM system.iota",        '^\[\{"v":"[A-Za-z0-9_-]{22}"\}\]$');
+}
+
+# ---- cases where BOTH engines must reject (any rc): OA reports native
+# ---- codes while SAP wraps as 7200; message parity is the error-wrap gap --
+$bothFailCases = [ordered]@{
+"trg_ins" = "INSERT INTO properties (PropertyID) VALUES ('ZZ PARITY TEST')";
 }
 
 # ---- NEWIDSTRING error parity: message text differs (known gap), rc must
@@ -99,6 +107,22 @@ foreach ($k in $shapeCases.Keys) {
         $pass++
     } else {
         "DIFF  {0,-22} (shape)" -f $k
+        "      SAP: " + $a.Substring(0, [Math]::Min(160, $a.Length))
+        "      OA : " + $b.Substring(0, [Math]::Min(160, $b.Length))
+        $fail++
+    }
+}
+
+foreach ($k in $bothFailCases.Keys) {
+    $q = $bothFailCases[$k]
+    $a = (& $dd --lib $SapLib --db $SapDb --user $user --password $pw --sql $q 2>&1) -join " "
+    $b = (& $dd --lib $OaLib  --db $OaDb  --user $user --password $pw --sql $q 2>&1) -join " "
+    $fa = $a -match '"error"'; $fb = $b -match '"error"'
+    if ($fa -and $fb) {
+        "PASS  {0,-22} both reject" -f $k
+        $pass++
+    } else {
+        "DIFF  {0,-22} (reject)  SAP failed=$fa  OA failed=$fb" -f $k
         "      SAP: " + $a.Substring(0, [Math]::Min(160, $a.Length))
         "      OA : " + $b.Substring(0, [Math]::Min(160, $b.Length))
         $fail++
