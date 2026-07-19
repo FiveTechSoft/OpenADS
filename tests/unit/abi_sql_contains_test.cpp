@@ -292,14 +292,14 @@ TEST_CASE("M10.like SQL LIKE in aggregate FILTER") {
     REQUIRE(AdsGotoTop(hCur) == 0);
 
     UNSIGNED8 buf1[32] = {0}; UNSIGNED32 cap1 = sizeof(buf1);
-    UNSIGNED8 col1[8] = "COL1";
+    UNSIGNED8 col1[8] = "EXPR";
     REQUIRE(AdsGetField(hCur, col1, buf1, &cap1, 0) == 0);
     auto s1 = std::string(reinterpret_cast<const char*>(buf1), cap1);
     while (!s1.empty() && s1.back() == ' ') s1.pop_back();
     CHECK(s1 == "2");  // Alice, Alan
 
     UNSIGNED8 buf2[32] = {0}; UNSIGNED32 cap2 = sizeof(buf2);
-    UNSIGNED8 col2[8] = "COL2";
+    UNSIGNED8 col2[8] = "EXPR_1";
     REQUIRE(AdsGetField(hCur, col2, buf2, &cap2, 0) == 0);
     auto s2 = std::string(reinterpret_cast<const char*>(buf2), cap2);
     while (!s2.empty() && s2.back() == ' ') s2.pop_back();
@@ -335,14 +335,14 @@ TEST_CASE("M10.contains SQL CONTAINS in aggregate FILTER") {
     REQUIRE(AdsGotoTop(hCur) == 0);
 
     UNSIGNED8 buf1[32] = {0}; UNSIGNED32 cap1 = sizeof(buf1);
-    UNSIGNED8 col1[8] = "COL1";
+    UNSIGNED8 col1[8] = "EXPR";
     REQUIRE(AdsGetField(hCur, col1, buf1, &cap1, 0) == 0);
     auto s1 = std::string(reinterpret_cast<const char*>(buf1), cap1);
     while (!s1.empty() && s1.back() == ' ') s1.pop_back();
     CHECK(s1 == "4");  // all rows
 
     UNSIGNED8 buf2[32] = {0}; UNSIGNED32 cap2 = sizeof(buf2);
-    UNSIGNED8 col2[8] = "COL2";
+    UNSIGNED8 col2[8] = "EXPR_1";
     REQUIRE(AdsGetField(hCur, col2, buf2, &cap2, 0) == 0);
     auto s2 = std::string(reinterpret_cast<const char*>(buf2), cap2);
     while (!s2.empty() && s2.back() == ' ') s2.pop_back();

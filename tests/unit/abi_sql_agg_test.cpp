@@ -83,7 +83,7 @@ TEST_CASE("M10.10 SELECT COUNT(*) returns matching row count") {
     REQUIRE(AdsGetRecordCount(hCur, 0, &cnt) == 0);
     CHECK(cnt == 1);
     REQUIRE(AdsGotoTop(hCur) == 0);
-    CHECK(read_col(hCur, "COL1") == "4");
+    CHECK(read_col(hCur, "EXPR") == "4");
 
     REQUIRE(AdsCloseSQLStatement(hStmt) == 0);
     REQUIRE(AdsDisconnect(hConn) == 0);
@@ -120,7 +120,7 @@ TEST_CASE("SQL result cursor is on row 1 after execute (no GotoTop) — SAP pari
         UNSIGNED16 bof = 1;
         REQUIRE(AdsAtBOF(hCur, &bof) == 0);
         CHECK(bof == 0);                         // NOT before the first row
-        CHECK(read_col(hCur, "COL1") == "4");    // read WITHOUT AdsGotoTop
+        CHECK(read_col(hCur, "EXPR") == "4");    // read WITHOUT AdsGotoTop
         REQUIRE(AdsCloseTable(hCur) == 0);
     }
 
@@ -163,10 +163,10 @@ TEST_CASE("M10.10 SUM / AVG / MIN / MAX") {
     REQUIRE(AdsExecuteSQLDirect(hStmt, sql, &hCur) == 0);
 
     REQUIRE(AdsGotoTop(hCur) == 0);
-    auto sum = read_col(hCur, "COL1");
-    auto avg = read_col(hCur, "COL2");
-    auto mn  = read_col(hCur, "COL3");
-    auto mx  = read_col(hCur, "COL4");
+    auto sum = read_col(hCur, "EXPR");
+    auto avg = read_col(hCur, "EXPR_1");
+    auto mn  = read_col(hCur, "EXPR_2");
+    auto mx  = read_col(hCur, "EXPR_3");
     CHECK(std::stod(sum) == doctest::Approx(100));
     CHECK(std::stod(avg) == doctest::Approx(25));
     CHECK(std::stod(mn)  == doctest::Approx(10));
@@ -202,8 +202,8 @@ TEST_CASE("M10.10 aggregate honours WHERE filter") {
     REQUIRE(AdsExecuteSQLDirect(hStmt, sql, &hCur) == 0);
 
     REQUIRE(AdsGotoTop(hCur) == 0);
-    auto cnt = read_col(hCur, "COL1");
-    auto sum = read_col(hCur, "COL2");
+    auto cnt = read_col(hCur, "EXPR");
+    auto sum = read_col(hCur, "EXPR_1");
     CHECK(std::stoi(cnt) == 3);             // 20, 30, 40
     CHECK(std::stod(sum) == doctest::Approx(90));
 

@@ -213,8 +213,8 @@ TEST_CASE("M10.54 aggregate FILTER (WHERE ...)") {
     ADSHANDLE hCur = 0;
     REQUIRE(AdsExecuteSQLDirect(hStmt, sql, &hCur) == 0);
     REQUIRE(AdsGotoTop(hCur) == 0);
-    CHECK(read_field(hCur, "COL1") == "3");      // 25 / 40 / 55
-    CHECK(read_field(hCur, "COL2") == "1");      // only 55
+    CHECK(read_field(hCur, "EXPR") == "3");      // 25 / 40 / 55
+    CHECK(read_field(hCur, "EXPR_1") == "1");    // only 55
 
     REQUIRE(AdsCloseSQLStatement(hStmt) == 0);
     REQUIRE(AdsDisconnect(hConn) == 0);

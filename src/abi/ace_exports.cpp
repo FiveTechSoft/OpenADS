@@ -20893,8 +20893,21 @@ struct AbiBridge final : openads::script::SqlBridge {
             ch = static_cast<char>(std::tolower((unsigned char)ch));
         if (src != "system.iota") return std::nullopt;
         std::string proj = trim(s.substr(7, fp - 7));
-        if (proj.empty() || proj.find(',') != std::string::npos)
-            return std::nullopt;               // single projection only
+        if (proj.empty()) return std::nullopt;
+        // Single projection only — but only a TOP-LEVEL comma splits
+        // projections; commas inside parens/braces/quotes are argument
+        // separators (TIMESTAMPDIFF( SQL_TSI_MONTH, {d '…'}, {d '…'} )).
+        {
+            int depth = 0;
+            bool in_str = false;
+            for (char ch : proj) {
+                if (in_str) { if (ch == '\'') in_str = false; continue; }
+                if (ch == '\'') in_str = true;
+                else if (ch == '(' || ch == '{') ++depth;
+                else if (ch == ')' || ch == '}') --depth;
+                else if (ch == ',' && depth == 0) return std::nullopt;
+            }
+        }
         auto prog = openads::script::compile("RETURN " + proj + ";");
         if (!prog) return std::nullopt;
         openads::script::Executor ex(this);    // subqueries recurse here
@@ -24614,6 +24627,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             struct AggSlot {
                 openads::sql::Aggregate def;
                 std::int32_t            field_index = -1;
+                std::uint8_t            decimals    = 0;  // source-field dp
             };
             std::vector<AggSlot> slots;
             slots.reserve(parsed.value().aggregates.size());
@@ -24626,6 +24640,14 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         c->close_table(cth.value());
                         return fail(openads::AE_COLUMN_NOT_FOUND,
                                     a.column.c_str());
+                    }
+                    {
+                        const auto& sfd = ctbl->field_descriptor(
+                            static_cast<std::uint16_t>(slot.field_index));
+                        using FT = openads::drivers::DbfFieldType;
+                        slot.decimals = (sfd.type == FT::AdtMoney ||
+                                         sfd.type == FT::Currency)
+                                      ? 4 : sfd.decimals;  // money: 4 implied
                     }
                 }
                 slots.push_back(std::move(slot));
@@ -24820,37 +24842,48 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             std::array<std::uint8_t, 32> jg_hdr{};
             jg_hdr[0] = 0x03;
             stamp_dbf_header_today(jg_hdr.data());
+            // SAP parity (oracle-verified 07/18/2026): the result carries
+            // ONLY the projected aggregates — group keys are not emitted
+            // unless projected. Columns are typed N(20,dp) (dp from the
+            // source field; COUNT dp=0), named alias / EXPR / EXPR_1 / …,
+            // and groups emit sorted ascending by group key.
+            auto jg_dp = [&](std::size_t i) -> int {
+                using K = openads::sql::AggregateKind;
+                switch (slots[i].def.kind) {
+                    case K::CountStar: case K::Count: return 0;
+                    case K::Avg: return 6;
+                    default: return static_cast<int>(slots[i].decimals);
+                }
+            };
             std::uint16_t jg_hlen = static_cast<std::uint16_t>(
-                32 + 32 * (gbs.size() + slots.size()) + 1);
-            std::uint32_t jg_rlen = 1;
-            for (auto& g : gbs) jg_rlen += g.length;
-            jg_rlen += 30u * static_cast<std::uint32_t>(slots.size());
+                32 + 32 * slots.size() + 1);
+            std::uint32_t jg_rlen =
+                1 + 20u * static_cast<std::uint32_t>(slots.size());
             jg_hdr[8]  = static_cast<std::uint8_t>( jg_hlen       & 0xFFu);
             jg_hdr[9]  = static_cast<std::uint8_t>((jg_hlen >> 8) & 0xFFu);
             jg_hdr[10] = static_cast<std::uint8_t>( jg_rlen       & 0xFFu);
             jg_hdr[11] = static_cast<std::uint8_t>((jg_rlen >> 8) & 0xFFu);
             jg_file.insert(jg_file.end(), jg_hdr.begin(), jg_hdr.end());
-            for (auto& g : gbs) {
-                std::array<std::uint8_t, 32> fd{};
-                std::memcpy(fd.data(), g.name.data(),
-                            std::min(g.name.size(), std::size_t{11}));
-                fd[11] = g.raw_type ? g.raw_type : 'C';
-                fd[16] = g.length;
-                jg_file.insert(jg_file.end(), fd.begin(), fd.end());
-            }
-            for (std::size_t i = 0; i < slots.size(); ++i) {
-                std::array<std::uint8_t, 32> fd{};
-                char fn[16];
-                std::snprintf(fn, sizeof(fn), "COL%u",
-                              static_cast<unsigned>((i + 1) & 0xFFFFFu));
-                std::size_t fn_len = std::strlen(fn);
-                std::memcpy(fd.data(), fn,
-                            fn_len > 11 ? 11 : fn_len);
-                fd[11] = 'C'; fd[16] = 30;
-                jg_file.insert(jg_file.end(), fd.begin(), fd.end());
+            {
+                std::size_t unaliased = 0;
+                for (std::size_t i = 0; i < slots.size(); ++i) {
+                    std::array<std::uint8_t, 32> fd{};
+                    std::string nm = slots[i].def.alias;
+                    if (nm.empty()) {
+                        nm = unaliased == 0
+                           ? "EXPR" : "EXPR_" + std::to_string(unaliased);
+                        ++unaliased;
+                    }
+                    std::memcpy(fd.data(), nm.data(),
+                                std::min(nm.size(), std::size_t{11}));
+                    fd[11] = 'N'; fd[16] = 20;
+                    fd[17] = static_cast<std::uint8_t>(jg_dp(i));
+                    jg_file.insert(jg_file.end(), fd.begin(), fd.end());
+                }
             }
             jg_file.push_back(0x0D);
 
+            std::sort(insertion_order.begin(), insertion_order.end());
             std::uint32_t jg_emitted = 0;
             for (auto& key : insertion_order) {
                 auto& acc = groups[key];
@@ -24858,51 +24891,11 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     if (!eval_having(*parsed.value().having, acc)) continue;
                 }
                 jg_file.push_back(' ');
-                for (std::size_t i = 0; i < gbs.size(); ++i) {
-                    const std::string& kp = acc.key_parts[i];
-                    for (std::uint8_t b = 0; b < gbs[i].length; ++b) {
-                        jg_file.push_back(b < kp.size()
-                            ? static_cast<std::uint8_t>(kp[b]) : ' ');
-                    }
-                }
                 for (std::size_t i = 0; i < slots.size(); ++i) {
-                    char buf[32] = {0};
-                    using K = openads::sql::AggregateKind;
-                    switch (slots[i].def.kind) {
-                        case K::CountStar:
-                            std::snprintf(buf, sizeof(buf), "%llu",
-                                static_cast<unsigned long long>(acc.row_count));
-                            break;
-                        case K::Count:
-                            std::snprintf(buf, sizeof(buf), "%llu",
-                                static_cast<unsigned long long>(acc.count[i]));
-                            break;
-                        case K::Sum:
-                            std::snprintf(buf, sizeof(buf), "%.6f", acc.sum[i]);
-                            break;
-                        case K::Avg:
-                            std::snprintf(buf, sizeof(buf), "%.6f",
-                                acc.count[i]
-                                    ? acc.sum[i] /
-                                        static_cast<double>(acc.count[i])
-                                    : 0.0);
-                            break;
-                        case K::Min:
-                            if (acc.count[i] == 0) std::memcpy(buf, "0", 2);
-                            else std::snprintf(buf, sizeof(buf), "%.6f",
-                                               acc.minv[i]);
-                            break;
-                        case K::Max:
-                            if (acc.count[i] == 0) std::memcpy(buf, "0", 2);
-                            else std::snprintf(buf, sizeof(buf), "%.6f",
-                                               acc.maxv[i]);
-                            break;
-                    }
-                    std::array<std::uint8_t, 30> cell{};
-                    std::memset(cell.data(), ' ', cell.size());
-                    std::size_t n = std::min<std::size_t>(std::strlen(buf), 30);
-                    std::memcpy(cell.data(), buf, n);
-                    jg_file.insert(jg_file.end(), cell.begin(), cell.end());
+                    char buf[48] = {0};
+                    std::snprintf(buf, sizeof(buf), "%-20.*f", jg_dp(i),
+                                  agg_at(acc, i));
+                    jg_file.insert(jg_file.end(), buf, buf + 20);
                 }
                 ++jg_emitted;
             }
@@ -24937,6 +24930,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             struct AggSlot {
                 openads::sql::Aggregate def;
                 std::int32_t            field_index = -1;
+                std::uint8_t            decimals    = 0;  // source-field dp
             };
             std::vector<AggSlot> slots;
             slots.reserve(parsed.value().aggregates.size());
@@ -24948,6 +24942,14 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     if (slot.field_index < 0) {
                         c->close_table(cth.value());
                         return fail(openads::AE_COLUMN_NOT_FOUND, a.column.c_str());
+                    }
+                    {
+                        const auto& sfd = ctbl->field_descriptor(
+                            static_cast<std::uint16_t>(slot.field_index));
+                        using FT = openads::drivers::DbfFieldType;
+                        slot.decimals = (sfd.type == FT::AdtMoney ||
+                                         sfd.type == FT::Currency)
+                                      ? 4 : sfd.decimals;  // money: 4 implied
                     }
                 }
                 slots.push_back(std::move(slot));
@@ -24995,58 +24997,64 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             agg_hdr[4] = 1;
             std::uint16_t agg_hlen = static_cast<std::uint16_t>(
                 32 + 32 * slots.size() + 1);
+            // SAP parity: columns typed N(20,dp), named alias / EXPR /
+            // EXPR_1 / … (same rules as the grouped paths).
+            auto jagg_dp = [&](std::size_t i) -> int {
+                using K = openads::sql::AggregateKind;
+                switch (slots[i].def.kind) {
+                    case K::CountStar: case K::Count: return 0;
+                    case K::Avg: return 6;
+                    default: return static_cast<int>(slots[i].decimals);
+                }
+            };
             std::uint16_t agg_rlen = static_cast<std::uint16_t>(
-                1 + 30 * slots.size());
+                1 + 20 * slots.size());
             agg_hdr[8]  = static_cast<std::uint8_t>( agg_hlen       & 0xFFu);
             agg_hdr[9]  = static_cast<std::uint8_t>((agg_hlen >> 8) & 0xFFu);
             agg_hdr[10] = static_cast<std::uint8_t>( agg_rlen       & 0xFFu);
             agg_hdr[11] = static_cast<std::uint8_t>((agg_rlen >> 8) & 0xFFu);
             agg_file.insert(agg_file.end(), agg_hdr.begin(), agg_hdr.end());
-            for (std::size_t i = 0; i < slots.size(); ++i) {
-                std::array<std::uint8_t, 32> fd{};
-                char fn[16];
-                std::snprintf(fn, sizeof(fn), "COL%u",
-                              static_cast<unsigned>((i + 1) & 0xFFFFFu));
-                std::size_t fn_len = std::strlen(fn);
-                std::memcpy(fd.data(), fn, fn_len > 11 ? 11 : fn_len);
-                fd[11] = 'C'; fd[16] = 30;
-                agg_file.insert(agg_file.end(), fd.begin(), fd.end());
+            {
+                std::size_t unaliased = 0;
+                for (std::size_t i = 0; i < slots.size(); ++i) {
+                    std::array<std::uint8_t, 32> fd{};
+                    std::string nm = slots[i].def.alias;
+                    if (nm.empty()) {
+                        nm = unaliased == 0
+                           ? "EXPR" : "EXPR_" + std::to_string(unaliased);
+                        ++unaliased;
+                    }
+                    std::memcpy(fd.data(), nm.data(),
+                                std::min(nm.size(), std::size_t{11}));
+                    fd[11] = 'N'; fd[16] = 20;
+                    fd[17] = static_cast<std::uint8_t>(jagg_dp(i));
+                    agg_file.insert(agg_file.end(), fd.begin(), fd.end());
+                }
             }
             agg_file.push_back(0x0D);
             agg_file.push_back(' ');
             for (std::size_t i = 0; i < slots.size(); ++i) {
-                char buf[32] = {0};
+                double v = 0.0;
+                using K = openads::sql::AggregateKind;
                 switch (slots[i].def.kind) {
-                    case openads::sql::AggregateKind::CountStar:
-                    case openads::sql::AggregateKind::Count:
-                        std::snprintf(buf, sizeof(buf), "%llu",
-                            static_cast<unsigned long long>(
-                                slots[i].def.kind ==
-                                openads::sql::AggregateKind::CountStar
-                                    ? row_count : count[i]));
+                    case K::CountStar:
+                        v = static_cast<double>(row_count); break;
+                    case K::Count:
+                        v = static_cast<double>(count[i]);  break;
+                    case K::Sum:
+                        v = sum[i]; break;
+                    case K::Avg:
+                        v = count[i]
+                          ? sum[i] / static_cast<double>(count[i]) : 0.0;
                         break;
-                    case openads::sql::AggregateKind::Sum:
-                        std::snprintf(buf, sizeof(buf), "%.6f", sum[i]);
-                        break;
-                    case openads::sql::AggregateKind::Avg:
-                        std::snprintf(buf, sizeof(buf), "%.6f",
-                            count[i] ? sum[i] / static_cast<double>(count[i])
-                                     : 0.0);
-                        break;
-                    case openads::sql::AggregateKind::Min:
-                        if (count[i] == 0) std::memcpy(buf, "0", 2);
-                        else std::snprintf(buf, sizeof(buf), "%.6f", minv[i]);
-                        break;
-                    case openads::sql::AggregateKind::Max:
-                        if (count[i] == 0) std::memcpy(buf, "0", 2);
-                        else std::snprintf(buf, sizeof(buf), "%.6f", maxv[i]);
-                        break;
+                    case K::Min:
+                        v = count[i] ? minv[i] : 0.0; break;
+                    case K::Max:
+                        v = count[i] ? maxv[i] : 0.0; break;
                 }
-                std::array<std::uint8_t, 30> cell{};
-                std::memset(cell.data(), ' ', cell.size());
-                std::size_t n = std::min<std::size_t>(std::strlen(buf), 30);
-                std::memcpy(cell.data(), buf, n);
-                agg_file.insert(agg_file.end(), cell.begin(), cell.end());
+                char buf[48] = {0};
+                std::snprintf(buf, sizeof(buf), "%-20.*f", jagg_dp(i), v);
+                agg_file.insert(agg_file.end(), buf, buf + 20);
             }
             agg_file.push_back(0x1A);
             {
@@ -25117,6 +25125,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         struct AggSlot {
             openads::sql::Aggregate def;
             std::int32_t            field_index = -1;   // -1 for COUNT(*)
+            std::uint8_t            decimals    = 0;    // source-field dp
         };
         std::vector<AggSlot> slots;
         slots.reserve(parsed.value().aggregates.size());
@@ -25128,6 +25137,14 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 if (slot.field_index < 0) {
                     if (table_handle != 0) c->close_table(table_handle);
                     return fail(openads::AE_COLUMN_NOT_FOUND, a.column.c_str());
+                }
+                {
+                    const auto& sfd = tbl->field_descriptor(
+                        static_cast<std::uint16_t>(slot.field_index));
+                    using FT = openads::drivers::DbfFieldType;
+                    slot.decimals = (sfd.type == FT::AdtMoney ||
+                                     sfd.type == FT::Currency)
+                                  ? 4 : sfd.decimals;      // money: 4 implied
                 }
             }
             slots.push_back(std::move(slot));
@@ -25384,34 +25401,44 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             std::array<std::uint8_t, 32> hdr{};
             hdr[0] = 0x03;
             stamp_dbf_header_today(hdr.data());
+            // SAP parity (oracle-verified 07/18/2026): only the projected
+            // aggregates appear in the result — group keys are not emitted
+            // unless projected. Columns typed N(20,dp), named alias / EXPR /
+            // EXPR_1 / …; groups emit sorted ascending by group key.
+            auto grp_dp = [&](std::size_t i) -> int {
+                using K = openads::sql::AggregateKind;
+                switch (slots[i].def.kind) {
+                    case K::CountStar: case K::Count: return 0;
+                    case K::Avg: return 6;
+                    default: return static_cast<int>(slots[i].decimals);
+                }
+            };
             std::uint16_t header_len = static_cast<std::uint16_t>(
-                32 + 32 * (gbs.size() + slots.size()) + 1);
-            std::uint32_t rec_len = 1;
-            for (auto& g : gbs) rec_len += g.length;
-            rec_len += 30u * static_cast<std::uint32_t>(slots.size());
+                32 + 32 * slots.size() + 1);
+            std::uint32_t rec_len =
+                1 + 20u * static_cast<std::uint32_t>(slots.size());
             hdr[8]  = static_cast<std::uint8_t>( header_len       & 0xFFu);
             hdr[9]  = static_cast<std::uint8_t>((header_len >> 8) & 0xFFu);
             hdr[10] = static_cast<std::uint8_t>( rec_len          & 0xFFu);
             hdr[11] = static_cast<std::uint8_t>((rec_len    >> 8) & 0xFFu);
             file.insert(file.end(), hdr.begin(), hdr.end());
 
-            for (auto& g : gbs) {
-                std::array<std::uint8_t, 32> fd{};
-                std::memcpy(fd.data(), g.name.data(),
-                            std::min(g.name.size(), std::size_t{11}));
-                fd[11] = g.raw_type ? g.raw_type : 'C';
-                fd[16] = g.length;
-                file.insert(file.end(), fd.begin(), fd.end());
-            }
-            for (std::size_t i = 0; i < slots.size(); ++i) {
-                std::array<std::uint8_t, 32> fd{};
-                char fn[16];
-                std::snprintf(fn, sizeof(fn), "COL%u",
-                              static_cast<unsigned>((i + 1) & 0xFFFFFu));
-                std::size_t fn_len = std::strlen(fn);
-                std::memcpy(fd.data(), fn, fn_len > 11 ? 11 : fn_len);
-                fd[11] = 'C'; fd[16] = 30;
-                file.insert(file.end(), fd.begin(), fd.end());
+            {
+                std::size_t unaliased = 0;
+                for (std::size_t i = 0; i < slots.size(); ++i) {
+                    std::array<std::uint8_t, 32> fd{};
+                    std::string nm = slots[i].def.alias;
+                    if (nm.empty()) {
+                        nm = unaliased == 0
+                           ? "EXPR" : "EXPR_" + std::to_string(unaliased);
+                        ++unaliased;
+                    }
+                    std::memcpy(fd.data(), nm.data(),
+                                std::min(nm.size(), std::size_t{11}));
+                    fd[11] = 'N'; fd[16] = 20;
+                    fd[17] = static_cast<std::uint8_t>(grp_dp(i));
+                    file.insert(file.end(), fd.begin(), fd.end());
+                }
             }
             file.push_back(0x0D);
 
@@ -25446,6 +25473,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 }
             };
 
+            std::sort(insertion_order.begin(), insertion_order.end());
             std::uint32_t emitted = 0;
             for (auto& key : insertion_order) {
                 auto& acc = groups[key];
@@ -25453,51 +25481,11 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     if (!eval_having(*parsed.value().having, acc)) continue;
                 }
                 file.push_back(' ');
-                for (std::size_t i = 0; i < gbs.size(); ++i) {
-                    const std::string& kp = acc.key_parts[i];
-                    for (std::uint8_t b = 0; b < gbs[i].length; ++b) {
-                        file.push_back(b < kp.size()
-                            ? static_cast<std::uint8_t>(kp[b]) : ' ');
-                    }
-                }
                 for (std::size_t i = 0; i < slots.size(); ++i) {
-                    char buf[32] = {0};
-                    using K = openads::sql::AggregateKind;
-                    switch (slots[i].def.kind) {
-                        case K::CountStar:
-                            std::snprintf(buf, sizeof(buf), "%llu",
-                                static_cast<unsigned long long>(acc.row_count));
-                            break;
-                        case K::Count:
-                            std::snprintf(buf, sizeof(buf), "%llu",
-                                static_cast<unsigned long long>(acc.count[i]));
-                            break;
-                        case K::Sum:
-                            std::snprintf(buf, sizeof(buf), "%.6f", acc.sum[i]);
-                            break;
-                        case K::Avg:
-                            std::snprintf(buf, sizeof(buf), "%.6f",
-                                acc.count[i]
-                                    ? acc.sum[i] /
-                                        static_cast<double>(acc.count[i])
-                                    : 0.0);
-                            break;
-                        case K::Min:
-                            if (acc.count[i] == 0) std::memcpy(buf, "0", 2);
-                            else std::snprintf(buf, sizeof(buf), "%.6f",
-                                               acc.minv[i]);
-                            break;
-                        case K::Max:
-                            if (acc.count[i] == 0) std::memcpy(buf, "0", 2);
-                            else std::snprintf(buf, sizeof(buf), "%.6f",
-                                               acc.maxv[i]);
-                            break;
-                    }
-                    std::array<std::uint8_t, 30> cell{};
-                    std::memset(cell.data(), ' ', cell.size());
-                    std::size_t n = std::min<std::size_t>(std::strlen(buf), 30);
-                    std::memcpy(cell.data(), buf, n);
-                    file.insert(file.end(), cell.begin(), cell.end());
+                    char buf[48] = {0};
+                    std::snprintf(buf, sizeof(buf), "%-20.*f", grp_dp(i),
+                                  agg_at(acc, i));
+                    file.insert(file.end(), buf, buf + 20);
                 }
                 ++emitted;
             }
@@ -25716,26 +25704,39 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         hdr[4] = 1;
         std::uint16_t header_len = static_cast<std::uint16_t>(
             32 + 32 * slots.size() + 1);
+        // SAP parity: columns typed N(20,dp), named alias / EXPR / EXPR_1 /
+        // … (oracle-verified naming; unaliased aggregates count up).
+        auto agg_dp = [&](std::size_t i) -> int {
+            using K = openads::sql::AggregateKind;
+            switch (slots[i].def.kind) {
+                case K::CountStar: case K::Count: return 0;
+                case K::Avg: return 6;
+                default: return static_cast<int>(slots[i].decimals);
+            }
+        };
         std::uint16_t rec_len = static_cast<std::uint16_t>(
-            1 + 30 * slots.size());
+            1 + 20 * slots.size());
         hdr[8]  = static_cast<std::uint8_t>( header_len       & 0xFFu);
         hdr[9]  = static_cast<std::uint8_t>((header_len >> 8) & 0xFFu);
         hdr[10] = static_cast<std::uint8_t>( rec_len          & 0xFFu);
         hdr[11] = static_cast<std::uint8_t>((rec_len    >> 8) & 0xFFu);
         file.insert(file.end(), hdr.begin(), hdr.end());
-        for (std::size_t i = 0; i < slots.size(); ++i) {
-            std::array<std::uint8_t, 32> fd{};
-            char fn[16];
-            if (!slots[i].def.alias.empty()) {
-                std::snprintf(fn, sizeof(fn), "%s", slots[i].def.alias.c_str());
-            } else {
-                std::snprintf(fn, sizeof(fn), "COL%u",
-                              static_cast<unsigned>((i + 1) & 0xFFFFFu));
+        {
+            std::size_t unaliased = 0;
+            for (std::size_t i = 0; i < slots.size(); ++i) {
+                std::array<std::uint8_t, 32> fd{};
+                std::string nm = slots[i].def.alias;
+                if (nm.empty()) {
+                    nm = unaliased == 0
+                       ? "EXPR" : "EXPR_" + std::to_string(unaliased);
+                    ++unaliased;
+                }
+                std::memcpy(fd.data(), nm.data(),
+                            std::min(nm.size(), std::size_t{11}));
+                fd[11] = 'N'; fd[16] = 20;
+                fd[17] = static_cast<std::uint8_t>(agg_dp(i));
+                file.insert(file.end(), fd.begin(), fd.end());
             }
-            std::size_t fn_len = std::strlen(fn);
-            std::memcpy(fd.data(), fn, fn_len > 11 ? 11 : fn_len);
-            fd[11] = 'C'; fd[16] = 30;
-            file.insert(file.end(), fd.begin(), fd.end());
         }
         file.push_back(0x0D);
         file.push_back(' ');
@@ -25755,25 +25756,28 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                                 : count[i]));
                     break;
                 case openads::sql::AggregateKind::Sum:
-                    std::snprintf(buf, sizeof(buf), "%.6f", sum[i]);
+                    std::snprintf(buf, sizeof(buf), "%.*f", agg_dp(i),
+                                  sum[i]);
                     break;
                 case openads::sql::AggregateKind::Avg:
-                    std::snprintf(buf, sizeof(buf), "%.6f",
+                    std::snprintf(buf, sizeof(buf), "%.*f", agg_dp(i),
                         count[i] ? sum[i] / static_cast<double>(count[i])
                                  : 0.0);
                     break;
                 case openads::sql::AggregateKind::Min:
                     if (count[i] == 0) std::memcpy(buf, "0", 2);
-                    else std::snprintf(buf, sizeof(buf), "%.6f", minv[i]);
+                    else std::snprintf(buf, sizeof(buf), "%.*f", agg_dp(i),
+                                       minv[i]);
                     break;
                 case openads::sql::AggregateKind::Max:
                     if (count[i] == 0) std::memcpy(buf, "0", 2);
-                    else std::snprintf(buf, sizeof(buf), "%.6f", maxv[i]);
+                    else std::snprintf(buf, sizeof(buf), "%.*f", agg_dp(i),
+                                       maxv[i]);
                     break;
             }
-            std::array<std::uint8_t, 30> cell{};
+            std::array<std::uint8_t, 20> cell{};
             std::memset(cell.data(), ' ', cell.size());
-            std::size_t n = std::min<std::size_t>(std::strlen(buf), 30);
+            std::size_t n = std::min<std::size_t>(std::strlen(buf), 20);
             std::memcpy(cell.data(), buf, n);
             file.insert(file.end(), cell.begin(), cell.end());
         }

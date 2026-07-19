@@ -193,7 +193,7 @@ TEST_CASE("M10.23 JOIN + aggregate — COUNT(*) over merged cursor") {
     REQUIRE(AdsGotoRecord(hCur, 1) == 0);
     UNSIGNED8  buf[32];
     UNSIGNED32 sz = sizeof(buf);
-    REQUIRE(AdsGetField(hCur, (UNSIGNED8*)"COL1", buf, &sz, 0) == 0);
+    REQUIRE(AdsGetField(hCur, (UNSIGNED8*)"EXPR", buf, &sz, 0) == 0);
     std::string s((char*)buf, sz);
     while (!s.empty() && s.back() == ' ') s.pop_back();
     CHECK(s == "3");                          // O01,O02,O03 — O04 unmatched
