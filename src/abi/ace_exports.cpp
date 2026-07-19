@@ -7005,7 +7005,8 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
         (usTableType == ADS_ADT) ? openads::engine::TableType::Adt
         : (usTableType == ADS_VFP) ? openads::engine::TableType::Vfp
         : openads::engine::TableType::Cdx;
-    fs::path full(c->resolve_table_file(rel, create_type));
+    fs::path full(c->resolve_table_file(rel, create_type,
+                                        /*for_create=*/true));
     const bool is_adt = (usTableType == ADS_ADT);
     if (!full.has_extension()) full.replace_extension(is_adt ? ".adt" : ".dbf");
 

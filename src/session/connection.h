@@ -179,8 +179,13 @@ public:
     // create path can land a new table in the very file a later
     // AdsOpenTable(name) will resolve to. `type` may be updated when the
     // extension implies a different driver than the caller's default.
+    // `for_create` folds rooted paths into the data directory
+    // unconditionally (new tables always land there); opens honor an
+    // absolute path verbatim when the file already exists at it (SAP
+    // opens free tables by full path even on a data-dir connection).
     std::string resolve_table_file(const std::string& relative_path,
-                                   engine::TableType&  type);
+                                   engine::TableType&  type,
+                                   bool                for_create = false);
 
 private:
     util::Result<void> recover_orphan_tx_();

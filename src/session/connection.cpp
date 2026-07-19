@@ -76,7 +76,8 @@ util::Result<Connection> Connection::open(const std::string& data_dir) {
 // Shared by open_table and find_open_table so both agree byte-for-byte
 // on which physical file a name maps to.
 std::string Connection::resolve_table_file(const std::string& relative_path,
-                                           engine::TableType&  type) {
+                                           engine::TableType&  type,
+                                           bool                for_create) {
     namespace fs = std::filesystem;
     std::string effective = relative_path;
     if (dd_.has_value()) effective = dd_->resolve(relative_path);
@@ -91,9 +92,45 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
     // keep only the relative remainder (subdirs + filename) before
     // joining, so the table always lands under data_dir_ and a later
     // AdsOpenTable with the same name resolves to the very same file.
+    //
+    // OPEN exception: an absolute path that already names an existing
+    // file is honored verbatim — SAP opens free tables by full path even
+    // on a data-directory connection, and folding those broke every
+    // caller that opens a table it just staged at an absolute location
+    // (the DD field-property fixtures do exactly that). CREATE never
+    // takes this branch: a new table always lands under data_dir_.
     fs::path rel = fs::path(effective);
-    if (rel.is_absolute() || rel.has_root_directory())
+    if (rel.is_absolute() || rel.has_root_directory()) {
+        if (!for_create) {
+            std::error_code ec;
+            fs::path cand = rel;
+            if (!cand.has_extension()) {
+                fs::path dbf = cand;
+                dbf.replace_extension(".dbf");
+                if (fs::exists(dbf, ec)) {
+                    cand = dbf;
+                } else {
+                    fs::path adt = cand;
+                    adt.replace_extension(".adt");
+                    if (fs::exists(adt, ec)) {
+                        cand = adt;
+                        type = engine::TableType::Adt;
+                    }
+                }
+            }
+            if (cand.has_extension() && fs::exists(cand, ec)) {
+                std::string aext = cand.extension().string();
+                for (auto& ch : aext) ch = static_cast<char>(
+                    std::tolower(static_cast<unsigned char>(ch)));
+                if (aext == ".adt" && type == engine::TableType::Cdx)
+                    type = engine::TableType::Adt;
+                else if (aext == ".ntx" && type == engine::TableType::Cdx)
+                    type = engine::TableType::Ntx;
+                return platform::resolve_case_insensitive(cand.string());
+            }
+        }
         rel = rel.relative_path();
+    }
     fs::path full = fs::path(data_dir_) / rel;
     // Auto-append .dbf when the caller (typically rddads / Clipper)
     // passed a bare table alias without an extension.  If .dbf does not
