@@ -780,6 +780,78 @@ int main(int argc, char** argv) {
         warnings.push_back("AdsDDGetDatabaseProperty not found in SAP library — DB properties skipped.");
     }
 
+    // ── Step 5g: field NOT NULL / default facts via AdsDDGetFieldProperty ───
+    // Cross-check source for the native SAP-binary Field-record decode
+    // (data_dict.cpp): after the DataDict opens the copied file, its
+    // field_props ("required"/"default") are compared against what ACE
+    // itself reports. Any disagreement lands in warnings — the decode is
+    // reverse-engineered, ACE is authoritative.
+    //
+    // SAP's REAL property IDs (verified against rddads ads.ch — NOT the
+    // renumbered constants in include/openads/ace.h):
+    //   300 ADS_DD_FIELD_DEFAULT_VALUE  (NUL-terminated string;
+    //                                    AE_PROPERTY_NOT_SET when absent)
+    //   301 ADS_DD_FIELD_CAN_NULL       (UNSIGNED16; non-zero = nullable)
+    struct SapFieldFact {
+        std::string table, field, def;
+        bool can_null = true;
+        bool has_def  = false;
+    };
+    std::vector<SapFieldFact> sap_field_facts;
+    {
+        using PFN_GetFieldProp = UNSIGNED32 (ADS_CALL*)(
+            ADSHANDLE, UNSIGNED8*, UNSIGNED8*, UNSIGNED16, void*,
+            UNSIGNED16*);
+        auto getFieldProp =
+            (PFN_GetFieldProp)lib_sym(sap, "AdsDDGetFieldProperty");
+        if (getFieldProp == nullptr) {
+            warnings.push_back(
+                "field-prop cross-check skipped: AdsDDGetFieldProperty "
+                "not exported by SAP library");
+        } else {
+            ADSHANDLE hc = 0;
+            rc = f.execSQL(hStmt,
+                (UNSIGNED8*)"SELECT Parent, Name FROM system.columns", &hc);
+            if (rc != 0 || hc == 0) {
+                warnings.push_back(
+                    "field-prop cross-check skipped: system.columns query "
+                    "failed rc=" + std::to_string(rc));
+            } else {
+                UNSIGNED16 eof = 0;
+                while (f.atEOF(hc, &eof) == 0 && !eof) {
+                    SapFieldFact fact;
+                    fact.table = sap_field(f, hc, "Parent");
+                    fact.field = sap_field(f, hc, "Name");
+                    if (!fact.table.empty() && !fact.field.empty()) {
+                        UNSIGNED16 can_null = 1;
+                        UNSIGNED16 plen = sizeof(can_null);
+                        UNSIGNED32 r301 = getFieldProp(
+                            hConn, (UNSIGNED8*)fact.table.c_str(),
+                            (UNSIGNED8*)fact.field.c_str(), 301,
+                            &can_null, &plen);
+                        fact.can_null = (r301 != 0) || (can_null != 0);
+                        char defbuf[512] = {};
+                        plen = sizeof(defbuf) - 1;
+                        UNSIGNED32 r300 = getFieldProp(
+                            hConn, (UNSIGNED8*)fact.table.c_str(),
+                            (UNSIGNED8*)fact.field.c_str(), 300,
+                            defbuf, &plen);
+                        if (r300 == 0) {   // AE_PROPERTY_NOT_SET = no default
+                            fact.has_def = true;
+                            fact.def = trim_sap_string(
+                                defbuf, static_cast<UNSIGNED16>(
+                                    std::min<std::size_t>(
+                                        plen, sizeof(defbuf) - 1)));
+                        }
+                        sap_field_facts.push_back(std::move(fact));
+                    }
+                    f.skip(hc, 1);
+                }
+                f.close(hc);
+            }
+        }
+    }
+
     // ── Step 6: read object permissions via AdsDDGetPermissions ─────────────
     // system.permissions SQL returns 0 rows for SAP binary .add files because
     // the real ACLs are stored in encrypted property blobs.  Use the
@@ -883,6 +955,63 @@ int main(int argc, char** argv) {
             return 1;
         }
         auto dd = std::move(opened).value();
+
+        // ── Step 7a: cross-check the native Field-record decode vs ACE ──
+        // dd loaded the copied SAP binary, so dd.field_props() holds the
+        // native "required"/"default" decode; sap_field_facts holds what
+        // ACE reported for the same fields. ACE is authoritative — any
+        // disagreement is a warning.
+        if (!sap_field_facts.empty()) {
+            auto lower = [](std::string s) {
+                for (auto& ch : s)
+                    ch = static_cast<char>(std::tolower(
+                        static_cast<unsigned char>(ch)));
+                return s;
+            };
+            struct NativeFact { bool required = false; std::string def; };
+            std::unordered_map<std::string, NativeFact> native;
+            for (const auto& tkv : dd.field_props()) {
+                for (const auto& fkv : tkv.second) {
+                    NativeFact nf;
+                    auto rit = fkv.second.find("required");
+                    nf.required = rit != fkv.second.end() &&
+                                  rit->second == "T";
+                    auto dit = fkv.second.find("default");
+                    if (dit != fkv.second.end()) nf.def = dit->second;
+                    native[lower(tkv.first) + "|" + lower(fkv.first)] =
+                        std::move(nf);
+                }
+            }
+            std::size_t mismatches = 0;
+            for (const auto& sf : sap_field_facts) {
+                NativeFact nf;   // default: nullable, no default value
+                auto it = native.find(lower(sf.table) + "|" +
+                                      lower(sf.field));
+                if (it != native.end()) nf = it->second;
+                if (nf.required != !sf.can_null) {
+                    ++mismatches;
+                    warnings.push_back(
+                        "field-prop MISMATCH " + sf.table + "." + sf.field +
+                        ": ACE can_null=" +
+                        std::string(sf.can_null ? "T" : "F") +
+                        " but native decode required=" +
+                        std::string(nf.required ? "T" : "F"));
+                }
+                std::string sap_def = sf.has_def ? sf.def : std::string();
+                if (sap_def != nf.def) {
+                    ++mismatches;
+                    warnings.push_back(
+                        "field-prop MISMATCH " + sf.table + "." + sf.field +
+                        ": ACE default='" + sap_def +
+                        "' but native decode default='" + nf.def + "'");
+                }
+            }
+            warnings.push_back(
+                "field-prop cross-check: " +
+                std::to_string(sap_field_facts.size()) +
+                " fields verified against ACE, " +
+                std::to_string(mismatches) + " mismatch(es)");
+        }
 
         for (const auto& tp : table_props_list) {
             for (const auto& kv : tp.props) {
