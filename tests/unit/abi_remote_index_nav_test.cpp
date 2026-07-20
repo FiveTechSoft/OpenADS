@@ -707,13 +707,16 @@ TEST_CASE("remote AdsGetKeyCount with conditional FOR index returns filtered cou
     REQUIRE(AdsGetKeyCount(hRT, 0, &tbl_cnt) == 0);
     CHECK(tbl_cnt == 100u);
 
-    // AdsGetRecordCount via the ORDER handle — remote route passes through
-    // to the parent table's physical record_count() (200). The filtered
-    // count is served by AdsGetKeyCount, which is the correct path for
-    // OrdKeyCount / DBOI_KEYCOUNT.
+    // AdsGetRecordCount via the ORDER handle — since a18b84b7 the remote
+    // route returns the *index key count* (scope + SET DELETED aware),
+    // NOT the parent table's physical record_count(). rddads' OrdKeyCount
+    // (DBOI_KEYCOUNT) calls AdsGetRecordCount with the order handle, so it
+    // must count the records reachable through the scoped order (100),
+    // matching AdsGetKeyCount above; returning the physical 200 made
+    // remote xBrowse allocate ghost rows for deleted keys inside scope.
     UNSIGNED32 rec_cnt = 0;
     REQUIRE(AdsGetRecordCount(hOrd, 1, &rec_cnt) == 0);
-    CHECK(rec_cnt == 200u);
+    CHECK(rec_cnt == 100u);
 
     // Verify the index walk: GotoTop + Skip should only visit CODIGO > 100.
     REQUIRE(AdsGotoTop(hOrd) == 0);

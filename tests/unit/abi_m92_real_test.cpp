@@ -117,24 +117,35 @@ TEST_CASE("M9.4 AdsGetRecordLength + AdsGetTableType + AdsGetTableFilename") {
 }
 
 TEST_CASE("M9.4 AdsCheckExistence + AdsDeleteFile") {
+    // The server filesystem API (b06cf6a0) sandboxes AdsCheckExistence /
+    // AdsDeleteFile under the connection's data directory: client paths
+    // are jailed relative to the root, so this exercises them with a
+    // connection rooted at the temp dir and a relative file name (the
+    // absolute-path-via-hConn=0 form the old test used is intentionally
+    // no longer honored — it would escape the jail).
     const auto dir = fs::temp_directory_path() / "openads_m94_files";
     std::error_code ec;
     fs::remove_all(dir, ec);
     fs::create_directories(dir);
-    auto p = dir / "a.dbf";
-    std::ofstream(p) << "x";
+    std::ofstream(dir / "a.dbf") << "x";
 
-    UNSIGNED8 path_buf[260];
-    std::memcpy(path_buf, p.string().c_str(), p.string().size() + 1);
+    std::string root = dir.string();
+    std::vector<UNSIGNED8> rbuf(root.begin(), root.end());
+    rbuf.push_back(0);
+    ADSHANDLE hConn = 0;
+    REQUIRE(AdsConnect60(rbuf.data(), ADS_LOCAL_SERVER, nullptr, nullptr, 0,
+                         &hConn) == 0);
 
+    UNSIGNED8 name_buf[64] = "a.dbf";
     UNSIGNED16 exists = 0;
-    REQUIRE(AdsCheckExistence(0, path_buf, &exists) == 0);
+    REQUIRE(AdsCheckExistence(hConn, name_buf, &exists) == 0);
     CHECK(exists == 1);
 
-    REQUIRE(AdsDeleteFile(0, path_buf) == 0);
+    REQUIRE(AdsDeleteFile(hConn, name_buf) == 0);
 
-    REQUIRE(AdsCheckExistence(0, path_buf, &exists) == 0);
+    REQUIRE(AdsCheckExistence(hConn, name_buf, &exists) == 0);
     CHECK(exists == 0);
 
+    REQUIRE(AdsDisconnect(hConn) == 0);
     fs::remove_all(dir, ec);
 }

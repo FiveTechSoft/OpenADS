@@ -7960,6 +7960,12 @@ UNSIGNED32 ENTRYPOINT AdsGotoRecord(ADSHANDLE hTable, UNSIGNED32 ulRecord) {
     return ok();
 }
 
+// These filesystem helpers live inside the file-scope `extern "C"` block
+// (opened far above for the ACE ABI exports). An anonymous namespace does
+// NOT reset language linkage, so without this `extern "C++"` their
+// functions would inherit C linkage and clang -Werror,-Wreturn-type-c-linkage
+// rejects the ones returning C++ types (FsConnCtx / std::optional / map&).
+extern "C++" {
 namespace {
 
 // Resolve hConn (0 = rddads default) to remote connection or local
@@ -8006,6 +8012,7 @@ local_files_map() {
 }
 
 } // namespace
+} // extern "C++"  — fs helpers regain C++ linkage inside the ABI block
 
 UNSIGNED32 ENTRYPOINT AdsCheckExistence(ADSHANDLE hConn, UNSIGNED8* pucName,
                              UNSIGNED16* pbExists) {
@@ -24691,37 +24698,28 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             if (!compiled) return fail(compiled.error());
             tbl->set_filter(std::move(compiled).value());
         }
-        // Trigger: INSTEAD OF UPDATE supersedes the actual write; BEFORE fires first.
-        // RCB 07/17/2026 (S2): failures propagate (probe Q6): BEFORE/
+        // Triggers are ROW-LEVEL (SAP semantics): each matching row fires
+        // INSTEAD OF / BEFORE with its own __old (current values) and
+        // __new (values after the SET list) images; the engine write is
+        // applied only when no INSTEAD OF ran; AFTER fires with the same
+        // images after the write. Failures propagate (probe Q6): BEFORE/
         // INSTEAD OF failure blocks the write, AFTER failure keeps it.
         std::string upd_alias = ri_alias_for_path(c, tbl->path());
         Handle upd_hConn = !upd_alias.empty() ? handle_for_conn(c) : Handle{0};
-        bool upd_instead_of = false;
         TrigError_ upd_terr;
-        if (upd_hConn) {
-            upd_instead_of = fire_triggers_(upd_hConn, c, upd_alias, 2u,
-                                            2u /*INSTEAD_OF*/, nullptr,
-                                            nullptr, &upd_terr);
-            if (!upd_instead_of)
-                fire_triggers_(upd_hConn, c, upd_alias, 2u, 1u /*BEFORE*/,
-                               nullptr, nullptr, &upd_terr);
-            if (upd_terr.has_error) {
-                tbl->clear_filter();
-                c->close_table(th.value());
-                return fail(static_cast<int>(upd_terr.errno_val), upd_terr.message.c_str());
-            }
-        }
-        if (!upd_instead_of) {
+        {
             std::uint32_t rcount = tbl->record_count();
             for (std::uint32_t r = 1; r <= rcount; ++r) {
                 if (auto g = tbl->goto_record(r); !g) continue;
                 if (tbl->is_deleted()) continue;
                 if (!tbl->passes_filter()) continue;
+
+                // Evaluate the SET list once for this row (expressions
+                // bind the row's CURRENT — pre-write — column values).
+                std::vector<openads::script::Value> assn_vals;
+                assn_vals.reserve(assns.size());
                 for (const auto& a : assns) {
                     if (a.value.is_expr) {
-                        // S4 — expression RHS evaluated per row with the
-                        // current row's columns bound (SET x = x + 1,
-                        // SET t = Now(), …).
                         auto pr = scriptbridge::compiled(
                             "RETURN " + a.value.text + ";");
                         if (!pr) return fail(pr.error());
@@ -24731,37 +24729,80 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         scriptbridge::bind_row_params(ex2, *tbl);
                         auto rr = ex2.run(*pr.value());
                         if (!rr) return fail(rr.error());
-                        auto wr = scriptbridge::write_script_value(
-                            *tbl, a.field_index,
+                        assn_vals.push_back(
                             rr.value().returned
-                                ? rr.value().return_value
+                                ? std::move(rr.value().return_value)
                                 : openads::script::Value::null());
-                        if (!wr) return fail(wr.error());
                     } else if (a.value.is_null) {
-                        auto wr = tbl->set_field_null(a.field_index);
-                        if (!wr) return fail(wr.error());
+                        assn_vals.push_back(openads::script::Value::null());
                     } else if (a.value.is_numeric) {
-                        auto wr = tbl->set_field(a.field_index, a.value.number);
-                        if (!wr) return fail(wr.error());
+                        assn_vals.push_back(
+                            openads::script::Value::real(a.value.number));
                     } else {
-                        auto wr = tbl->set_field(a.field_index, a.value.text);
+                        assn_vals.push_back(
+                            openads::script::Value::character(a.value.text));
+                    }
+                }
+
+                // Row images for the firings.
+                TrigFieldMap_ old_img, new_img;
+                bool row_instead = false;
+                if (upd_hConn) {
+                    trig_collect_row_(tbl, old_img);
+                    new_img = old_img;
+                    for (std::size_t i2 = 0; i2 < assns.size(); ++i2) {
+                        const auto& fd2 =
+                            tbl->field_descriptor(assns[i2].field_index);
+                        std::string nm2 = fd2.name;
+                        for (auto& ch : nm2)
+                            ch = static_cast<char>(std::tolower(
+                                static_cast<unsigned char>(ch)));
+                        std::string txt =
+                            assn_vals[i2].is_null
+                                ? std::string()
+                                : openads::script::to_display(assn_vals[i2]);
+                        new_img[nm2] = TrigField_{std::move(txt),
+                                                  trig_type_char_(fd2.type)};
+                    }
+                    row_instead = fire_triggers_(
+                        upd_hConn, c, upd_alias, 2u, 2u /*INSTEAD_OF*/,
+                        nullptr, nullptr, &upd_terr, &new_img, &old_img);
+                    if (!row_instead)
+                        fire_triggers_(upd_hConn, c, upd_alias, 2u,
+                                       1u /*BEFORE*/, nullptr, nullptr,
+                                       &upd_terr, &new_img, &old_img);
+                    if (upd_terr.has_error) {
+                        tbl->clear_filter();
+                        c->close_table(th.value());
+                        return fail(static_cast<int>(upd_terr.errno_val),
+                                    upd_terr.message.c_str());
+                    }
+                    // The trigger body may have repositioned the table
+                    // (its statements re-enter the engine); restore.
+                    if (auto g2 = tbl->goto_record(r); !g2) continue;
+                }
+                if (!row_instead) {
+                    for (std::size_t i2 = 0; i2 < assns.size(); ++i2) {
+                        auto wr = scriptbridge::write_script_value(
+                            *tbl, assns[i2].field_index, assn_vals[i2]);
                         if (!wr) return fail(wr.error());
+                    }
+                    if (upd_hConn) {
+                        fire_triggers_(upd_hConn, c, upd_alias, 2u,
+                                       4u /*AFTER*/, tbl, nullptr,
+                                       &upd_terr, &new_img, &old_img);
+                        if (upd_terr.has_error) {
+                            tbl->clear_filter();
+                            c->close_table(th.value());
+                            return fail(
+                                static_cast<int>(upd_terr.errno_val),
+                                upd_terr.message.c_str());
+                        }
+                        if (auto g2 = tbl->goto_record(r); !g2) continue;
                     }
                 }
             }
             if (auto fl = tbl->flush(); !fl) return fail(fl.error());
-        }
-        // Fire AFTER UPDATE triggers (only when no INSTEAD OF ran). The
-        // table sits on the last updated row, so single-row updates (the
-        // common WHERE pk = x case) give the trigger a real __new image.
-        if (!upd_instead_of && upd_hConn) {
-            fire_triggers_(upd_hConn, c, upd_alias, 2u, 4u /*AFTER*/, tbl,
-                           nullptr, &upd_terr);
-            if (upd_terr.has_error) {
-                tbl->clear_filter();
-                c->close_table(th.value());
-                return fail(static_cast<int>(upd_terr.errno_val), upd_terr.message.c_str());
-            }
         }
         tbl->clear_filter();
         c->close_table(th.value());
@@ -24872,44 +24913,59 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             if (!compiled) return fail(compiled.error());
             tbl->set_filter(std::move(compiled).value());
         }
-        // Trigger: INSTEAD OF DELETE supersedes the actual delete; BEFORE fires first.
-        // RCB 07/17/2026 (S2): failures propagate (probe Q6 semantics).
+        // Triggers are ROW-LEVEL (SAP semantics): each matching row fires
+        // INSTEAD OF / BEFORE / AFTER with that row's __old image (the
+        // values being deleted — pmsys's Delete AuditLog is AFTER DELETE
+        // and reads `SELECT propertyid FROM __old`). INSTEAD OF
+        // supersedes the engine's own delete. Failures propagate
+        // (probe Q6 semantics).
         std::string del_alias = ri_alias_for_path(c, tbl->path());
         Handle del_hConn = !del_alias.empty() ? handle_for_conn(c) : Handle{0};
-        bool del_instead_of = false;
         TrigError_ del_terr;
-        if (del_hConn) {
-            del_instead_of = fire_triggers_(del_hConn, c, del_alias, 3u,
-                                            2u /*INSTEAD_OF*/, nullptr,
-                                            nullptr, &del_terr);
-            if (!del_instead_of)
-                fire_triggers_(del_hConn, c, del_alias, 3u, 1u /*BEFORE*/,
-                               nullptr, nullptr, &del_terr);
-            if (del_terr.has_error) {
-                tbl->clear_filter();
-                c->close_table(th.value());
-                return fail(static_cast<int>(del_terr.errno_val), del_terr.message.c_str());
-            }
-        }
-        if (!del_instead_of) {
+        {
             std::uint32_t rcount = tbl->record_count();
             for (std::uint32_t r = 1; r <= rcount; ++r) {
                 if (auto g = tbl->goto_record(r); !g) continue;
                 if (tbl->is_deleted()) continue;
                 if (!tbl->passes_filter()) continue;
-                (void)tbl->mark_deleted();
+                TrigFieldMap_ old_img;
+                bool row_instead = false;
+                if (del_hConn) {
+                    trig_collect_row_(tbl, old_img);
+                    row_instead = fire_triggers_(
+                        del_hConn, c, del_alias, 3u, 2u /*INSTEAD_OF*/,
+                        nullptr, nullptr, &del_terr, nullptr, &old_img);
+                    if (!row_instead)
+                        fire_triggers_(del_hConn, c, del_alias, 3u,
+                                       1u /*BEFORE*/, nullptr, nullptr,
+                                       &del_terr, nullptr, &old_img);
+                    if (del_terr.has_error) {
+                        tbl->clear_filter();
+                        c->close_table(th.value());
+                        return fail(static_cast<int>(del_terr.errno_val),
+                                    del_terr.message.c_str());
+                    }
+                    // Trigger bodies may reposition the table; restore.
+                    if (auto g2 = tbl->goto_record(r); !g2) continue;
+                }
+                if (!row_instead) {
+                    (void)tbl->mark_deleted();
+                    if (del_hConn) {
+                        fire_triggers_(del_hConn, c, del_alias, 3u,
+                                       4u /*AFTER*/, nullptr, nullptr,
+                                       &del_terr, nullptr, &old_img);
+                        if (del_terr.has_error) {
+                            tbl->clear_filter();
+                            c->close_table(th.value());
+                            return fail(
+                                static_cast<int>(del_terr.errno_val),
+                                del_terr.message.c_str());
+                        }
+                        if (auto g2 = tbl->goto_record(r); !g2) continue;
+                    }
+                }
             }
             if (auto fl = tbl->flush(); !fl) return fail(fl.error());
-        }
-        // Fire AFTER DELETE triggers (only when no INSTEAD OF ran).
-        if (!del_instead_of && del_hConn) {
-            fire_triggers_(del_hConn, c, del_alias, 3u, 4u /*AFTER*/,
-                           nullptr, nullptr, &del_terr);
-            if (del_terr.has_error) {
-                tbl->clear_filter();
-                c->close_table(th.value());
-                return fail(static_cast<int>(del_terr.errno_val), del_terr.message.c_str());
-            }
         }
         tbl->clear_filter();
         c->close_table(th.value());

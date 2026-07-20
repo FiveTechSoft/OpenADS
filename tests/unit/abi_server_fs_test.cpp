@@ -27,7 +27,7 @@ ADSHANDLE remote_connect(const fs::path& dir, std::uint16_t port) {
     return hConn;
 }
 
-ADSHANDLE local_connect(const fs::path& dir) {
+[[maybe_unused]] ADSHANDLE local_connect(const fs::path& dir) {
     std::vector<UNSIGNED8> buf(dir.string().begin(), dir.string().end());
     buf.push_back(0);
     ADSHANDLE hConn = 0;

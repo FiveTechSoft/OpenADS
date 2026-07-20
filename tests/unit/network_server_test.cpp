@@ -145,10 +145,11 @@ TEST_CASE("M12.3 server unknown opcode returns Error frame") {
     Socket cs = cli.value();
 
     Frame req;
-    // M12.15 grew the opcode space to 0x87; pick a value still
-    // outside every defined op so the server's default-case path
-    // is what answers.
-    req.opcode = static_cast<Opcode>(0xEE);   // truly unknown
+    // Pick a value outside every defined op so the server's
+    // default-case path is what answers. The server filesystem API
+    // (b06cf6a0) claimed 0xE0-0xFD; 0xFE is the only remaining gap
+    // below Error (0xFF).
+    req.opcode = static_cast<Opcode>(0xFE);   // truly unknown
     REQUIRE(write_frame(cs, req).has_value());
     auto reply = read_frame(cs);
     REQUIRE(reply.has_value());
