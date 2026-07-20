@@ -9322,16 +9322,19 @@ UNSIGNED32 ENTRYPOINT AdsGetRecordNum(ADSHANDLE hTable, UNSIGNED16 /*bFilterOpti
 
 UNSIGNED32 ENTRYPOINT AdsGetRecordCount(ADSHANDLE hTable, UNSIGNED16 bFilterOption,
                              UNSIGNED32* pulRecordCount) {
-    // rddads AdsKeyCount / OrdKeyCount pass hOrdCurrent (a RemoteIndex
-    // handle) here. Route through the parent table so FWH xBrowse gets a
-    // non-zero nLen instead of an error that blanks the grid.
+    // rddads OrdKeyCount (DBOI_KEYCOUNT) passes hOrdCurrent here — a
+    // RemoteIndex handle. Must return the *index* key count (scope +
+    // SET DELETED aware on the server), NOT the parent table's physical
+    // record count. Routing to the table made remote xBrowse allocate
+    // ghost rows when deleted keys sat inside the scope (Tim's report).
     if (auto* ri = get_remote_index(hTable)) {
-        if (ri->parent == nullptr || pulRecordCount == nullptr) {
+        if (pulRecordCount == nullptr) {
             return fail(openads::AE_INTERNAL_ERROR, "remote index");
         }
-        ADSHANDLE th = handle_for_remote_table(ri->parent);
-        if (th == 0) return fail(openads::AE_INTERNAL_ERROR, "remote index parent");
-        return AdsGetRecordCount(th, bFilterOption, pulRecordCount);
+        auto r = openads::network::remote_index_key_count(ri);
+        if (!r) return fail(r.error());
+        *pulRecordCount = r.value();
+        return ok();
     }
     if (auto* rt = get_remote_table(hTable)) {
         if (pulRecordCount == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
