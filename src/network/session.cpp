@@ -2200,6 +2200,75 @@ DispatchResult Session::dispatch(const Frame& f) {
             write_u32_le(iid, reply.payload);
             break;
         }
+        // Remote AdsCreateTable: write the free table under the session
+        // data directory via the lazy ABI connection, then close it so
+        // the client can re-open through OpenTable (prod bag auto-open).
+        case Opcode::CreateTable: {
+            if (!sess_conn_) {
+                reply = err("CreateTable: not connected",
+                            openads::AE_NO_CONNECTION);
+                break;
+            }
+            if (f.payload.size() < 6) {
+                reply = err("CreateTable: bad payload"); break;
+            }
+            std::size_t pos = 0;
+            std::uint16_t table_type = read_u16_le(f.payload.data() + pos);
+            pos += 2;
+            std::uint16_t char_type  = read_u16_le(f.payload.data() + pos);
+            pos += 2;
+            std::uint16_t memo_bs    = read_u16_le(f.payload.data() + pos);
+            pos += 2;
+            std::string name, fields;
+            if (!read_lstr16(f.payload, pos, name) ||
+                !read_lstr16(f.payload, pos, fields)) {
+                reply = err("CreateTable: short payload"); break;
+            }
+            if (!ensure_abi_conn()) {
+                reply = err("CreateTable: no ABI connection"); break;
+            }
+            auto nb = to_cbuf(name);
+            auto fb = to_cbuf(fields);
+            ADSHANDLE hTable = 0;
+            UNSIGNED32 rrc = AdsCreateTable(
+                abi_conn_, nb.data(), nullptr,
+                table_type, char_type, 0, 0, memo_bs,
+                fb.data(), &hTable);
+            if (rrc != 0) {
+                reply = err("CreateTable", rrc); break;
+            }
+            // Files are on disk under the data dir; release the local
+            // handle so the client's subsequent OpenTable can take Shared.
+            if (hTable != 0) (void)AdsCloseTable(hTable);
+            reply.opcode = Opcode::CreateTableAck;
+            break;
+        }
+        case Opcode::DropTable: {
+            if (!sess_conn_) {
+                reply = err("DropTable: not connected",
+                            openads::AE_NO_CONNECTION);
+                break;
+            }
+            std::size_t pos = 0;
+            std::string name;
+            if (!read_lstr16(f.payload, pos, name)) {
+                reply = err("DropTable: short payload"); break;
+            }
+            std::uint16_t delete_files = 0;
+            if (pos + 2 <= f.payload.size()) {
+                delete_files = read_u16_le(f.payload.data() + pos);
+            }
+            if (!ensure_abi_conn()) {
+                reply = err("DropTable: no ABI connection"); break;
+            }
+            auto nb = to_cbuf(name);
+            UNSIGNED32 rrc = AdsDropTable(abi_conn_, nb.data(), delete_files);
+            if (rrc != 0) {
+                reply = err("DropTable", rrc); break;
+            }
+            reply.opcode = Opcode::DropTableAck;
+            break;
+        }
         case Opcode::SkipUnique: {
             if (f.payload.size() < 8) { reply = err("SkipUnique: bad payload"); break; }
             std::uint32_t iid = read_u32_le(f.payload.data());

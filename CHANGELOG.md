@@ -1,3 +1,25 @@
+## 1.8.17 — 2026-07-20
+
+### Fixed — remote DbCreate / AdsCreateTable wrote next to the client app
+
+When a Harbour/X# client connected with `AdsConnect60(tcp://…)` and called
+`dbCreate` / `AdsCreateTable`, create still ran against a *local* default
+connection (cwd of the client process) because there was no remote
+`CreateTable` wire opcode. The table landed next to the application, then
+the post-create `AdsOpenTable` (which *does* route remote) failed with
+`ADSCDX/5103 OpenTable: open failed`. Reported by Pritpal Bedi against
+v1.8.16: path-to-open of DbCreate had been fixed, path-to-create had not.
+
+`AdsCreateTable` and `AdsDropTable` now detect a `RemoteConnection` handle
+and forward create/drop over the wire (`CreateTable` / `DropTable`
+opcodes). The server writes under its data directory via the session ABI
+connection (so the 1.8.15 absolute-path folding also applies remotely);
+the client then re-opens through the normal remote `OpenTable` path.
+Remote `AdsConnect60` also records the handle as the rddads default so
+create-with-hConnect=0 works. Regression tests cover bare-name create +
+open + drop and drive-rooted remote create. Verified against a live
+`openads_serverd` on macOS (iMac) over the LAN.
+
 ## 1.8.16 — 2026-07-19
 
 ### Fixed — DbSeek missed on compound, nested-function and probe-sized CDX keys (#131)

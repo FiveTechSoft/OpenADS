@@ -5397,6 +5397,9 @@ UNSIGNED32 ENTRYPOINT AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 usServerType
                 remote_tls_conns;
             remote_tls_conns.emplace(h, std::move(rc));
             *phConnect = h;
+            // Harbour rddads stores the last AdsConnect handle for
+            // AdsCreateTable / AdsBeginTransaction(0) etc.
+            rddads_default_connection() = h;
             return ok();
 #else
             return fail(openads::AE_FUNCTION_NOT_AVAILABLE,
@@ -5427,6 +5430,9 @@ UNSIGNED32 ENTRYPOINT AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 usServerType
                 remote_conns;
             remote_conns.emplace(h, std::move(rc));
             *phConnect = h;
+            // Harbour rddads stores the last AdsConnect handle for
+            // AdsCreateTable / AdsBeginTransaction(0) etc.
+            rddads_default_connection() = h;
             return ok();
         }
     }
@@ -7022,6 +7028,34 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
     }
 #endif
 
+    // Remote connection: create on the server data directory over the wire.
+    // Without this branch AdsCreateTable falls through to a local cwd
+    // Connection (get_or_create_default_connection), so DbCreate / rddads
+    // writes the .dbf next to the client app while the subsequent open
+    // (remote AdsOpenTable) fails with AE_TABLE_CORRUPTED (5103).
+    {
+        ADSHANDLE rc_h = hConn;
+        if (rc_h == 0) rc_h = rddads_default_connection();
+        if (auto* rc = get_remote_connection(rc_h)) {
+            auto cr = rc->create_table(rel, defs,
+                                       static_cast<std::uint16_t>(usTableType),
+                                       static_cast<std::uint16_t>(usCharType),
+                                       static_cast<std::uint16_t>(usMemoBlockSize));
+            if (!cr) return fail(cr.error());
+            // Re-open via the normal remote path so production-bag auto-open
+            // and the implicit GotoTop match AdsOpenTable semantics.
+            std::vector<UNSIGNED8> namebuf(rel.size() + 1, 0);
+            if (!rel.empty())
+                std::memcpy(namebuf.data(), rel.data(), rel.size());
+            const UNSIGNED16 open_type =
+                (usTableType == ADS_ADT) ? ADS_ADT
+                : (usTableType == ADS_VFP) ? ADS_VFP
+                : ADS_CDX;
+            return AdsOpenTable(rc_h, namebuf.data(), namebuf.data(),
+                                open_type, usCharType, 0, 0, 1, phTable);
+        }
+    }
+
     auto& s = state();
     Connection* c = s.registry.lookup<Connection>(hConn,
                             HandleKind::Connection);
@@ -7385,6 +7419,16 @@ UNSIGNED32 ENTRYPOINT AdsDropTable(ADSHANDLE     hConnect,
         return run_sql_drop(msc, openads::sql_backend::SqlDdlDialect::Mssql);
     }
 #endif
+
+    {
+        ADSHANDLE rc_h = hConnect;
+        if (rc_h == 0) rc_h = rddads_default_connection();
+        if (auto* rc = get_remote_connection(rc_h)) {
+            auto dr = rc->drop_table(rel, /*delete_files=*/1);
+            if (!dr) return fail(dr.error());
+            return ok();
+        }
+    }
 
     auto& s = state();
     Connection* c = s.registry.lookup<Connection>(hConnect,

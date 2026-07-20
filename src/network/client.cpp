@@ -1746,6 +1746,46 @@ RemoteConnection::create_index(std::uint32_t table_id,
 }
 
 util::Result<void>
+RemoteConnection::create_table(const std::string& name,
+                                const std::string& fields,
+                                std::uint16_t table_type,
+                                std::uint16_t char_type,
+                                std::uint16_t memo_block_size) {
+    Frame req;
+    req.opcode = Opcode::CreateTable;
+    write_u16_le(table_type, req.payload);
+    write_u16_le(char_type, req.payload);
+    write_u16_le(memo_block_size, req.payload);
+    push_lp_str(req.payload, name);
+    push_lp_str(req.payload, fields);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::CreateTableAck) {
+        return util::Error{5000, 0, "CreateTable: server error",
+                           std::string(rep.value().payload.begin(),
+                                       rep.value().payload.end())};
+    }
+    return {};
+}
+
+util::Result<void>
+RemoteConnection::drop_table(const std::string& name,
+                              std::uint16_t delete_files) {
+    Frame req;
+    req.opcode = Opcode::DropTable;
+    push_lp_str(req.payload, name);
+    write_u16_le(delete_files, req.payload);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::DropTableAck) {
+        return util::Error{5000, 0, "DropTable: server error",
+                           std::string(rep.value().payload.begin(),
+                                       rep.value().payload.end())};
+    }
+    return {};
+}
+
+util::Result<void>
 RemoteConnection::skip_unique(std::uint32_t index_id,
                                std::int32_t  direction) {
     Frame req; req.opcode = Opcode::SkipUnique;

@@ -248,6 +248,15 @@ public:
                                               const std::string& key_filter,
                                               std::uint32_t options,
                                               std::uint16_t page_size);
+    // Create a free table on the remote data directory (AdsCreateTable).
+    // Does not leave the table open — caller follows up with open_table().
+    util::Result<void>          create_table(const std::string& name,
+                                              const std::string& fields,
+                                              std::uint16_t table_type,
+                                              std::uint16_t char_type,
+                                              std::uint16_t memo_block_size);
+    util::Result<void>          drop_table(const std::string& name,
+                                            std::uint16_t delete_files);
     util::Result<void>          skip_unique(std::uint32_t index_id,
                                             std::int32_t  direction);
     util::Result<void>          set_scope(std::uint32_t index_id,

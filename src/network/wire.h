@@ -349,6 +349,25 @@ enum class Opcode : std::uint8_t {
     ShowDeleted        = 0xDA,
     ShowDeletedAck     = 0xDB,
 
+    // Remote AdsCreateTable / AdsDropTable. Without these, a client that
+    // AdsConnect60'd to tcp://… fell through AdsCreateTable's local
+    // Connection lookup, wrote the .dbf next to the client app (cwd of
+    // the default local connection), then AdsOpenTable (which *does*
+    // route remote) failed with AE_TABLE_CORRUPTED (5103) because the
+    // file never landed under the server data directory.
+    //
+    // Request CreateTable:
+    //   [u16 tableType][u16 charType][u16 memoBlockSize]
+    //   [u16 nameLen][name][u16 fieldsLen][fields]
+    // Reply CreateTableAck: (empty) — client re-opens via OpenTable so
+    //   production-bag auto-open / GotoTop reuse the existing path.
+    CreateTable        = 0xDC,
+    CreateTableAck     = 0xDD,
+    // Request DropTable: [u16 nameLen][name][u16 deleteFiles]
+    // Reply DropTableAck: (empty)
+    DropTable          = 0xDE,
+    DropTableAck       = 0xDF,
+
     Error              = 0xFF,
 };
 
