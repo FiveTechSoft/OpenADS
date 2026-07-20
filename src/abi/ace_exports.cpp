@@ -5870,6 +5870,9 @@ UNSIGNED32 ENTRYPOINT AdsConnect101(UNSIGNED8* pucConnectString,
 // system-procedure machinery further down (namespace spproc).
 extern "C++" {
 namespace spproc { void drop_all_events_for(const void* conn); }
+// S4 — session #temp / trigger-image cleanup (defined by the sess
+// namespace further down, near the trigger machinery).
+extern "C++" void sess_forget_connection(Connection* c);
 }
 
 UNSIGNED32 ENTRYPOINT AdsDisconnect(ADSHANDLE hConnect) {
@@ -5989,6 +5992,10 @@ UNSIGNED32 ENTRYPOINT AdsDisconnect(ADSHANDLE hConnect) {
         // Drop this connection's sp_CreateEvent registrations so the
         // global event map can't hold a dangling Connection key.
         spproc::drop_all_events_for(c);
+        // S4 — drop session #temp tables / trigger-image registrations so
+        // the maps can't hold a dangling Connection key (defined near the
+        // sess namespace below).
+        sess_forget_connection(c);
         // If this connection activated the process-wide OEM upper table
         // (AdsSetCollation NTXPL852/PL852), deactivate it so UPPER()
         // reverts to UTF-8 promotion for the rest of the process.
@@ -9729,7 +9736,12 @@ bool fire_triggers_(Handle hConn, Connection* conn,
                     const std::string& table_alias, std::uint32_t event_mask,
                     std::uint32_t timing,
                     Table* new_tbl = nullptr, Table* old_tbl = nullptr,
-                    TrigError_* out_err = nullptr) {
+                    TrigError_* out_err = nullptr,
+                    // S4 — pre-built row images for firings where no table
+                    // row exists yet (INSERT BEFORE / INSTEAD OF: the image
+                    // comes from the statement's VALUES).
+                    const TrigFieldMap_* new_override = nullptr,
+                    const TrigFieldMap_* old_override = nullptr) {
     if (tl_trigger_depth >= kTrigMaxDepth) return false; // depth limit
     if (conn->triggers_disabled()) return false;          // connection-level disable
     auto* dd = conn->dd();
@@ -9750,7 +9762,11 @@ bool fire_triggers_(Handle hConn, Connection* conn,
         if (e->options & 0x02u) { want_memos  = true; }
     }
     TrigFieldMap_ new_fields, old_fields;
-    if (want_values) {
+    // S4 — statement-supplied images take precedence (INSERT BEFORE /
+    // INSTEAD OF fire before any row exists to collect from).
+    if (new_override != nullptr) new_fields = *new_override;
+    if (old_override != nullptr) old_fields = *old_override;
+    if (want_values && new_override == nullptr && old_override == nullptr) {
         if (want_memos) {
             trig_collect_row_(new_tbl, new_fields);
             trig_collect_row_(old_tbl, old_fields);
@@ -9783,6 +9799,24 @@ bool fire_triggers_(Handle hConn, Connection* conn,
             collect_no_memo(old_tbl, old_fields);
         }
     }
+
+    // S4 — re-entrancy guard: a write performed INSIDE a trigger body to
+    // the SAME table/event does not re-fire that trigger (SAP semantics —
+    // the INSTEAD OF idiom `insert into t select * from __new` would
+    // otherwise recurse).
+    static thread_local std::vector<std::string> tl_active_fires;
+    std::string fire_key = table_alias + "|" +
+                           std::to_string(event_mask) + "|" +
+                           std::to_string(timing);
+    if (std::find(tl_active_fires.begin(), tl_active_fires.end(),
+                  fire_key) != tl_active_fires.end())
+        return false;
+    struct FireGuard {
+        std::vector<std::string>& v;
+        ~FireGuard() { v.pop_back(); }
+    };
+    tl_active_fires.push_back(fire_key);
+    FireGuard fire_guard{tl_active_fires};
 
     bool instead_of_fired = false;
     ++tl_trigger_depth;
@@ -22226,6 +22260,10 @@ struct TriggerBridge final : openads::script::SqlBridge {
 
     openads::util::Result<std::unique_ptr<openads::script::SqlCursor>>
     exec(const std::string& sql) override {
+        static const bool trig_trace =
+            std::getenv("OPENADS_TRACE") != nullptr;
+        if (trig_trace)
+            std::fprintf(stderr, "[trig-exec] %.120s\n", sql.c_str());
         // 1. INSERT INTO __error … VALUES (code, 'msg') — the classic ADS
         //    way for a trigger to fail the DML. Surface it as an error.
         {
@@ -22365,6 +22403,59 @@ struct TriggerBridge final : openads::script::SqlBridge {
                         low.find("__old") != std::string::npos;
             if (refs && !instead_of)
                 return std::unique_ptr<openads::script::SqlCursor>{};
+            // S4 — the INSTEAD OF idiom `INSERT INTO <t> SELECT * FROM
+            // __new`: expand to an explicit column INSERT built from the
+            // row image (empty-text fields are omitted so DD defaults and
+            // the NOT NULL checks apply to what the client actually sent).
+            if (refs && instead_of && new_f != nullptr && !new_f->empty()) {
+                std::size_t p = 0;
+                auto ws2 = [&](std::size_t& q) {
+                    while (q < low.size() && std::isspace(
+                           static_cast<unsigned char>(low[q]))) ++q;
+                };
+                auto word2 = [&](std::size_t& q) -> std::string {
+                    ws2(q);
+                    std::size_t b2 = q;
+                    while (q < low.size() &&
+                           (std::isalnum(static_cast<unsigned char>(
+                                low[q])) ||
+                            low[q] == '_' || low[q] == '.'))
+                        ++q;
+                    return low.substr(b2, q - b2);
+                };
+                ws2(p);
+                if (word2(p) == "insert" && word2(p) == "into") {
+                    std::size_t name_pos = p;
+                    ws2(name_pos);
+                    std::string tgt = word2(p);
+                    std::string tgt_orig = s.substr(name_pos, tgt.size());
+                    std::size_t q = p;
+                    bool star_shape = word2(q) == "select";
+                    if (star_shape) {
+                        ws2(q);
+                        star_shape = q < low.size() && low[q] == '*';
+                        if (star_shape) ++q;
+                    }
+                    if (star_shape && word2(q) == "from" &&
+                        word2(q) == "__new") {
+                        std::string cols2, vals2;
+                        for (const auto& kv : *new_f) {
+                            if (kv.second.text.empty()) continue;
+                            if (!cols2.empty()) {
+                                cols2 += ", ";
+                                vals2 += ", ";
+                            }
+                            cols2 += kv.first;
+                            vals2 += trig_literal(kv.second);
+                        }
+                        if (!cols2.empty()) {
+                            return inner.exec(
+                                "INSERT INTO " + tgt_orig + " (" + cols2 +
+                                ") VALUES (" + vals2 + ")");
+                        }
+                    }
+                }
+            }
             if (refs) {
                 // v1: substitute bare field identifiers (typed literals),
                 // then map the virtual table to system.iota (single-row
@@ -22545,6 +22636,101 @@ inline openads::util::Result<void> run_top_level_script(
 
 } // namespace scriptbridge
 
+// ---- S4: connection-scoped trigger row images + session #temp tables ----
+// While a trigger fires, its __new/__old one-row images are visible to
+// EVERY statement executed on the connection — including stored
+// procedures the trigger body calls (pmsys: trigger →
+// sp_SaveIntoAuditLog → `SELECT n.[col] newVal INTO #MyTrigTbl FROM
+// __new n`). #temp tables are connection-scoped result snapshots
+// created by SELECT INTO #t, readable via FROM #t, and removed by
+// DROP TABLE #t or disconnect.
+namespace sess {
+
+struct TrigImages {
+    const std::map<std::string, TrigField_>* new_f = nullptr;
+    const std::map<std::string, TrigField_>* old_f = nullptr;
+};
+struct TempTable {
+    std::vector<std::string>              col_names;
+    std::vector<std::vector<std::string>> rows;   // display-text cells
+};
+
+inline std::mutex& mu() { static std::mutex m; return m; }
+inline std::map<Connection*, std::vector<TrigImages>>& image_stacks() {
+    static std::map<Connection*, std::vector<TrigImages>> m;
+    return m;
+}
+inline std::map<Connection*,
+                std::map<std::string, TempTable>>& temp_tables() {
+    static std::map<Connection*, std::map<std::string, TempTable>> m;
+    return m;
+}
+
+inline std::string lower(std::string s) {
+    for (auto& ch : s)
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    return s;
+}
+
+inline TrigImages active_images(Connection* c) {
+    std::lock_guard<std::mutex> lk(mu());
+    auto it = image_stacks().find(c);
+    if (it == image_stacks().end() || it->second.empty()) return {};
+    return it->second.back();
+}
+
+// RAII: registers the firing trigger's images for the whole connection.
+struct ImageScope {
+    Connection* c;
+    ImageScope(Connection* conn, const std::map<std::string, TrigField_>* nf,
+               const std::map<std::string, TrigField_>* of)
+        : c(conn) {
+        std::lock_guard<std::mutex> lk(mu());
+        image_stacks()[c].push_back(TrigImages{nf, of});
+    }
+    ~ImageScope() {
+        std::lock_guard<std::mutex> lk(mu());
+        auto it = image_stacks().find(c);
+        if (it != image_stacks().end() && !it->second.empty())
+            it->second.pop_back();
+        if (it != image_stacks().end() && it->second.empty())
+            image_stacks().erase(it);
+    }
+};
+
+inline void store_temp(Connection* c, const std::string& name,
+                       TempTable t) {
+    std::lock_guard<std::mutex> lk(mu());
+    temp_tables()[c][lower(name)] = std::move(t);
+}
+inline bool drop_temp(Connection* c, const std::string& name) {
+    std::lock_guard<std::mutex> lk(mu());
+    auto it = temp_tables().find(c);
+    if (it == temp_tables().end()) return false;
+    return it->second.erase(lower(name)) > 0;
+}
+inline bool get_temp(Connection* c, const std::string& name,
+                     TempTable& out) {
+    std::lock_guard<std::mutex> lk(mu());
+    auto it = temp_tables().find(c);
+    if (it == temp_tables().end()) return false;
+    auto jt = it->second.find(lower(name));
+    if (jt == it->second.end()) return false;
+    out = jt->second;
+    return true;
+}
+inline void forget_connection(Connection* c) {
+    std::lock_guard<std::mutex> lk(mu());
+    temp_tables().erase(c);
+    image_stacks().erase(c);
+}
+
+}  // namespace sess
+
+extern "C++" void sess_forget_connection(Connection* c) {
+    sess::forget_connection(c);
+}
+
 // Run one trigger body through the script engine. Declared ahead of the
 // DML machinery (which lives earlier in this file, inside an anonymous
 // namespace) and defined here at global scope.
@@ -22559,6 +22745,10 @@ extern "C++" openads::util::Result<void> script_run_trigger_body(
     if (AdsCreateSQLStatement(hConn, &hStmt) != openads::AE_SUCCESS)
         return openads::util::Error{openads::AE_INTERNAL_ERROR, 0,
             "trigger: statement alloc failed", ""};
+    // S4: make this trigger's row images visible to every statement on
+    // the connection while the body runs — stored procedures called from
+    // the body resolve __new/__old through sess::active_images.
+    sess::ImageScope img_scope(conn, &new_f, &old_f);
     scriptbridge::TriggerBridge bridge(conn, hStmt, &new_f, &old_f,
                                        is_instead_of);
     openads::script::Executor ex(&bridge);
@@ -23016,6 +23206,303 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         return ok();
     }
 
+    // ---- S4: session #temp tables & trigger-image SELECT INTO -----------
+    // DROP TABLE #t removes the session snapshot; SELECT ... INTO #t
+    // materialises one. When the FROM sources are the trigger images
+    // (__new/__old) the row is resolved directly from the active images
+    // (pmsys: sp_SaveIntoAuditLog called from a trigger); any other
+    // source runs the SELECT normally and snapshots its cursor.
+    {
+        std::string up5;
+        up5.reserve(sql.size());
+        for (char ch : sql)
+            up5.push_back(static_cast<char>(
+                std::toupper(static_cast<unsigned char>(ch))));
+        auto skip_ws2 = [&](std::size_t& p) {
+            while (p < sql.size() &&
+                   std::isspace(static_cast<unsigned char>(sql[p]))) ++p;
+        };
+        auto read_word = [&](std::size_t& p) -> std::string {
+            skip_ws2(p);
+            std::size_t b2 = p;
+            while (p < sql.size() &&
+                   (std::isalnum(static_cast<unsigned char>(sql[p])) ||
+                    sql[p] == '_' || sql[p] == '#'))
+                ++p;
+            return sql.substr(b2, p - b2);
+        };
+        std::size_t sp = 0;
+        skip_ws2(sp);
+        if (up5.compare(sp, 10, "DROP TABLE") == 0) {
+            std::size_t q = sp + 10;
+            skip_ws2(q);
+            if (q < sql.size() && sql[q] == '#') {
+                std::string nm = read_word(q);
+                sess::drop_temp(c, nm);
+                *phCursor = 0;
+                return ok();
+            }
+        }
+        if (up5.compare(sp, 7, "SELECT ") == 0) {
+            std::size_t into_pos = std::string::npos;
+            int depth = 0;
+            bool in_q = false;
+            for (std::size_t i2 = sp; i2 + 6 <= sql.size(); ++i2) {
+                char ch = sql[i2];
+                if (in_q) { if (ch == '\'') in_q = false; continue; }
+                if (ch == '\'') { in_q = true; continue; }
+                if (ch == '(') { ++depth; continue; }
+                if (ch == ')') { --depth; continue; }
+                if (depth == 0 && up5.compare(i2, 6, " INTO ") == 0) {
+                    into_pos = i2;
+                    break;
+                }
+            }
+            std::size_t np = into_pos == std::string::npos
+                           ? std::string::npos : into_pos + 6;
+            if (np != std::string::npos) skip_ws2(np);
+            if (np != std::string::npos && np < sql.size() &&
+                sql[np] == '#') {
+                std::string tmp_name = read_word(np);
+                std::string items = sql.substr(sp + 7, into_pos - (sp + 7));
+                std::size_t rp = np;
+                skip_ws2(rp);
+                std::string rest = sql.substr(rp);   // "FROM ..."
+                // Parse the FROM source list: tok [alias][, tok [alias]].
+                struct Src { std::string table, alias; };
+                std::vector<Src> srcs;
+                bool from_ok = false;
+                {
+                    std::size_t p = 0;
+                    std::string kw = rest.substr(0, 4);
+                    for (auto& ch : kw)
+                        ch = static_cast<char>(
+                            std::toupper(static_cast<unsigned char>(ch)));
+                    if (kw == "FROM") {
+                        p = 4;
+                        from_ok = true;
+                        for (;;) {
+                            while (p < rest.size() && std::isspace(
+                                   static_cast<unsigned char>(rest[p]))) ++p;
+                            std::size_t b2 = p;
+                            while (p < rest.size() &&
+                                   (std::isalnum(static_cast<unsigned char>(
+                                        rest[p])) ||
+                                    rest[p] == '_')) ++p;
+                            Src s2;
+                            s2.table = sess::lower(rest.substr(b2, p - b2));
+                            while (p < rest.size() && std::isspace(
+                                   static_cast<unsigned char>(rest[p]))) ++p;
+                            if (p < rest.size() && rest[p] != ',' &&
+                                rest[p] != ';') {
+                                std::size_t a2 = p;
+                                while (p < rest.size() &&
+                                       (std::isalnum(
+                                            static_cast<unsigned char>(
+                                                rest[p])) ||
+                                        rest[p] == '_')) ++p;
+                                s2.alias = sess::lower(
+                                    rest.substr(a2, p - a2));
+                            }
+                            if (s2.table.empty()) { from_ok = false; break; }
+                            srcs.push_back(std::move(s2));
+                            while (p < rest.size() && std::isspace(
+                                   static_cast<unsigned char>(rest[p]))) ++p;
+                            if (p < rest.size() && rest[p] == ',') {
+                                ++p;
+                                continue;
+                            }
+                            break;
+                        }
+                    }
+                }
+                bool all_images = from_ok && !srcs.empty();
+                for (const auto& s2 : srcs)
+                    if (s2.table != "__new" && s2.table != "__old")
+                        all_images = false;
+                auto imgs = sess::active_images(c);
+                {
+                    static const bool into_trace =
+                        std::getenv("OPENADS_TRACE") != nullptr;
+                    if (into_trace)
+                        std::fprintf(stderr,
+                            "[into] tmp=%s all_images=%d new=%p old=%p "
+                            "sql=%.100s\n",
+                            tmp_name.c_str(), all_images ? 1 : 0,
+                            (const void*)imgs.new_f,
+                            (const void*)imgs.old_f, sql.c_str());
+                }
+                if (all_images &&
+                    (imgs.new_f != nullptr || imgs.old_f != nullptr)) {
+                    // Resolve each projected item straight from the images.
+                    auto image_for = [&](const std::string& alias)
+                        -> const std::map<std::string, TrigField_>* {
+                        for (const auto& s2 : srcs) {
+                            if (alias.empty() || s2.alias == alias ||
+                                s2.table == alias) {
+                                return s2.table == "__old" ? imgs.old_f
+                                                           : imgs.new_f;
+                            }
+                        }
+                        return imgs.new_f != nullptr ? imgs.new_f
+                                                     : imgs.old_f;
+                    };
+                    sess::TempTable tt;
+                    std::vector<std::string> row;
+                    std::size_t p = 0;
+                    bool parse_ok = true;
+                    while (parse_ok && p < items.size()) {
+                        while (p < items.size() && std::isspace(
+                               static_cast<unsigned char>(items[p]))) ++p;
+                        if (p >= items.size()) break;
+                        // [alias.]col-or-[col] [colalias]
+                        std::string alias, col;
+                        std::size_t b2 = p;
+                        if (items[p] != '[') {
+                            while (p < items.size() &&
+                                   (std::isalnum(
+                                        static_cast<unsigned char>(
+                                            items[p])) ||
+                                    items[p] == '_')) ++p;
+                            std::string first = items.substr(b2, p - b2);
+                            if (p < items.size() && items[p] == '.') {
+                                alias = sess::lower(first);
+                                ++p;
+                            } else {
+                                col = first;
+                            }
+                        }
+                        if (col.empty()) {
+                            if (p < items.size() && items[p] == '[') {
+                                std::size_t e2 = items.find(']', p);
+                                if (e2 == std::string::npos) {
+                                    parse_ok = false;
+                                    break;
+                                }
+                                col = items.substr(p + 1, e2 - p - 1);
+                                p = e2 + 1;
+                            } else {
+                                std::size_t c2 = p;
+                                while (p < items.size() &&
+                                       (std::isalnum(
+                                            static_cast<unsigned char>(
+                                                items[p])) ||
+                                        items[p] == '_')) ++p;
+                                col = items.substr(c2, p - c2);
+                            }
+                        }
+                        if (col.empty()) { parse_ok = false; break; }
+                        while (p < items.size() && std::isspace(
+                               static_cast<unsigned char>(items[p]))) ++p;
+                        std::string colalias;
+                        if (p < items.size() && items[p] != ',') {
+                            std::size_t a2 = p;
+                            while (p < items.size() &&
+                                   (std::isalnum(
+                                        static_cast<unsigned char>(
+                                            items[p])) ||
+                                    items[p] == '_')) ++p;
+                            colalias = items.substr(a2, p - a2);
+                        }
+                        while (p < items.size() && std::isspace(
+                               static_cast<unsigned char>(items[p]))) ++p;
+                        if (p < items.size() && items[p] == ',') ++p;
+                        const auto* m = image_for(alias);
+                        std::string cell;
+                        if (m != nullptr) {
+                            auto it2 = m->find(sess::lower(col));
+                            if (it2 != m->end())
+                                cell = openads::script::to_display(
+                                    scriptbridge::trig_value(it2->second));
+                        }
+                        tt.col_names.push_back(
+                            colalias.empty() ? col : colalias);
+                        row.push_back(std::move(cell));
+                    }
+                    if (parse_ok && !tt.col_names.empty()) {
+                        tt.rows.push_back(std::move(row));
+                        sess::store_temp(c, tmp_name, std::move(tt));
+                        *phCursor = 0;
+                        return ok();
+                    }
+                    return fail(openads::AE_PARSE_ERROR,
+                                "SELECT INTO #temp: unsupported item list");
+                }
+                // Generic source: run the SELECT without the INTO clause
+                // and snapshot the cursor.
+                std::string inner = sql.substr(sp, into_pos - sp) + " " +
+                                    rest;
+                std::vector<UNSIGNED8> ibuf(inner.size() + 1);
+                std::memcpy(ibuf.data(), inner.c_str(), inner.size() + 1);
+                ADSHANDLE hc2 = 0;
+                UNSIGNED32 rc2 =
+                    AdsExecuteSQLDirect(hStatement, ibuf.data(), &hc2);
+                if (rc2 != 0) return rc2;
+                if (hc2 == 0)
+                    return fail(openads::AE_PARSE_ERROR,
+                                "SELECT INTO #temp: inner SELECT returned "
+                                "no cursor");
+                auto& s5 = state();
+                std::lock_guard<std::recursive_mutex> lk5(s5.mu);
+                auto* src_tbl = s5.registry.lookup<openads::engine::Table>(
+                    hc2, HandleKind::Table);
+                if (src_tbl == nullptr) {
+                    AdsCloseTable(hc2);
+                    return fail(openads::AE_INTERNAL_ERROR,
+                                "SELECT INTO #temp: cursor lookup");
+                }
+                const auto* proj = projection_for(hc2);
+                std::vector<std::uint16_t> cols2;
+                if (proj) {
+                    cols2 = *proj;
+                } else {
+                    for (std::uint16_t k2 = 0;
+                         k2 < src_tbl->field_count(); ++k2)
+                        cols2.push_back(k2);
+                }
+                sess::TempTable tt;
+                for (std::uint16_t k2 : cols2)
+                    tt.col_names.push_back(
+                        src_tbl->field_descriptor(k2).name);
+                // Column aliases from the SELECT (`col newVal`) name the
+                // snapshot's columns, SAP-style.
+                if (auto ps2 = openads::sql::parse_select(inner)) {
+                    for (const auto& pa : ps2.value().projection_aliases) {
+                        if (pa.first < tt.col_names.size())
+                            tt.col_names[pa.first] = pa.second;
+                    }
+                }
+                std::vector<std::uint32_t> recnos;
+                if (src_tbl->has_recno_sequence()) {
+                    recnos = src_tbl->recno_sequence();
+                } else {
+                    std::uint32_t rcount = src_tbl->record_count();
+                    for (std::uint32_t r2 = 1; r2 <= rcount; ++r2)
+                        recnos.push_back(r2);
+                }
+                for (std::uint32_t r2 : recnos) {
+                    if (auto g2 = src_tbl->goto_record(r2); !g2) continue;
+                    if (src_tbl->is_deleted()) continue;
+                    if (!src_tbl->passes_filter()) continue;
+                    std::vector<std::string> row;
+                    for (std::uint16_t k2 : cols2) {
+                        auto v2 = src_tbl->read_field(k2);
+                        std::string cell =
+                            v2 ? v2.value().as_string : std::string();
+                        while (!cell.empty() && cell.back() == ' ')
+                            cell.pop_back();
+                        row.push_back(std::move(cell));
+                    }
+                    tt.rows.push_back(std::move(row));
+                }
+                AdsCloseTable(hc2);
+                sess::store_temp(c, tmp_name, std::move(tt));
+                *phCursor = 0;
+                return ok();
+            }
+        }
+    }
+
     // Open a table by name, transparently resolving "system.*" virtual tables
     // to memory tables materialized from DD state.
     auto open_or_sys = [c, &sql](const std::string& tname,
@@ -23024,6 +23511,30 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                             openads::engine::LockingMode lmode)
         -> openads::util::Result<Handle> {
         std::string resolved = tname;
+        // S4 — session #temp table: serve the stored snapshot as a
+        // memory table.
+        if (!tname.empty() && tname[0] == '#') {
+            sess::TempTable tt;
+            if (!sess::get_temp(c, tname, tt))
+                return openads::util::Error{
+                    static_cast<std::int32_t>(openads::AE_NO_FILE_FOUND), 0,
+                    tname, ""};
+            std::vector<SpCol> cols;
+            cols.reserve(tt.col_names.size());
+            for (std::size_t i2 = 0; i2 < tt.col_names.size(); ++i2) {
+                std::size_t w = 1;
+                for (const auto& row : tt.rows)
+                    if (i2 < row.size() && row[i2].size() > w)
+                        w = row[i2].size();
+                cols.push_back(SpCol{tt.col_names[i2].c_str(), 'C',
+                                     static_cast<std::uint16_t>(
+                                         std::min<std::size_t>(w, 4096)),
+                                     0});
+            }
+            auto mt = build_memory_result("temp" + tname, cols, tt.rows);
+            if (!mt) return mt.error();
+            return c->adopt_table(std::move(mt).value(), tname);
+        }
         if (tname.size() > 7) {
             std::string px = tname.substr(0, 7);
             for (auto& ch : px) ch = static_cast<char>(
@@ -24207,7 +24718,26 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 if (tbl->is_deleted()) continue;
                 if (!tbl->passes_filter()) continue;
                 for (const auto& a : assns) {
-                    if (a.value.is_null) {
+                    if (a.value.is_expr) {
+                        // S4 — expression RHS evaluated per row with the
+                        // current row's columns bound (SET x = x + 1,
+                        // SET t = Now(), …).
+                        auto pr = scriptbridge::compiled(
+                            "RETURN " + a.value.text + ";");
+                        if (!pr) return fail(pr.error());
+                        scriptbridge::AbiBridge br(c, hStatement);
+                        openads::script::Executor ex2(&br);
+                        ex2.set_user(c->username());
+                        scriptbridge::bind_row_params(ex2, *tbl);
+                        auto rr = ex2.run(*pr.value());
+                        if (!rr) return fail(rr.error());
+                        auto wr = scriptbridge::write_script_value(
+                            *tbl, a.field_index,
+                            rr.value().returned
+                                ? rr.value().return_value
+                                : openads::script::Value::null());
+                        if (!wr) return fail(wr.error());
+                    } else if (a.value.is_null) {
                         auto wr = tbl->set_field_null(a.field_index);
                         if (!wr) return fail(wr.error());
                     } else if (a.value.is_numeric) {
@@ -24570,7 +25100,23 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         ins.value().columns[i].c_str(), ""};
                 }
                 const auto& v = vals[i];
-                if (v.is_null) {
+                if (v.is_expr) {
+                    // S4 — expression value (User(), Now(), …) evaluated
+                    // through the script engine.
+                    auto pr = scriptbridge::compiled(
+                        "RETURN " + v.text + ";");
+                    if (!pr) return pr.error();
+                    scriptbridge::AbiBridge br(c, hStatement);
+                    openads::script::Executor ex2(&br);
+                    ex2.set_user(c->username());
+                    auto rr = ex2.run(*pr.value());
+                    if (!rr) return rr.error();
+                    auto wr = scriptbridge::write_script_value(
+                        *tbl, static_cast<std::uint16_t>(fidx),
+                        rr.value().returned ? rr.value().return_value
+                                            : openads::script::Value::null());
+                    if (!wr) return wr.error();
+                } else if (v.is_null) {
                     auto wr = tbl->set_field_null(
                         static_cast<std::uint16_t>(fidx));
                     if (!wr) return wr.error();
@@ -24644,13 +25190,70 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         Handle ins_hConn = !ins_alias.empty() ? handle_for_conn(c) : Handle{0};
         bool ins_instead_of = false;
         TrigError_ ins_terr;
+        // S4 — pre-write __new image from the statement VALUES (first
+        // row): INSERT BEFORE / INSTEAD OF triggers fire before any table
+        // row exists, so the image must come from the statement. pmsys's
+        // Insert AuditLog is an INSTEAD OF trigger that reads
+        // `SELECT propertyid FROM __new` and re-inserts the row itself.
+        TrigFieldMap_ ins_new_img;
+        if (ins_hConn) {
+            const std::vector<openads::sql::InsertLiteral>* vals0 = nullptr;
+            if (!ins.value().rows.empty()) vals0 = &ins.value().rows.front();
+            else if (ins.value().select_sql.empty())
+                vals0 = &ins.value().values;
+            std::uint16_t nf2 = tbl->field_count();
+            for (std::uint16_t i2 = 0; i2 < nf2; ++i2) {
+                const auto& fd2 = tbl->field_descriptor(i2);
+                std::string nm2 = fd2.name;
+                for (auto& ch : nm2)
+                    ch = static_cast<char>(std::tolower(
+                        static_cast<unsigned char>(ch)));
+                char tc2 = trig_type_char_(fd2.type);
+                std::string txt;
+                if (vals0 != nullptr) {
+                    std::int32_t cp2 = ins_col_pos(fd2.name);
+                    if (cp2 >= 0 &&
+                        static_cast<std::size_t>(cp2) < vals0->size()) {
+                        const auto& v2 =
+                            (*vals0)[static_cast<std::size_t>(cp2)];
+                        if (v2.is_null) {
+                            txt.clear();
+                        } else if (v2.is_expr) {
+                            // Expression value: evaluate for the image so
+                            // the trigger sees the actual incoming value.
+                            auto pr2 = scriptbridge::compiled(
+                                "RETURN " + v2.text + ";");
+                            if (pr2) {
+                                scriptbridge::AbiBridge br2(c, hStatement);
+                                openads::script::Executor ex3(&br2);
+                                ex3.set_user(c->username());
+                                auto rr2 = ex3.run(*pr2.value());
+                                if (rr2 && rr2.value().returned)
+                                    txt = openads::script::to_display(
+                                        rr2.value().return_value);
+                            }
+                        } else if (v2.is_numeric) {
+                            char nb2[40];
+                            std::snprintf(nb2, sizeof(nb2), "%.10g",
+                                          v2.number);
+                            txt = nb2;
+                        } else {
+                            txt = v2.text;
+                        }
+                    }
+                }
+                ins_new_img[nm2] = TrigField_{std::move(txt), tc2};
+            }
+        }
         if (ins_hConn) {
             ins_instead_of = fire_triggers_(ins_hConn, c, ins_alias, 1u,
                                             2u /*INSTEAD_OF*/, nullptr,
-                                            nullptr, &ins_terr);
+                                            nullptr, &ins_terr,
+                                            &ins_new_img, nullptr);
             if (!ins_instead_of)
                 fire_triggers_(ins_hConn, c, ins_alias, 1u, 1u /*BEFORE*/,
-                               nullptr, nullptr, &ins_terr);
+                               nullptr, nullptr, &ins_terr,
+                               &ins_new_img, nullptr);
             if (ins_terr.has_error) {
                 c->close_table(th.value());
                 return fail(static_cast<int>(ins_terr.errno_val), ins_terr.message.c_str());

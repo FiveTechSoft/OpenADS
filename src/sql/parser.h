@@ -309,6 +309,12 @@ struct SelectStmt {
         std::unique_ptr<SelectStmt> parsed;  // parsed form of the member
     };
     std::vector<UnionMember>    unions;
+
+    // S4 — column aliases on PLAIN column projections (`col alias` /
+    // `col AS alias`). Each entry pairs a projection index with its
+    // alias; consumers that expose result columns by name (SELECT INTO
+    // #temp snapshots) apply them.
+    std::vector<std::pair<std::size_t, std::string>> projection_aliases;
 };
 
 util::Result<SelectStmt> parse_select(const std::string& sql);
@@ -324,6 +330,10 @@ struct InsertLiteral {
     // string '') parses instead of falling through to read_numeric_literal
     // and failing with 7200. When true, is_numeric/text/number are unused.
     bool        is_null    = false;
+    // S4 — expression value (User(), Now(), col + 1, ...): `text` holds
+    // the verbatim expression; the executor evaluates it through the
+    // script engine (UPDATE binds the current row's columns).
+    bool        is_expr    = false;
 };
 
 struct InsertStmt {

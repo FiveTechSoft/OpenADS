@@ -1090,20 +1090,27 @@ util::Result<void> DataDict::load_add_binary_(const std::string& buf) {
                         (static_cast<uint8_t>(rec.property[2]) << 16) |
                         (static_cast<uint8_t>(rec.property[3]) << 24));
                 }
-                if (rec.property.size() >= 8) {
-                    e.timing = static_cast<uint32_t>(
-                        static_cast<uint8_t>(rec.property[6]) |
-                        (static_cast<uint8_t>(rec.property[7]) << 8));
-                }
-                // SAP binary triggers: plen covers only the first few fields (event_mask,
-                // timing) so rec.property may be only 4-8 bytes.  The inline SQL body
-                // at property[18..272] must be read directly from buf[] like Relation does.
-                //   [16..17] = LE uint16 inline body length
-                //   [18..272] = up to 255 bytes of SQL text
+                // SAP binary triggers: plen covers ONLY the event u32, so
+                // rec.property is 4 bytes — timing/options/body live in the
+                // undeclared part of the 273-byte property area and must be
+                // read from buf[] directly (oracle-verified on pmsys.add,
+                // 6/6 triggers match SAP system.triggers):
+                //   [4..5]   0x0004
+                //   [6..9]   timing  (LE u32): 1=BEFORE 2=INSTEAD_OF 4=AFTER
+                //   [10..11] 0x0004
+                //   [12..15] options (LE u32): 0x01 WANT_VALUES | 0x02 MEMOS
+                //   [16..17] inline body length (LE uint16)
+                //   [18..272] up to 255 bytes of SQL text (+ .am overflow)
                 {
                     const std::size_t TPS = base + 225;
                     const std::size_t TPL = 273;
                     if (TPS + TPL <= buf.size()) {
+                        e.timing = static_cast<uint32_t>(
+                            static_cast<uint8_t>(buf[TPS + 6]) |
+                            (static_cast<uint8_t>(buf[TPS + 7]) << 8));
+                        e.options = static_cast<uint32_t>(
+                            static_cast<uint8_t>(buf[TPS + 12]) |
+                            (static_cast<uint8_t>(buf[TPS + 13]) << 8));
                         uint16_t body_len = static_cast<uint16_t>(
                             static_cast<uint8_t>(buf[TPS + 16]) |
                             (static_cast<uint8_t>(buf[TPS + 17]) << 8));

@@ -106,6 +106,11 @@ public:
             if (pos_ < s_.size()) ++pos_;  // consume ']'
             return out;
         }
+        // S4 — leading '#' names a session temp table (SELECT INTO #t).
+        if (pos_ < s_.size() && s_[pos_] == '#') {
+            out.push_back('#');
+            ++pos_;
+        }
         while (pos_ < s_.size()) {
             char c = s_[pos_];
             if (std::isalnum(static_cast<unsigned char>(c)) ||
@@ -1433,6 +1438,21 @@ util::Result<SelectStmt> parse_select(const std::string& sql) {
                 // which the single/two-table paths consume).
                 stmt.select_items.push_back(
                     SelectItem{head_alias, head, false});
+                // S4 — optional column alias (`col alias` / `col AS
+                // alias`); recorded positionally so SELECT INTO #temp
+                // snapshots can name their columns like SAP.
+                {
+                    std::string calias;
+                    if (c.match_keyword("AS")) {
+                        calias = c.read_identifier();
+                    } else if (!c.peek_char(',') && !c.peek_keyword("FROM") &&
+                               !c.peek_keyword("INTO")) {
+                        calias = c.read_identifier();
+                    }
+                    if (!calias.empty())
+                        stmt.projection_aliases.emplace_back(
+                            stmt.projection.size(), calias);
+                }
                 stmt.projection.push_back(std::move(head));
             }
             if (c.match_char(',')) continue;
@@ -2147,6 +2167,8 @@ parse_create_index(const std::string& sql) {
     return stmt;
 }
 
+static std::string capture_value_expr(Cursor& c);   // defined below
+
 util::Result<UpdateStmt> parse_update(const std::string& sql) {
     Cursor c(sql);
     if (!c.match_keyword("UPDATE")) {
@@ -2183,10 +2205,23 @@ util::Result<UpdateStmt> parse_update(const std::string& sql) {
             a.value.is_numeric = false;
             a.value.text       = std::move(s).value();
         } else {
+            std::size_t vsave = c.save();
             auto n = c.read_numeric_literal();
-            if (!n) return n.error();
-            a.value.is_numeric = true;
-            a.value.number     = n.value();
+            if (n) {
+                a.value.is_numeric = true;
+                a.value.number     = n.value();
+            } else {
+                // S4 — expression RHS (col + 1, Now(), IIF(…), …):
+                // captured verbatim; the executor evaluates it per row
+                // with the current row's columns bound.
+                c.restore(vsave);
+                a.value.is_expr = true;
+                a.value.text    = capture_value_expr(c);
+                if (a.value.text.empty()) {
+                    return util::Error{7200, 0,
+                        "expected value in SET clause", sql};
+                }
+            }
         }
         stmt.assignments.push_back(std::move(a));
         if (c.match_char(',')) continue;
@@ -2199,6 +2234,36 @@ util::Result<UpdateStmt> parse_update(const std::string& sql) {
     }
     c.match_char(';');
     return stmt;
+}
+
+// S4 — capture a verbatim value expression (function calls like Now() /
+// User(), arithmetic, {d ...} literals) until a top-level ',' / ')' /
+// ';' / WHERE. Used by INSERT VALUES and UPDATE SET when the value is
+// not a plain literal; the executor evaluates the text through the
+// script engine. peek_* skip leading whitespace permanently, which
+// drops inter-token spacing from the capture — harmless downstream.
+static std::string capture_value_expr(Cursor& c) {
+    std::string raw;
+    int  depth  = 0;
+    bool in_str = false;
+    for (;;) {
+        if (!in_str && depth == 0) {
+            if (c.eof() || c.peek_char(',') || c.peek_char(')') ||
+                c.peek_char(';') || c.peek_keyword("WHERE"))
+                break;
+        }
+        if (c.eof()) break;
+        char ch = c.consume_char();
+        raw.push_back(ch);
+        if (in_str) { if (ch == '\'') in_str = false; continue; }
+        if (ch == '\'') in_str = true;
+        else if (ch == '(' || ch == '{') ++depth;
+        else if (ch == ')' || ch == '}') --depth;
+    }
+    while (!raw.empty() &&
+           std::isspace(static_cast<unsigned char>(raw.back())))
+        raw.pop_back();
+    return raw;
 }
 
 util::Result<MergeStmt> parse_merge(const std::string& sql) {
@@ -2478,10 +2543,22 @@ util::Result<InsertStmt> parse_insert(const std::string& sql) {
                 lit.is_numeric = false;
                 lit.text       = std::move(s).value();
             } else {
+                std::size_t vsave = c.save();
                 auto n = c.read_numeric_literal();
-                if (!n) return n.error();
-                lit.is_numeric = true;
-                lit.number     = n.value();
+                if (n) {
+                    lit.is_numeric = true;
+                    lit.number     = n.value();
+                } else {
+                    // S4 — expression value (User(), Now(), {d …}, …):
+                    // captured verbatim, evaluated by the executor.
+                    c.restore(vsave);
+                    lit.is_expr = true;
+                    lit.text    = capture_value_expr(c);
+                    if (lit.text.empty()) {
+                        return util::Error{7200, 0,
+                            "expected value in VALUES list", sql};
+                    }
+                }
             }
             row.push_back(std::move(lit));
             if (c.match_char(',')) continue;
