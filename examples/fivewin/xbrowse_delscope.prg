@@ -208,12 +208,33 @@ STATIC FUNCTION AutoWalk()
    nFail += CheckWalk( "down", aDown, aExpect )
    nFail += CheckWalk( "up"  , aUp  , aExpect )
 
+   // Tim's xBrowse bug: OrdKeyCount (rddads → AdsGetRecordCount on order
+   // handle) must equal the live scoped walk, not physical RecCount.
+   nFail += CheckKeyCount( Len( aExpect ) )
+
    IF nFail == 0
-      LogLine( "OK: all checks passed — no deleted rows, no duplicates, expected scoped keys both directions" )
+      LogLine( "OK: all checks passed — no deleted, no duplicates, OrdKeyCount matches walk" )
    ELSE
       LogLine( "FAIL: " + AllTrim( Str( nFail ) ) + " check(s) failed" )
    ENDIF
    RETURN iif( nFail == 0, 0, 1 )
+
+//----------------------------------------------------------------------------//
+
+STATIC FUNCTION CheckKeyCount( nExpect )
+
+   LOCAL nKey := DS->( OrdKeyCount() )
+   LOCAL nRec := DS->( RecCount() )
+   LOCAL nFail := 0
+
+   LogLine( "OrdKeyCount()=" + AllTrim( Str( nKey ) ) + ;
+            "  RecCount()=" + AllTrim( Str( nRec ) ) + ;
+            "  expect live scoped=" + AllTrim( Str( nExpect ) ) )
+   IF nKey != nExpect
+      LogLine( "FAIL: OrdKeyCount mismatch (Tim xBrowse ghost-row root cause)" )
+      nFail++
+   ENDIF
+   RETURN nFail
 
 //----------------------------------------------------------------------------//
 
