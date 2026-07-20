@@ -15,12 +15,14 @@ directo** del Advantage Client Engine (`ace32.dll` /
 que enlazan contra `contrib/rddads` siguen funcionando sin
 recompilar.
 
-Release actual: **v1.8.4**.
+Release actual: **v1.8.18**.
 
 ## Contenido
 
 - **[Novedades](novedades/)** — resumen de cambios desde
-  v1.0.0-rc29 → v1.8.2 (relleno OrdScope, colación NTXPL852, y más).
+  v1.0.0-rc29 → **v1.8.18** (API de ficheros en servidor `oads_*` / `Ads*`, y más).
+- **[Server filesystem (EN)](../en/server-filesystem/)** — operaciones de
+  ficheros/directorios bajo el data root del servidor (`EnableFileFunc`).
 - **[Historia del proyecto](historia/)** — cómo OpenADS creció
   desde un esqueleto mínimo hasta un motor completo compatible
   con ADS (868 commits).
