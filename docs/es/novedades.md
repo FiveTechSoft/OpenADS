@@ -6,11 +6,50 @@ nav_order: 0
 permalink: /es/novedades/
 ---
 
-# Novedades (v1.0.0-rc29 → v1.8.14)
+# Novedades (v1.0.0-rc29 → v1.8.18)
 
 Esta página resume los cambios más destacados desde la versión
 v1.0.0-rc29. Para el historial completo de commits, consulta el
 [CHANGELOG](https://github.com/FiveTechSoft/OpenADS/blob/main/CHANGELOG.md).
+
+---
+
+## Destacados v1.8.18
+
+### API de sistema de archivos en el servidor (`oads_*` / `Ads*`)
+
+Los clientes pueden crear, borrar, renombrar y listar ficheros y
+directorios **bajo el directorio de datos del servidor** sin unidad
+mapeada (estilo LetoDB, nombres OpenADS).
+
+| Capacidad | Funciones ACE |
+|---|---|
+| Existe / borrar / renombrar | `AdsCheckExistence`, `AdsDeleteFile`, `AdsRenameFile` |
+| Tamaño / hora / fecha | `AdsGetFileSize`, `AdsGetFileTime`, `AdsGetFileDate` |
+| Listado / carpetas | `AdsDirectory`, `AdsDirExist`, `AdsDirMake`, `AdsDirRemove` |
+| E/S de bajo nivel | `AdsFOpen` · `AdsFCreate` · `AdsFClose` · `AdsFRead` · `AdsFWrite` · `AdsFSeek` |
+
+**Seguridad:** en remoto hace falta `EnableFileFunc=1` en `openads.ini`
+o `--enable-file-func` (por defecto **desactivado**). Las rutas quedan
+enjauladas bajo `--data`.
+
+Guía (EN): [Server filesystem](../en/server-filesystem/). Documentación
+por función (EN): [API Reference](../en/api-reference/) y páginas bajo
+`/en/functions/ads-…`. Actualizar **cliente y** `openads_serverd`.
+
+Binarios Windows x64/x86 en el
+[release v1.8.18](https://github.com/FiveTechSoft/OpenADS/releases/tag/v1.8.18).
+
+---
+
+## Destacados v1.8.17
+
+### REMOTO — `DbCreate` / `AdsCreateTable` ya no escribe junto a la app
+
+Con `AdsConnect60(tcp://…)`, el create escribía en el cwd del
+**cliente** y el open remoto fallaba con **ADSCDX/5103**. Create/drop
+van por el cable al directorio de datos del servidor. Actualizar
+DLL y `openads_serverd`.
 
 ---
 

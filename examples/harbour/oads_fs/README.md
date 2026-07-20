@@ -3,6 +3,10 @@
 Harbour-friendly names for OpenADS remote/local filesystem ops under the
 connection data directory (LetoDB-style, without `leto_*` symbols).
 
+**Docs:** [Server filesystem](../../../docs/en/server-filesystem.md) ·
+[What's New v1.8.18](../../../docs/en/whatsnew.md) · per-function pages under
+`docs/en/functions/ads-*.md`
+
 ## Server config
 
 ```ini

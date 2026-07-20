@@ -7,11 +7,14 @@ permalink: /en/api-reference/
 has_children: true
 ---
 
-# OpenADS API Reference — v1.4.0
+# OpenADS API Reference — v1.8.18
 
-Complete reference for the 357 exported `Ads*` functions in
+Complete reference for the exported `Ads*` functions in
 `ace64.dll` / `ace32.dll` / `libace.so`. Every function available
 to Harbour / X# / Clipper / C / PHP / .NET applications.
+
+**v1.8.18** adds the [server filesystem]({{ site.baseurl }}/en/server-filesystem/)
+API (`AdsRenameFile`, `AdsDirectory`, `AdsFOpen`, …).
 
 **Legend:**
 - ✅ = Fully implemented
@@ -31,6 +34,7 @@ ACE error code on failure) unless noted otherwise.
 |---|----------|-----------|
 | 1 | [Connection Management](#1-connection-management) | 10 |
 | 2 | [Table Operations](#2-table-operations) | 15 |
+| 2b | [Server filesystem](#2b-server-filesystem-oads--ads) | 16 |
 | 3 | [Record Navigation](#3-record-navigation) | 14 |
 | 4 | [Field Read](#4-field-read-by-type) | 21 |
 | 5 | [Field Write](#5-field-write) | 17 |
@@ -92,14 +96,41 @@ ACE error code on failure) unless noted otherwise.
 | `AdsGetTableConType` | ✅ | Returns connection type of the table |
 | `AdsGetTableConnection` | ✅ | Returns the connection handle for a table |
 | `AdsGetTableOpenOptions` | ✅ | Returns the open-mode flags |
-| `AdsCheckExistence` | ✅ | Test if a file exists on disk |
-| `AdsDeleteFile` | ✅ | Delete a file from the data directory |
+| `AdsCheckExistence` | ✅ | File exists under data dir (local/remote; [doc]({{ site.baseurl }}/en/functions/ads-check-existence/)) |
+| `AdsDeleteFile` | ✅ | Delete file under data dir ([doc]({{ site.baseurl }}/en/functions/ads-delete-file/)) |
 | `AdsGetNumOpenTables` | ✅ | Returns count of open tables |
 | `AdsOpenTable90` | ➡️ | Forwards to `AdsOpenTable` |
 | `AdsCreateTable71` | ➡️ | Forwards to `AdsCreateTable` |
 | `AdsCreateTable90` | ➡️ | Forwards to `AdsCreateTable` |
 | `AdsRestructureTable90` | ➡️ | Forwards to `AdsRestructureTable` |
 | `AdsGetTableHandle25` | 🔴 | `AE_FUNCTION_NOT_AVAILABLE` — lookup by name |
+
+---
+
+## 2b. Server filesystem (`oads_*` / `Ads*`)
+
+Added in **v1.8.18**. Paths are jailed under the connection data directory.
+Remote ops require `EnableFileFunc=1` on `openads_serverd`. Full guide:
+[Server filesystem]({{ site.baseurl }}/en/server-filesystem/).
+
+| Function | Status | Description |
+|----------|--------|-------------|
+| [`AdsCheckExistence`]({{ site.baseurl }}/en/functions/ads-check-existence/) | ✅ | File exists? (`oads_File`) |
+| [`AdsDeleteFile`]({{ site.baseurl }}/en/functions/ads-delete-file/) | ✅ | Delete file (`oads_FErase`) |
+| [`AdsRenameFile`]({{ site.baseurl }}/en/functions/ads-rename-file/) | ✅ | Rename/move within jail (`oads_FRename`) |
+| [`AdsGetFileSize`]({{ site.baseurl }}/en/functions/ads-get-file-size/) | ✅ | Size in bytes (`oads_FSize`) |
+| [`AdsGetFileTime`]({{ site.baseurl }}/en/functions/ads-get-file-time/) | ✅ | mtime `"hh:mm:ss"` (`oads_FTime`) |
+| [`AdsGetFileDate`]({{ site.baseurl }}/en/functions/ads-get-file-date/) | ✅ | mtime `"YYYYMMDD"` (`oads_FDate`) |
+| [`AdsDirectory`]({{ site.baseurl }}/en/functions/ads-directory/) | ✅ | List mask → packed buffer (`oads_Directory`) |
+| [`AdsDirExist`]({{ site.baseurl }}/en/functions/ads-dir-exist/) | ✅ | Directory exists? (`oads_DirExist`) |
+| [`AdsDirMake`]({{ site.baseurl }}/en/functions/ads-dir-make/) | ✅ | Create directory (`oads_DirMake`) |
+| [`AdsDirRemove`]({{ site.baseurl }}/en/functions/ads-dir-remove/) | ✅ | Remove empty directory (`oads_DirRemove`) |
+| [`AdsFOpen`]({{ site.baseurl }}/en/functions/ads-fopen/) | ✅ | Open existing file (`oads_FOpen`) |
+| [`AdsFCreate`]({{ site.baseurl }}/en/functions/ads-fcreate/) | ✅ | Create/truncate file (`oads_FCreate`) |
+| [`AdsFClose`]({{ site.baseurl }}/en/functions/ads-fclose/) | ✅ | Close file handle (`oads_FClose`) |
+| [`AdsFRead`]({{ site.baseurl }}/en/functions/ads-fread/) | ✅ | Read bytes (`oads_FRead`) |
+| [`AdsFWrite`]({{ site.baseurl }}/en/functions/ads-fwrite/) | ✅ | Write bytes (`oads_FWrite`) |
+| [`AdsFSeek`]({{ site.baseurl }}/en/functions/ads-fseek/) | ✅ | Seek origin 0/1/2 (`oads_FSeek`) |
 
 ---
 

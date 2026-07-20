@@ -6,11 +6,52 @@ nav_order: 0
 permalink: /en/whatsnew/
 ---
 
-# What's New (v1.0.0-rc29 → v1.8.14)
+# What's New (v1.0.0-rc29 → v1.8.18)
 
 This page summarises the most notable changes since the
 v1.0.0-rc29 release. For the full commit-by-commit history see
 the [CHANGELOG](https://github.com/FiveTechSoft/OpenADS/blob/main/CHANGELOG.md).
+
+---
+
+## v1.8.18 Highlights
+
+### Server filesystem API (`oads_*` / `Ads*`)
+
+Clients can manage files and directories **under the server data root**
+without a mapped drive — LetoDB-style helpers with OpenADS names.
+
+| Capability | ACE functions |
+|---|---|
+| Exists / erase / rename | [`AdsCheckExistence`](../functions/ads-check-existence/), [`AdsDeleteFile`](../functions/ads-delete-file/), [`AdsRenameFile`](../functions/ads-rename-file/) |
+| Size / time / date | [`AdsGetFileSize`](../functions/ads-get-file-size/), [`AdsGetFileTime`](../functions/ads-get-file-time/), [`AdsGetFileDate`](../functions/ads-get-file-date/) |
+| List / directories | [`AdsDirectory`](../functions/ads-directory/), [`AdsDirExist`](../functions/ads-dir-exist/), [`AdsDirMake`](../functions/ads-dir-make/), [`AdsDirRemove`](../functions/ads-dir-remove/) |
+| Low-level I/O | [`AdsFOpen`](../functions/ads-fopen/) · [`AdsFCreate`](../functions/ads-fcreate/) · [`AdsFClose`](../functions/ads-fclose/) · [`AdsFRead`](../functions/ads-fread/) · [`AdsFWrite`](../functions/ads-fwrite/) · [`AdsFSeek`](../functions/ads-fseek/) |
+
+**Security:** remote ops require `EnableFileFunc=1` in `openads.ini` or
+`--enable-file-func` on `openads_serverd` (default **off**). Paths are
+jailed under `--data` / the connection data directory.
+
+Full guide: [Server filesystem](../server-filesystem/). Harbour notes:
+`examples/harbour/oads_fs/`. Update **both** client DLL and
+`openads_serverd`.
+
+### Also in 1.8.18
+
+Binaries for Windows x64 and x86 are attached to the
+[v1.8.18 GitHub release](https://github.com/FiveTechSoft/OpenADS/releases/tag/v1.8.18).
+
+---
+
+## v1.8.17 Highlights
+
+### REMOTE — `DbCreate` / `AdsCreateTable` no longer writes next to the app
+
+When connected with `AdsConnect60(tcp://…)`, create still wrote the
+table on the **client** cwd; the post-create open was remote and
+failed with **ADSCDX/5103**. Create/drop now go over the wire;
+tables land under the server data directory. Update **both**
+`openace64.dll` / `ace32.dll` and `openads_serverd`.
 
 ---
 
