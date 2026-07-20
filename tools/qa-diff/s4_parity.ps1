@@ -32,7 +32,10 @@ $cases = [ordered]@{
 "sp_mgAllLocks"      = "EXECUTE PROCEDURE sp_mgGetAllLocksAllTablesAllUsers()";
 
 # ---- writing procs: run, then verify the observable side effects ---------
-"sp_SaveIntoAuditLog"  = "EXECUTE PROCEDURE sp_SaveIntoAuditLog('properties','PARITYKEY01','INSERT')";
+# sp_SaveIntoAuditLog is in $bothFailCases: standalone (outside trigger
+# context) BOTH engines reject at the proc's `... FROM __new` statement —
+# SAP 5154→5004 missing __new.adt, OA embedded-SQL failure. Text parity
+# is the error-wrap gap.
 "chk_auditlog_count"   = "SELECT COUNT(*) AS n FROM auditlog WHERE TableKey = 'PARITYKEY01'";
 "sp_ChargeMonthlyRent" = "EXECUTE PROCEDURE sp_ChargeMonthlyRent({d '2026-07-01'})";
 "chk_charges_month"    = "SELECT COUNT(*) AS n FROM encitems WHERE CatCode = 'RENT'";
@@ -72,6 +75,7 @@ $shapeCases = [ordered]@{
 # ---- codes while SAP wraps as 7200; message parity is the error-wrap gap --
 $bothFailCases = [ordered]@{
 "trg_ins" = "INSERT INTO properties (PropertyID) VALUES ('ZZ PARITY TEST')";
+"sp_SaveIntoAuditLog" = "EXECUTE PROCEDURE sp_SaveIntoAuditLog('properties','PARITYKEY01','INSERT')";
 }
 
 # ---- NEWIDSTRING error parity: message text differs (known gap), rc must

@@ -6684,17 +6684,24 @@ static inline bool sql_like_match_t(const std::string& s,
 // `=`, LIKE, BETWEEN and IN; plain CHAR compares byte-wise. SAP's
 // system.* catalog columns are CICHAR, which is why
 // `WHERE Parent = 'PROPERTIES'` matches 'properties' there.
+// PAD SPACE semantics (oracle-verified: `Parent = 'PROPERTIES   '` and
+// `address = '533 Hickory Blvd  '` both match on SAP): trailing blanks
+// are insignificant on BOTH sides of a string comparison, CHAR and
+// CICHAR alike.
 static inline int where_str_cmp(const std::string& a, const std::string& b,
                                 bool ci) {
-    if (!ci) return a.compare(b);
-    std::size_t n = std::min(a.size(), b.size());
+    std::size_t alen = a.size(), blen = b.size();
+    while (alen > 0 && a[alen - 1] == ' ') --alen;
+    while (blen > 0 && b[blen - 1] == ' ') --blen;
+    std::size_t n = std::min(alen, blen);
     for (std::size_t i = 0; i < n; ++i) {
-        int ca = std::toupper(static_cast<unsigned char>(a[i]));
-        int cb = std::toupper(static_cast<unsigned char>(b[i]));
+        int ca = static_cast<unsigned char>(a[i]);
+        int cb = static_cast<unsigned char>(b[i]);
+        if (ci) { ca = std::toupper(ca); cb = std::toupper(cb); }
         if (ca != cb) return ca < cb ? -1 : 1;
     }
-    if (a.size() == b.size()) return 0;
-    return a.size() < b.size() ? -1 : 1;
+    if (alen == blen) return 0;
+    return alen < blen ? -1 : 1;
 }
 
 static inline bool field_is_cichar(const openads::engine::Table& t,
@@ -27195,6 +27202,17 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 term.nocase   = true;
                 term.literal  = to_lower_ascii(term.literal);
                 term.literal2 = to_lower_ascii(term.literal2);
+            }
+            // PAD SPACE (oracle-verified): trailing blanks are
+            // insignificant in string comparisons — a CHAR(20) script
+            // variable substitutes as a space-padded literal and must
+            // still match ('PROPERTIES           ' matches on SAP).
+            if (!w.is_numeric) {
+                while (!term.literal.empty() && term.literal.back() == ' ')
+                    term.literal.pop_back();
+                while (!term.literal2.empty() &&
+                       term.literal2.back() == ' ')
+                    term.literal2.pop_back();
             }
             if (w.subquery) {
                 // M10.29 — correlated scalar subquery. If the
