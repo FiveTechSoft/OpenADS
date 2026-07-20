@@ -5678,11 +5678,11 @@ UNSIGNED32 ENTRYPOINT AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 usServerType
 
         // Logins-disabled: a stricter, all-connections-rejected gate than
         // LOG_IN_REQUIRED below — even a valid user/password normally can't
-        // connect while this is set. Reads "prop_16", DA-Web's own numbering
-        // for ADS_DD_LOGINS_DISABLED (api/db_props.php) — NOT ace.h's
-        // ADS_DD_LOGINS_DISABLED macro (=14), which collides with this
-        // engine's VERSION_MAJOR slot at prop_14. Mirrored in
-        // network/session.cpp's Connect handler for remote connections.
+        // connect while this is set. Reads the STABLE storage key "prop_16"
+        // (SP_MODIFYDATABASE numbering) — the SAP ABI id for it is
+        // ADS_DD_LOGINS_DISABLED (113), translated by db_prop_storage_key.
+        // Mirrored in network/session.cpp's Connect handler for remote
+        // connections.
         //
         // Admin bypass: without this, setting the flag would be a one-way
         // door — nobody, not even the admin trying to undo it, could ever
@@ -13210,6 +13210,43 @@ UNSIGNED32 ENTRYPOINT AdsDDRemoveRefIntegrity(ADSHANDLE hConn, UNSIGNED8* pucNam
     return ok();
 }
 
+// SAP database-property id (ABI) → the legacy "prop_N" storage key that
+// existing OpenADS DDs persist (SP_MODIFYDATABASE numbering; the
+// AdsConnect60 login checks read prop_5 / prop_16, DA-Web db_props.php
+// reads the same keys). The storage keys are deliberately STABLE — only
+// the public ABI numbering moved to SAP's. Ids without a mapping fall
+// back to a raw prop_<id> passthrough, which also keeps legacy callers
+// that passed the storage numbers directly working (their old ids and
+// keys coincide).
+static const char* db_prop_storage_key(UNSIGNED16 usProp) {
+    switch (usProp) {
+        case ADS_DD_COMMENT:                 return "prop_1";
+        case ADS_DD_USER_DEFINED_PROP:       return "prop_26";
+        case ADS_DD_DEFAULT_TABLE_PATH:      return "prop_3";
+        case ADS_DD_TEMP_TABLE_PATH:         return "prop_12";
+        case ADS_DD_LOG_IN_REQUIRED:         return "prop_5";
+        case ADS_DD_VERIFY_ACCESS_RIGHTS:    return "prop_8";
+        case ADS_DD_ENCRYPT_TABLE_PASSWORD:  return "prop_13";
+        case ADS_DD_ENCRYPT_NEW_TABLE:       return "prop_10";
+        case ADS_DD_ENABLE_INTERNET:         return "prop_6";
+        case ADS_DD_INTERNET_SECURITY_LEVEL: return "prop_7";
+        case ADS_DD_MAX_FAILED_ATTEMPTS:     return "prop_11";
+        case ADS_DD_ALLOW_ADSSYS_NET_ACCESS: return "prop_24";
+        case ADS_DD_VERSION_MAJOR:           return "prop_14";
+        case ADS_DD_VERSION_MINOR:           return "prop_15";
+        case ADS_DD_LOGINS_DISABLED:         return "prop_16";
+        case ADS_DD_LOGINS_DISABLED_ERRSTR:  return "prop_17";
+        case ADS_DD_FTS_DELIMITERS:          return "prop_18";
+        case ADS_DD_FTS_NOISE:               return "prop_19";
+        case ADS_DD_FTS_DROP_CHARS:          return "prop_20";
+        case ADS_DD_FTS_CONDITIONAL_CHARS:   return "prop_21";
+        case ADS_DD_ENCRYPTED:               return "prop_22";
+        case ADS_DD_ENCRYPT_INDEXES:         return "prop_23";
+        case ADS_DD_ENCRYPT_COMMUNICATION:   return "prop_25";
+        default:                             return nullptr;
+    }
+}
+
 UNSIGNED32 ENTRYPOINT AdsDDSetDatabaseProperty(ADSHANDLE hConn, UNSIGNED16 usProp,
                                     void* pBuf, UNSIGNED16 usLen) {
     if (auto* rc = get_remote_connection(hConn)) {
@@ -13222,11 +13259,24 @@ UNSIGNED32 ENTRYPOINT AdsDDSetDatabaseProperty(ADSHANDLE hConn, UNSIGNED16 usPro
     }
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
-    std::string key = "prop_" + std::to_string(static_cast<unsigned>(usProp));
     std::string val;
     if (pBuf != nullptr && usLen > 0) {
         val.assign(reinterpret_cast<const char*>(pBuf), usLen);
     }
+    // ADS_DD_ADMIN_PASSWORD sets the adssys account password (same as
+    // sp_ModifyDatabase ADMIN_PASSWORD); ADS_DD_VERSION is the DD format
+    // version and is not writable.
+    if (usProp == ADS_DD_ADMIN_PASSWORD) {
+        auto r = dd->set_user_property("adssys", "prop_1101", val);
+        if (!r) return fail(r.error());
+        return ok();
+    }
+    if (usProp == ADS_DD_VERSION)
+        return fail(openads::AE_FUNCTION_NOT_AVAILABLE, "read-only DD prop");
+    const char* mapped = db_prop_storage_key(usProp);
+    std::string key = mapped != nullptr
+        ? std::string(mapped)
+        : "prop_" + std::to_string(static_cast<unsigned>(usProp));
     auto r = dd->set_db_property(key, val);
     if (!r) return fail(r.error());
     return ok();
@@ -13252,7 +13302,20 @@ UNSIGNED32 ENTRYPOINT AdsDDGetDatabaseProperty(ADSHANDLE hConn, UNSIGNED16 usPro
         std::memset(pBuf, 0, cap);
     }
     if (dd == nullptr) { *pusLen = 0; return ok(); }
-    std::string key = "prop_" + std::to_string(static_cast<unsigned>(usProp));
+    // ADMIN_PASSWORD is write-only in the SAP ABI; VERSION is the DD
+    // format version, which OpenADS does not track per-DD.
+    if (usProp == ADS_DD_ADMIN_PASSWORD) {
+        *pusLen = 0;
+        return fail(openads::AE_INVALID_PROPERTY_ID, "write-only DD prop");
+    }
+    if (usProp == ADS_DD_VERSION) {
+        *pusLen = 0;
+        return fail(openads::AE_PROPERTY_NOT_SET, "");
+    }
+    const char* mapped = db_prop_storage_key(usProp);
+    std::string key = mapped != nullptr
+        ? std::string(mapped)
+        : "prop_" + std::to_string(static_cast<unsigned>(usProp));
     auto val = dd->get_db_property(key);
     UNSIGNED16 n = static_cast<UNSIGNED16>(
         std::min<std::size_t>(val.size(), cap));
@@ -13507,8 +13570,8 @@ UNSIGNED32 ENTRYPOINT AdsDDGetTableProperty(ADSHANDLE hConn, UNSIGNED8* pucTable
         case ADS_DD_TABLE_DEFAULT_INDEX:       // 213
             return put_str(dd->get_table_property(alias, 213));
 
-        case ADS_DD_COMMENT:                   // 1
-        case ADS_DD_USER_DEFINED_PROP:         // 22 in SAP docs; table value stored under generic prop 3 too.
+        case ADS_DD_COMMENT:                   // 1 (generic object prop)
+        case ADS_DD_USER_DEFINED_PROP:         // 3 (generic object prop)
             return put_str(dd->get_table_property(alias, usProp == ADS_DD_COMMENT ? 1 : 3));
 
         default:
@@ -13577,8 +13640,8 @@ UNSIGNED32 ENTRYPOINT AdsDDSetTableProperty(ADSHANDLE hConn, UNSIGNED8* pucTable
         if (pBuf != nullptr && usLen > 0)
             val.assign(static_cast<const char*>(pBuf), usLen);
         while (!val.empty() && val.back() == '\0') val.pop_back();
-        int stored_prop = static_cast<int>(usProp);
-        if (usProp == ADS_DD_USER_DEFINED_PROP) stored_prop = 3;
+        int stored_prop = static_cast<int>(usProp);   // generic ids 1/3
+                                                      // store as-is now
         dd->set_table_property(alias, stored_prop, val);
         if (auto r = dd->save(); !r) return fail(r.error());
         return ok();

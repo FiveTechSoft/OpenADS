@@ -5,9 +5,11 @@
  * GET  ?dd=   → JSON object with all readable properties
  * POST {...}  → { saved: N }
  *
- * OpenADS internal property keys (prop_N) come from the SP_MODIFYDATABASE
- * mapping in ace_exports.cpp and the engine's login check (prop_5).
- * SAP native IDs (100-131 in ace.h) differ and are only used in import_dd.
+ * This API passes SAP ABI property ids (ADS_DD_* in ace.h: generic 1-3,
+ * database 100-122). The engine's db_prop_storage_key translates them
+ * to the STABLE on-disk prop_N storage keys below (SP_MODIFYDATABASE
+ * numbering — the AdsConnect60 login check reads prop_5/prop_16
+ * directly), so existing DDs keep working:
  *
  *   prop_1   COMMENT                (string)
  *   prop_3   DEFAULT_TABLE_PATH     (string)
@@ -95,7 +97,7 @@ try {
         // Guard: refuse to enable loginRequired if no user has a stored password.
         $wantLogin = !empty($body['loginRequired']);
         if ($wantLogin) {
-            $currentLoginReq = readU16($dict, 5) !== 0;
+            $currentLoginReq = readU16($dict, 103) !== 0;   // ADS_DD_LOG_IN_REQUIRED
             if (!$currentLoginReq) {
                 // A SQL query() on the same connection/handle that has
                 // already been used for an AdsDictionary property read
@@ -136,55 +138,57 @@ try {
             }
         }
 
-        // String properties
-        try { $dict->setDatabaseProperty(1,  (string)($body['description']          ?? '')); $saved++; } catch (Throwable) {}
-        try { $dict->setDatabaseProperty(3,  (string)($body['defaultTablePath']     ?? '')); $saved++; } catch (Throwable) {}
-        try { $dict->setDatabaseProperty(12, (string)($body['tempTablePath']        ?? '')); $saved++; } catch (Throwable) {}
-        try { $dict->setDatabaseProperty(13, (string)($body['encryptTablePassword'] ?? '')); $saved++; } catch (Throwable) {}
-        try { $dict->setDatabaseProperty(17, (string)($body['loginsDisabledErrstr'] ?? '')); $saved++; } catch (Throwable) {}
-        try { $dict->setDatabaseProperty(18, (string)($body['ftsDelimiters']        ?? '')); $saved++; } catch (Throwable) {}
-        try { $dict->setDatabaseProperty(19, (string)($body['ftsNoise']             ?? '')); $saved++; } catch (Throwable) {}
-        try { $dict->setDatabaseProperty(20, (string)($body['ftsDropChars']         ?? '')); $saved++; } catch (Throwable) {}
-        try { $dict->setDatabaseProperty(21, (string)($body['ftsConditionalChars']  ?? '')); $saved++; } catch (Throwable) {}
-        try { $dict->setDatabaseProperty(26, (string)($body['userDefinedProp']      ?? '')); $saved++; } catch (Throwable) {}
+        // String properties — SAP ABI ids (the engine translates them to
+        // the stable prop_N storage keys).
+        try { $dict->setDatabaseProperty(1,   (string)($body['description']          ?? '')); $saved++; } catch (Throwable) {}
+        try { $dict->setDatabaseProperty(100, (string)($body['defaultTablePath']     ?? '')); $saved++; } catch (Throwable) {}
+        try { $dict->setDatabaseProperty(102, (string)($body['tempTablePath']        ?? '')); $saved++; } catch (Throwable) {}
+        try { $dict->setDatabaseProperty(105, (string)($body['encryptTablePassword'] ?? '')); $saved++; } catch (Throwable) {}
+        try { $dict->setDatabaseProperty(114, (string)($body['loginsDisabledErrstr'] ?? '')); $saved++; } catch (Throwable) {}
+        try { $dict->setDatabaseProperty(115, (string)($body['ftsDelimiters']        ?? '')); $saved++; } catch (Throwable) {}
+        try { $dict->setDatabaseProperty(116, (string)($body['ftsNoise']             ?? '')); $saved++; } catch (Throwable) {}
+        try { $dict->setDatabaseProperty(117, (string)($body['ftsDropChars']         ?? '')); $saved++; } catch (Throwable) {}
+        try { $dict->setDatabaseProperty(118, (string)($body['ftsConditionalChars']  ?? '')); $saved++; } catch (Throwable) {}
+        try { $dict->setDatabaseProperty(3,   (string)($body['userDefinedProp']      ?? '')); $saved++; } catch (Throwable) {}
 
         // UNSIGNED16 bool properties
-        try { writeU16($dict,  5, $wantLogin                          ? 1 : 0); $saved++; } catch (Throwable) {}
-        try { writeU16($dict,  8, !empty($body['verifyAccessRights']) ? 1 : 0); $saved++; } catch (Throwable) {}
-        try { writeU16($dict, 10, !empty($body['encryptNewTable'])    ? 1 : 0); $saved++; } catch (Throwable) {}
-        try { writeU16($dict, 16, !empty($body['loginsDisabled'])     ? 1 : 0); $saved++; } catch (Throwable) {}
-        try { writeU16($dict, 23, !empty($body['encryptIndexes'])     ? 1 : 0); $saved++; } catch (Throwable) {}
-        try { writeU16($dict, 25, !empty($body['encryptCommunication']) ? 1 : 0); $saved++; } catch (Throwable) {}
-        // prop_22 = ENCRYPTED is read-only (set by encryption engine, not UI)
+        try { writeU16($dict, 103, $wantLogin                          ? 1 : 0); $saved++; } catch (Throwable) {}
+        try { writeU16($dict, 104, !empty($body['verifyAccessRights']) ? 1 : 0); $saved++; } catch (Throwable) {}
+        try { writeU16($dict, 106, !empty($body['encryptNewTable'])    ? 1 : 0); $saved++; } catch (Throwable) {}
+        try { writeU16($dict, 113, !empty($body['loginsDisabled'])     ? 1 : 0); $saved++; } catch (Throwable) {}
+        try { writeU16($dict, 120, !empty($body['encryptIndexes'])     ? 1 : 0); $saved++; } catch (Throwable) {}
+        try { writeU16($dict, 122, !empty($body['encryptCommunication']) ? 1 : 0); $saved++; } catch (Throwable) {}
+        // ADS_DD_ENCRYPTED (119) is read-only (set by the encryption engine)
 
         // UNSIGNED16 version numbers
-        try { writeU16($dict, 14, (int)($body['versionMajor'] ?? 0)); $saved++; } catch (Throwable) {}
-        try { writeU16($dict, 15, (int)($body['versionMinor'] ?? 0)); $saved++; } catch (Throwable) {}
+        try { writeU16($dict, 111, (int)($body['versionMajor'] ?? 0)); $saved++; } catch (Throwable) {}
+        try { writeU16($dict, 112, (int)($body['versionMinor'] ?? 0)); $saved++; } catch (Throwable) {}
 
         $conn->close();
         echo json_encode(['saved' => $saved]);
 
     } else {
+        // SAP ABI ids (engine translates to the stable prop_N storage keys).
         $result = [
-            'description'           => readStr($dict,  1),
-            'defaultTablePath'      => readStr($dict,  3),
-            'tempTablePath'         => readStr($dict, 12),
-            'encryptTablePassword'  => readStr($dict, 13),
-            'loginRequired'         => readU16($dict,  5) !== 0,
-            'verifyAccessRights'    => readU16($dict,  8) !== 0,
-            'encryptNewTable'       => readU16($dict, 10) !== 0,
-            'versionMajor'          => readU16($dict, 14),
-            'versionMinor'          => readU16($dict, 15),
-            'loginsDisabled'        => readU16($dict, 16) !== 0,
-            'loginsDisabledErrstr'  => readStr($dict, 17),
-            'ftsDelimiters'         => readStr($dict, 18),
-            'ftsNoise'              => readStr($dict, 19),
-            'ftsDropChars'          => readStr($dict, 20),
-            'ftsConditionalChars'   => readStr($dict, 21),
-            'encrypted'             => readU16($dict, 22) !== 0,
-            'encryptIndexes'        => readU16($dict, 23) !== 0,
-            'encryptCommunication'  => readU16($dict, 25) !== 0,
-            'userDefinedProp'       => readStr($dict, 26),
+            'description'           => readStr($dict,   1),
+            'defaultTablePath'      => readStr($dict, 100),
+            'tempTablePath'         => readStr($dict, 102),
+            'encryptTablePassword'  => readStr($dict, 105),
+            'loginRequired'         => readU16($dict, 103) !== 0,
+            'verifyAccessRights'    => readU16($dict, 104) !== 0,
+            'encryptNewTable'       => readU16($dict, 106) !== 0,
+            'versionMajor'          => readU16($dict, 111),
+            'versionMinor'          => readU16($dict, 112),
+            'loginsDisabled'        => readU16($dict, 113) !== 0,
+            'loginsDisabledErrstr'  => readStr($dict, 114),
+            'ftsDelimiters'         => readStr($dict, 115),
+            'ftsNoise'              => readStr($dict, 116),
+            'ftsDropChars'          => readStr($dict, 117),
+            'ftsConditionalChars'   => readStr($dict, 118),
+            'encrypted'             => readU16($dict, 119) !== 0,
+            'encryptIndexes'        => readU16($dict, 120) !== 0,
+            'encryptCommunication'  => readU16($dict, 122) !== 0,
+            'userDefinedProp'       => readStr($dict,   3),
         ];
         $conn->close();
         echo json_encode($result);

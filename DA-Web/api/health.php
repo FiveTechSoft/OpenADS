@@ -1,4 +1,4 @@
-<?php
+﻿<?php
 /**
  * api/health.php - DD health checks for administrator review.
  */
@@ -377,7 +377,7 @@ try {
         }
 
         $tempPath = '';
-        try { $tempPath = trim((string)$dict->getDatabaseProperty(12)); } catch (Throwable) {}
+        try { $tempPath = trim((string)$dict->getDatabaseProperty(102)); } catch (Throwable) {}
         if ($tempPath !== '') {
             $realTemp = realpath($tempPath);
             if ($realTemp === false || !is_dir($realTemp)) {

@@ -808,11 +808,6 @@ UNSIGNED32 ENTRYPOINT AdsExecuteSQLDirectW  (ADSHANDLE hStatement, UNSIGNED16* p
 #define ADS_GET_FORMAT_WEB    0x00000040
 #define ADS_GET_UTF8          0x00000080
 #define ADS_ROOT_DD_ALIAS     0x00000100
-// ADS_DD_VERSION* assigned >22 to avoid switch collisions with the
-// ADS_DD_* string-property block below.
-#define ADS_DD_VERSION                       23
-#define ADS_DD_VERSION_MAJOR                 24
-#define ADS_DD_VERSION_MINOR                 25
 #define ADS_USER_DEFINED      0x00000200
 // rddads.h defines ADS_USE_OEM_TRANSLATION conditionally; do not
 // redefine here. ADS_VARCHAR / ADS_VARBINARY / ADS_CISTRING /
@@ -836,29 +831,40 @@ UNSIGNED32 ENTRYPOINT AdsExecuteSQLDirectW  (ADSHANDLE hStatement, UNSIGNED16* p
 #endif
 #define ADS_MAX_ERROR_LEN        320
 
-// Data Dictionary string-property keys.
+// Generic DD object property ids — SAP ABI (rddads ads.ch): valid for
+// any object kind (database, table, field, index, ...).
 #define ADS_DD_COMMENT                       1
-#define ADS_DD_ADMIN_PASSWORD                2
-#define ADS_DD_DEFAULT_TABLE_PATH            3
-#define ADS_DD_TEMP_TABLE_PATH               4
-#define ADS_DD_LOG_IN_REQUIRED               5
-#define ADS_DD_VERIFY_ACCESS_RIGHTS          6
-#define ADS_DD_ENCRYPT_NEW_TABLE             7
-#define ADS_DD_ENCRYPT_TABLE_PASSWORD        8
-#define ADS_DD_ENCRYPT_INDEXES               9
-#define ADS_DD_ENCRYPT_COMMUNICATION         10
-#define ADS_DD_ENCRYPTED                     11
-#define ADS_DD_ENABLE_INTERNET               12
-#define ADS_DD_INTERNET_SECURITY_LEVEL       13
-#define ADS_DD_LOGINS_DISABLED               14
-#define ADS_DD_LOGINS_DISABLED_ERRSTR        15
-#define ADS_DD_DISABLE_DLL_CACHING           16
-#define ADS_DD_FTS_DELIMITERS                17
-#define ADS_DD_FTS_NOISE                     18
-#define ADS_DD_FTS_DROP_CHARS                19
-#define ADS_DD_FTS_CONDITIONAL_CHARS         20
-#define ADS_DD_MAX_FAILED_ATTEMPTS           21
-#define ADS_DD_USER_DEFINED_PROP             22
+#define ADS_DD_VERSION                       2
+#define ADS_DD_USER_DEFINED_PROP             3
+
+// Database property ids 100-122 — SAP ABI numbering. 100-112 are from
+// rddads ads.ch; 113-122 were verified against SAP ace64.dll by
+// tools/import_dd (its kDBProps sweep). NOTE: the on-disk storage keys
+// ("prop_N" strings in the DD) use SP_MODIFYDATABASE's legacy
+// numbering and are STABLE — AdsDDGet/SetDatabaseProperty translate
+// between the two so existing converted DDs keep working.
+#define ADS_DD_DEFAULT_TABLE_PATH            100
+#define ADS_DD_ADMIN_PASSWORD                101
+#define ADS_DD_TEMP_TABLE_PATH               102
+#define ADS_DD_LOG_IN_REQUIRED               103
+#define ADS_DD_VERIFY_ACCESS_RIGHTS          104
+#define ADS_DD_ENCRYPT_TABLE_PASSWORD        105
+#define ADS_DD_ENCRYPT_NEW_TABLE             106
+#define ADS_DD_ENABLE_INTERNET               107
+#define ADS_DD_INTERNET_SECURITY_LEVEL       108
+#define ADS_DD_MAX_FAILED_ATTEMPTS           109
+#define ADS_DD_ALLOW_ADSSYS_NET_ACCESS       110
+#define ADS_DD_VERSION_MAJOR                 111
+#define ADS_DD_VERSION_MINOR                 112
+#define ADS_DD_LOGINS_DISABLED               113
+#define ADS_DD_LOGINS_DISABLED_ERRSTR        114
+#define ADS_DD_FTS_DELIMITERS                115
+#define ADS_DD_FTS_NOISE                     116
+#define ADS_DD_FTS_DROP_CHARS                117
+#define ADS_DD_FTS_CONDITIONAL_CHARS         118
+#define ADS_DD_ENCRYPTED                     119
+#define ADS_DD_ENCRYPT_INDEXES               120
+#define ADS_DD_ENCRYPT_COMMUNICATION         122
 
 // Referential integrity action options (usUpdate / usDelete).
 #define ADS_DD_RI_CASCADE                 1

@@ -881,25 +881,37 @@ Index file management:
 
 Both take `hConnect`, `usPropertyID`, `pvProperty`, `pusPropertyLen`.
 
+SAP ABI numbering (rddads `ads.ch`; ids 113-122 verified against SAP
+ace64 by `tools/import_dd`). On disk the values live under stable legacy
+`prop_N` storage keys; `db_prop_storage_key` in ace_exports translates.
+
 | Constant | Value | Type | Description |
 |----------|-------|------|-------------|
-| `ADS_DD_COMMENT`               | 1  | string | Free-text database description |
-| `ADS_DD_ADMIN_PASSWORD`        | 2  | string | Write-only; sets the `adssys` password |
-| `ADS_DD_DEFAULT_TABLE_PATH`    | 3  | string | Default directory for new table files |
-| `ADS_DD_TEMP_TABLE_PATH`       | 4  | string | Scratch directory for temp tables |
-| `ADS_DD_LOG_IN_REQUIRED`       | 5  | u16   | `ADS_TRUE` → reject anonymous connects |
-| `ADS_DD_VERIFY_ACCESS_RIGHTS`  | 6  | u16   | `ADS_TRUE` → enforce table-level permissions |
-| `ADS_DD_ENCRYPT_NEW_TABLE`     | 7  | u16   | Encrypt tables on creation |
-| `ADS_DD_ENCRYPT_TABLE_PASSWORD`| 8  | string | Encryption passphrase |
-| `ADS_DD_ENCRYPT_INDEXES`       | 9  | u16   | Encrypt index files |
-| `ADS_DD_ENCRYPTED`             | 11 | u16   | Read-only; `ADS_TRUE` if the `.add` itself is encrypted |
-| `ADS_DD_LOGINS_DISABLED`       | 14 | u16   | Temporarily bar new logins |
-| `ADS_DD_LOGINS_DISABLED_ERRSTR`| 15 | string | Message sent to rejected clients |
-| `ADS_DD_FTS_DELIMITERS`        | 17 | string | Full-text search word delimiters |
-| `ADS_DD_FTS_NOISE`             | 18 | string | FTS noise-word list |
-| `ADS_DD_MAX_FAILED_ATTEMPTS`   | 21 | u16   | Lock-out threshold (0 = no limit) |
-| `ADS_DD_USER_DEFINED_PROP`     | 22 | string | Arbitrary application-level property |
-| `ADS_DD_VERSION`               | 23 | u16   | Dictionary format version (read-only) |
+| `ADS_DD_COMMENT`               | 1   | string | Free-text database description |
+| `ADS_DD_VERSION`               | 2   | u16   | Dictionary format version (read-only; unset in OpenADS) |
+| `ADS_DD_USER_DEFINED_PROP`     | 3   | string | Arbitrary application-level property |
+| `ADS_DD_DEFAULT_TABLE_PATH`    | 100 | string | Default directory for new table files |
+| `ADS_DD_ADMIN_PASSWORD`        | 101 | string | Write-only; sets the `adssys` password |
+| `ADS_DD_TEMP_TABLE_PATH`       | 102 | string | Scratch directory for temp tables |
+| `ADS_DD_LOG_IN_REQUIRED`       | 103 | u16   | `ADS_TRUE` → reject anonymous connects |
+| `ADS_DD_VERIFY_ACCESS_RIGHTS`  | 104 | u16   | `ADS_TRUE` → enforce table-level permissions |
+| `ADS_DD_ENCRYPT_TABLE_PASSWORD`| 105 | string | Encryption passphrase |
+| `ADS_DD_ENCRYPT_NEW_TABLE`     | 106 | u16   | Encrypt tables on creation |
+| `ADS_DD_ENABLE_INTERNET`       | 107 | u16   | Allow AIS/internet connections |
+| `ADS_DD_INTERNET_SECURITY_LEVEL`| 108 | u16  | AIS security level |
+| `ADS_DD_MAX_FAILED_ATTEMPTS`   | 109 | u16   | Lock-out threshold (0 = no limit) |
+| `ADS_DD_ALLOW_ADSSYS_NET_ACCESS`| 110 | u16  | Allow `adssys` over the network |
+| `ADS_DD_VERSION_MAJOR`         | 111 | u16   | User-defined major version |
+| `ADS_DD_VERSION_MINOR`         | 112 | u16   | User-defined minor version |
+| `ADS_DD_LOGINS_DISABLED`       | 113 | u16   | Temporarily bar new logins |
+| `ADS_DD_LOGINS_DISABLED_ERRSTR`| 114 | string | Message sent to rejected clients |
+| `ADS_DD_FTS_DELIMITERS`        | 115 | string | Full-text search word delimiters |
+| `ADS_DD_FTS_NOISE`             | 116 | string | FTS noise-word list |
+| `ADS_DD_FTS_DROP_CHARS`        | 117 | string | FTS drop characters |
+| `ADS_DD_FTS_CONDITIONAL_CHARS` | 118 | string | FTS conditional drop characters |
+| `ADS_DD_ENCRYPTED`             | 119 | u16   | Read-only; `ADS_TRUE` if the `.add` itself is encrypted |
+| `ADS_DD_ENCRYPT_INDEXES`       | 120 | u16   | Encrypt index files |
+| `ADS_DD_ENCRYPT_COMMUNICATION` | 122 | u16   | Require encrypted client connections |
 
 ### 9.7 User and group management
 

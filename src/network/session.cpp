@@ -944,11 +944,10 @@ DispatchResult Session::dispatch(const Frame& f) {
                 auto* dd = co.value().dd();
                 // Logins-disabled: a stricter, all-connections-rejected gate
                 // than LOG_IN_REQUIRED below — even a valid user/password
-                // normally can't connect while this is set. Reads "prop_16",
-                // DA-Web's own numbering for ADS_DD_LOGINS_DISABLED
-                // (api/db_props.php) — NOT ace.h's ADS_DD_LOGINS_DISABLED
-                // macro (=14), which collides with this engine's
-                // VERSION_MAJOR slot at prop_14.
+                // normally can't connect while this is set. Reads the STABLE
+                // storage key "prop_16" (SP_MODIFYDATABASE numbering); the
+                // SAP ABI id is ADS_DD_LOGINS_DISABLED (113), translated by
+                // ace_exports' db_prop_storage_key.
                 //
                 // Admin bypass: without this, setting the flag would be a
                 // one-way door — nobody, not even the admin trying to undo

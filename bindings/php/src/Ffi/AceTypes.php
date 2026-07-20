@@ -34,13 +34,35 @@ final class AceTypes
     public const ADS_HARDSEEK = 0;
     public const ADS_SOFTSEEK = 1;
 
-    /** Data Dictionary — database properties (AdsDDGetDatabaseProperty). */
+    /**
+     * Data Dictionary — generic + database properties, SAP ABI numbering
+     * (rddads ads.ch; 113-122 verified against SAP ace64 by import_dd).
+     */
     public const ADS_DD_COMMENT                  = 1;
-    public const ADS_DD_ADMIN_PASSWORD           = 2;
-    public const ADS_DD_DEFAULT_TABLE_PATH       = 3;
-    public const ADS_DD_LOG_IN_REQUIRED          = 5;
-    public const ADS_DD_VERIFY_ACCESS_RIGHTS     = 6;
-    public const ADS_DD_MAX_FAILED_ATTEMPTS      = 21;
+    public const ADS_DD_VERSION                  = 2;
+    public const ADS_DD_USER_DEFINED_PROP        = 3;
+    public const ADS_DD_DEFAULT_TABLE_PATH       = 100;
+    public const ADS_DD_ADMIN_PASSWORD           = 101;
+    public const ADS_DD_TEMP_TABLE_PATH          = 102;
+    public const ADS_DD_LOG_IN_REQUIRED          = 103;
+    public const ADS_DD_VERIFY_ACCESS_RIGHTS     = 104;
+    public const ADS_DD_ENCRYPT_TABLE_PASSWORD   = 105;
+    public const ADS_DD_ENCRYPT_NEW_TABLE        = 106;
+    public const ADS_DD_ENABLE_INTERNET          = 107;
+    public const ADS_DD_INTERNET_SECURITY_LEVEL  = 108;
+    public const ADS_DD_MAX_FAILED_ATTEMPTS      = 109;
+    public const ADS_DD_ALLOW_ADSSYS_NET_ACCESS  = 110;
+    public const ADS_DD_VERSION_MAJOR            = 111;
+    public const ADS_DD_VERSION_MINOR            = 112;
+    public const ADS_DD_LOGINS_DISABLED          = 113;
+    public const ADS_DD_LOGINS_DISABLED_ERRSTR   = 114;
+    public const ADS_DD_FTS_DELIMITERS           = 115;
+    public const ADS_DD_FTS_NOISE                = 116;
+    public const ADS_DD_FTS_DROP_CHARS           = 117;
+    public const ADS_DD_FTS_CONDITIONAL_CHARS    = 118;
+    public const ADS_DD_ENCRYPTED                = 119;
+    public const ADS_DD_ENCRYPT_INDEXES          = 120;
+    public const ADS_DD_ENCRYPT_COMMUNICATION    = 122;
 
     /** Data Dictionary — RI rule options. */
     public const ADS_DD_RI_CASCADE               = 1;
