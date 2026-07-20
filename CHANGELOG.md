@@ -1,3 +1,25 @@
+## 1.8.19 — 2026-07-20
+
+### Fixed — remote xBrowse ghost rows with scope + SET DELETED ON
+
+With an index scope that included deleted keys, key counts disagreed
+with the navigable walk (live rows only). FiveWin xBrowse then painted
+blank/skipped lines, duplicated data, and sometimes would not close.
+LOCAL often looked fine; REMOTE + xBrowse exposed it.
+
+Two fixes:
+
+1. `count_scoped_keys` / local `AdsGetKeyCount` + order-handle
+   `AdsGetRecordCount` exclude deleted when SET DELETED ON.
+2. Remote: rddads `OrdKeyCount` calls `AdsGetRecordCount(hOrdCurrent)`.
+   That path no longer returns the parent table’s physical `RecCount`;
+   it uses `remote_index_key_count` (scope + deleted-aware on the server).
+
+Regression tests: `abi_scoped_deleted_keycount_test.cpp`. ACE verify
+(Tim mini + delscope) against iMac: walk and OrdKeyCount match.
+
+**Update both** client `ace32`/`ace64` **and** `openads_serverd`.
+
 ## 1.8.18 — 2026-07-20
 
 ### Added — server filesystem API (`oads_*` / `Ads*`)

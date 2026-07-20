@@ -14,7 +14,7 @@ for the Advantage Client Engine (`ace32.dll` / `ace64.dll` /
 `libace.so`) — Harbour / Clipper applications that link against
 `contrib/rddads` keep working without recompilation.
 
-Current release: **v1.8.18**.
+Current release: **v1.8.19**.
 
 ## What's in here
 

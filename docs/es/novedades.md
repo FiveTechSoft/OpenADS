@@ -6,11 +6,22 @@ nav_order: 0
 permalink: /es/novedades/
 ---
 
-# Novedades (v1.0.0-rc29 → v1.8.18)
+# Novedades (v1.0.0-rc29 → v1.8.19)
 
 Esta página resume los cambios más destacados desde la versión
 v1.0.0-rc29. Para el historial completo de commits, consulta el
 [CHANGELOG](https://github.com/FiveTechSoft/OpenADS/blob/main/CHANGELOG.md).
+
+---
+
+## Destacados v1.8.19
+
+### REMOTO — scope + SET DELETED ON: sin filas fantasma en xBrowse
+
+`OrdKeyCount` contaba claves de registros borrados dentro del scope
+mientras la navegación los saltaba. xBrowse de FiveWin mostraba filas
+en blanco / saltos y a veces no cerraba. El contador de claves ahora
+coincide con el walk vivo. Actualizar **DLL y** `openads_serverd`.
 
 ---
 

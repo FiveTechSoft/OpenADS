@@ -6,11 +6,22 @@ nav_order: 0
 permalink: /en/whatsnew/
 ---
 
-# What's New (v1.0.0-rc29 → v1.8.18)
+# What's New (v1.0.0-rc29 → v1.8.19)
 
 This page summarises the most notable changes since the
 v1.0.0-rc29 release. For the full commit-by-commit history see
 the [CHANGELOG](https://github.com/FiveTechSoft/OpenADS/blob/main/CHANGELOG.md).
+
+---
+
+## v1.8.19 Highlights
+
+### REMOTE — scope + SET DELETED ON: no more xBrowse ghost rows
+
+`OrdKeyCount` counted deleted keys inside an index scope while
+navigation skipped them. FiveWin xBrowse then showed blank/skipped
+rows and could refuse to close. Key counts now match the live
+scoped walk. Update **client DLL and** `openads_serverd`.
 
 ---
 
