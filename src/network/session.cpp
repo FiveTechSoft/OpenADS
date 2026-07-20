@@ -13,6 +13,8 @@
 #include "platform/proc.h"
 #include "openads/ace.h"
 #include "openads/error.h"
+#include "engine/server_fs.h"
+#include "platform/fs_sandbox.h"
 #include "platform/path.h"
 #include "session/connection.h"
 #include "sql_backend/enterprise_config.h"
@@ -2268,6 +2270,324 @@ DispatchResult Session::dispatch(const Frame& f) {
             reply.opcode = Opcode::DropTableAck;
             break;
         }
+        // ── Server filesystem (EnableFileFunc) ──────────────────────────
+        case Opcode::FileExists:
+        case Opcode::FileErase:
+        case Opcode::FileRename:
+        case Opcode::FileSize:
+        case Opcode::FileMTime:
+        case Opcode::Directory:
+        case Opcode::DirExist:
+        case Opcode::DirMake:
+        case Opcode::DirRemove:
+        case Opcode::FOpen:
+        case Opcode::FCreate:
+        case Opcode::FClose:
+        case Opcode::FRead:
+        case Opcode::FWrite:
+        case Opcode::FSeek: {
+            if (!srv_->enable_file_func()) {
+                reply = err("file functions disabled",
+                            openads::AE_ACCESS_DENIED);
+                break;
+            }
+            if (!sess_conn_) {
+                reply = err("fs: not connected", openads::AE_NO_CONNECTION);
+                break;
+            }
+            auto deny_path = [&](const std::string&) {
+                reply = err("path outside data directory",
+                            openads::AE_ACCESS_DENIED);
+            };
+            if (f.opcode == Opcode::FileExists) {
+                std::size_t pos = 0;
+                std::string path;
+                if (!read_lstr16(f.payload, pos, path)) {
+                    reply = err("FileExists: short payload"); break;
+                }
+                auto abs = resolve_fs_client_path(path);
+                if (!abs) { deny_path(path); break; }
+                auto ex = openads::engine::fs_exists(*abs);
+                if (!ex) {
+                    reply = err("FileExists",
+                                static_cast<UNSIGNED32>(ex.error().code));
+                    break;
+                }
+                reply.opcode = Opcode::FileExistsAck;
+                reply.payload.push_back(ex.value() ? 1 : 0);
+            } else if (f.opcode == Opcode::FileErase) {
+                std::size_t pos = 0;
+                std::string path;
+                if (!read_lstr16(f.payload, pos, path)) {
+                    reply = err("FileErase: short payload"); break;
+                }
+                auto abs = resolve_fs_client_path(path);
+                if (!abs) { deny_path(path); break; }
+                auto r = openads::engine::fs_erase(*abs);
+                if (!r) {
+                    reply = err("FileErase",
+                                static_cast<UNSIGNED32>(r.error().code));
+                    break;
+                }
+                reply.opcode = Opcode::FileEraseAck;
+            } else if (f.opcode == Opcode::FileRename) {
+                std::size_t pos = 0;
+                std::string old_p, new_p;
+                if (!read_lstr16(f.payload, pos, old_p) ||
+                    !read_lstr16(f.payload, pos, new_p)) {
+                    reply = err("FileRename: short payload"); break;
+                }
+                auto a = resolve_fs_client_path(old_p);
+                auto b = resolve_fs_client_path(new_p);
+                if (!a || !b) { deny_path(old_p); break; }
+                auto r = openads::engine::fs_rename(*a, *b);
+                if (!r) {
+                    reply = err("FileRename",
+                                static_cast<UNSIGNED32>(r.error().code));
+                    break;
+                }
+                reply.opcode = Opcode::FileRenameAck;
+            } else if (f.opcode == Opcode::FileSize) {
+                std::size_t pos = 0;
+                std::string path;
+                if (!read_lstr16(f.payload, pos, path)) {
+                    reply = err("FileSize: short payload"); break;
+                }
+                auto abs = resolve_fs_client_path(path);
+                if (!abs) { deny_path(path); break; }
+                auto sz = openads::engine::fs_size(*abs);
+                if (!sz) {
+                    reply = err("FileSize",
+                                static_cast<UNSIGNED32>(sz.error().code));
+                    break;
+                }
+                reply.opcode = Opcode::FileSizeAck;
+                std::uint64_t v = sz.value();
+                for (int i = 0; i < 8; ++i)
+                    reply.payload.push_back(
+                        static_cast<std::uint8_t>((v >> (8 * i)) & 0xFF));
+            } else if (f.opcode == Opcode::FileMTime) {
+                std::size_t pos = 0;
+                std::string path;
+                if (!read_lstr16(f.payload, pos, path)) {
+                    reply = err("FileMTime: short payload"); break;
+                }
+                auto abs = resolve_fs_client_path(path);
+                if (!abs) { deny_path(path); break; }
+                auto st = openads::engine::fs_stat_entry(*abs);
+                if (!st) {
+                    reply = err("FileMTime",
+                                static_cast<UNSIGNED32>(st.error().code));
+                    break;
+                }
+                const auto& se = st.value();
+                reply.opcode = Opcode::FileMTimeAck;
+                reply.payload.push_back(
+                    static_cast<std::uint8_t>(se.year & 0xFF));
+                reply.payload.push_back(
+                    static_cast<std::uint8_t>((se.year >> 8) & 0xFF));
+                reply.payload.push_back(se.mon);
+                reply.payload.push_back(se.day);
+                reply.payload.push_back(se.hh);
+                reply.payload.push_back(se.mm);
+                reply.payload.push_back(se.ss);
+            } else if (f.opcode == Opcode::Directory) {
+                std::size_t pos = 0;
+                std::string mask;
+                if (!read_lstr16(f.payload, pos, mask)) {
+                    reply = err("Directory: short payload"); break;
+                }
+                // Split "subdir/*.dbf" and jail-resolve the directory part.
+                std::string dir_part = ".";
+                std::string pat = mask.empty() ? "*" : mask;
+                auto slash = pat.find_last_of("/\\");
+                if (slash != std::string::npos) {
+                    dir_part = pat.substr(0, slash);
+                    if (dir_part.empty()) dir_part = ".";
+                    pat = pat.substr(slash + 1);
+                    if (pat.empty()) pat = "*";
+                }
+                auto abs_dir = resolve_fs_client_path(dir_part);
+                if (!abs_dir) { deny_path(dir_part); break; }
+                auto entries =
+                    openads::engine::fs_directory(*abs_dir, pat);
+                if (!entries) {
+                    reply = err("Directory",
+                        static_cast<UNSIGNED32>(entries.error().code));
+                    break;
+                }
+                const auto& elist = entries.value();
+                reply.opcode = Opcode::DirectoryAck;
+                write_u32_le(static_cast<std::uint32_t>(elist.size()),
+                             reply.payload);
+                for (const auto& e : elist)
+                    openads::engine::pack_dir_entry(e, reply.payload);
+            } else if (f.opcode == Opcode::DirExist) {
+                std::size_t pos = 0;
+                std::string path;
+                if (!read_lstr16(f.payload, pos, path)) {
+                    reply = err("DirExist: short payload"); break;
+                }
+                auto abs = resolve_fs_client_path(path);
+                if (!abs) { deny_path(path); break; }
+                auto ex = openads::engine::fs_dir_exist(*abs);
+                if (!ex) {
+                    reply = err("DirExist",
+                                static_cast<UNSIGNED32>(ex.error().code));
+                    break;
+                }
+                reply.opcode = Opcode::DirExistAck;
+                reply.payload.push_back(ex.value() ? 1 : 0);
+            } else if (f.opcode == Opcode::DirMake) {
+                std::size_t pos = 0;
+                std::string path;
+                if (!read_lstr16(f.payload, pos, path)) {
+                    reply = err("DirMake: short payload"); break;
+                }
+                auto abs = resolve_fs_client_path(path);
+                if (!abs) { deny_path(path); break; }
+                auto r = openads::engine::fs_dir_make(*abs);
+                if (!r) {
+                    reply = err("DirMake",
+                                static_cast<UNSIGNED32>(r.error().code));
+                    break;
+                }
+                reply.opcode = Opcode::DirMakeAck;
+            } else if (f.opcode == Opcode::DirRemove) {
+                std::size_t pos = 0;
+                std::string path;
+                if (!read_lstr16(f.payload, pos, path)) {
+                    reply = err("DirRemove: short payload"); break;
+                }
+                auto abs = resolve_fs_client_path(path);
+                if (!abs) { deny_path(path); break; }
+                auto r = openads::engine::fs_dir_remove(*abs);
+                if (!r) {
+                    reply = err("DirRemove",
+                                static_cast<UNSIGNED32>(r.error().code));
+                    break;
+                }
+                reply.opcode = Opcode::DirRemoveAck;
+            } else if (f.opcode == Opcode::FOpen ||
+                       f.opcode == Opcode::FCreate) {
+                std::size_t pos = 0;
+                std::string path;
+                if (!read_lstr16(f.payload, pos, path)) {
+                    reply = err("FOpen: short payload"); break;
+                }
+                std::uint16_t mode = 0;
+                if (pos + 2 <= f.payload.size()) {
+                    mode = read_u16_le(f.payload.data() + pos);
+                }
+                if (files_.size() >= openads::engine::kMaxSessionFiles) {
+                    reply = err("too many open files",
+                                openads::AE_INTERNAL_ERROR);
+                    break;
+                }
+                auto abs = resolve_fs_client_path(path);
+                if (!abs) { deny_path(path); break; }
+                bool create = (f.opcode == Opcode::FCreate);
+                auto fo = openads::engine::fs_open(
+                    *abs, mode, create);
+                if (!fo) {
+                    reply = err(create ? "FCreate" : "FOpen",
+                                static_cast<UNSIGNED32>(fo.error().code));
+                    break;
+                }
+                std::uint32_t id = next_file_id_++;
+                files_[id] = std::move(fo.value());
+                reply.opcode = create ? Opcode::FCreateAck : Opcode::FOpenAck;
+                write_u32_le(id, reply.payload);
+            } else if (f.opcode == Opcode::FClose) {
+                if (f.payload.size() < 4) {
+                    reply = err("FClose: short payload"); break;
+                }
+                std::uint32_t id = read_u32_le(f.payload.data());
+                if (files_.erase(id) == 0) {
+                    reply = err("FClose: bad handle",
+                                openads::AE_INTERNAL_ERROR);
+                    break;
+                }
+                reply.opcode = Opcode::FCloseAck;
+            } else if (f.opcode == Opcode::FRead) {
+                if (f.payload.size() < 8) {
+                    reply = err("FRead: short payload"); break;
+                }
+                std::uint32_t id = read_u32_le(f.payload.data());
+                std::uint32_t n  = read_u32_le(f.payload.data() + 4);
+                if (n > openads::engine::kMaxFsIoChunk)
+                    n = openads::engine::kMaxFsIoChunk;
+                auto it = files_.find(id);
+                if (it == files_.end()) {
+                    reply = err("FRead: bad handle",
+                                openads::AE_INTERNAL_ERROR);
+                    break;
+                }
+                std::vector<char> buf(n);
+                it->second->stream.read(buf.data(),
+                                        static_cast<std::streamsize>(n));
+                auto got = static_cast<std::uint32_t>(
+                    it->second->stream.gcount());
+                reply.opcode = Opcode::FReadAck;
+                write_u32_le(got, reply.payload);
+                reply.payload.insert(
+                    reply.payload.end(), buf.begin(),
+                    buf.begin() + static_cast<std::ptrdiff_t>(got));
+            } else if (f.opcode == Opcode::FWrite) {
+                if (f.payload.size() < 8) {
+                    reply = err("FWrite: short payload"); break;
+                }
+                std::uint32_t id = read_u32_le(f.payload.data());
+                std::uint32_t n  = read_u32_le(f.payload.data() + 4);
+                if (n > openads::engine::kMaxFsIoChunk)
+                    n = openads::engine::kMaxFsIoChunk;
+                if (8u + n > f.payload.size()) {
+                    reply = err("FWrite: short data"); break;
+                }
+                auto it = files_.find(id);
+                if (it == files_.end()) {
+                    reply = err("FWrite: bad handle",
+                                openads::AE_INTERNAL_ERROR);
+                    break;
+                }
+                it->second->stream.write(
+                    reinterpret_cast<const char*>(f.payload.data() + 8),
+                    static_cast<std::streamsize>(n));
+                it->second->stream.flush();
+                if (!it->second->stream) {
+                    reply = err("FWrite: io error",
+                                openads::AE_INTERNAL_ERROR);
+                    break;
+                }
+                reply.opcode = Opcode::FWriteAck;
+                write_u32_le(n, reply.payload);
+            } else if (f.opcode == Opcode::FSeek) {
+                if (f.payload.size() < 9) {
+                    reply = err("FSeek: short payload"); break;
+                }
+                std::uint32_t id = read_u32_le(f.payload.data());
+                std::int32_t off = static_cast<std::int32_t>(
+                    read_u32_le(f.payload.data() + 4));
+                std::uint8_t origin = f.payload[8];
+                auto it = files_.find(id);
+                if (it == files_.end()) {
+                    reply = err("FSeek: bad handle",
+                                openads::AE_INTERNAL_ERROR);
+                    break;
+                }
+                std::ios::seekdir way = std::ios::beg;
+                if (origin == 1) way = std::ios::cur;
+                else if (origin == 2) way = std::ios::end;
+                it->second->stream.clear();
+                it->second->stream.seekg(off, way);
+                it->second->stream.seekp(off, way);
+                auto pos = static_cast<std::uint32_t>(
+                    it->second->stream.tellg());
+                reply.opcode = Opcode::FSeekAck;
+                write_u32_le(pos, reply.payload);
+            }
+            break;
+        }
         case Opcode::SkipUnique: {
             if (f.payload.size() < 8) { reply = err("SkipUnique: bad payload"); break; }
             std::uint32_t iid = read_u32_le(f.payload.data());
@@ -3588,6 +3908,22 @@ DispatchResult Session::dispatch(const Frame& f) {
         }
     }
     return { std::move(reply), false };
+}
+
+std::optional<std::string> Session::resolve_fs_client_path(
+    const std::string& client_path) const {
+    if (!sess_conn_) return std::nullopt;
+    // Prefer the session connection data directory (already jailed at
+    // Connect time). Fall back to server multi-root list.
+    if (!sess_conn_->data_dir().empty()) {
+        return openads::platform::resolve_fs_path(sess_conn_->data_dir(),
+                                                    client_path);
+    }
+    if (srv_ && !srv_->data_dir_.empty()) {
+        auto roots = openads::platform::split_data_roots(srv_->data_dir_);
+        return openads::platform::resolve_fs_path(roots, client_path);
+    }
+    return std::nullopt;
 }
 
 } // namespace openads::network

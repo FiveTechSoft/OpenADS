@@ -29,6 +29,9 @@ add_executable(openads_unit_tests
     unit/platform_lock_test.cpp
     unit/platform_mmap_test.cpp
     unit/platform_path_test.cpp
+    unit/fs_sandbox_test.cpp
+    unit/server_fs_test.cpp
+    unit/abi_server_fs_test.cpp
     unit/platform_time_test.cpp
     unit/platform_thread_test.cpp
     unit/dbf_header_test.cpp

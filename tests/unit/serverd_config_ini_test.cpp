@@ -75,6 +75,15 @@ TEST_CASE("parse_ini accepts dash/underscore aliases") {
     CHECK(cfg.data_dir == "/var/lib/openads");
 }
 
+TEST_CASE("parse_ini EnableFileFunc") {
+    auto cfg = parse_ok("EnableFileFunc = 1\n");
+    CHECK(cfg.has_enable_file_func);
+    CHECK(cfg.enable_file_func);
+    auto off = parse_ok("enable_file_func = false\n");
+    CHECK(off.has_enable_file_func);
+    CHECK_FALSE(off.enable_file_func);
+}
+
 TEST_CASE("parse_ini collects repeated http_user lines") {
     auto cfg = parse_ok("http_user = a:1\nhttp_user = b:2\n");
     REQUIRE(cfg.http_users.size() == 2);

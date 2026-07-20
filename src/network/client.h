@@ -5,6 +5,7 @@
 #include "network/transport.h"
 #include "network/wire.h"
 #include "engine/aggregate.h"
+#include "engine/server_fs.h"
 #include "util/result.h"
 
 #include <cstdint>
@@ -257,6 +258,34 @@ public:
                                               std::uint16_t memo_block_size);
     util::Result<void>          drop_table(const std::string& name,
                                             std::uint16_t delete_files);
+
+    // Server filesystem (EnableFileFunc on server).
+    util::Result<bool>          file_exists(const std::string& path);
+    util::Result<void>          file_erase(const std::string& path);
+    util::Result<void>          file_rename(const std::string& old_p,
+                                            const std::string& new_p);
+    util::Result<std::uint64_t> file_size(const std::string& path);
+    util::Result<openads::engine::DirEntry> file_mtime(
+        const std::string& path);
+    util::Result<std::vector<openads::engine::DirEntry>>
+                                directory(const std::string& mask);
+    util::Result<bool>          dir_exist(const std::string& path);
+    util::Result<void>          dir_make(const std::string& path);
+    util::Result<void>          dir_remove(const std::string& path);
+    util::Result<std::uint32_t> fopen(const std::string& path,
+                                      std::uint16_t mode);
+    util::Result<std::uint32_t> fcreate(const std::string& path,
+                                        std::uint16_t attr);
+    util::Result<void>          fclose(std::uint32_t file_id);
+    util::Result<std::vector<std::uint8_t>>
+                                fread(std::uint32_t file_id,
+                                      std::uint32_t nbytes);
+    util::Result<std::uint32_t> fwrite(std::uint32_t file_id,
+                                       const std::uint8_t* data,
+                                       std::uint32_t n);
+    util::Result<std::uint32_t> fseek(std::uint32_t file_id,
+                                      std::int32_t offset,
+                                      std::uint8_t origin);
     util::Result<void>          skip_unique(std::uint32_t index_id,
                                             std::int32_t  direction);
     util::Result<void>          set_scope(std::uint32_t index_id,

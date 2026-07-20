@@ -69,6 +69,12 @@ public:
     // platform::resolve_under_any_root.
     void set_data_dir(const std::string& dir) { data_dir_ = dir; }
 
+    // When false (default), remote oads_*/Ads* filesystem opcodes return
+    // AE_ACCESS_DENIED. Set via openads.ini EnableFileFunc=1 or
+    // --enable-file-func.
+    void set_enable_file_func(bool on) { enable_file_func_ = on; }
+    bool enable_file_func() const noexcept { return enable_file_func_; }
+
     // Enterprise: cap on concurrent session threads (0 = unlimited). Overrides
     // the env-loaded EnterpriseConfig value; call before start(). Production
     // reads OPENADS_SERVER_MAX_SESSIONS; this exists mainly for tests.
@@ -164,6 +170,7 @@ private:
 
     // Data root directory: relative client paths are resolved under it.
     std::string                                   data_dir_;
+    bool                                          enable_file_func_ = false;
 
     // M12.9 — credential map (user -> password). Protected by creds_mu_
     // because add_credential() may run while sessions authenticate.

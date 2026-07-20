@@ -368,6 +368,51 @@ enum class Opcode : std::uint8_t {
     DropTable          = 0xDE,
     DropTableAck       = 0xDF,
 
+    // Server filesystem API (oads_* / Ads*) — gated by EnableFileFunc.
+    // Paths are relative to the session data directory (jail).
+    // FileExists:  [u16 pathLen][path] → FileExistsAck: [u8 exists]
+    FileExists         = 0xE0,
+    FileExistsAck      = 0xE1,
+    // FileErase:   [u16 pathLen][path] → empty ack
+    FileErase          = 0xE2,
+    FileEraseAck       = 0xE3,
+    // FileRename:  [u16 oldLen][old][u16 newLen][new] → empty ack
+    FileRename         = 0xE4,
+    FileRenameAck      = 0xE5,
+    // FileSize:    [u16 pathLen][path] → FileSizeAck: [u64 size LE]
+    FileSize           = 0xE6,
+    FileSizeAck        = 0xE7,
+    // FileMTime:   [u16 pathLen][path] → [u16 y][u8 mon day hh mm ss]
+    FileMTime          = 0xE8,
+    FileMTimeAck       = 0xE9,
+    // Directory:   [u16 maskLen][mask][u16 attr] → [u32 n][entries…]
+    Directory          = 0xEA,
+    DirectoryAck       = 0xEB,
+    DirExist           = 0xEC,
+    DirExistAck        = 0xED,
+    DirMake            = 0xEE,
+    DirMakeAck         = 0xEF,
+    DirRemove          = 0xF0,
+    DirRemoveAck       = 0xF1,
+    // FOpen:  [u16 pathLen][path][u16 mode] → [u32 file_id]
+    FOpen              = 0xF2,
+    FOpenAck           = 0xF3,
+    // FCreate:[u16 pathLen][path][u16 attr] → [u32 file_id]
+    FCreate            = 0xF4,
+    FCreateAck         = 0xF5,
+    // FClose: [u32 file_id]
+    FClose             = 0xF6,
+    FCloseAck          = 0xF7,
+    // FRead:  [u32 file_id][u32 nbytes] → [u32 nread][bytes]
+    FRead              = 0xF8,
+    FReadAck           = 0xF9,
+    // FWrite: [u32 file_id][u32 nbytes][bytes] → [u32 nwritten]
+    FWrite             = 0xFA,
+    FWriteAck          = 0xFB,
+    // FSeek:  [u32 file_id][i32 offset][u8 origin] → [u32 position]
+    FSeek              = 0xFC,
+    FSeekAck           = 0xFD,
+
     Error              = 0xFF,
 };
 

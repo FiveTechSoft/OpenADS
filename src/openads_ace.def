@@ -118,6 +118,20 @@ EXPORTS
     AdsCacheOpenTables
     AdsCacheRecords
     AdsCheckExistence
+    AdsRenameFile
+    AdsGetFileSize
+    AdsGetFileTime
+    AdsGetFileDate
+    AdsDirectory
+    AdsDirExist
+    AdsDirMake
+    AdsDirRemove
+    AdsFOpen
+    AdsFCreate
+    AdsFClose
+    AdsFRead
+    AdsFWrite
+    AdsFSeek
     AdsClearCallbackFunction
     AdsClearFilter
     AdsClearRelation

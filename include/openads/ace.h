@@ -75,6 +75,35 @@ UNSIGNED32 ENTRYPOINT AdsGetTableFilename(ADSHANDLE  hTable, UNSIGNED16 usOption
 UNSIGNED32 ENTRYPOINT AdsCheckExistence(ADSHANDLE  hConnect, UNSIGNED8* pucName,
                               UNSIGNED16* pbExists);
 UNSIGNED32 ENTRYPOINT AdsDeleteFile    (ADSHANDLE  hConnect, UNSIGNED8* pucName);
+UNSIGNED32 ENTRYPOINT AdsRenameFile    (ADSHANDLE  hConnect, UNSIGNED8* pucOld,
+                              UNSIGNED8* pucNew);
+UNSIGNED32 ENTRYPOINT AdsGetFileSize   (ADSHANDLE  hConnect, UNSIGNED8* pucName,
+                              UNSIGNED32* pulSize);
+UNSIGNED32 ENTRYPOINT AdsGetFileTime   (ADSHANDLE  hConnect, UNSIGNED8* pucName,
+                              UNSIGNED8* pucTime, UNSIGNED16* pusLen);
+UNSIGNED32 ENTRYPOINT AdsGetFileDate   (ADSHANDLE  hConnect, UNSIGNED8* pucName,
+                              UNSIGNED8* pucDate, UNSIGNED16* pusLen);
+// Packed directory listing (same layout as wire DirectoryAck entries).
+// If pucBuffer is null or *pulBufLen is too small, returns
+// AE_INSUFFICIENT_BUFFER and writes required size to *pulBufLen.
+UNSIGNED32 ENTRYPOINT AdsDirectory     (ADSHANDLE  hConnect, UNSIGNED8* pucMask,
+                              UNSIGNED16 usAttr, UNSIGNED8* pucBuffer,
+                              UNSIGNED32* pulBufLen);
+UNSIGNED32 ENTRYPOINT AdsDirExist      (ADSHANDLE  hConnect, UNSIGNED8* pucPath,
+                              UNSIGNED16* pbExists);
+UNSIGNED32 ENTRYPOINT AdsDirMake       (ADSHANDLE  hConnect, UNSIGNED8* pucPath);
+UNSIGNED32 ENTRYPOINT AdsDirRemove     (ADSHANDLE  hConnect, UNSIGNED8* pucPath);
+UNSIGNED32 ENTRYPOINT AdsFOpen         (ADSHANDLE  hConnect, UNSIGNED8* pucName,
+                              UNSIGNED16 usMode, ADSHANDLE* phFile);
+UNSIGNED32 ENTRYPOINT AdsFCreate       (ADSHANDLE  hConnect, UNSIGNED8* pucName,
+                              UNSIGNED16 usAttribute, ADSHANDLE* phFile);
+UNSIGNED32 ENTRYPOINT AdsFClose        (ADSHANDLE  hFile);
+UNSIGNED32 ENTRYPOINT AdsFRead         (ADSHANDLE  hFile, void* pBuf,
+                              UNSIGNED32 ulLen, UNSIGNED32* pulRead);
+UNSIGNED32 ENTRYPOINT AdsFWrite        (ADSHANDLE  hFile, const void* pBuf,
+                              UNSIGNED32 ulLen, UNSIGNED32* pulWritten);
+UNSIGNED32 ENTRYPOINT AdsFSeek         (ADSHANDLE  hFile, SIGNED32 lOffset,
+                              UNSIGNED16 usOrigin, UNSIGNED32* pulPos);
 UNSIGNED32 ENTRYPOINT AdsCloseAllTables(void);
 UNSIGNED32 ENTRYPOINT AdsGetRecordLength(ADSHANDLE hTable, UNSIGNED32* pulLen);
 

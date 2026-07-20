@@ -59,6 +59,8 @@ void usage(const char* argv0) {
         "               serves. Semicolon-separated for more than one\n"
         "               root, e.g. --data \"C:\\data;D:\\more-data\"\n"
         "               (default = current working directory)\n"
+        "  --enable-file-func   allow remote oads_*/Ads* filesystem ops\n"
+        "               under --data (default OFF; see EnableFileFunc)\n"
         "  --http-user  user:password — register a Studio login\n"
         "               (repeatable; if none given, console is open)\n"
         "  --config     read settings from an openads.ini file (CLI flags\n"
@@ -82,6 +84,7 @@ struct Args {
     int           backlog     = 16;
     std::uint16_t http_port   = 0;
     std::string   data_dir    = ".";
+    bool          enable_file_func = false;
     // ads_err.dbf error log overrides; empty/0 keeps mgmt::ErrorLog's
     // defaults (OPENADS_ERROR_LOG_PATH env, then the SAP default paths).
     std::string   error_log_path;
@@ -102,6 +105,8 @@ bool parse_args(int argc, char** argv, Args& out) {
         else if (a == "--backlog"   && i + 1 < argc) out.backlog = std::atoi(argv[++i]);
         else if (a == "--http-port" && i + 1 < argc) out.http_port = static_cast<std::uint16_t>(std::atoi(argv[++i]));
         else if (a == "--data"      && i + 1 < argc) out.data_dir = argv[++i];
+        else if (a == "--enable-file-func") out.enable_file_func = true;
+        else if (a == "--disable-file-func") out.enable_file_func = false;
         else if (a == "--error-log-path" && i + 1 < argc)
             out.error_log_path = argv[++i];
         else if (a == "--error-log-max"  && i + 1 < argc)
@@ -135,6 +140,7 @@ void apply_ini(const openads::serverd::IniConfig& cfg, Args& out) {
     if (cfg.has_backlog)   out.backlog   = cfg.backlog;
     if (cfg.has_http_port) out.http_port = cfg.http_port;
     if (cfg.has_data)      out.data_dir  = cfg.data_dir;
+    if (cfg.has_enable_file_func) out.enable_file_func = cfg.enable_file_func;
     if (cfg.has_error_log_path) out.error_log_path   = cfg.error_log_path;
     if (cfg.has_error_log_max)  out.error_log_max_kb = cfg.error_log_max_kb;
     for (const auto& u : cfg.http_users) out.http_users.push_back(u);
@@ -238,6 +244,7 @@ int run_server(const Args& args, bool console) {
     openads::network::Server srv;
     if (!args.data_dir.empty() && args.data_dir != ".")
         srv.set_data_dir(args.data_dir);
+    srv.set_enable_file_func(args.enable_file_func);
 
     // The HTTP Studio console browses one directory; when --data lists
     // several roots (";"-separated, for the wire-protocol jail — see

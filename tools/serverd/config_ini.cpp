@@ -99,6 +99,15 @@ bool parse_ini(const std::string& text, IniConfig& out, std::string& error) {
         } else if (key == "data" || key == "data_dir" || key == "datadir") {
             out.data_dir = val;
             out.has_data = true;
+        } else if (key == "enablefilefunc" || key == "enable_file_func" ||
+                   key == "enable-file-func") {
+            out.has_enable_file_func = true;
+            std::string v = val;
+            for (char& c : v) {
+                if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+            }
+            out.enable_file_func =
+                (v == "1" || v == "true" || v == "yes" || v == "on");
         } else if (key == "error_log_path" || key == "error-log-path" ||
                    key == "error_assert_logs") {
             out.error_log_path = val;

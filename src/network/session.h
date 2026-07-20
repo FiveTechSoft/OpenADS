@@ -1,5 +1,6 @@
 #pragma once
 
+#include "engine/server_fs.h"
 #include "network/frame_reader.h"
 #include "network/server.h"
 #include "network/socket.h"
@@ -10,6 +11,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -102,6 +104,15 @@ private:
     // lazily, so ensure_abi_conn must re-apply it or the ABI connection
     // starts with the default (show) and ordered walks leak deleted rows.
     bool          show_deleted_ = true;
+
+    // Server filesystem (oads_*) — open files for this session only.
+    std::unordered_map<std::uint32_t,
+                       std::unique_ptr<openads::engine::FsFile>> files_;
+    std::uint32_t next_file_id_ = 1;
+
+    // Resolve client path under session data dir (or server data roots).
+    std::optional<std::string> resolve_fs_client_path(
+        const std::string& client_path) const;
 
     // ---- M12.22 read-ahead ramp -------------------------------------------
     // RCB 07/14/2026: why sequential-access detection lives on the SERVER and

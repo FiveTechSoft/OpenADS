@@ -1785,6 +1785,253 @@ RemoteConnection::drop_table(const std::string& name,
     return {};
 }
 
+namespace {
+
+util::Error fs_wire_err(const Frame& rep, const char* op) {
+    std::string msg(rep.payload.begin(), rep.payload.end());
+    std::int32_t code = 5000;
+    if (rep.payload.size() >= 4) {
+        code = static_cast<std::int32_t>(read_u32_le(rep.payload.data()));
+    }
+    return util::Error{code, 0, std::string(op) + ": server error", msg};
+}
+
+std::uint64_t read_u64_le(const std::uint8_t* p) {
+    std::uint64_t v = 0;
+    for (int i = 0; i < 8; ++i)
+        v |= static_cast<std::uint64_t>(p[i]) << (8 * i);
+    return v;
+}
+
+} // namespace
+
+util::Result<bool>
+RemoteConnection::file_exists(const std::string& path) {
+    Frame req;
+    req.opcode = Opcode::FileExists;
+    push_lp_str(req.payload, path);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::FileExistsAck ||
+        rep.value().payload.empty())
+        return fs_wire_err(rep.value(), "FileExists");
+    return rep.value().payload[0] != 0;
+}
+
+util::Result<void>
+RemoteConnection::file_erase(const std::string& path) {
+    Frame req;
+    req.opcode = Opcode::FileErase;
+    push_lp_str(req.payload, path);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::FileEraseAck)
+        return fs_wire_err(rep.value(), "FileErase");
+    return {};
+}
+
+util::Result<void>
+RemoteConnection::file_rename(const std::string& old_p,
+                              const std::string& new_p) {
+    Frame req;
+    req.opcode = Opcode::FileRename;
+    push_lp_str(req.payload, old_p);
+    push_lp_str(req.payload, new_p);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::FileRenameAck)
+        return fs_wire_err(rep.value(), "FileRename");
+    return {};
+}
+
+util::Result<std::uint64_t>
+RemoteConnection::file_size(const std::string& path) {
+    Frame req;
+    req.opcode = Opcode::FileSize;
+    push_lp_str(req.payload, path);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::FileSizeAck ||
+        rep.value().payload.size() < 8)
+        return fs_wire_err(rep.value(), "FileSize");
+    return read_u64_le(rep.value().payload.data());
+}
+
+util::Result<openads::engine::DirEntry>
+RemoteConnection::file_mtime(const std::string& path) {
+    Frame req;
+    req.opcode = Opcode::FileMTime;
+    push_lp_str(req.payload, path);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::FileMTimeAck ||
+        rep.value().payload.size() < 7)
+        return fs_wire_err(rep.value(), "FileMTime");
+    openads::engine::DirEntry e;
+    const auto& pl = rep.value().payload;
+    e.year = static_cast<std::uint16_t>(pl[0] | (pl[1] << 8));
+    e.mon = pl[2]; e.day = pl[3];
+    e.hh = pl[4]; e.mm = pl[5]; e.ss = pl[6];
+    return e;
+}
+
+util::Result<std::vector<openads::engine::DirEntry>>
+RemoteConnection::directory(const std::string& mask) {
+    Frame req;
+    req.opcode = Opcode::Directory;
+    push_lp_str(req.payload, mask);
+    write_u16_le(0, req.payload);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::DirectoryAck ||
+        rep.value().payload.size() < 4)
+        return fs_wire_err(rep.value(), "Directory");
+    std::size_t off = 0;
+    std::uint32_t n = read_u32_le(rep.value().payload.data());
+    off = 4;
+    // Guard against corrupt/huge counts (avoids std::length_error).
+    if (n > 100000u)
+        return util::Error{5000, 0, "Directory: count too large", mask};
+    std::vector<openads::engine::DirEntry> out;
+    out.reserve(n);
+    for (std::uint32_t i = 0; i < n; ++i) {
+        openads::engine::DirEntry e;
+        if (!openads::engine::unpack_dir_entry(rep.value().payload, off, e))
+            return util::Error{5000, 0, "Directory: bad entry", mask};
+        out.push_back(std::move(e));
+    }
+    return out;
+}
+
+util::Result<bool>
+RemoteConnection::dir_exist(const std::string& path) {
+    Frame req;
+    req.opcode = Opcode::DirExist;
+    push_lp_str(req.payload, path);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::DirExistAck ||
+        rep.value().payload.empty())
+        return fs_wire_err(rep.value(), "DirExist");
+    return rep.value().payload[0] != 0;
+}
+
+util::Result<void>
+RemoteConnection::dir_make(const std::string& path) {
+    Frame req;
+    req.opcode = Opcode::DirMake;
+    push_lp_str(req.payload, path);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::DirMakeAck)
+        return fs_wire_err(rep.value(), "DirMake");
+    return {};
+}
+
+util::Result<void>
+RemoteConnection::dir_remove(const std::string& path) {
+    Frame req;
+    req.opcode = Opcode::DirRemove;
+    push_lp_str(req.payload, path);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::DirRemoveAck)
+        return fs_wire_err(rep.value(), "DirRemove");
+    return {};
+}
+
+util::Result<std::uint32_t>
+RemoteConnection::fopen(const std::string& path, std::uint16_t mode) {
+    Frame req;
+    req.opcode = Opcode::FOpen;
+    push_lp_str(req.payload, path);
+    write_u16_le(mode, req.payload);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::FOpenAck ||
+        rep.value().payload.size() < 4)
+        return fs_wire_err(rep.value(), "FOpen");
+    return read_u32_le(rep.value().payload.data());
+}
+
+util::Result<std::uint32_t>
+RemoteConnection::fcreate(const std::string& path, std::uint16_t attr) {
+    Frame req;
+    req.opcode = Opcode::FCreate;
+    push_lp_str(req.payload, path);
+    write_u16_le(attr, req.payload);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::FCreateAck ||
+        rep.value().payload.size() < 4)
+        return fs_wire_err(rep.value(), "FCreate");
+    return read_u32_le(rep.value().payload.data());
+}
+
+util::Result<void>
+RemoteConnection::fclose(std::uint32_t file_id) {
+    Frame req;
+    req.opcode = Opcode::FClose;
+    write_u32_le(file_id, req.payload);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::FCloseAck)
+        return fs_wire_err(rep.value(), "FClose");
+    return {};
+}
+
+util::Result<std::vector<std::uint8_t>>
+RemoteConnection::fread(std::uint32_t file_id, std::uint32_t nbytes) {
+    Frame req;
+    req.opcode = Opcode::FRead;
+    write_u32_le(file_id, req.payload);
+    write_u32_le(nbytes, req.payload);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::FReadAck ||
+        rep.value().payload.size() < 4)
+        return fs_wire_err(rep.value(), "FRead");
+    std::uint32_t n = read_u32_le(rep.value().payload.data());
+    if (4u + n > rep.value().payload.size())
+        return util::Error{5000, 0, "FRead: short data", ""};
+    return std::vector<std::uint8_t>(
+        rep.value().payload.begin() + 4,
+        rep.value().payload.begin() + 4 + static_cast<std::ptrdiff_t>(n));
+}
+
+util::Result<std::uint32_t>
+RemoteConnection::fwrite(std::uint32_t file_id, const std::uint8_t* data,
+                         std::uint32_t n) {
+    Frame req;
+    req.opcode = Opcode::FWrite;
+    write_u32_le(file_id, req.payload);
+    write_u32_le(n, req.payload);
+    if (data && n)
+        req.payload.insert(req.payload.end(), data, data + n);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::FWriteAck ||
+        rep.value().payload.size() < 4)
+        return fs_wire_err(rep.value(), "FWrite");
+    return read_u32_le(rep.value().payload.data());
+}
+
+util::Result<std::uint32_t>
+RemoteConnection::fseek(std::uint32_t file_id, std::int32_t offset,
+                        std::uint8_t origin) {
+    Frame req;
+    req.opcode = Opcode::FSeek;
+    write_u32_le(file_id, req.payload);
+    write_u32_le(static_cast<std::uint32_t>(offset), req.payload);
+    req.payload.push_back(origin);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::FSeekAck ||
+        rep.value().payload.size() < 4)
+        return fs_wire_err(rep.value(), "FSeek");
+    return read_u32_le(rep.value().payload.data());
+}
+
 util::Result<void>
 RemoteConnection::skip_unique(std::uint32_t index_id,
                                std::int32_t  direction) {

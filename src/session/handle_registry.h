@@ -44,7 +44,10 @@ enum class HandleKind {
     // Native MS SQL Server backend (mssql:// / tds://).
     MssqlConnection = 24,
     MssqlTable      = 25,
-    MssqlIndex      = 26
+    MssqlIndex      = 26,
+    // Server filesystem low-level file handles (oads_FOpen / AdsFOpen).
+    LocalFile       = 27,
+    RemoteFile      = 28
 };
 
 using Handle = std::uint64_t;

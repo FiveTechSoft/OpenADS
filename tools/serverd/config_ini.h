@@ -35,6 +35,10 @@ struct IniConfig {
     std::uint16_t http_port     = 0;
     bool          has_data      = false;
     std::string   data_dir;
+    // Enable remote client filesystem ops under data= (oads_*/AdsF*).
+    // Keys: EnableFileFunc / enable_file_func (0/1/true/false).
+    bool          has_enable_file_func = false;
+    bool          enable_file_func     = false;
     // SAP-style error log settings (ads_err.dbf): directory and max size
     // in kilobytes. Accepted keys: error_log_path (alias:
     // error_assert_logs, SAP's registry/ini name) and error_log_max.

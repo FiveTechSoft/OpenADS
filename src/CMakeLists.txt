@@ -17,9 +17,11 @@ endif()
 add_library(openads_core STATIC
     util/log.cpp
     platform/path.cpp
+    platform/fs_sandbox.cpp
     platform/time.cpp
     platform/thread.cpp
     platform/proc.cpp
+    engine/server_fs.cpp
     abi/ace_exports.cpp
     abi/ace_stubs.cpp
     abi/openads_sql_c.cpp

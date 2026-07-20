@@ -1,3 +1,23 @@
+## 1.8.18 — 2026-07-20
+
+### Added — server filesystem API (`oads_*` / `Ads*`)
+
+Client apps can manage files and directories under the server data root
+without a mapped drive (LetoDB-style surface, OpenADS names):
+
+- Meta: `AdsCheckExistence` / `AdsDeleteFile` (now sandboxed + remote),
+  `AdsRenameFile`, `AdsGetFileSize`, `AdsGetFileTime`, `AdsGetFileDate`,
+  `AdsDirectory`, `AdsDirExist`, `AdsDirMake`, `AdsDirRemove`
+- Low-level I/O: `AdsFOpen`, `AdsFCreate`, `AdsFClose`, `AdsFRead`,
+  `AdsFWrite`, `AdsFSeek`
+- Wire opcodes `0xE0`–`0xFD`; server gated by **`EnableFileFunc=0`**
+  (default) or `--enable-file-func`
+- Paths jailed under `--data` / connection data dir (absolute paths folded)
+- Harbour notes: `examples/harbour/oads_fs/`; design docs under
+  `docs/superpowers/specs/2026-07-20-oads-server-filesystem-design.md`
+
+Unit tests: `fs_sandbox_test`, `server_fs_test`, `abi_server_fs_test`.
+
 ## 1.8.17 — 2026-07-20
 
 ### Fixed — remote DbCreate / AdsCreateTable wrote next to the client app

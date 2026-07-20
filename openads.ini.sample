@@ -24,6 +24,10 @@ backlog = 16
 # Directory the engine serves tables from.
 data = .
 
+# Allow remote oads_*/Ads* filesystem ops (File/FErase/Directory/FOpen…).
+# Default 0 = denied. WARNING: enables client read/write/delete under data=.
+# EnableFileFunc = 0
+
 # Studio web console: set a port to expose the browser admin UI / REST API.
 # Leave commented out to disable it.
 # http_port = 6263
