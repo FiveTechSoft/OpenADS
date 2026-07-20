@@ -1,14 +1,14 @@
----
+﻿---
 title: AdsDDGetIndexProperty
 layout: default
-parent: Referência da API
+parent: ReferÃªncia da API
 nav_order: 1
 permalink: /pt/funcoes/ads-dd-get-index-property/
 ---
 
 # AdsDDGetIndexProperty
 
-Obtém uma propriedade de um índice no dicionário de dados.
+ObtÃ©m uma propriedade de um Ã­ndice no dicionÃ¡rio de dados.
 
 ## Sintaxe
 
@@ -16,24 +16,24 @@ Obtém uma propriedade de um índice no dicionário de dados.
 UNSIGNED32 ENTRYPOINT AdsDDGetIndexProperty(ADSHANDLE hConnect, UNSIGNED8* pucTableName, UNSIGNED8* pucTagName, UNSIGNED16 usPropertyID, void* pvProperty, UNSIGNED16* pusPropertyLen);
 ```
 
-## Parâmetros
+## ParÃ¢metros
 
-| Parâmetro | Tipo | Descrição |
+| ParÃ¢metro | Tipo | DescriÃ§Ã£o |
 |-----------|------|-----------|
-| `hConnect` | `ADSHANDLE` | Handle da conexão com o dicionário de dados. |
+| `hConnect` | `ADSHANDLE` | Handle da conexÃ£o com o dicionÃ¡rio de dados. |
 | `pucTableName` | `UNSIGNED8*` | Nome da tabela. |
-| `pucTagName` | `UNSIGNED8*` | Nome da tag do índice. |
+| `pucTagName` | `UNSIGNED8*` | Nome da tag do Ã­ndice. |
 | `usPropertyID` | `UNSIGNED16` | ID da propriedade a ser obtida. |
 | `pvProperty` | `void*` | Buffer para receber o valor da propriedade. |
 | `pusPropertyLen` | `UNSIGNED16*` | Comprimento do buffer; retorna o comprimento do valor. |
 
 ## Valor de Retorno
 
-`AE_SUCCESS` (0) em caso de sucesso. Código de erro se falhar.
+`AE_SUCCESS` (0) em caso de sucesso. CÃ³digo de erro se falhar.
 
-## Descrição
+## DescriÃ§Ã£o
 
-`AdsDDGetIndexProperty` recupera uma propriedade de um índice ou tag dentro de uma tabela no dicionário de dados. As propriedades incluem nome do arquivo, expressão, único, descendente, condição e comprimento da chave.
+`AdsDDGetIndexProperty` recupera uma propriedade de um Ã­ndice ou tag dentro de uma tabela no dicionÃ¡rio de dados. As propriedades incluem nome do arquivo, expressÃ£o, Ãºnico, descendente, condiÃ§Ã£o e comprimento da chave.
 
 ## Exemplo
 
@@ -41,14 +41,14 @@ UNSIGNED32 ENTRYPOINT AdsDDGetIndexProperty(ADSHANDLE hConnect, UNSIGNED8* pucTa
 UNSIGNED16 usLen = 256;
 UNSIGNED8 aucValue[256];
 
-AdsDDGetIndexProperty(hConnect, "Clientes", "IdxNome", ADS_DD_INDEX_EXPR, aucValue, &usLen);
+AdsDDGetIndexProperty(hConnect, "Clientes", "IdxNome", ADS_DD_INDEX_EXPRESSION, aucValue, &usLen);
 ```
 
-## Ver Também
+## Ver TambÃ©m
 
 - [AdsDDSetIndexProperty]({{ site.baseurl }}/pt/funcoes/ads-dd-set-index-property/)
 - [AdsDDAddIndexFile]({{ site.baseurl }}/pt/funcoes/ads-dd-add-index-file/)
 
 ---
 
-[AdsDDGetProcedureProperty →]({{ site.baseurl }}/pt/funcoes/ads-dd-get-procedure-property/)
+[AdsDDGetProcedureProperty â†’]({{ site.baseurl }}/pt/funcoes/ads-dd-get-procedure-property/)

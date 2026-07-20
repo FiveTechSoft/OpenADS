@@ -4,8 +4,9 @@
  *
  * POST { dd, table, rows: [{ Field, Required, Default }] }
  *
- * Writes ADS_DD_FIELD_REQUIRED (305) and ADS_DD_FIELD_DEFAULT (306)
- * for each supplied row via AdsDictionary::setFieldProperty.
+ * Writes ADS_DD_FIELD_CAN_NULL (301, UNSIGNED16: 0 = required) and
+ * ADS_DD_FIELD_DEFAULT_VALUE (300) for each supplied row via
+ * AdsDictionary::setFieldProperty — SAP ABI numbering.
  */
 header('Content-Type: application/json');
 session_start();
@@ -35,22 +36,23 @@ try {
         if ($field === '') continue;
         if (!preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $field)) continue;
 
-        // ADS_DD_FIELD_REQUIRED = 305 ('True' = required / cannot be null)
+        // ADS_DD_FIELD_CAN_NULL = 301 (UNSIGNED16; 0 = NOT NULL = required)
         if (isset($row['Required'])) {
-            $val = (strcasecmp(trim($row['Required']), 'True') === 0) ? 'True' : 'False';
+            $required = (strcasecmp(trim($row['Required']), 'True') === 0);
             try {
-                $dict->setFieldProperty($table, $field, 305, $val);
+                $dict->setFieldProperty($table, $field, 301,
+                                        pack('v', $required ? 0 : 1));
                 $saved++;
             } catch (Throwable $e) {
                 $errors[] = "$field Required: " . $e->getMessage();
             }
         }
 
-        // ADS_DD_FIELD_DEFAULT = 306
+        // ADS_DD_FIELD_DEFAULT_VALUE = 300
         if (array_key_exists('Default', $row)) {
             $val = trim($row['Default'] ?? '');
             try {
-                $dict->setFieldProperty($table, $field, 306, $val);
+                $dict->setFieldProperty($table, $field, 300, $val);
                 $saved++;
             } catch (Throwable $e) {
                 $errors[] = "$field Default: " . $e->getMessage();

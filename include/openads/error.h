@@ -29,6 +29,8 @@
 #undef AE_NO_CURRENT_RECORD
 #undef AE_INSUFFICIENT_BUFFER
 #undef AE_INVALID_EXPRESSION
+#undef AE_INVALID_PROPERTY_ID
+#undef AE_PROPERTY_NOT_SET
 #undef AE_COLUMN_CANNOT_BE_NULL
 #undef AE_NOT_VFP_NULLABLE_FIELD
 
@@ -74,6 +76,13 @@ enum : std::uint32_t {
     // filter expression cannot be optimised into a server-side AOF, causing
     // the stock rddads RDD to fall back to its client-side row filter.
     AE_INVALID_EXPRESSION       = 5079,
+    // 5126 = AE_INVALID_PROPERTY_ID (SAP SDK). AdsDDGet/Set*Property with
+    // a usPropertyID that is not valid for the object kind.
+    AE_INVALID_PROPERTY_ID      = 5126,
+    // 5138 = AE_PROPERTY_NOT_SET (SAP SDK). AdsDDGet*Property when the
+    // requested property has no value for the object (e.g. a field with
+    // no default value).
+    AE_PROPERTY_NOT_SET         = 5138,
     // 5147 = AE_COLUMN_CANNOT_BE_NULL (SAP SDK). Setting NULL on a column
     // that can never hold one (ADT AutoInc / RowVersion).
     AE_COLUMN_CANNOT_BE_NULL    = 5147,

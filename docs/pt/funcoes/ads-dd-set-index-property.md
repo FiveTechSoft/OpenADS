@@ -1,14 +1,14 @@
----
+﻿---
 title: AdsDDSetIndexProperty
 layout: default
-parent: Referência da API
+parent: ReferÃªncia da API
 nav_order: 1
 permalink: /pt/funcoes/ads-dd-set-index-property/
 ---
 
 # AdsDDSetIndexProperty
 
-Define uma propriedade de um índice no dicionário de dados.
+Define uma propriedade de um Ã­ndice no dicionÃ¡rio de dados.
 
 ## Sintaxe
 
@@ -16,36 +16,36 @@ Define uma propriedade de um índice no dicionário de dados.
 UNSIGNED32 ENTRYPOINT AdsDDSetIndexProperty(ADSHANDLE hConnect, UNSIGNED8* pucTableName, UNSIGNED8* pucTagName, UNSIGNED16 usPropertyID, void* pvProperty, UNSIGNED16 usPropertyLen);
 ```
 
-## Parâmetros
+## ParÃ¢metros
 
-| Parâmetro | Tipo | Descrição |
+| ParÃ¢metro | Tipo | DescriÃ§Ã£o |
 |-----------|------|-----------|
-| `hConnect` | `ADSHANDLE` | Handle da conexão com o dicionário de dados. |
+| `hConnect` | `ADSHANDLE` | Handle da conexÃ£o com o dicionÃ¡rio de dados. |
 | `pucTableName` | `UNSIGNED8*` | Nome da tabela. |
-| `pucTagName` | `UNSIGNED8*` | Nome da tag do índice. |
+| `pucTagName` | `UNSIGNED8*` | Nome da tag do Ã­ndice. |
 | `usPropertyID` | `UNSIGNED16` | ID da propriedade a ser definida. |
 | `pvProperty` | `void*` | Valor da propriedade. |
 | `usPropertyLen` | `UNSIGNED16` | Comprimento do valor. |
 
 ## Valor de Retorno
 
-`AE_SUCCESS` (0) em caso de sucesso. Código de erro se falhar.
+`AE_SUCCESS` (0) em caso de sucesso. CÃ³digo de erro se falhar.
 
-## Descrição
+## DescriÃ§Ã£o
 
-`AdsDDSetIndexProperty` define uma propriedade de um índice ou tag dentro de uma tabela no dicionário de dados. As propriedades que podem ser definidas incluem expressão, único, descendente e condição.
+`AdsDDSetIndexProperty` define uma propriedade de um Ã­ndice ou tag dentro de uma tabela no dicionÃ¡rio de dados. As propriedades que podem ser definidas incluem expressÃ£o, Ãºnico, descendente e condiÃ§Ã£o.
 
 ## Exemplo
 
 ```c
-AdsDDSetIndexProperty(hConnect, "Clientes", "IdxNome", ADS_DD_INDEX_DESCENDING, &bTrue, sizeof(UNSIGNED16));
+AdsDDSetIndexProperty(hConnect, "Clientes", "IdxNome", ADS_DD_INDEX_OPTIONS, &bTrue, sizeof(UNSIGNED16));
 ```
 
-## Ver Também
+## Ver TambÃ©m
 
 - [AdsDDGetIndexProperty]({{ site.baseurl }}/pt/funcoes/ads-dd-get-index-property/)
 - [AdsDDAddIndexFile]({{ site.baseurl }}/pt/funcoes/ads-dd-add-index-file/)
 
 ---
 
-[AdsDDSetProcedureProperty →]({{ site.baseurl }}/pt/funcoes/ads-dd-set-procedure-property/)
+[AdsDDSetProcedureProperty â†’]({{ site.baseurl }}/pt/funcoes/ads-dd-set-procedure-property/)

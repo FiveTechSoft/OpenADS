@@ -787,8 +787,8 @@ int main(int argc, char** argv) {
     // itself reports. Any disagreement lands in warnings — the decode is
     // reverse-engineered, ACE is authoritative.
     //
-    // SAP's REAL property IDs (verified against rddads ads.ch — NOT the
-    // renumbered constants in include/openads/ace.h):
+    // SAP property IDs (rddads ads.ch; include/openads/ace.h uses the
+    // same numbering since the ABI renumbering fix):
     //   300 ADS_DD_FIELD_DEFAULT_VALUE  (NUL-terminated string;
     //                                    AE_PROPERTY_NOT_SET when absent)
     //   301 ADS_DD_FIELD_CAN_NULL       (UNSIGNED16; non-zero = nullable)

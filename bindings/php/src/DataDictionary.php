@@ -111,9 +111,12 @@ final class DataDictionary
     // -------------------------------------------------------------------------
 
     /**
-     * Get a field property (ADS_DD_FIELD_* constants).
-     * Structural properties (NAME, TYPE, LENGTH, DECIMAL) are read live from
-     * the table file. Returns raw bytes; numeric properties need unpack().
+     * Get a field property (ADS_DD_FIELD_* constants, SAP ABI numbering).
+     * Structural properties (TYPE, LENGTH, DECIMAL, DEFINITION) are read
+     * live from the table file. Returns raw bytes; UNSIGNED16 properties
+     * (CAN_NULL, TYPE, LENGTH, DECIMAL) need unpack('v', ...).
+     * DEFAULT_VALUE / MIN / MAX throw when the property is unset
+     * (AE_PROPERTY_NOT_SET, 5138).
      */
     public function getFieldProperty(string $alias, string $field, int $prop): string
     {
@@ -128,7 +131,12 @@ final class DataDictionary
         );
     }
 
-    /** Set a stored field property (REQUIRED, DEFAULT, VALIDATION_RULE/MSG, COMMENT). */
+    /**
+     * Set a stored field property (DEFAULT_VALUE, CAN_NULL, MIN/MAX,
+     * VALIDATION_MSG, OA_FIELD_VALIDATION_RULE, or the generic
+     * ADS_DD_COMMENT). For CAN_NULL pass pack('v', 0|1) — the ABI takes
+     * an UNSIGNED16 (text T/F is tolerated by OpenADS as an extension).
+     */
     public function setFieldProperty(string $alias, string $field, int $prop, string $value): void
     {
         $buf = Connection::cstr($this->ffi, $value);

@@ -72,7 +72,9 @@ if (!extension_loaded('openads') && !class_exists('AdsConnection')) {
         public function removeTable(string $alias, bool $deleteFiles = false): void {}
         public function addIndexFile(string $table, string $indexPath, string $comment = ''): void {}
         public function removeIndexFile(string $table, string $indexPath): void {}
-        // Index property codes: ADS_DD_INDEX_UNIQUE=408, ADS_DD_INDEX_DESCENDING=407, ADS_DD_INDEX_EXPR=401
+        // Index property codes (SAP ABI): 400=FILE_NAME 401=EXPRESSION
+        // 402=CONDITION 403=OPTIONS(u32 bitmask) 404=KEY_LENGTH(u16)
+        // 405=KEY_TYPE(u16)
         public function getIndexProperty(string $table, string $indexName, int $property): string {}
         public function setIndexProperty(string $table, string $indexName, int $property, string $value): void {}
         // Trigger property codes: 1401=event_mask(u32) 1402=timing(u32) 1404=body(container) 1405=proc_name 1408=table

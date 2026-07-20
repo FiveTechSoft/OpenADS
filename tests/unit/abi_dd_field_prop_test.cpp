@@ -90,22 +90,24 @@ struct FpFixture {
 
 } // namespace
 
-TEST_CASE("AdsDDGetFieldProperty — structural: name and type") {
+TEST_CASE("AdsDDGetFieldProperty — structural: type and definition") {
     FpFixture f;
     UNSIGNED8 tbl[16] = "people";
-
-    char buf[64];
-    UNSIGNED16 len = sizeof(buf);
     UNSIGNED8 fld[16] = "NAME";
-    REQUIRE(AdsDDGetFieldProperty(f.hConn, tbl, fld, ADS_DD_FIELD_NAME,
-                                   buf, &len) == 0);
-    REQUIRE(std::string(buf, len) == "NAME");
 
+    // SAP ABI: ADS_DD_FIELD_TYPE = 306, UNSIGNED16 ADS data type.
     UNSIGNED16 type_val = 0;
-    len = sizeof(type_val);
+    UNSIGNED16 len = sizeof(type_val);
     REQUIRE(AdsDDGetFieldProperty(f.hConn, tbl, fld, ADS_DD_FIELD_TYPE,
                                    &type_val, &len) == 0);
     CHECK(type_val == ADS_STRING);
+
+    // ADS_DD_FIELD_DEFINITION = 305 — field-definition text.
+    char buf[64];
+    len = sizeof(buf);
+    REQUIRE(AdsDDGetFieldProperty(f.hConn, tbl, fld, ADS_DD_FIELD_DEFINITION,
+                                   buf, &len) == 0);
+    CHECK(std::string(buf, len).find("NAME") == 0);
 }
 
 TEST_CASE("AdsDDGetFieldProperty — structural: length and decimals") {
@@ -130,32 +132,47 @@ TEST_CASE("AdsDDSetFieldProperty + AdsDDGetFieldProperty — stored props round-
     UNSIGNED8 tbl[16] = "people";
     UNSIGNED8 fld[16] = "NAME";
 
-    // Set comment
+    // Set comment (fields use the generic ADS_DD_COMMENT property — SAP
+    // has no field-specific comment id).
     const char* cmt = "The person's name";
-    REQUIRE(AdsDDSetFieldProperty(f.hConn, tbl, fld, ADS_DD_FIELD_COMMENT,
+    REQUIRE(AdsDDSetFieldProperty(f.hConn, tbl, fld, ADS_DD_COMMENT,
                                    const_cast<char*>(cmt),
                                    static_cast<UNSIGNED16>(std::strlen(cmt))) == 0);
-    // Set required flag
-    const char* req = "1";
-    REQUIRE(AdsDDSetFieldProperty(f.hConn, tbl, fld, ADS_DD_FIELD_REQUIRED,
-                                   const_cast<char*>(req), 1) == 0);
-    // Set default value
+    // Mark NOT NULL: ADS_DD_FIELD_CAN_NULL = 301, UNSIGNED16 (0 = NULL
+    // not allowed).
+    UNSIGNED16 can_null = 0;
+    REQUIRE(AdsDDSetFieldProperty(f.hConn, tbl, fld, ADS_DD_FIELD_CAN_NULL,
+                                   &can_null, sizeof(can_null)) == 0);
+    // Set default value (ADS_DD_FIELD_DEFAULT_VALUE = 300).
     const char* def = "Unknown";
-    REQUIRE(AdsDDSetFieldProperty(f.hConn, tbl, fld, ADS_DD_FIELD_DEFAULT,
+    REQUIRE(AdsDDSetFieldProperty(f.hConn, tbl, fld, ADS_DD_FIELD_DEFAULT_VALUE,
                                    const_cast<char*>(def),
                                    static_cast<UNSIGNED16>(std::strlen(def))) == 0);
 
     // Read back
     char buf[128];
     UNSIGNED16 len = sizeof(buf);
-    REQUIRE(AdsDDGetFieldProperty(f.hConn, tbl, fld, ADS_DD_FIELD_COMMENT,
+    REQUIRE(AdsDDGetFieldProperty(f.hConn, tbl, fld, ADS_DD_COMMENT,
                                    buf, &len) == 0);
     CHECK(std::string(buf, len) == "The person's name");
 
+    UNSIGNED16 got_null = 99;
+    len = sizeof(got_null);
+    REQUIRE(AdsDDGetFieldProperty(f.hConn, tbl, fld, ADS_DD_FIELD_CAN_NULL,
+                                   &got_null, &len) == 0);
+    CHECK(got_null == 0);            // NOT NULL round-trips
+
     len = sizeof(buf);
-    REQUIRE(AdsDDGetFieldProperty(f.hConn, tbl, fld, ADS_DD_FIELD_DEFAULT,
+    REQUIRE(AdsDDGetFieldProperty(f.hConn, tbl, fld, ADS_DD_FIELD_DEFAULT_VALUE,
                                    buf, &len) == 0);
     CHECK(std::string(buf, len) == "Unknown");
+
+    // A field with no default reports AE_PROPERTY_NOT_SET (SAP behavior).
+    UNSIGNED8 fld_age[8] = "AGE";
+    len = sizeof(buf);
+    CHECK(AdsDDGetFieldProperty(f.hConn, tbl, fld_age,
+                                ADS_DD_FIELD_DEFAULT_VALUE, buf, &len) ==
+          openads::AE_PROPERTY_NOT_SET);
 }
 
 TEST_CASE("AdsDDGetFieldProperty — unknown field returns error") {
@@ -164,7 +181,7 @@ TEST_CASE("AdsDDGetFieldProperty — unknown field returns error") {
     UNSIGNED8 fld[16] = "NOPE";
     char buf[64];
     UNSIGNED16 len = sizeof(buf);
-    UNSIGNED32 rc = AdsDDGetFieldProperty(f.hConn, tbl, fld, ADS_DD_FIELD_NAME,
+    UNSIGNED32 rc = AdsDDGetFieldProperty(f.hConn, tbl, fld, ADS_DD_FIELD_TYPE,
                                            buf, &len);
     CHECK(rc != 0);
 }
@@ -174,7 +191,7 @@ TEST_CASE("AdsDDSetFieldProperty — structural prop returns not-available") {
     UNSIGNED8 tbl[16] = "people";
     UNSIGNED8 fld[16] = "NAME";
     const char* val = "NewName";
-    UNSIGNED32 rc = AdsDDSetFieldProperty(f.hConn, tbl, fld, ADS_DD_FIELD_NAME,
+    UNSIGNED32 rc = AdsDDSetFieldProperty(f.hConn, tbl, fld, ADS_DD_FIELD_TYPE,
                                            const_cast<char*>(val), 7);
     CHECK(rc == openads::AE_FUNCTION_NOT_AVAILABLE);
 }
@@ -197,7 +214,7 @@ TEST_CASE("AdsDDGetFieldProperty — persists across DD reopen") {
         REQUIRE(AdsDDAddTable(hConn, alias, path, 0, 0, nullptr, nullptr) == 0);
         UNSIGNED8 tbl[8] = "emp", fld[8] = "NAME";
         const char* rule = "LEN(NAME)>0";
-        REQUIRE(AdsDDSetFieldProperty(hConn, tbl, fld, ADS_DD_FIELD_VALIDATION_RULE,
+        REQUIRE(AdsDDSetFieldProperty(hConn, tbl, fld, ADS_DD_OA_FIELD_VALIDATION_RULE,
                                        const_cast<char*>(rule),
                                        static_cast<UNSIGNED16>(std::strlen(rule))) == 0);
         AdsDisconnect(hConn);
@@ -209,7 +226,7 @@ TEST_CASE("AdsDDGetFieldProperty — persists across DD reopen") {
         UNSIGNED8 tbl[8] = "emp", fld[8] = "NAME";
         char buf[128];
         UNSIGNED16 len = sizeof(buf);
-        REQUIRE(AdsDDGetFieldProperty(hConn, tbl, fld, ADS_DD_FIELD_VALIDATION_RULE,
+        REQUIRE(AdsDDGetFieldProperty(hConn, tbl, fld, ADS_DD_OA_FIELD_VALIDATION_RULE,
                                        buf, &len) == 0);
         CHECK(std::string(buf, len) == "LEN(NAME)>0");
         AdsDisconnect(hConn);

@@ -13700,11 +13700,10 @@ UNSIGNED32 ENTRYPOINT AdsDDGetFieldProperty(ADSHANDLE hConn, UNSIGNED8* pucTable
     if (dd == nullptr) {
 #if defined(OPENADS_WITH_POSTGRESQL)
         // No Advantage Data Dictionary on this connection: a SQL backend with a
-        // live catalog (PostgreSQL information_schema) can still answer REQUIRED
-        // (=> nullable) and DEFAULT per field. The value uses the same encoding as
-        // the dictionary path ("T"/"F" for REQUIRED, the literal for DEFAULT) so
-        // the caller need not know which source provided it.
-        if (usProp == ADS_DD_FIELD_REQUIRED || usProp == ADS_DD_FIELD_DEFAULT) {
+        // live catalog (PostgreSQL information_schema) can still answer
+        // CAN_NULL (UNSIGNED16, SAP shape) and DEFAULT_VALUE per field.
+        if (usProp == ADS_DD_FIELD_CAN_NULL ||
+            usProp == ADS_DD_FIELD_DEFAULT_VALUE) {
             if (auto* pc = state().registry
                     .lookup<openads::sql_backend::PostgresConnection>(
                         hConn, HandleKind::PostgresConnection)) {
@@ -13720,9 +13719,21 @@ UNSIGNED32 ENTRYPOINT AdsDDGetFieldProperty(ADSHANDLE hConn, UNSIGNED8* pucTable
                                            return std::toupper((unsigned char) a) ==
                                                   std::toupper((unsigned char) b);
                                        })) {
-                            return usProp == ADS_DD_FIELD_REQUIRED
-                                ? put_str(fd2.nullable ? "F" : "T")
-                                : put_str(fd2.default_value);
+                            if (usProp == ADS_DD_FIELD_CAN_NULL) {
+                                if (pBuf != nullptr && cap >= 2) {
+                                    auto* b = static_cast<std::uint8_t*>(pBuf);
+                                    b[0] = fd2.nullable ? 1 : 0;
+                                    b[1] = 0;
+                                }
+                                *pusLen = 2;
+                                return ok();
+                            }
+                            if (fd2.default_value.empty()) {
+                                *pusLen = 0;
+                                return fail(openads::AE_PROPERTY_NOT_SET,
+                                            want.c_str());
+                            }
+                            return put_str(fd2.default_value);
                         }
                     }
                 }
@@ -13754,9 +13765,11 @@ UNSIGNED32 ENTRYPOINT AdsDDGetFieldProperty(ADSHANDLE hConn, UNSIGNED8* pucTable
         return ok();
     };
 
-    // Structural properties: open the table briefly, read the field descriptor.
-    if (usProp == ADS_DD_FIELD_NAME   || usProp == ADS_DD_FIELD_TYPE  ||
-        usProp == ADS_DD_FIELD_LENGTH || usProp == ADS_DD_FIELD_DECIMAL) {
+    // Structural properties: open the table briefly, read the field
+    // descriptor. SAP ABI (ace_adsddgetfieldproperty.htm): TYPE / LENGTH /
+    // DECIMAL are UNSIGNED16; DEFINITION is the field-definition text.
+    if (usProp == ADS_DD_FIELD_TYPE   || usProp == ADS_DD_FIELD_LENGTH ||
+        usProp == ADS_DD_FIELD_DECIMAL || usProp == ADS_DD_FIELD_DEFINITION) {
 
         std::string rel = dd->resolve(alias);
         auto th = c->open_table(rel, openads::engine::TableType::Cdx,
@@ -13771,14 +13784,17 @@ UNSIGNED32 ENTRYPOINT AdsDDGetFieldProperty(ADSHANDLE hConn, UNSIGNED8* pucTable
                 ret = fail(static_cast<int>(openads::AE_NO_FILE_FOUND), field.c_str());
             } else {
                 const auto& fd = tbl->field_descriptor(static_cast<std::uint16_t>(fi));
-                if (usProp == ADS_DD_FIELD_NAME) {
-                    ret = put_str(fd.name);
-                } else if (usProp == ADS_DD_FIELD_TYPE) {
+                if (usProp == ADS_DD_FIELD_TYPE) {
                     ret = put_u16(map_field_type(fd.type));
                 } else if (usProp == ADS_DD_FIELD_LENGTH) {
                     ret = put_u16(static_cast<std::uint16_t>(fd.length));
                 } else if (usProp == ADS_DD_FIELD_DECIMAL) {
                     ret = put_u16(static_cast<std::uint16_t>(fd.decimals));
+                } else {  // ADS_DD_FIELD_DEFINITION — "name, type, len, dec"
+                    ret = put_str(fd.name + "," +
+                                  std::to_string(map_field_type(fd.type)) +
+                                  "," + std::to_string(fd.length) + "," +
+                                  std::to_string(fd.decimals));
                 }
             }
         }
@@ -13786,19 +13802,37 @@ UNSIGNED32 ENTRYPOINT AdsDDGetFieldProperty(ADSHANDLE hConn, UNSIGNED8* pucTable
         return ret;
     }
 
-    // Stored properties: read from field_props_.
+    // CAN_NULL: UNSIGNED16, non-zero = a NULL value is allowed (SAP shape).
+    // The stored "required" flag is the inverse.
+    if (usProp == ADS_DD_FIELD_CAN_NULL) {
+        bool required = dd->get_field_property(alias, field, "required") == "T";
+        return put_u16(required ? 0 : 1);
+    }
+
+    // Stored string properties from field_props_. DEFAULT_VALUE / MIN /
+    // MAX return AE_PROPERTY_NOT_SET when absent (SAP behavior).
     std::string key;
+    bool not_set_when_empty = false;
     switch (usProp) {
-        case ADS_DD_FIELD_REQUIRED:        key = "required"; break;
-        case ADS_DD_FIELD_DEFAULT:         key = "default"; break;
-        case ADS_DD_FIELD_VALIDATION_RULE: key = "rule"; break;
-        case ADS_DD_FIELD_VALIDATION_MSG:  key = "msg"; break;
-        case ADS_DD_FIELD_COMMENT:         key = "comment"; break;
+        case ADS_DD_FIELD_DEFAULT_VALUE:
+            key = "default"; not_set_when_empty = true; break;
+        case ADS_DD_FIELD_MIN_VALUE:
+            key = "min";     not_set_when_empty = true; break;
+        case ADS_DD_FIELD_MAX_VALUE:
+            key = "max";     not_set_when_empty = true; break;
+        case ADS_DD_FIELD_VALIDATION_MSG:    key = "msg";     break;
+        case ADS_DD_OA_FIELD_VALIDATION_RULE: key = "rule";   break;
+        case ADS_DD_COMMENT:                 key = "comment"; break;
         default:
             *pusLen = 0;
-            return fail(openads::AE_FUNCTION_NOT_AVAILABLE, "");
+            return fail(openads::AE_INVALID_PROPERTY_ID, "");
     }
-    return put_str(dd->get_field_property(alias, field, key));
+    std::string val = dd->get_field_property(alias, field, key);
+    if (val.empty() && not_set_when_empty) {
+        *pusLen = 0;
+        return fail(openads::AE_PROPERTY_NOT_SET, field.c_str());
+    }
+    return put_str(val);
 }
 
 UNSIGNED32 ENTRYPOINT AdsDDSetFieldProperty(ADSHANDLE hConn, UNSIGNED8* pucTable,
@@ -13821,19 +13855,39 @@ UNSIGNED32 ENTRYPOINT AdsDDSetFieldProperty(ADSHANDLE hConn, UNSIGNED8* pucTable
     if (!dd->has_alias(alias))
         return fail(static_cast<int>(openads::AE_TABLE_NOT_FOUND), alias.c_str());
 
-    // Structural props are read-only.
-    if (usProp >= ADS_DD_FIELD_NAME && usProp <= ADS_DD_FIELD_DECIMAL)
+    // Structural props (TYPE / LENGTH / DECIMAL / DEFINITION) are read-only.
+    if (usProp == ADS_DD_FIELD_TYPE || usProp == ADS_DD_FIELD_LENGTH ||
+        usProp == ADS_DD_FIELD_DECIMAL || usProp == ADS_DD_FIELD_DEFINITION)
         return fail(openads::AE_FUNCTION_NOT_AVAILABLE, "read-only field prop");
+
+    // CAN_NULL: SAP passes an UNSIGNED16 (non-zero = nullable). Text
+    // spellings (T/F, True/False) are tolerated for OA's own callers.
+    if (usProp == ADS_DD_FIELD_CAN_NULL) {
+        bool can_null = true;
+        if (pBuf != nullptr && usLen == 2) {
+            const auto* b = static_cast<const std::uint8_t*>(pBuf);
+            can_null = (static_cast<std::uint16_t>(b[0]) |
+                        (static_cast<std::uint16_t>(b[1]) << 8)) != 0;
+        } else if (pBuf != nullptr && usLen > 0) {
+            char c0 = static_cast<const char*>(pBuf)[0];
+            can_null = !(c0 == 'F' || c0 == 'f' || c0 == '0');
+        }
+        auto r = dd->set_field_property(alias, field, "required",
+                                        can_null ? "" : "T");
+        if (!r) return fail(r.error());
+        return ok();
+    }
 
     std::string key;
     switch (usProp) {
-        case ADS_DD_FIELD_REQUIRED:        key = "required"; break;
-        case ADS_DD_FIELD_DEFAULT:         key = "default"; break;
-        case ADS_DD_FIELD_VALIDATION_RULE: key = "rule"; break;
-        case ADS_DD_FIELD_VALIDATION_MSG:  key = "msg"; break;
-        case ADS_DD_FIELD_COMMENT:         key = "comment"; break;
+        case ADS_DD_FIELD_DEFAULT_VALUE:      key = "default"; break;
+        case ADS_DD_FIELD_MIN_VALUE:          key = "min";     break;
+        case ADS_DD_FIELD_MAX_VALUE:          key = "max";     break;
+        case ADS_DD_FIELD_VALIDATION_MSG:     key = "msg";     break;
+        case ADS_DD_OA_FIELD_VALIDATION_RULE: key = "rule";    break;
+        case ADS_DD_COMMENT:                  key = "comment"; break;
         default:
-            return fail(openads::AE_FUNCTION_NOT_AVAILABLE, "");
+            return fail(openads::AE_INVALID_PROPERTY_ID, "");
     }
     std::string val = pBuf && usLen > 0
         ? std::string(static_cast<const char*>(pBuf), usLen) : std::string{};
@@ -13911,15 +13965,38 @@ UNSIGNED32 ENTRYPOINT AdsDDGetIndexProperty(ADSHANDLE hConn, UNSIGNED8* pucTable
 
     switch (usProp) {
         case ADS_DD_INDEX_FILE_NAME:  return put_str(found_path);
-        case ADS_DD_INDEX_EXPR:       return put_str(found_idx->expression());
-        case ADS_DD_INDEX_UNIQUE:     return put_u16(found_idx->unique()     ? 1 : 0);
-        case ADS_DD_INDEX_DESCENDING: return put_u16(found_idx->descending() ? 1 : 0);
+        case ADS_DD_INDEX_EXPRESSION: return put_str(found_idx->expression());
         case ADS_DD_INDEX_CONDITION:  return put_str({});  // not exposed by IIndex
+        case ADS_DD_INDEX_OPTIONS: {
+            // SAP shape: UNSIGNED32 bitmask of ADS_UNIQUE / ADS_COMPOUND /
+            // ADS_CUSTOM / ADS_DESCENDING.
+            UNSIGNED32 opts = 0;
+            if (found_idx->unique())     opts |= ADS_UNIQUE;
+            if (found_idx->descending()) opts |= ADS_DESCENDING;
+            if (pBuf != nullptr && cap >= 4) {
+                auto* b = static_cast<std::uint8_t*>(pBuf);
+                b[0] = static_cast<std::uint8_t>( opts        & 0xFFu);
+                b[1] = static_cast<std::uint8_t>((opts >>  8) & 0xFFu);
+                b[2] = static_cast<std::uint8_t>((opts >> 16) & 0xFFu);
+                b[3] = static_cast<std::uint8_t>((opts >> 24) & 0xFFu);
+            }
+            *pusLen = 4;
+            return ok();
+        }
         case ADS_DD_INDEX_KEY_LENGTH: return put_u16(found_idx->key_length());
-        case ADS_DD_INDEX_TYPE:       return put_u16(0);   // CDX=0 (not exposed by IIndex)
+        case ADS_DD_INDEX_KEY_TYPE: {
+            // SAP shape: UNSIGNED16 ADS data type of the key (see
+            // AdsGetKeyType) — numeric-encoded keys report ADS_NUMERIC,
+            // everything else ADS_STRING.
+            using KE = openads::drivers::KeyEncoding;
+            bool numeric =
+                found_idx->key_encoding() == KE::FoxNumeric ||
+                found_idx->key_encoding() == KE::NtxNumeric;
+            return put_u16(numeric ? ADS_NUMERIC : ADS_STRING);
+        }
         default:
             *pusLen = 0;
-            return fail(openads::AE_FUNCTION_NOT_AVAILABLE, "");
+            return fail(openads::AE_INVALID_PROPERTY_ID, "");
     }
 }
 

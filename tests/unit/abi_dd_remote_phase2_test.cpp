@@ -1,6 +1,6 @@
-// abi_dd_remote_phase2_test.cpp — M12.30: AdsDD* Data Dictionary property
+﻿// abi_dd_remote_phase2_test.cpp â€” M12.30: AdsDD* Data Dictionary property
 // API over a remote (tcp://) connection, phase 2 (the surface deferred by
-// phase 1 / M12.29, see docs/wire-protocol.md §5.25): user/group management,
+// phase 1 / M12.29, see docs/wire-protocol.md Â§5.25): user/group management,
 // links, referential integrity create, views, index-file registration,
 // index/user-table-rights properties, and permissions.
 //
@@ -131,7 +131,7 @@ TEST_CASE("M12.30 remote AdsDDCreateUser + AdsDDDropObject(User)") {
     AdsDisconnect(hRemote);
 
     ADSHANDLE hLocal = f.connect_local();
-    // Persisted to disk: local sees the same (deleted) user state — the
+    // Persisted to disk: local sees the same (deleted) user state â€” the
     // description property is gone along with the user record.
     len = sizeof(buf);
     REQUIRE(AdsDDGetUserProperty(hLocal, user, 1, buf, &len) == 0);
@@ -167,7 +167,7 @@ TEST_CASE("M12.30 remote AdsDDCreateLink + AdsDDModifyLink + AdsDDDropLink") {
     AdsDisconnect(hRemote);
 }
 
-TEST_CASE("M12.30 remote AdsDDCreateRefIntegrity + AdsDDDropObject(RefIntegrity) — "
+TEST_CASE("M12.30 remote AdsDDCreateRefIntegrity + AdsDDDropObject(RefIntegrity) â€” "
          "cross-checked against the phase-1 property getter") {
     DdRemoteFixture f;
     ADSHANDLE hRemote = f.connect_remote();
@@ -191,7 +191,7 @@ TEST_CASE("M12.30 remote AdsDDCreateRefIntegrity + AdsDDDropObject(RefIntegrity)
     AdsDisconnect(hRemote);
 }
 
-TEST_CASE("M12.30 remote AdsDDCreateView — cross-checked against the "
+TEST_CASE("M12.30 remote AdsDDCreateView â€” cross-checked against the "
          "phase-1 property getter") {
     DdRemoteFixture f;
     ADSHANDLE hRemote = f.connect_remote();
@@ -249,7 +249,7 @@ TEST_CASE("M12.30 remote AdsDDAddIndexFile / AdsDDRemoveIndexFile") {
     AdsDisconnect(hRemote);
 }
 
-TEST_CASE("M12.30 remote AdsDDGetIndexProperty — routes to a real error, "
+TEST_CASE("M12.30 remote AdsDDGetIndexProperty â€” routes to a real error, "
          "not the old silent empty success") {
     DdRemoteFixture f;
     ADSHANDLE hRemote = f.connect_remote();
@@ -260,10 +260,10 @@ TEST_CASE("M12.30 remote AdsDDGetIndexProperty — routes to a real error, "
     char buf[64];
     UNSIGNED16 lenRemote = sizeof(buf);
     UNSIGNED32 rcRemote = AdsDDGetIndexProperty(hRemote, tbl, idx,
-        ADS_DD_INDEX_EXPR, buf, &lenRemote);
+        ADS_DD_INDEX_EXPRESSION, buf, &lenRemote);
     UNSIGNED16 lenLocal = sizeof(buf);
     UNSIGNED32 rcLocal = AdsDDGetIndexProperty(hLocal, tbl, idx,
-        ADS_DD_INDEX_EXPR, buf, &lenLocal);
+        ADS_DD_INDEX_EXPRESSION, buf, &lenLocal);
 
     CHECK(rcRemote != 0);
     CHECK(rcRemote == rcLocal);
@@ -314,7 +314,7 @@ TEST_CASE("M12.30 remote AdsDDGrantPermission / AdsDDGetPermissions / "
     CHECK(got == kBits);
 
     // AdsDDRevokePermission is a pure wrapper around GrantPermission(...,0)
-    // locally — this pins that the wrapper's remote path also works now
+    // locally â€” this pins that the wrapper's remote path also works now
     // that the function it forwards to is wired.
     REQUIRE(AdsDDRevokePermission(hRemote, kTableType, objName, nullptr,
                                   grantee, 0) == 0);

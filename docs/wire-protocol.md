@@ -836,32 +836,39 @@ Both take `hConnect`, `pucTableName`, `usPropertyID`, `pvProperty`, `pusProperty
 
 Both take `hConnect`, `pucTableName`, `pucFieldName`, `usPropertyID`, `pvProperty`, `pusPropertyLen`.
 
+SAP ABI numbering (matches rddads `ads.ch`; real ADS clients pass these
+exact values). Field comments use the generic `ADS_DD_COMMENT` (1).
+`DEFAULT_VALUE` / `MIN_VALUE` / `MAX_VALUE` return `AE_PROPERTY_NOT_SET`
+(5138) when the property is unset.
+
 | Constant | Value | Type | Description |
 |----------|-------|------|-------------|
-| `ADS_DD_FIELD_NAME`            | 301 | string | Field name |
-| `ADS_DD_FIELD_TYPE`            | 302 | string | Type character (`C`, `N`, `D`, `L`, `M`, `I`, `V`, `Q`, `Y`, `B`, `W`) |
-| `ADS_DD_FIELD_LENGTH`          | 303 | u16   | Column width in bytes |
-| `ADS_DD_FIELD_DECIMAL`         | 304 | u16   | Decimal digits (numeric fields) |
-| `ADS_DD_FIELD_REQUIRED`        | 305 | u16   | `ADS_TRUE` → NULL / blank rejected by engine |
-| `ADS_DD_FIELD_DEFAULT`         | 306 | string | Default value expression |
-| `ADS_DD_FIELD_VALIDATION_RULE` | 307 | string | Per-field validation expression |
-| `ADS_DD_FIELD_VALIDATION_MSG`  | 308 | string | Message on validation failure |
-| `ADS_DD_FIELD_COMMENT`         | 309 | string | Free-text comment |
+| `ADS_DD_FIELD_DEFAULT_VALUE`   | 300 | string | Default value expression |
+| `ADS_DD_FIELD_CAN_NULL`        | 301 | u16   | Non-zero → NULL allowed (0 = required) |
+| `ADS_DD_FIELD_MIN_VALUE`       | 302 | string | Minimum-value expression |
+| `ADS_DD_FIELD_MAX_VALUE`       | 303 | string | Maximum-value expression |
+| `ADS_DD_FIELD_VALIDATION_MSG`  | 304 | string | Message on validation failure |
+| `ADS_DD_FIELD_DEFINITION`      | 305 | string | Field definition text |
+| `ADS_DD_FIELD_TYPE`            | 306 | u16   | ADS data type (see `AdsGetFieldType`) |
+| `ADS_DD_FIELD_LENGTH`          | 307 | u16   | Column width in bytes |
+| `ADS_DD_FIELD_DECIMAL`         | 308 | u16   | Decimal digits (numeric fields) |
+| `ADS_DD_OA_FIELD_VALIDATION_RULE` | 390 | string | OpenADS extension: per-field validation expression |
 
 ### 9.5 Index properties (`AdsDDGetIndexProperty` / `AdsDDSetIndexProperty`)
 
 Both take `hConnect`, `pucTableName`, `pucTagName`, `usPropertyID`, `pvProperty`, `pusPropertyLen`.
 
+SAP ABI numbering (matches rddads `ads.ch`). Unique / descending travel
+inside the `OPTIONS` bitmask, not as standalone properties.
+
 | Constant | Value | Type | Description |
 |----------|-------|------|-------------|
-| `ADS_DD_INDEX_FILE_NAME`  | 401 | string | Bound `.cdx` / `.ntx` file name |
-| `ADS_DD_INDEX_EXPR`       | 402 | string | Key expression |
-| `ADS_DD_INDEX_UNIQUE`     | 403 | u16   | `ADS_TRUE` → unique key |
-| `ADS_DD_INDEX_DESCENDING` | 404 | u16   | `ADS_TRUE` → descending sort |
-| `ADS_DD_INDEX_CONDITION`  | 405 | string | FOR condition expression |
-| `ADS_DD_INDEX_KEY_LENGTH` | 406 | u16   | Compiled key width in bytes |
-| `ADS_DD_INDEX_TYPE`       | 407 | u16   | `ADS_CDX` / `ADS_NTX` constant |
-| `ADS_DD_INDEX_FILE_TYPE`  | 408 | u16   | Same as `ADS_DD_INDEX_TYPE` |
+| `ADS_DD_INDEX_FILE_NAME`  | 400 | string | Bound `.cdx` / `.ntx` file name |
+| `ADS_DD_INDEX_EXPRESSION` | 401 | string | Key expression |
+| `ADS_DD_INDEX_CONDITION`  | 402 | string | FOR condition expression |
+| `ADS_DD_INDEX_OPTIONS`    | 403 | u32   | Bitmask: `ADS_UNIQUE`(1) \| `ADS_COMPOUND`(2) \| `ADS_CUSTOM`(4) \| `ADS_DESCENDING`(8) |
+| `ADS_DD_INDEX_KEY_LENGTH` | 404 | u16   | Compiled key width in bytes |
+| `ADS_DD_INDEX_KEY_TYPE`   | 405 | u16   | ADS data type of the key (`ADS_STRING` / `ADS_NUMERIC`) |
 
 Index file management:
 

@@ -937,26 +937,37 @@ UNSIGNED32 ENTRYPOINT AdsExecuteSQLDirectW  (ADSHANDLE hStatement, UNSIGNED16* p
 #define ADS_TABLE_CACHE_READS                1
 #define ADS_TABLE_CACHE_WRITES               2
 
-// Field-object property codes (301-309).
-#define ADS_DD_FIELD_NAME                    301
-#define ADS_DD_FIELD_TYPE                    302
-#define ADS_DD_FIELD_LENGTH                  303
-#define ADS_DD_FIELD_DECIMAL                 304
-#define ADS_DD_FIELD_REQUIRED                305
-#define ADS_DD_FIELD_DEFAULT                 306
-#define ADS_DD_FIELD_VALIDATION_RULE         307
-#define ADS_DD_FIELD_VALIDATION_MSG          308
-#define ADS_DD_FIELD_COMMENT                 309
+// Field-object property codes — SAP ABI numbering (verified against
+// rddads ads.ch and ace_adsddgetfieldproperty.htm; real ADS clients
+// pass these exact values). SAP reserves 300-399 for field properties.
+// Return shapes: DEFAULT_VALUE / MIN_VALUE / MAX_VALUE are
+// NUL-terminated strings (AE_PROPERTY_NOT_SET when absent); CAN_NULL /
+// TYPE / LENGTH / DECIMAL are UNSIGNED16; DEFINITION and
+// VALIDATION_MSG are strings. Field comments travel through the
+// generic ADS_DD_COMMENT property.
+#define ADS_DD_FIELD_DEFAULT_VALUE           300
+#define ADS_DD_FIELD_CAN_NULL                301
+#define ADS_DD_FIELD_MIN_VALUE               302
+#define ADS_DD_FIELD_MAX_VALUE               303
+#define ADS_DD_FIELD_VALIDATION_MSG          304
+#define ADS_DD_FIELD_DEFINITION              305
+#define ADS_DD_FIELD_TYPE                    306
+#define ADS_DD_FIELD_LENGTH                  307
+#define ADS_DD_FIELD_DECIMAL                 308
+// OpenADS extension (not in the SAP ABI; parked at the top of the SAP
+// field-property range where no SAP release has allocated).
+#define ADS_DD_OA_FIELD_VALIDATION_RULE      390
 
-// Index-object property codes (401-408).
-#define ADS_DD_INDEX_FILE_NAME               401
-#define ADS_DD_INDEX_EXPR                    402
-#define ADS_DD_INDEX_UNIQUE                  403
-#define ADS_DD_INDEX_DESCENDING              404
-#define ADS_DD_INDEX_CONDITION               405
-#define ADS_DD_INDEX_KEY_LENGTH              406
-#define ADS_DD_INDEX_TYPE                    407
-#define ADS_DD_INDEX_FILE_TYPE               408
+// Index-object property codes — SAP ABI numbering (rddads ads.ch).
+// FILE_NAME / EXPRESSION / CONDITION are strings; OPTIONS is an
+// UNSIGNED32 bitmask of ADS_UNIQUE / ADS_COMPOUND / ADS_CUSTOM /
+// ADS_DESCENDING; KEY_LENGTH and KEY_TYPE are UNSIGNED16.
+#define ADS_DD_INDEX_FILE_NAME               400
+#define ADS_DD_INDEX_EXPRESSION              401
+#define ADS_DD_INDEX_CONDITION               402
+#define ADS_DD_INDEX_OPTIONS                 403
+#define ADS_DD_INDEX_KEY_LENGTH              404
+#define ADS_DD_INDEX_KEY_TYPE                405
 
 // Trigger event-mask bits (used in AdsDDCreateTrigger ulType).
 #define ADS_BEFORE_INSERT                    0x0001
@@ -1064,6 +1075,8 @@ UNSIGNED32 ENTRYPOINT AdsExecuteSQLDirectW  (ADSHANDLE hStatement, UNSIGNED16* p
 #define AE_VALUE_OVERFLOW          5057
 #define AE_INVALID_EXPRESSION      5079
 #define AE_INDEX_ALREADY_OPEN      5108
+#define AE_INVALID_PROPERTY_ID     5126  /* bad usPropertyID for object kind */
+#define AE_PROPERTY_NOT_SET        5138  /* DD property not set for object */
 #define AE_COLUMN_CANNOT_BE_NULL   5147
 #define AE_SAP_PERMS_NEED_IMPORT   5174  /* DD has SAP-format permissions; run import tool */
 #define AE_NOT_VFP_NULLABLE_FIELD  5205

@@ -188,17 +188,21 @@ try {
             $fieldName = $f['name'];
             $propLines = [];
             try {
-                $req = trim($dict4->getFieldProperty($table, $fieldName, 305));
-                if ($req !== '') {
-                    // stored value is Field_Can_Be_Null; pass through as-is
-                    $nullOk = $req;
+                // ADS_DD_FIELD_CAN_NULL = 301 (SAP ABI): UNSIGNED16,
+                // 0 = NULL not allowed. Only emit when NOT NULL — the
+                // nullable state is the default.
+                $raw = $dict4->getFieldProperty($table, $fieldName, 301);
+                $canNull = strlen($raw) >= 2 ? unpack('v', $raw)[1] : 1;
+                if ($canNull === 0) {
                     $propLines[] = "EXECUTE PROCEDURE sp_ModifyFieldProperty ( '$table', ";
                     $propLines[] = "      '$fieldName', 'Field_Can_Be_Null', ";
-                    $propLines[] = "      '$nullOk', 'APPEND_FAIL', '$failTable' ); ";
+                    $propLines[] = "      'False', 'APPEND_FAIL', '$failTable' ); ";
                 }
             } catch (Throwable $e) {}
             try {
-                $def = trim($dict4->getFieldProperty($table, $fieldName, 306));
+                // ADS_DD_FIELD_DEFAULT_VALUE = 300 (SAP ABI); throws
+                // AE_PROPERTY_NOT_SET when there is no default.
+                $def = trim($dict4->getFieldProperty($table, $fieldName, 300));
                 if ($def !== '') {
                     $propLines[] = "EXECUTE PROCEDURE sp_ModifyFieldProperty ( '$table', ";
                     $propLines[] = "      '$fieldName', 'Field_Default_Value', ";

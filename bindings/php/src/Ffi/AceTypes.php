@@ -77,26 +77,38 @@ final class AceTypes
     public const ADS_DD_TABLE_PERMISSION_DELETE  = 3;
     public const ADS_DD_TABLE_PERMISSION_FULL    = 4;
 
-    /** Data Dictionary — field properties (AdsDDGetFieldProperty). */
-    public const ADS_DD_FIELD_NAME               = 301;
-    public const ADS_DD_FIELD_TYPE               = 302;
-    public const ADS_DD_FIELD_LENGTH             = 303;
-    public const ADS_DD_FIELD_DECIMAL            = 304;
-    public const ADS_DD_FIELD_REQUIRED           = 305;
-    public const ADS_DD_FIELD_DEFAULT            = 306;
-    public const ADS_DD_FIELD_VALIDATION_RULE    = 307;
-    public const ADS_DD_FIELD_VALIDATION_MSG     = 308;
-    public const ADS_DD_FIELD_COMMENT            = 309;
+    /**
+     * Data Dictionary — field properties (AdsDDGetFieldProperty).
+     * SAP ABI numbering (rddads ads.ch). CAN_NULL / TYPE / LENGTH /
+     * DECIMAL return UNSIGNED16 (2 raw LE bytes); the rest are strings.
+     * DEFAULT_VALUE / MIN / MAX raise AE_PROPERTY_NOT_SET (5138) when
+     * the property is unset. Field comments use the generic
+     * ADS_DD_COMMENT property.
+     */
+    public const ADS_DD_FIELD_DEFAULT_VALUE      = 300;
+    public const ADS_DD_FIELD_CAN_NULL           = 301;
+    public const ADS_DD_FIELD_MIN_VALUE          = 302;
+    public const ADS_DD_FIELD_MAX_VALUE          = 303;
+    public const ADS_DD_FIELD_VALIDATION_MSG     = 304;
+    public const ADS_DD_FIELD_DEFINITION         = 305;
+    public const ADS_DD_FIELD_TYPE               = 306;
+    public const ADS_DD_FIELD_LENGTH             = 307;
+    public const ADS_DD_FIELD_DECIMAL            = 308;
+    /** OpenADS extension (not in the SAP ABI). */
+    public const ADS_DD_OA_FIELD_VALIDATION_RULE = 390;
 
-    /** Data Dictionary — index properties (AdsDDGetIndexProperty). */
-    public const ADS_DD_INDEX_FILE_NAME          = 401;
-    public const ADS_DD_INDEX_EXPR               = 402;
-    public const ADS_DD_INDEX_UNIQUE             = 403;
-    public const ADS_DD_INDEX_DESCENDING         = 404;
-    public const ADS_DD_INDEX_CONDITION          = 405;
-    public const ADS_DD_INDEX_KEY_LENGTH         = 406;
-    public const ADS_DD_INDEX_TYPE               = 407;
-    public const ADS_DD_INDEX_FILE_TYPE          = 408;
+    /**
+     * Data Dictionary — index properties (AdsDDGetIndexProperty).
+     * SAP ABI numbering. OPTIONS returns an UNSIGNED32 bitmask
+     * (ADS_UNIQUE=1, ADS_COMPOUND=2, ADS_CUSTOM=4, ADS_DESCENDING=8);
+     * KEY_LENGTH / KEY_TYPE return UNSIGNED16.
+     */
+    public const ADS_DD_INDEX_FILE_NAME          = 400;
+    public const ADS_DD_INDEX_EXPRESSION         = 401;
+    public const ADS_DD_INDEX_CONDITION          = 402;
+    public const ADS_DD_INDEX_OPTIONS            = 403;
+    public const ADS_DD_INDEX_KEY_LENGTH         = 404;
+    public const ADS_DD_INDEX_KEY_TYPE           = 405;
 
     /** Data Dictionary — trigger properties (AdsDDGetTriggerProperty). */
     public const ADS_DD_TRIGGER_TABLE            = 501;

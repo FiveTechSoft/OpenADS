@@ -239,19 +239,21 @@ try {
             }
         }
 
-        // Field properties: Required (305) and Default (306) via AdsDictionary
+        // Field properties via AdsDictionary — SAP ABI numbering:
+        // ADS_DD_FIELD_CAN_NULL (301) returns UNSIGNED16 (0 = NOT NULL =
+        // required); ADS_DD_FIELD_DEFAULT_VALUE (300) returns the default
+        // text and throws AE_PROPERTY_NOT_SET (5138) when there is none.
         try {
             $dict = AdsDictionary::fromConnection($conn);
             foreach ($fields as &$f) {
                 try {
-                    // ADS_DD_FIELD_REQUIRED (305) stores "Field_Can_Be_Null" value.
-                    // "False" = cannot be null = field IS required.
-                    $req = trim($dict->getFieldProperty($table, $f['Field'], 305));
-                    $f['Required'] = (strcasecmp($req, 'False') === 0) ? 'True' : 'False';
+                    $raw = $dict->getFieldProperty($table, $f['Field'], 301);
+                    $canNull = strlen($raw) >= 2 ? unpack('v', $raw)[1] : 1;
+                    $f['Required'] = ($canNull === 0) ? 'True' : 'False';
                 } catch (Throwable $e) {}
                 try {
-                    $f['Default'] = trim($dict->getFieldProperty($table, $f['Field'], 306));
-                } catch (Throwable $e) {}
+                    $f['Default'] = trim($dict->getFieldProperty($table, $f['Field'], 300));
+                } catch (Throwable $e) { $f['Default'] = ''; }
             }
             unset($f);
         } catch (Throwable $e) {}
