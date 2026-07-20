@@ -1454,8 +1454,10 @@ const std::vector<std::uint32_t>& CdxIndex::ordered_recnos_cached() {
     return pos_walk_;
 }
 
-std::uint32_t CdxIndex::count_scoped_keys(const std::string& top,
-                                           const std::string& bottom) {
+std::uint32_t CdxIndex::count_scoped_keys(
+    const std::string& top,
+    const std::string& bottom,
+    const std::function<bool(std::uint32_t recno)>* include_recno) {
     // Save the navigation cursor so callers see no side-effect.
     std::uint32_t  s_leaf    = cur_leaf_;
     std::int32_t   s_index   = cur_index_;
@@ -1476,7 +1478,11 @@ std::uint32_t CdxIndex::count_scoped_keys(const std::string& top,
                                                   key_size_) > 0) {
                 break;
             }
-            ++count;
+            // SET DELETED ON: skip index keys that point at deleted rows so
+            // OrdKeyCount / xBrowse match the navigable walk (1.8.18 fix).
+            if (include_recno == nullptr || (*include_recno)(cur.recno)) {
+                ++count;
+            }
             auto nx = next();
             if (!nx) break;
             cur = nx.value();

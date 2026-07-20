@@ -9372,12 +9372,37 @@ UNSIGNED32 ENTRYPOINT AdsGetRecordCount(ADSHANDLE hTable, UNSIGNED16 bFilterOpti
             // handles index handles via lookup_table_by_index + activate.
             if (t && t->order()) {
                 auto& sc = t->order()->scope();
+                // rddads OrdKeyCount calls AdsGetRecordCount on the order
+                // handle — must honour SET DELETED ON (exclude deleted
+                // keys) or remote xBrowse allocates ghost rows / hangs.
+                const bool hide_del = !t->show_deleted_records();
+                const std::uint32_t saved_rn = t->recno();
+                std::function<bool(std::uint32_t)> live;
+                const std::function<bool(std::uint32_t)>* live_p = nullptr;
+                if (hide_del) {
+                    live = [t](std::uint32_t rn) {
+                        if (!t->goto_record(rn)) return false;
+                        return !t->is_deleted();
+                    };
+                    live_p = &live;
+                }
                 if (sc.top.has_value() || sc.bottom.has_value()) {
                     *pulRecordCount = cdx->count_scoped_keys(
                         sc.top.value_or(""),
-                        sc.bottom.value_or(""));
-                    return ok();
+                        sc.bottom.value_or(""),
+                        live_p);
+                } else if (hide_del) {
+                    std::uint32_t n = 0;
+                    for (std::uint32_t rn : cdx->ordered_recnos_cached()) {
+                        if (live(rn)) ++n;
+                    }
+                    *pulRecordCount = n;
+                } else {
+                    *pulRecordCount = static_cast<UNSIGNED32>(
+                        cdx->ordered_recnos_cached().size());
                 }
+                if (hide_del && saved_rn != 0) (void)t->goto_record(saved_rn);
+                return ok();
             }
             *pulRecordCount = static_cast<UNSIGNED32>(
                 cdx->ordered_recnos_cached().size());
@@ -31534,16 +31559,36 @@ UNSIGNED32 ENTRYPOINT AdsGetKeyCount(ADSHANDLE hIndex, UNSIGNED16 /*usFilter*/,
         if (auto* cdx =
                 dynamic_cast<openads::drivers::cdx::CdxIndex*>(ord->index())) {
             // When scope is active, count only keys within [top, bottom]
-            // instead of the entire conditional index.
+            // instead of the entire conditional index. With SET DELETED ON
+            // exclude deleted rows so xBrowse OrdKeyCount matches Skip.
             auto& sc = ord->scope();
+            const bool hide_del = !t->show_deleted_records();
+            const std::uint32_t saved_rn = t->recno();
+            std::function<bool(std::uint32_t)> live;
+            const std::function<bool(std::uint32_t)>* live_p = nullptr;
+            if (hide_del) {
+                live = [t](std::uint32_t rn) {
+                    if (!t->goto_record(rn)) return false;
+                    return !t->is_deleted();
+                };
+                live_p = &live;
+            }
             if (sc.top.has_value() || sc.bottom.has_value()) {
                 *pulCount = cdx->count_scoped_keys(
                     sc.top.value_or(""),
-                    sc.bottom.value_or(""));
+                    sc.bottom.value_or(""),
+                    live_p);
+            } else if (hide_del) {
+                std::uint32_t n = 0;
+                for (std::uint32_t rn : cdx->ordered_recnos_cached()) {
+                    if (live(rn)) ++n;
+                }
+                *pulCount = n;
             } else {
                 *pulCount = static_cast<UNSIGNED32>(
                     cdx->ordered_recnos_cached().size());
             }
+            if (hide_del && saved_rn != 0) (void)t->goto_record(saved_rn);
             return ok();
         }
     }

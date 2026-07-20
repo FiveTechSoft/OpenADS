@@ -108,23 +108,18 @@ TEST_CASE("AdsGetKeyCount after deletes: documents raw-vs-filter behaviour") {
     }
     REQUIRE(AdsWriteRecord(hT) == 0);
 
-    // Raw key count (bFilterOption=0) - current implementation returns
-    // the physical count regardless of deleted state.
+    // With deleted still shown, key count is physical (all index keys).
     UNSIGNED32 raw_cnt = 0;
     REQUIRE(AdsGetKeyCount(hI, 0, &raw_cnt) == 0);
-    INFO("AdsGetKeyCount raw after 2 deletes = " << raw_cnt);
-    // Known behaviour: returns physical count (5), not live count (3).
-    // This is a documented gap; OrdKeyCount() callers should be aware.
+    INFO("AdsGetKeyCount show-deleted after 2 deletes = " << raw_cnt);
     CHECK(raw_cnt == 5u);
 
-    // With DELETED ON, ADS_RESPECTFILTERS documents the filter-aware path.
+    // SET DELETED ON: OrdKeyCount / xBrowse must see live keys only.
     AdsShowDeleted(0);
     UNSIGNED32 filter_cnt = 0;
-    REQUIRE(AdsGetKeyCount(hI, ADS_RESPECTFILTERS, &filter_cnt) == 0);
-    INFO("AdsGetKeyCount ADS_RESPECTFILTERS after 2 deletes = " << filter_cnt);
-    // Accept either 3 (filter-aware) or 5 (raw fallback) — both are valid
-    // results depending on implementation maturity; test documents the gap.
-    CHECK((filter_cnt == 3u || filter_cnt == 5u));
+    REQUIRE(AdsGetKeyCount(hI, 0, &filter_cnt) == 0);
+    INFO("AdsGetKeyCount SET DELETED ON after 2 deletes = " << filter_cnt);
+    CHECK(filter_cnt == 3u);
 
     AdsShowDeleted(1);  // restore default
     AdsCloseTable(hT);

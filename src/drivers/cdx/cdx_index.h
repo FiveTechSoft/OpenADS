@@ -5,6 +5,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -118,8 +119,16 @@ public:
     // Count keys whose index key falls within the scope range
     // [top, bottom]. Empty top → start at first key; empty bottom →
     // count to end. Saves/restores cursor state.
-    std::uint32_t count_scoped_keys(const std::string& top,
-                                    const std::string& bottom);
+    //
+    // Optional `include_recno`: when non-null, only count keys whose
+    // recno returns true (used to honour SET DELETED ON — exclude
+    // deleted rows so OrdKeyCount / xBrowse row counts match the
+    // navigable walk). nullptr = count every index key in range.
+    std::uint32_t count_scoped_keys(
+        const std::string& top,
+        const std::string& bottom,
+        const std::function<bool(std::uint32_t recno)>* include_recno =
+            nullptr);
     // 0-based position of recno in key order, or 0xFFFFFFFF if absent.
     std::uint32_t pos_of_recno_cached(std::uint32_t recno);
     void invalidate_pos_cache() {
