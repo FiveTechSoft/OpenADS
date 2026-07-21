@@ -22653,6 +22653,99 @@ inline bool sq_is_scalar_agg(const openads::sql::SelectStmt& sq) {
            sq.projection[0].rfind("$AGG_", 0) == 0;
 }
 
+// S4 — shared by the join materializers (2-table + N-way). The merged
+// temp cursor is a text-convention DBF, but the SOURCE tables may be
+// ADT (pmsys) whose records carry a 5-byte prefix and binary field
+// encodings — so joins must go through DECODED field values
+// (Table::read_field), never raw record bytes, and each source field
+// maps to a DBF text descriptor.
+inline openads::drivers::DbfField join_out_field(
+        const openads::drivers::DbfField& f) {
+    using T = openads::drivers::DbfFieldType;
+    openads::drivers::DbfField o = f;
+    switch (f.type) {
+        case T::Character: case T::CiCharacter: case T::Varchar:
+            o.raw_type = 'C';
+            o.length   = static_cast<std::uint16_t>(
+                std::min<std::uint16_t>(f.length, 254));
+            o.decimals = 0;
+            break;
+        case T::Memo: case T::Binary: case T::Varbinary:
+            // Memo text truncated into an inline cell (no .dbt on the
+            // temp cursor); binary yields blanks.
+            o.raw_type = 'C'; o.length = 254; o.decimals = 0;
+            break;
+        case T::Numeric: case T::Float:
+            o.raw_type = 'N';
+            o.length   = static_cast<std::uint16_t>(
+                std::min<std::uint16_t>(f.length ? f.length : 20, 20));
+            break;
+        case T::Integer: case T::ShortInt: case T::AutoInc:
+            o.raw_type = 'N'; o.length = 11; o.decimals = 0;
+            break;
+        case T::Double: case T::Currency: case T::AdtMoney:
+            o.raw_type = 'N'; o.length = 20;
+            o.decimals = f.decimals ? f.decimals
+                : (f.type == T::Double ? 0 : 4);
+            break;
+        case T::RowVersion: case T::ModTime:
+            o.raw_type = 'N'; o.length = 20; o.decimals = 0;
+            break;
+        case T::Date: case T::AdtDate:
+            o.raw_type = 'D'; o.length = 8; o.decimals = 0;
+            break;
+        case T::DateTime: case T::AdtTimestamp:
+            o.raw_type = 'C'; o.length = 22; o.decimals = 0;
+            break;
+        case T::Time:
+            o.raw_type = 'C'; o.length = 11; o.decimals = 0;
+            break;
+        case T::Logical:
+            o.raw_type = 'L'; o.length = 1; o.decimals = 0;
+            break;
+        default:
+            o.raw_type = 'C';
+            o.length   = static_cast<std::uint16_t>(
+                std::min<std::uint16_t>(f.length ? f.length : 10, 254));
+            o.decimals = 0;
+            break;
+    }
+    return o;
+}
+
+// Format one decoded cell (from the POSITIONED row of `t`) for the
+// mapped output descriptor. NULL / read failure yields an empty string
+// (blank cell); the caller pads to out.length.
+inline std::string join_cell_text(openads::engine::Table& t,
+                                  std::uint16_t fi,
+                                  const openads::drivers::DbfField& out) {
+    auto v = t.read_field(fi);
+    if (!v || v.value().is_null) return std::string();
+    std::string s;
+    switch (out.raw_type) {
+        case 'N': {
+            // Left-justified: right-justified N cells leak their leading
+            // spaces into string reads of the temp cursor (same lesson as
+            // the aggregate temp cells).
+            char cell[32];
+            std::snprintf(cell, sizeof(cell), "%-*.*f",
+                          static_cast<int>(out.length),
+                          static_cast<int>(out.decimals),
+                          v.value().as_double);
+            s = cell;
+            break;
+        }
+        case 'L':
+            s = v.value().as_bool ? "T" : "F";
+            break;
+        default:   // 'C' / 'D' — decoded display text
+            s = v.value().as_string;
+            break;
+    }
+    if (s.size() > out.length) s.resize(out.length);
+    return s;
+}
+
 } // namespace scriptbridge
 
 // ---- S4: connection-scoped trigger row images + session #temp tables ----
@@ -25883,17 +25976,22 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         //         evaluator is defined, so the single-table residual filters
         //         in pure[i] can be applied during the build.) ---
 
-        // --- 6. Resolve the output schema from select_items (ADS names). ---
-        struct OutCol { std::size_t ti; openads::drivers::DbfField fld; };
+        // --- 6. Resolve the output schema from select_items (ADS names).
+        //         Each source field maps to a DBF text descriptor (the
+        //         sources may be ADT with binary encodings); rows emit
+        //         from DECODED values.
+        struct OutCol { std::size_t ti; std::uint16_t src_fi;
+                        openads::drivers::DbfField fld; };
         std::vector<OutCol> outcols;
         std::unordered_set<std::string> seen;
         auto add_out = [&](std::size_t ti, std::int32_t fi) {
             const auto& f =
                 tbls[ti]->driver()->fields()[static_cast<std::size_t>(fi)];
-            std::string nm = f.name;
-            if (nm.size() > 10) nm.resize(10);
-            if (!seen.insert(lc(nm)).second) return;   // first-wins de-dupe
-            outcols.push_back(OutCol{ti, f});
+            auto ofld = scriptbridge::join_out_field(f);
+            if (ofld.name.size() > 10) ofld.name.resize(10);
+            if (!seen.insert(lc(ofld.name)).second) return;  // first-wins
+            outcols.push_back(OutCol{
+                ti, static_cast<std::uint16_t>(fi), std::move(ofld)});
         };
         if (st.select_items.empty()) {
             // bare `SELECT *` across all tables, in FROM order.
@@ -25934,17 +26032,22 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         "multi-table join: empty projection");
         }
 
-        // --- 7. Residual WHERE evaluator over the bound raw records. ---
-        std::vector<std::vector<std::uint8_t>> raws(N);
+        // --- 7. Residual WHERE evaluator over the bound rows. Rows are
+        //         bound by POSITIONING each table (goto_record) and
+        //         recording the recno in recs[ti]; values come from
+        //         Table::read_field (decoded — works for ADT's 5-byte
+        //         prefix + binary encodings as well as DBF), never from
+        //         raw record bytes.
+        std::vector<std::uint32_t> recs(N, 0);
         auto slice = [&](std::size_t ti, std::int32_t fi) -> std::string {
-            const auto& f =
-                tbls[ti]->driver()->fields()[static_cast<std::size_t>(fi)];
-            const auto& buf = raws[ti];
-            if (static_cast<std::size_t>(f.record_offset) + f.length
-                    > buf.size())
-                return std::string();
-            return std::string(reinterpret_cast<const char*>(
-                buf.data() + f.record_offset), f.length);
+            if (recs[ti] == 0) return std::string();
+            auto v = tbls[ti]->read_field(static_cast<std::uint16_t>(fi));
+            if (!v || v.value().is_null) return std::string();
+            return v.value().as_string;
+        };
+        auto is_ci_col = [&](std::size_t ti, std::int32_t fi) {
+            return field_is_cichar(*tbls[ti],
+                                   static_cast<std::uint16_t>(fi));
         };
         auto is_num_type = [](openads::drivers::DbfFieldType t) {
             return t == openads::drivers::DbfFieldType::Numeric  ||
@@ -25963,17 +26066,6 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     ch = static_cast<char>(
                         std::tolower(static_cast<unsigned char>(ch)));
             return v;
-        };
-        std::function<bool(const char*, const char*)> like_m =
-            [&](const char* p, const char* sv) -> bool {
-            if (*p == '\0') return *sv == '\0';
-            if (*p == '%') {
-                if (like_m(p + 1, sv)) return true;
-                return *sv != '\0' && like_m(p, sv + 1);
-            }
-            if (*sv == '\0') return false;
-            if (*p == '_' || *p == *sv) return like_m(p + 1, sv + 1);
-            return false;
         };
         std::function<bool(const openads::sql::WhereExpr*)> eval =
             [&](const openads::sql::WhereExpr* n) -> bool {
@@ -25998,9 +26090,10 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     std::size_t lti; std::int32_t lfi;
                     if (!resolve(std::string(), n->in_clause.column, lti, lfi))
                         return false;
+                    bool ci = is_ci_col(lti, lfi);
                     std::string lhs = trim_trailing(slice(lti, lfi));
                     for (const auto& v : n->in_clause.literals)
-                        if (lhs == v) return true;
+                        if (where_str_cmp(lhs, v, ci) == 0) return true;
                     return false;
                 }
                 case K::Cmp: {
@@ -26011,6 +26104,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     const auto& lf =
                         tbls[lti]->driver()->fields()[
                             static_cast<std::size_t>(lfi)];
+                    bool ci = is_ci_col(lti, lfi);
                     std::string lhs = fold(trim_trailing(slice(lti, lfi)),
                                            w.lhs_fn);
                     if (w.is_outer_ref) {
@@ -26018,7 +26112,10 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         if (!resolve(w.outer_column_alias, w.outer_column,
                                      rti, rfi))
                             return false;
-                        int cc = lhs.compare(trim_trailing(slice(rti, rfi)));
+                        // SAP: comparison is CI if EITHER operand is CICHAR.
+                        int cc = where_str_cmp(
+                            lhs, trim_trailing(slice(rti, rfi)),
+                            ci || is_ci_col(rti, rfi));
                         switch (w.op) {
                             case Op::Ne: return cc != 0;
                             case Op::Lt: return cc <  0;
@@ -26032,7 +26129,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     if (w.op == Op::IsNotNull) return !lhs.empty();
                     bool numeric = is_num_type(lf.type);
                     if (w.op == Op::Like)
-                        return like_m(w.literal.c_str(), lhs.c_str());
+                        return sql_like_match_t(lhs, w.literal, ci);
                     if (w.op == Op::Between) {
                         if (numeric) {
                             double a  = std::strtod(lhs.c_str(), nullptr);
@@ -26040,8 +26137,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                             double b2 = std::strtod(w.literal2.c_str(), nullptr);
                             return a >= b1 && a <= b2;
                         }
-                        return lhs.compare(w.literal)  >= 0 &&
-                               lhs.compare(w.literal2) <= 0;
+                        return where_str_cmp(lhs, w.literal,  ci) >= 0 &&
+                               where_str_cmp(lhs, w.literal2, ci) <= 0;
                     }
                     int cc;
                     if (numeric) {
@@ -26051,7 +26148,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                                        : std::strtod(w.literal.c_str(), nullptr);
                         cc = (a < b) ? -1 : (a > b ? 1 : 0);
                     } else {
-                        cc = lhs.compare(w.literal);
+                        cc = where_str_cmp(lhs, w.literal, ci);
                     }
                     switch (w.op) {
                         case Op::Eq: return cc == 0;
@@ -26071,32 +26168,22 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         // --- 7b. Hash each joined table on its key columns, applying the
         //         single-table residual filters (pure[i]) up front so the hash
         //         holds only matching rows (e.g. just the month's detail rows)
-        //         instead of the whole history. raws[i] is scratch here; the
+        //         instead of the whole history. recs[i] is scratch here; the
         //         walk re-binds it per emitted combination.
         for (std::size_t i = 1; i < N; ++i) {
             auto& pr = probes[i];
-            const auto& flds = tbls[i]->driver()->fields();
             std::uint32_t rc = tbls[i]->record_count();
             for (std::uint32_t r = 1; r <= rc; ++r) {
-                auto raw = tbls[i]->driver()->read_record_raw(r);
-                if (!raw) continue;
-                raws[i] = std::move(raw).value();
-                const auto& buf = raws[i];
-                if (buf.empty() || buf[0] == '*') continue;   // skip deleted
+                if (auto g = tbls[i]->goto_record(r); !g) continue;
+                if (tbls[i]->is_deleted()) continue;
+                recs[i] = r;
                 bool keep = true;
                 for (const auto* cj : pure[i])
                     if (!eval(cj)) { keep = false; break; }   // single-table filter
                 if (!keep) continue;
                 std::string key;
-                bool kok = true;
                 for (std::size_t k = 0; k < pr.myCols.size(); ++k) {
-                    const auto& f = flds[static_cast<std::size_t>(
-                        pr.myCols[k])];
-                    if (static_cast<std::size_t>(f.record_offset) + f.length
-                            > buf.size()) { kok = false; break; }
-                    std::string seg = trim_trailing(std::string(
-                        reinterpret_cast<const char*>(
-                            buf.data() + f.record_offset), f.length));
+                    std::string seg = trim_trailing(slice(i, pr.myCols[k]));
                     if (pr.ci[k])
                         for (char& ch : seg)
                             ch = static_cast<char>(std::toupper(
@@ -26104,9 +26191,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     key += seg;
                     key.push_back('\x01');
                 }
-                if (!kok) continue;
                 pr.hash[key].push_back(r);
             }
+            recs[i] = 0;
         }
 
         // --- 8. Output DBF header + field descriptors. ---
@@ -26141,19 +26228,18 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             file.push_back(0x0D);
         }
 
-        // --- 9. Left-deep nested-loop join walk; emit projected rows. ---
+        // --- 9. Left-deep nested-loop join walk; emit projected rows
+        //         from the decoded values of the bound (positioned) rows.
         std::uint32_t emitted = 0;
         auto emit_row = [&]() {
             std::vector<std::uint8_t> rec(out_rlen, ' ');
             rec[0] = ' ';
             std::size_t off = 1;
             for (const auto& oc : outcols) {
-                const auto& buf = raws[oc.ti];
-                std::size_t so = oc.fld.record_offset;
-                std::size_t L  = oc.fld.length;
-                if (so + L <= buf.size())
-                    std::memcpy(rec.data() + off, buf.data() + so, L);
-                off += L;
+                std::string s = scriptbridge::join_cell_text(
+                    *tbls[oc.ti], oc.src_fi, oc.fld);
+                std::memcpy(rec.data() + off, s.data(), s.size());
+                off += oc.fld.length;
             }
             file.insert(file.end(), rec.begin(), rec.end());
             ++emitted;
@@ -26170,27 +26256,18 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             if (level == 0) {
                 std::uint32_t rc = tbls[0]->record_count();
                 for (std::uint32_t r = 1; r <= rc; ++r) {
-                    auto raw = tbls[0]->driver()->read_record_raw(r);
-                    if (!raw) continue;
-                    if (raw.value().empty() || raw.value()[0] == '*') continue;
-                    raws[0] = std::move(raw).value();
+                    if (auto g = tbls[0]->goto_record(r); !g) continue;
+                    if (tbls[0]->is_deleted()) continue;
+                    recs[0] = r;
                     if (pass_bucket(0)) walk(1);   // prune table-0 filters early
                 }
                 return;
             }
             const auto& pr = probes[level];
-            const auto& pfld = tbls[pr.partner]->driver()->fields();
             std::string key;
             for (std::size_t k = 0; k < pr.partnerCols.size(); ++k) {
-                const auto& f = pfld[static_cast<std::size_t>(
-                    pr.partnerCols[k])];
-                const auto& pbuf = raws[pr.partner];
-                std::string v;
-                if (static_cast<std::size_t>(f.record_offset) + f.length
-                        <= pbuf.size())
-                    v.assign(reinterpret_cast<const char*>(
-                        pbuf.data() + f.record_offset), f.length);
-                std::string seg = trim_trailing(v);
+                std::string seg = trim_trailing(
+                    slice(pr.partner, pr.partnerCols[k]));
                 if (pr.ci[k])
                     for (char& ch : seg)
                         ch = static_cast<char>(std::toupper(
@@ -26201,11 +26278,11 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             auto it2 = pr.hash.find(key);
             if (it2 == pr.hash.end()) return;
             for (std::uint32_t r : it2->second) {
-                auto raw = tbls[level]->driver()->read_record_raw(r);
-                if (!raw) continue;
-                raws[level] = std::move(raw).value();
+                if (auto g = tbls[level]->goto_record(r); !g) continue;
+                recs[level] = r;
                 if (pass_bucket(level)) walk(level + 1);  // push filters down
             }
+            recs[level] = 0;
         };
         walk(0);
 
@@ -26363,60 +26440,6 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             bool                          from_right;
             openads::drivers::DbfField    fld;          // output descriptor
         };
-        auto map_out_field = [](const openads::drivers::DbfField& f)
-                             -> openads::drivers::DbfField {
-            using T = openads::drivers::DbfFieldType;
-            openads::drivers::DbfField o = f;
-            switch (f.type) {
-                case T::Character: case T::CiCharacter: case T::Varchar:
-                    o.raw_type = 'C';
-                    o.length   = static_cast<std::uint16_t>(
-                        std::min<std::uint16_t>(f.length, 254));
-                    o.decimals = 0;
-                    break;
-                case T::Memo: case T::Binary: case T::Varbinary:
-                    // Memo text truncated into an inline cell (no .dbt on
-                    // the temp cursor); binary yields blanks.
-                    o.raw_type = 'C'; o.length = 254; o.decimals = 0;
-                    break;
-                case T::Numeric: case T::Float:
-                    o.raw_type = 'N';
-                    o.length   = static_cast<std::uint16_t>(
-                        std::min<std::uint16_t>(
-                            f.length ? f.length : 20, 20));
-                    break;
-                case T::Integer: case T::ShortInt: case T::AutoInc:
-                    o.raw_type = 'N'; o.length = 11; o.decimals = 0;
-                    break;
-                case T::Double: case T::Currency: case T::AdtMoney:
-                    o.raw_type = 'N'; o.length = 20;
-                    o.decimals = f.decimals ? f.decimals
-                        : (f.type == T::Double ? 0 : 4);
-                    break;
-                case T::RowVersion: case T::ModTime:
-                    o.raw_type = 'N'; o.length = 20; o.decimals = 0;
-                    break;
-                case T::Date: case T::AdtDate:
-                    o.raw_type = 'D'; o.length = 8; o.decimals = 0;
-                    break;
-                case T::DateTime: case T::AdtTimestamp:
-                    o.raw_type = 'C'; o.length = 22; o.decimals = 0;
-                    break;
-                case T::Time:
-                    o.raw_type = 'C'; o.length = 11; o.decimals = 0;
-                    break;
-                case T::Logical:
-                    o.raw_type = 'L'; o.length = 1; o.decimals = 0;
-                    break;
-                default:
-                    o.raw_type = 'C';
-                    o.length   = static_cast<std::uint16_t>(std::min<
-                        std::uint16_t>(f.length ? f.length : 10, 254));
-                    o.decimals = 0;
-                    break;
-            }
-            return o;
-        };
         std::vector<JOutCol> jcols;
         std::vector<openads::drivers::DbfField> merged;
         // Source CICHAR columns demote to plain 'C' in the temp DBF, so
@@ -26437,7 +26460,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 JOutCol oc;
                 oc.src_idx    = static_cast<std::uint16_t>(i);
                 oc.from_right = false;
-                oc.fld        = map_out_field(lfields[i]);
+                oc.fld        = scriptbridge::join_out_field(lfields[i]);
                 if (lfields[i].type ==
                     openads::drivers::DbfFieldType::CiCharacter)
                     join_ci_cols.insert(lower_nm(oc.fld.name));
@@ -26448,7 +26471,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 JOutCol oc;
                 oc.src_idx    = static_cast<std::uint16_t>(i);
                 oc.from_right = true;
-                oc.fld        = map_out_field(rfields[i]);
+                oc.fld        = scriptbridge::join_out_field(rfields[i]);
                 std::string nm = "R_" + oc.fld.name;
                 if (nm.size() > 10) nm.resize(10);
                 oc.fld.name = std::move(nm);
@@ -26505,28 +26528,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 if (present) {
                     openads::engine::Table* st =
                         oc.from_right ? rtbl : ltbl;
-                    auto v = st->read_field(oc.src_idx);
-                    if (v && !v.value().is_null) {
-                        char cell[32];
-                        std::string s;
-                        switch (oc.fld.raw_type) {
-                            case 'N':
-                                std::snprintf(cell, sizeof(cell), "%*.*f",
-                                    static_cast<int>(L),
-                                    static_cast<int>(oc.fld.decimals),
-                                    v.value().as_double);
-                                s = cell;
-                                break;
-                            case 'L':
-                                s = v.value().as_bool ? "T" : "F";
-                                break;
-                            default:   // 'C' / 'D' — decoded display text
-                                s = v.value().as_string;
-                                break;
-                        }
-                        if (s.size() > L) s.resize(L);
-                        std::memcpy(mrec.data() + off, s.data(), s.size());
-                    }
+                    std::string s = scriptbridge::join_cell_text(
+                        *st, oc.src_idx, oc.fld);
+                    std::memcpy(mrec.data() + off, s.data(), s.size());
                 }
                 off += L;
             }
