@@ -1619,12 +1619,24 @@ util::Result<SelectStmt> parse_select(const std::string& sql) {
             return util::Error{7200, 0,
                 "expected table name after INNER JOIN", sql};
         }
+        // Optional joined-table alias: `JOIN t AS a ON …` or the bare
+        // `JOIN t a ON …` form. The alias is only used to qualify the ON
+        // columns; the executor resolves join keys by unqualified column
+        // name (with an orientation-swap fallback), so the alias itself
+        // is consumed but not stored.
+        if (c.match_keyword("AS")) {
+            c.read_identifier();
+        } else if (!c.peek_keyword("ON")) {
+            c.read_identifier();
+        }
         if (!c.match_keyword("ON")) {
             return util::Error{7200, 0,
                 "expected ON for INNER JOIN", sql};
         }
-        // Parse `<lcol> = <rcol>`. Both columns are bare identifiers
-        // — qualified `tbl.col` syntax lands in a later milestone.
+        // Parse `<lcol> = <rcol>`. read_identifier() accepts a qualified
+        // `<alias>.<col>` ref and returns just the column name, so
+        // `l.ManagerID = m.ManagerID` resolves like `ManagerID =
+        // ManagerID`.
         j.left_column = c.read_identifier();
         if (j.left_column.empty()) {
             return util::Error{7200, 0,
