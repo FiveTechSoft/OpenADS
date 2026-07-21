@@ -15,12 +15,12 @@ directo** del Advantage Client Engine (`ace32.dll` /
 que enlazan contra `contrib/rddads` siguen funcionando sin
 recompilar.
 
-Release actual: **v1.8.20**.
+Release actual: **v1.8.21**.
 
 ## Contenido
 
 - **[Novedades](novedades/)** — resumen de cambios desde
-  v1.0.0-rc29 → **v1.8.20** (Studio HTTP, props DD rddads, API de ficheros en servidor, y más).
+  v1.0.0-rc29 → **v1.8.21** (versión al arrancar el servidor, Studio HTTP, props DD rddads, y más).
 - **[Server filesystem (EN)](../en/server-filesystem/)** — operaciones de
   ficheros/directorios bajo el data root del servidor (`EnableFileFunc`).
 - **[Historia del proyecto](historia/)** — cómo OpenADS creció

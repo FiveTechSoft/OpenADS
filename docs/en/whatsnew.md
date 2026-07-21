@@ -6,11 +6,21 @@ nav_order: 0
 permalink: /en/whatsnew/
 ---
 
-# What's New (v1.0.0-rc29 → v1.8.20)
+# What's New (v1.0.0-rc29 → v1.8.21)
 
 This page summarises the most notable changes since the
 v1.0.0-rc29 release. For the full commit-by-commit history see
 the [CHANGELOG](https://github.com/FiveTechSoft/OpenADS/blob/main/CHANGELOG.md).
+
+---
+
+## v1.8.21 Highlights
+
+### Server prints version on launch
+
+`openads_serverd` includes the build version in the startup banner
+and in the error-log “server started” entry (same string as
+`--version`).
 
 ---
 

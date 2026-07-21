@@ -14,12 +14,12 @@ for the Advantage Client Engine (`ace32.dll` / `ace64.dll` /
 `libace.so`) — Harbour / Clipper applications that link against
 `contrib/rddads` keep working without recompilation.
 
-Current release: **v1.8.20**.
+Current release: **v1.8.21**.
 
 ## What's in here
 
 - **[What's New](whatsnew/)** — summary of changes since
-  v1.0.0-rc29 → **v1.8.20** (Studio HTTP packages, rddads DD props, server filesystem, remote DbCreate, and more).
+  v1.0.0-rc29 → **v1.8.21** (server version on launch, Studio HTTP packages, rddads DD props, server filesystem, and more).
 - **[Server filesystem](server-filesystem/)** — file/directory ops under
   the server data root (`EnableFileFunc`, `AdsFOpen` / `AdsDirectory`, …).
 - **[Project History](history/)** — how OpenADS grew from a

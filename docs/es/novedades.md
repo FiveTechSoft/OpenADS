@@ -6,11 +6,20 @@ nav_order: 0
 permalink: /es/novedades/
 ---
 
-# Novedades (v1.0.0-rc29 → v1.8.20)
+# Novedades (v1.0.0-rc29 → v1.8.21)
 
 Esta página resume los cambios más destacados desde la versión
 v1.0.0-rc29. Para el historial completo de commits, consulta el
 [CHANGELOG](https://github.com/FiveTechSoft/OpenADS/blob/main/CHANGELOG.md).
+
+---
+
+## Destacados v1.8.21
+
+### El servidor muestra la versión al arrancar
+
+`openads_serverd` incluye la versión del build en el banner de arranque
+y en el registro de errores (misma cadena que `--version`).
 
 ---
 

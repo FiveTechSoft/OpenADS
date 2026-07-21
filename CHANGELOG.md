@@ -1,3 +1,18 @@
+## 1.8.21 — 2026-07-21
+
+### Added — server prints version number when launched
+
+`openads_serverd` now includes the build version in the startup banner
+(same string as `--version` / `git describe`), for example:
+
+```text
+openads_serverd 1.8.21 listening on 0.0.0.0:6262 (backlog=16)
+```
+
+The `ads_err.dbf` / error-log “server started” entry also records the
+version so Windows Service launches (no console) still leave a clear
+trail.
+
 ## 1.8.20 — 2026-07-21
 
 ### Fixed — Windows release packages ship Studio HTTP (`OPENADS_WITH_HTTP=ON`)
