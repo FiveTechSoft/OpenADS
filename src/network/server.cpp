@@ -23,6 +23,10 @@
 #include <unordered_map>
 #include <vector>
 
+#ifndef OPENADS_VERSION_STR
+#  define OPENADS_VERSION_STR "unknown"
+#endif
+
 // Defined in abi/ace_exports.cpp: every index attached to an open Table
 // handle in this process. Sessions open tables through the in-process ABI,
 // so this covers their indexes too (same linkage pattern as session.cpp's
@@ -424,7 +428,8 @@ util::Result<void> Server::start(const std::string& host,
         });
     mgmt::ErrorLog::instance().log(
         0, "SERVER", 0,
-        "OpenADS server started on port " + std::to_string(port_));
+        std::string("OpenADS ") + OPENADS_VERSION_STR +
+            " server started on port " + std::to_string(port_));
     running_.store(true);
     // Enterprise step 3 — if the sharded-reactor pool is enabled, stand it up
     // before the accept loop so accept_loop hands sockets to it. Env-read (not

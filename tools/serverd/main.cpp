@@ -229,6 +229,10 @@ static void probe_ace_dlls(bool console) {
     std::fflush(stdout);
 }
 
+#ifndef OPENADS_VERSION_STR
+#  define OPENADS_VERSION_STR "unknown"
+#endif
+
 // Run the actual server. Returns when g_running flips to false
 // (signal handler on POSIX / SCM stop control on Windows).
 int run_server(const Args& args, bool console) {
@@ -276,8 +280,9 @@ int run_server(const Args& args, bool console) {
         return 1;
     }
     if (console) {
-        std::printf("openads_serverd listening on %s:%u (backlog=%d)\n",
-                    args.host.c_str(), srv.port(), args.backlog);
+        std::printf("openads_serverd %s listening on %s:%u (backlog=%d)\n",
+                    OPENADS_VERSION_STR, args.host.c_str(), srv.port(),
+                    args.backlog);
         probe_ace_dlls(console);
     }
 
@@ -314,10 +319,6 @@ int run_server(const Args& args, bool console) {
     srv.stop();
     return 0;
 }
-
-#ifndef OPENADS_VERSION_STR
-#  define OPENADS_VERSION_STR "unknown"
-#endif
 
 #if defined(_WIN32)
 
