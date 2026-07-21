@@ -22641,6 +22641,18 @@ inline openads::util::Result<void> run_top_level_script(
     return {};
 }
 
+// A subquery projects exactly one scalar aggregate and nothing else.
+// Since S4, aggregate projections carry an `$AGG_<n>` placeholder in
+// `projection` (to preserve SELECT-list order alongside group-key
+// columns), so "pure aggregate" is projection == that single placeholder
+// (empty is still accepted for older callers).
+inline bool sq_is_scalar_agg(const openads::sql::SelectStmt& sq) {
+    if (sq.aggregates.size() != 1) return false;
+    if (sq.projection.empty()) return true;
+    return sq.projection.size() == 1 &&
+           sq.projection[0].rfind("$AGG_", 0) == 0;
+}
+
 } // namespace scriptbridge
 
 // ---- S4: connection-scoped trigger row images + session #temp tables ----
@@ -27534,10 +27546,11 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             std::array<std::uint8_t, 32> hdr{};
             hdr[0] = 0x03;
             stamp_dbf_header_today(hdr.data());
-            // SAP parity (oracle-verified 07/18/2026): only the projected
-            // aggregates appear in the result — group keys are not emitted
-            // unless projected. Columns typed N(20,dp), named alias / EXPR /
-            // EXPR_1 / …; groups emit sorted ascending by group key.
+            // SAP parity: aggregate columns are N(20,dp), named alias /
+            // EXPR / EXPR_1 / …; group-key columns are emitted in their
+            // SELECT-list position (`SELECT col, COUNT(*) … GROUP BY col`)
+            // with the source field's type/length. Groups emit sorted
+            // ascending by group key.
             auto grp_dp = [&](std::size_t i) -> int {
                 using K = openads::sql::AggregateKind;
                 switch (slots[i].def.kind) {
@@ -27546,32 +27559,101 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     default: return static_cast<int>(slots[i].decimals);
                 }
             };
+            // Ordered output columns from the projection: an `$AGG_<n>`
+            // placeholder is aggregate slot n; anything else must be a
+            // group-by key column.
+            struct GOut {
+                bool         is_agg = false;
+                std::size_t  idx    = 0;   // slot index / gbs index
+                std::string  name;
+                char         type   = 'N';
+                std::uint8_t len    = 20;
+                std::uint8_t dec    = 0;
+            };
+            auto ci_eq_g = [](const std::string& x, const std::string& y) {
+                if (x.size() != y.size()) return false;
+                for (std::size_t z = 0; z < x.size(); ++z)
+                    if (std::toupper(static_cast<unsigned char>(x[z])) !=
+                        std::toupper(static_cast<unsigned char>(y[z])))
+                        return false;
+                return true;
+            };
+            std::vector<GOut> gouts;
+            {
+                std::size_t unaliased = 0;
+                for (const auto& pj : parsed.value().projection) {
+                    GOut o;
+                    if (pj.rfind("$AGG_", 0) == 0) {
+                        o.is_agg = true;
+                        o.idx = static_cast<std::size_t>(
+                            std::stoul(pj.substr(5)));
+                        std::string nm = slots[o.idx].def.alias;
+                        if (nm.empty()) {
+                            nm = unaliased == 0 ? "EXPR"
+                               : "EXPR_" + std::to_string(unaliased);
+                            ++unaliased;
+                        }
+                        o.name = nm;
+                        o.type = 'N'; o.len = 20;
+                        o.dec = static_cast<std::uint8_t>(grp_dp(o.idx));
+                    } else {
+                        std::int32_t gi = -1;
+                        for (std::size_t j = 0; j < gbs.size(); ++j)
+                            if (ci_eq_g(gbs[j].name, pj)) {
+                                gi = static_cast<std::int32_t>(j); break;
+                            }
+                        if (gi < 0) {
+                            if (table_handle != 0)
+                                c->close_table(table_handle);
+                            return fail(openads::AE_PARSE_ERROR,
+                                ("SELECT column must be a GROUP BY key: " +
+                                 pj).c_str());
+                        }
+                        o.is_agg = false;
+                        o.idx = static_cast<std::size_t>(gi);
+                        o.name = gbs[o.idx].name;
+                        o.type = gbs[o.idx].raw_type
+                               ? static_cast<char>(gbs[o.idx].raw_type)
+                               : 'C';
+                        o.len = gbs[o.idx].length;
+                        o.dec = 0;
+                    }
+                    gouts.push_back(std::move(o));
+                }
+                // Defensive: an aggregate query always has $AGG_ items, but
+                // fall back to all slots if somehow none were recorded.
+                if (gouts.empty()) {
+                    for (std::size_t i = 0; i < slots.size(); ++i) {
+                        GOut o;
+                        o.is_agg = true; o.idx = i;
+                        o.name = slots[i].def.alias.empty()
+                               ? (i == 0 ? "EXPR"
+                                         : "EXPR_" + std::to_string(i))
+                               : slots[i].def.alias;
+                        o.type = 'N'; o.len = 20;
+                        o.dec = static_cast<std::uint8_t>(grp_dp(i));
+                        gouts.push_back(std::move(o));
+                    }
+                }
+            }
             std::uint16_t header_len = static_cast<std::uint16_t>(
-                32 + 32 * slots.size() + 1);
-            std::uint32_t rec_len =
-                1 + 20u * static_cast<std::uint32_t>(slots.size());
+                32 + 32 * gouts.size() + 1);
+            std::uint32_t rec_len = 1;
+            for (const auto& o : gouts) rec_len += o.len;
             hdr[8]  = static_cast<std::uint8_t>( header_len       & 0xFFu);
             hdr[9]  = static_cast<std::uint8_t>((header_len >> 8) & 0xFFu);
             hdr[10] = static_cast<std::uint8_t>( rec_len          & 0xFFu);
             hdr[11] = static_cast<std::uint8_t>((rec_len    >> 8) & 0xFFu);
             file.insert(file.end(), hdr.begin(), hdr.end());
 
-            {
-                std::size_t unaliased = 0;
-                for (std::size_t i = 0; i < slots.size(); ++i) {
-                    std::array<std::uint8_t, 32> fd{};
-                    std::string nm = slots[i].def.alias;
-                    if (nm.empty()) {
-                        nm = unaliased == 0
-                           ? "EXPR" : "EXPR_" + std::to_string(unaliased);
-                        ++unaliased;
-                    }
-                    std::memcpy(fd.data(), nm.data(),
-                                std::min(nm.size(), std::size_t{11}));
-                    fd[11] = 'N'; fd[16] = 20;
-                    fd[17] = static_cast<std::uint8_t>(grp_dp(i));
-                    file.insert(file.end(), fd.begin(), fd.end());
-                }
+            for (const auto& o : gouts) {
+                std::array<std::uint8_t, 32> fd{};
+                std::memcpy(fd.data(), o.name.data(),
+                            std::min(o.name.size(), std::size_t{11}));
+                fd[11] = static_cast<std::uint8_t>(o.type);
+                fd[16] = o.len;
+                fd[17] = o.dec;
+                file.insert(file.end(), fd.begin(), fd.end());
             }
             file.push_back(0x0D);
 
@@ -27614,11 +27696,22 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     if (!eval_having(*parsed.value().having, acc)) continue;
                 }
                 file.push_back(' ');
-                for (std::size_t i = 0; i < slots.size(); ++i) {
-                    char buf[48] = {0};
-                    std::snprintf(buf, sizeof(buf), "%-20.*f", grp_dp(i),
-                                  agg_at(acc, i));
-                    file.insert(file.end(), buf, buf + 20);
+                for (const auto& o : gouts) {
+                    if (o.is_agg) {
+                        char buf[48] = {0};
+                        std::snprintf(buf, sizeof(buf), "%-20.*f",
+                                      static_cast<int>(o.dec),
+                                      agg_at(acc, o.idx));
+                        file.insert(file.end(), buf, buf + 20);
+                    } else {
+                        // Group-key column: the stored key part, already
+                        // padded to gbs[idx].length at accumulation time.
+                        std::string kp = o.idx < acc.key_parts.size()
+                                       ? acc.key_parts[o.idx] : std::string();
+                        for (std::uint8_t b = 0; b < o.len; ++b)
+                            file.push_back(b < kp.size()
+                                ? static_cast<std::uint8_t>(kp[b]) : ' ');
+                    }
                 }
                 ++emitted;
             }
@@ -28458,8 +28551,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         std::string scalar_str;
                         bool found = false;
                         std::uint32_t srcount = stbl->record_count();
-                        if (sub->aggregates.size() == 1 &&
-                            sub->projection.empty()) {
+                        if (scriptbridge::sq_is_scalar_agg(*sub)) {
                             const auto& a = sub->aggregates[0];
                             std::int32_t scol = -1;
                             if (a.kind !=
@@ -28585,7 +28677,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 // (`= (SELECT MAX(x) FROM t)`). Single aggregate slot
                 // computes against the inner table; numeric result
                 // lands directly in the cmp's number/literal.
-                if (sq.aggregates.size() == 1 && sq.projection.empty()) {
+                if (scriptbridge::sq_is_scalar_agg(sq)) {
                     const auto& a = sq.aggregates[0];
                     std::int32_t scol = -1;
                     if (a.kind != openads::sql::AggregateKind::CountStar) {

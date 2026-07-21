@@ -1332,9 +1332,17 @@ util::Result<SelectStmt> parse_select(const std::string& sql) {
             }
 
             if (is_agg_call) {
-                if (!stmt.projection.empty()) {
-                    return util::Error{7200, 0,
-                        "mixing plain columns + aggregates in SELECT not supported", sql};
+                // Plain group-key columns and OTHER aggregates ($AGG_) MAY
+                // accompany an aggregate; complex projection items (CASE /
+                // scalar fn / arith / window — the other `$…` placeholders)
+                // may not.
+                for (const auto& pj : stmt.projection) {
+                    if (!pj.empty() && pj[0] == '$' &&
+                        pj.rfind("$AGG_", 0) != 0) {
+                        return util::Error{7200, 0,
+                            "mixing complex projection items + aggregates "
+                            "in SELECT not supported", sql};
+                    }
                 }
                 aggregate_mode = true;
                 if (!c.match_char('(')) {
@@ -1386,12 +1394,17 @@ util::Result<SelectStmt> parse_select(const std::string& sql) {
                 if (c.match_keyword("AS")) {
                     agg.alias = c.read_identifier();
                 }
+                // Record SELECT-list order via an `$AGG_<n>` placeholder so
+                // the grouped executor can interleave group-key columns and
+                // aggregates in the order the user wrote them.
+                {
+                    char aggph[24];
+                    std::snprintf(aggph, sizeof(aggph), "$AGG_%zu",
+                                  stmt.aggregates.size());
+                    stmt.projection.push_back(aggph);
+                }
                 stmt.aggregates.push_back(std::move(agg));
             } else {
-                if (aggregate_mode) {
-                    return util::Error{7200, 0,
-                        "mixing plain columns + aggregates in SELECT not supported", sql};
-                }
                 // M10.40 — arithmetic projection: `<col> {+,-,*,/}
                 // <num_or_col>`. Detect binary operator after the
                 // first identifier; if absent, treat `head` as a
@@ -1399,6 +1412,11 @@ util::Result<SelectStmt> parse_select(const std::string& sql) {
                 bool is_arith =
                     c.peek_char('+') || c.peek_char('-') ||
                     c.peek_char('*') || c.peek_char('/');
+                if (is_arith && aggregate_mode) {
+                    return util::Error{7200, 0,
+                        "mixing arithmetic + aggregates in SELECT not "
+                        "supported", sql};
+                }
                 if (is_arith) {
                     ArithExpr a;
                     a.lhs_column = head;
@@ -1694,6 +1712,18 @@ util::Result<SelectStmt> parse_select(const std::string& sql) {
             }
             stmt.group_by.push_back(std::move(col));
             if (!c.match_char(',')) break;
+        }
+    }
+    // A plain column projected alongside an aggregate must be a GROUP BY
+    // key (`SELECT col, COUNT(*) … GROUP BY col`); mixing a plain column
+    // with an aggregate and NO GROUP BY is invalid SQL.
+    if (!stmt.aggregates.empty() && stmt.group_by.empty()) {
+        for (const auto& pj : stmt.projection) {
+            if (!pj.empty() && pj.rfind("$AGG_", 0) != 0) {
+                return util::Error{7200, 0,
+                    "column in SELECT with aggregate requires GROUP BY: " +
+                    pj, sql};
+            }
         }
     }
     if (c.match_keyword("HAVING")) {
