@@ -6,11 +6,24 @@ nav_order: 0
 permalink: /es/novedades/
 ---
 
-# Novedades (v1.0.0-rc29 → v1.8.19)
+# Novedades (v1.0.0-rc29 → v1.8.20)
 
 Esta página resume los cambios más destacados desde la versión
 v1.0.0-rc29. Para el historial completo de commits, consulta el
 [CHANGELOG](https://github.com/FiveTechSoft/OpenADS/blob/main/CHANGELOG.md).
+
+---
+
+## Destacados v1.8.20
+
+### Studio HTTP en paquetes Windows + props DD para rddads
+
+Los builds de release de Windows incluyen `openads_serverd` con
+**`OPENADS_WITH_HTTP=ON`**: `--http-port 6263` habilita Studio en
+`http://localhost:6263`.
+
+`ace.h` define las propiedades DD de SAP **121–130**, incluida
+`ADS_DD_DISABLE_DLL_CACHING` (125) que necesita Harbour rddads.
 
 ---
 

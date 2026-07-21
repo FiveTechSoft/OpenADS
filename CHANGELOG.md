@@ -1,3 +1,21 @@
+## 1.8.20 — 2026-07-21
+
+### Fixed — Windows release packages ship Studio HTTP (`OPENADS_WITH_HTTP=ON`)
+
+v1.8.19 Windows zips were built with HTTP left off in the release CMake
+cache, so `openads_serverd --http-port 6263` reported that the build
+lacked `OPENADS_WITH_HTTP` and Studio on `http://localhost:6263` never
+came up. Release scripts now force `-DOPENADS_WITH_HTTP=ON` for both
+x64 and x86; packages include a server that serves the web console.
+
+### Fixed — Harbour rddads: `ADS_DD_DISABLE_DLL_CACHING` undeclared
+
+`include/openads/ace.h` was missing SAP data-dictionary property IDs
+121–130. Harbour `contrib/rddads` uses
+`ADS_DD_DISABLE_DLL_CACHING` (125) and failed to compile against OpenADS
+headers. Those `#define`s are restored (including 125). Rebuild rddads
+against the updated `ace.h` (or this release’s headers).
+
 ## 1.8.19 — 2026-07-20
 
 ### Fixed — remote xBrowse ghost rows with scope + SET DELETED ON
