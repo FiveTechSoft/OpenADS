@@ -893,7 +893,19 @@ UNSIGNED32 ENTRYPOINT AdsExecuteSQLDirectW  (ADSHANDLE hStatement, UNSIGNED16* p
 #define ADS_DD_FTS_CONDITIONAL_CHARS         118
 #define ADS_DD_ENCRYPTED                     119
 #define ADS_DD_ENCRYPT_INDEXES               120
+// 121-130 — SAP ACE 10.x / ADS 8+ database properties (rddads adsfunc.c
+// ADSDDSETDATABASEPROPERTY switch). ADS_DD_DISABLE_DLL_CACHING is required
+// for stock Harbour rddads builds with ADS_LIB_VERSION >= 800.
+#define ADS_DD_QUERY_LOG_TABLE               121
 #define ADS_DD_ENCRYPT_COMMUNICATION         122
+#define ADS_DD_DEFAULT_TABLE_RELATIVE_PATH   123
+#define ADS_DD_TEMP_TABLE_RELATIVE_PATH      124
+#define ADS_DD_DISABLE_DLL_CACHING           125
+#define ADS_DD_DATA_ENCRYPTION_TYPE          126
+#define ADS_DD_FTS_DELIMITERS_W              127
+#define ADS_DD_FTS_NOISE_W                   128
+#define ADS_DD_FTS_DROP_CHARS_W              129
+#define ADS_DD_FTS_CONDITIONAL_CHARS_W       130
 
 // Referential integrity action options (usUpdate / usDelete).
 #define ADS_DD_RI_CASCADE                 1
