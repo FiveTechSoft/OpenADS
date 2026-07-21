@@ -25838,6 +25838,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             std::size_t partner = 0;
             std::vector<std::int32_t> myCols;
             std::vector<std::int32_t> partnerCols;
+            std::vector<bool>         ci;   // per key column: CICHAR fold
             std::unordered_map<std::string,
                                std::vector<std::uint32_t>> hash;
         };
@@ -25862,6 +25863,12 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 }
                 probes[i].myCols.push_back(myc);
                 probes[i].partnerCols.push_back(otc);
+                // CICHAR join key (either side CICHAR) folds case.
+                probes[i].ci.push_back(
+                    field_is_cichar(*tbls[i],
+                        static_cast<std::uint16_t>(myc)) ||
+                    field_is_cichar(*tbls[other],
+                        static_cast<std::uint16_t>(otc)));
             }
             if (partner == N) {
                 close_all();
@@ -26082,13 +26089,19 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 if (!keep) continue;
                 std::string key;
                 bool kok = true;
-                for (std::int32_t fc : pr.myCols) {
-                    const auto& f = flds[static_cast<std::size_t>(fc)];
+                for (std::size_t k = 0; k < pr.myCols.size(); ++k) {
+                    const auto& f = flds[static_cast<std::size_t>(
+                        pr.myCols[k])];
                     if (static_cast<std::size_t>(f.record_offset) + f.length
                             > buf.size()) { kok = false; break; }
-                    key += trim_trailing(std::string(
+                    std::string seg = trim_trailing(std::string(
                         reinterpret_cast<const char*>(
                             buf.data() + f.record_offset), f.length));
+                    if (pr.ci[k])
+                        for (char& ch : seg)
+                            ch = static_cast<char>(std::toupper(
+                                static_cast<unsigned char>(ch)));
+                    key += seg;
                     key.push_back('\x01');
                 }
                 if (!kok) continue;
@@ -26168,15 +26181,21 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             const auto& pr = probes[level];
             const auto& pfld = tbls[pr.partner]->driver()->fields();
             std::string key;
-            for (std::int32_t pc : pr.partnerCols) {
-                const auto& f = pfld[static_cast<std::size_t>(pc)];
+            for (std::size_t k = 0; k < pr.partnerCols.size(); ++k) {
+                const auto& f = pfld[static_cast<std::size_t>(
+                    pr.partnerCols[k])];
                 const auto& pbuf = raws[pr.partner];
                 std::string v;
                 if (static_cast<std::size_t>(f.record_offset) + f.length
                         <= pbuf.size())
                     v.assign(reinterpret_cast<const char*>(
                         pbuf.data() + f.record_offset), f.length);
-                key += trim_trailing(v);
+                std::string seg = trim_trailing(v);
+                if (pr.ci[k])
+                    for (char& ch : seg)
+                        ch = static_cast<char>(std::toupper(
+                            static_cast<unsigned char>(ch)));
+                key += seg;
                 key.push_back('\x01');
             }
             auto it2 = pr.hash.find(key);
@@ -26281,8 +26300,18 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         j.right_column.c_str());
         }
 
-        auto trim_trailing = [](std::string sl) {
+        // CICHAR join keys match case-insensitively (SAP: a comparison is
+        // case-insensitive if either operand is CICHAR). Fold the hash key
+        // to upper on both build and probe so 'abc' joins 'ABC'.
+        bool join_ci =
+            field_is_cichar(*ltbl, static_cast<std::uint16_t>(lcol)) ||
+            field_is_cichar(*rtbl, static_cast<std::uint16_t>(rcol));
+        auto trim_trailing = [join_ci](std::string sl) {
             while (!sl.empty() && sl.back() == ' ') sl.pop_back();
+            if (join_ci)
+                for (char& ch : sl)
+                    ch = static_cast<char>(std::toupper(
+                        static_cast<unsigned char>(ch)));
             return sl;
         };
 
@@ -26651,6 +26680,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 std::uint16_t field_index;
                 bool          descending;
                 bool          numeric;
+                bool          ci;    // CICHAR: case-insensitive collation
             };
             std::vector<SortKey> sks;
             auto add_sk = [&](const openads::sql::OrderBy& ob)
@@ -26671,6 +26701,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     fd.type == openads::drivers::DbfFieldType::Integer ||
                     fd.type == openads::drivers::DbfFieldType::Currency||
                     fd.type == openads::drivers::DbfFieldType::Double;
+                k.ci = fd.type ==
+                       openads::drivers::DbfFieldType::CiCharacter;
                 sks.push_back(k);
                 return std::monostate{};
             };
@@ -26711,8 +26743,10 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                             less  = a.d[i] <  b.d[i];
                             equal = a.d[i] == b.d[i];
                         } else {
-                            less  = a.s[i] <  b.s[i];
-                            equal = a.s[i] == b.s[i];
+                            int cmp = where_str_cmp(a.s[i], b.s[i],
+                                                    sks[i].ci);
+                            less  = cmp <  0;
+                            equal = cmp == 0;
                         }
                         if (equal) continue;
                         return sks[i].descending ? !less : less;
@@ -28880,6 +28914,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             std::uint16_t field_index;
             bool          descending;
             bool          numeric;
+            bool          ci;        // CICHAR: case-insensitive collation
         };
         std::vector<SortKey> sks;
         auto add_sort_key = [&](const openads::sql::OrderBy& ob)
@@ -28902,6 +28937,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 fd.type == openads::drivers::DbfFieldType::Integer ||
                 fd.type == openads::drivers::DbfFieldType::Currency||
                 fd.type == openads::drivers::DbfFieldType::Double;
+            k.ci = fd.type ==
+                   openads::drivers::DbfFieldType::CiCharacter;
             sks.push_back(k);
             return std::monostate{};
         };
@@ -28950,8 +28987,11 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         less  = a.d[i] <  b.d[i];
                         equal = a.d[i] == b.d[i];
                     } else {
-                        less  = a.s[i] <  b.s[i];
-                        equal = a.s[i] == b.s[i];
+                        // PAD SPACE + CICHAR-aware collation, matching
+                        // WHERE-clause string comparison semantics.
+                        int cmp = where_str_cmp(a.s[i], b.s[i], sks[i].ci);
+                        less  = cmp <  0;
+                        equal = cmp == 0;
                     }
                     if (equal) continue;
                     return sks[i].descending ? !less : less;
