@@ -103,7 +103,19 @@ UNSIGNED32 ENTRYPOINT AdsFRead         (ADSHANDLE  hFile, void* pBuf,
 UNSIGNED32 ENTRYPOINT AdsFWrite        (ADSHANDLE  hFile, const void* pBuf,
                               UNSIGNED32 ulLen, UNSIGNED32* pulWritten);
 UNSIGNED32 ENTRYPOINT AdsFSeek         (ADSHANDLE  hFile, SIGNED32 lOffset,
-                              UNSIGNED16 usOrigin, UNSIGNED32* pulPos);
+                               UNSIGNED16 usOrigin, UNSIGNED32* pulPos);
+// OpenADS compatibility aliases used by legacy oads_* callers.
+UNSIGNED32 ENTRYPOINT oads_FOpen       (ADSHANDLE  hConnect, UNSIGNED8* pucName,
+                               UNSIGNED16 usMode, ADSHANDLE* phFile);
+UNSIGNED32 ENTRYPOINT oads_FCreate     (ADSHANDLE  hConnect, UNSIGNED8* pucName,
+                               UNSIGNED16 usAttribute, ADSHANDLE* phFile);
+UNSIGNED32 ENTRYPOINT oads_FClose      (ADSHANDLE hFile);
+UNSIGNED32 ENTRYPOINT oads_FRead       (ADSHANDLE hFile, void* pBuf,
+                               UNSIGNED32 ulLen, UNSIGNED32* pulRead);
+UNSIGNED32 ENTRYPOINT oads_FWrite      (ADSHANDLE hFile, const void* pBuf,
+                               UNSIGNED32 ulLen, UNSIGNED32* pulWritten);
+UNSIGNED32 ENTRYPOINT oads_FSeek       (ADSHANDLE hFile, SIGNED32 lOffset,
+                               UNSIGNED16 usOrigin, UNSIGNED32* pulPos);
 UNSIGNED32 ENTRYPOINT AdsCloseAllTables(void);
 UNSIGNED32 ENTRYPOINT AdsGetRecordLength(ADSHANDLE hTable, UNSIGNED32* pulLen);
 

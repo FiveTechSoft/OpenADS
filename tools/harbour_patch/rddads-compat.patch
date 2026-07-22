@@ -571,7 +571,7 @@ diff --git a/contrib/rddads/adsfunc.c b/contrib/rddads/adsfunc.c
 index 8f3e2a1..c4b91de 100644
 --- a/contrib/rddads/adsfunc.c
 +++ b/contrib/rddads/adsfunc.c
-@@ -1707,6 +1707,58 @@ HB_FUNC( ADSCACHERECORDS )
+@@ -1707,6 +1707,69 @@ HB_FUNC( ADSCACHERECORDS )
     else
        hb_errRT_DBCMD( EG_NOTABLE, 2001, NULL, HB_ERR_FUNCNAME );
  }

@@ -10,7 +10,8 @@ Apply by hand or via `git apply` from a Harbour source tree:
 
 ```sh
 cd /path/to/harbour
-git apply /path/to/openads/tools/harbour_patch/rddads-compat.patch
+git apply --check /path/to/openads/tools/harbour_patch/rddads-compat.patch
+git apply --3way /path/to/openads/tools/harbour_patch/rddads-compat.patch
 ```
 
 Then rebuild rddads:
@@ -19,6 +20,11 @@ Then rebuild rddads:
 HB_WITH_ADS=/path/to/openads-sdk \
     bin/win/msvc64/hbmk2 contrib/rddads/rddads.hbp -comp=msvc64
 ```
+
+The patch is checked with `git apply --check` against a clean Harbour
+checkout. If nearby Harbour code has moved, use `git apply --3way` as shown
+above so Git matches the surrounding function context instead of depending
+only on recorded line numbers.
 
 ## Patch contents
 

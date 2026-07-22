@@ -8443,6 +8443,33 @@ UNSIGNED32 ENTRYPOINT AdsFSeek(ADSHANDLE hFile, SIGNED32 lOffset,
     return fail(openads::AE_INTERNAL_ERROR, "bad file handle");
 }
 
+// Legacy OpenADS filesystem spellings. Keep these as thin ABI aliases so
+// existing FiveWin/Harbour code can link as either AdsF* or oads_F* while
+// sharing exactly the same local/remote implementation and handle registry.
+UNSIGNED32 ENTRYPOINT oads_FOpen(ADSHANDLE hConnect, UNSIGNED8* pucName,
+                                 UNSIGNED16 usMode, ADSHANDLE* phFile) {
+    return AdsFOpen(hConnect, pucName, usMode, phFile);
+}
+UNSIGNED32 ENTRYPOINT oads_FCreate(ADSHANDLE hConnect, UNSIGNED8* pucName,
+                                   UNSIGNED16 usAttribute, ADSHANDLE* phFile) {
+    return AdsFCreate(hConnect, pucName, usAttribute, phFile);
+}
+UNSIGNED32 ENTRYPOINT oads_FClose(ADSHANDLE hFile) {
+    return AdsFClose(hFile);
+}
+UNSIGNED32 ENTRYPOINT oads_FRead(ADSHANDLE hFile, void* pBuf,
+                                 UNSIGNED32 ulLen, UNSIGNED32* pulRead) {
+    return AdsFRead(hFile, pBuf, ulLen, pulRead);
+}
+UNSIGNED32 ENTRYPOINT oads_FWrite(ADSHANDLE hFile, const void* pBuf,
+                                  UNSIGNED32 ulLen, UNSIGNED32* pulWritten) {
+    return AdsFWrite(hFile, pBuf, ulLen, pulWritten);
+}
+UNSIGNED32 ENTRYPOINT oads_FSeek(ADSHANDLE hFile, SIGNED32 lOffset,
+                                 UNSIGNED16 usOrigin, UNSIGNED32* pulPos) {
+    return AdsFSeek(hFile, lOffset, usOrigin, pulPos);
+}
+
 // SAP's ace.h declares `AdsCloseAllTables(void)`: close every table
 // the calling process has opened. We accept the same 0-arg form;
 // per-connection close still works through AdsCloseTable().
@@ -11574,6 +11601,21 @@ bool path_ends_with_ci(const std::string& s, const char* suffix) {
     return true;
 }
 
+// Harbour/FiveWin may pass a client-native fully qualified path (for example
+// C:\\work\\table.cdx) even when the table is remote. Normalize separators
+// everywhere; a Windows drive path received by a POSIX server cannot refer to
+// the client's filesystem, so remote callers use its basename in the table's
+// server-side directory.
+std::string normalize_index_path(std::string path, bool remote) {
+    std::replace(path.begin(), path.end(), '\\', '/');
+    const bool drive_path = path.size() >= 3 &&
+        std::isalpha(static_cast<unsigned char>(path[0])) &&
+        path[1] == ':' && path[2] == '/';
+    if (remote && drive_path)
+        path = std::filesystem::path(path).filename().string();
+    return path;
+}
+
 std::unique_ptr<openads::drivers::IIndex>
 make_index_for(const std::string& path) {
     if (path_ends_with_ci(path, ".cdx")) {
@@ -12137,6 +12179,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
 #endif
     if (auto* rt = get_remote_table(hTable)) {
         std::string path = openads::abi::to_internal(pucFileName, 0);
+        path = normalize_index_path(std::move(path), true);
         std::string tag  = openads::abi::to_internal(pucIndexName, 0);
         std::string expr = openads::abi::to_internal(pucExpr, 0);
         std::string cond = pucCondition
@@ -12177,7 +12220,8 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
     // safe.)
     std::lock_guard<std::recursive_mutex> _create_lk(state().mu);
     (void)pucKeyFilter; (void)usPageSize;
-    auto bag  = openads::abi::to_internal(pucFileName, 0);
+    auto bag  = normalize_index_path(
+        openads::abi::to_internal(pucFileName, 0), false);
     auto tag  = openads::abi::to_internal(pucIndexName, 0);
     auto expr = openads::abi::to_internal(pucExpr, 0);
     std::string for_expr = pucCondition != nullptr
@@ -12765,7 +12809,8 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex(ADSHANDLE hTable, UNSIGNED8* pucFile,
     if (!t) {
         return fail(openads::AE_INTERNAL_ERROR, "unknown table or null out");
     }
-    auto file = openads::abi::to_internal(pucFile, 0);
+    auto file = normalize_index_path(
+        openads::abi::to_internal(pucFile, 0), false);
     auto tag  = openads::abi::to_internal(pucTag,  0);
     auto expr = openads::abi::to_internal(pucExpr, 0);
     // A FOR condition makes this a conditional index: only matching rows get

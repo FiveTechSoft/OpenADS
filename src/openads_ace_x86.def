@@ -158,6 +158,12 @@ EXPORTS
     AdsFRead@16                 = AdsFRead
     AdsFWrite@16                = AdsFWrite
     AdsFSeek@16                 = AdsFSeek
+    oads_FOpen@16               = oads_FOpen
+    oads_FCreate@16             = oads_FCreate
+    oads_FClose@4               = oads_FClose
+    oads_FRead@16               = oads_FRead
+    oads_FWrite@16              = oads_FWrite
+    oads_FSeek@16               = oads_FSeek
     AdsDeleteIndex@4            = AdsDeleteIndex
     AdsDeleteRecord@4           = AdsDeleteRecord
     AdsDisconnect@4             = AdsDisconnect

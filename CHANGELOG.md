@@ -2605,3 +2605,14 @@ remote wire connections. Configure accounts with
 `openads_serverd --auth-user user:password` or `auth_user = user:password` in
 `openads.ini`; invalid credentials are rejected with `AE_LOGIN_FAILED`
 (`7077`). Use `tls://` URIs to protect credentials in transit.
+## 1.8.23 — 2026-07-22
+
+### Fixed — Harbour patch, filesystem exports, Studio folders and CDX paths
+
+- Fixed the malformed final hunk in `rddads-compat.patch`; it now passes
+  `git apply --check`, with `--3way` guidance for newer Harbour trees.
+- Added `oads_FOpen`/`oads_FCreate`/`oads_FClose`/`oads_FRead`/
+  `oads_FWrite`/`oads_FSeek` ABI aliases alongside the `AdsF*` exports.
+- Studio now discovers DBF tables below subdirectories of `--data`.
+- Normalized Windows-style fully qualified CDX paths for remote/POSIX
+  servers, so `INDEX ON ... TO ( cIdx )` works with a full client path.

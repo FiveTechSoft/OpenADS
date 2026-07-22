@@ -132,6 +132,12 @@ EXPORTS
     AdsFRead
     AdsFWrite
     AdsFSeek
+    oads_FOpen
+    oads_FCreate
+    oads_FClose
+    oads_FRead
+    oads_FWrite
+    oads_FSeek
     AdsClearCallbackFunction
     AdsClearFilter
     AdsClearRelation

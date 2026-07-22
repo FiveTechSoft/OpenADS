@@ -183,17 +183,20 @@ json bytes_to_json_cell(const std::uint8_t* p, std::size_t n) {
     };
 }
 
-// List `*.dbf` files in the data dir.
+// List `*.dbf` files in the data dir, including tables below subdirectories.
+// Return paths relative to the configured data root so the Studio can show
+// the actual folder layout and pass the same name back to the table APIs.
 std::vector<std::string> list_dbf_files(const std::string& dir) {
     std::vector<std::string> out;
     std::error_code ec;
     if (!fs::exists(dir, ec)) return out;
-    for (auto& e : fs::directory_iterator(dir, ec)) {
+    for (auto& e : fs::recursive_directory_iterator(dir, ec)) {
         if (!e.is_regular_file()) continue;
         auto ext = e.path().extension().string();
         std::transform(ext.begin(), ext.end(), ext.begin(),
                        [](unsigned char c){ return std::tolower(c); });
-        if (ext == ".dbf") out.push_back(e.path().filename().string());
+        if (ext == ".dbf")
+            out.push_back(fs::relative(e.path(), fs::path(dir), ec).generic_string());
     }
     std::sort(out.begin(), out.end());
     return out;
@@ -1363,14 +1366,14 @@ bool HttpConsole::start(const std::string& host,
         return req.has_param("type") ? req.get_param_value("type") : "";
     };
 
-    srv.Get(R"(/api/tables/([^/]+)/schema)",
+    srv.Get(R"(/api/tables/(.+)/schema)",
             [this, type_param](const httplib::Request& req, httplib::Response& res) {
         json j = table_schema(data_dir_, req.matches[1], type_param(req));
         if (j.contains("error")) res.status = j.value("http_code", 500);
         res.set_content(j.dump(), "application/json");
     });
 
-    srv.Get(R"(/api/tables/([^/]+)/rows)",
+    srv.Get(R"(/api/tables/(.+)/rows)",
             [this, type_param](const httplib::Request& req, httplib::Response& res) {
         std::uint32_t offset = 0, limit = 50;
         if (req.has_param("offset"))
@@ -1388,7 +1391,7 @@ bool HttpConsole::start(const std::string& host,
         res.set_content(j.dump(), "application/json");
     });
 
-    srv.Post(R"(/api/tables/([^/]+)/insert)",
+    srv.Post(R"(/api/tables/(.+)/insert)",
              [this, type_param](const httplib::Request& req, httplib::Response& res) {
         json body;
         try { body = json::parse(req.body); }
@@ -1401,7 +1404,7 @@ bool HttpConsole::start(const std::string& host,
         res.set_content(j.dump(), "application/json");
     });
 
-    srv.Post(R"(/api/tables/([^/]+)/update)",
+    srv.Post(R"(/api/tables/(.+)/update)",
              [this, type_param](const httplib::Request& req, httplib::Response& res) {
         std::uint32_t recno = 0;
         if (req.has_param("recno"))
@@ -1421,7 +1424,7 @@ bool HttpConsole::start(const std::string& host,
         res.set_content(j.dump(), "application/json");
     });
 
-    srv.Post(R"(/api/tables/([^/]+)/delete)",
+    srv.Post(R"(/api/tables/(.+)/delete)",
              [this, type_param](const httplib::Request& req, httplib::Response& res) {
         std::uint32_t recno = 0;
         if (req.has_param("recno"))
@@ -1608,14 +1611,14 @@ bool HttpConsole::start(const std::string& host,
         res.set_content(j.dump(), "application/json");
     });
 
-    srv.Delete(R"(/api/tables/([^/]+))",
+    srv.Delete(R"(/api/tables/(.+))",
                [this](const httplib::Request& req, httplib::Response& res) {
         json j = table_drop(data_dir_, req.matches[1]);
         if (j.contains("error")) res.status = j.value("http_code", 500);
         res.set_content(j.dump(), "application/json");
     });
 
-    srv.Post(R"(/api/tables/([^/]+)/encrypt)",
+    srv.Post(R"(/api/tables/(.+)/encrypt)",
              [this, type_param](const httplib::Request& req, httplib::Response& res) {
         json body;
         try { body = json::parse(req.body); }
@@ -1630,25 +1633,25 @@ bool HttpConsole::start(const std::string& host,
 
     // studio.web.0.6 — table maintenance (Reindex / Pack / Zap +
     // CREATE INDEX wizard).
-    srv.Post(R"(/api/tables/([^/]+)/reindex)",
+    srv.Post(R"(/api/tables/(.+)/reindex)",
              [this, type_param](const httplib::Request& req, httplib::Response& res) {
         json j = table_reindex(data_dir_, req.matches[1], type_param(req));
         if (j.contains("error")) res.status = j.value("http_code", 500);
         res.set_content(j.dump(), "application/json");
     });
-    srv.Post(R"(/api/tables/([^/]+)/pack)",
+    srv.Post(R"(/api/tables/(.+)/pack)",
              [this, type_param](const httplib::Request& req, httplib::Response& res) {
         json j = table_pack(data_dir_, req.matches[1], type_param(req));
         if (j.contains("error")) res.status = j.value("http_code", 500);
         res.set_content(j.dump(), "application/json");
     });
-    srv.Post(R"(/api/tables/([^/]+)/zap)",
+    srv.Post(R"(/api/tables/(.+)/zap)",
              [this, type_param](const httplib::Request& req, httplib::Response& res) {
         json j = table_zap(data_dir_, req.matches[1], type_param(req));
         if (j.contains("error")) res.status = j.value("http_code", 500);
         res.set_content(j.dump(), "application/json");
     });
-    srv.Post(R"(/api/tables/([^/]+)/index)",
+    srv.Post(R"(/api/tables/(.+)/index)",
              [this](const httplib::Request& req, httplib::Response& res) {
         json body; try { body = json::parse(req.body); }
         catch (...) { res.status = 400;
@@ -1659,7 +1662,7 @@ bool HttpConsole::start(const std::string& host,
         res.set_content(j.dump(), "application/json");
     });
 
-    srv.Get(R"(/api/tables/([^/]+)/sidecars)",
+    srv.Get(R"(/api/tables/(.+)/sidecars)",
             [this](const httplib::Request& req, httplib::Response& res) {
         json j = table_sidecars(data_dir_, req.matches[1]);
         res.set_content(j.dump(), "application/json");
@@ -1668,7 +1671,7 @@ bool HttpConsole::start(const std::string& host,
     // studio.web.0.8 — download a single DBF (or any sidecar) as
     // application/octet-stream so the admin can pull a copy off the
     // server through the browser.
-    srv.Get(R"(/api/tables/([^/]+)/download)",
+    srv.Get(R"(/api/tables/(.+)/download)",
             [this](const httplib::Request& req, httplib::Response& res) {
         std::string fname = req.matches[1];
         if (fname.find("..") != std::string::npos ||
