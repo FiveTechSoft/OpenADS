@@ -22758,6 +22758,14 @@ inline openads::drivers::DbfField join_out_field(
     return o;
 }
 
+// SAP TRUNCATES AVG toward zero at the result's decimals rather than
+// rounding (oracle 2026-07-21: AVG(money) 1505.58485… -> 1505.5848 at
+// 4dp; AVG(integer) 2190965.7 -> 2190965 at 0dp).
+inline double avg_truncate(double v, int dp) {
+    double scale = std::pow(10.0, dp);
+    return std::trunc(v * scale) / scale;
+}
+
 // Format one decoded cell (from the POSITIONED row of `t`) for the
 // mapped output descriptor. NULL / read failure yields an empty string
 // (blank cell); the caller pads to out.length.
@@ -25811,10 +25819,16 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
     // ====================================================================
     if (parsed.value().from_tables.size() >= 3) {
         auto& st = parsed.value();
-        if (st.projection_complex) {
+        // S4 — aggregates (COUNT/SUM/AVG/MIN/MAX, optional GROUP BY /
+        // HAVING) are supported by accumulating during the join walk;
+        // the other complex projection kinds are not.
+        const bool nway_agg = !st.aggregates.empty();
+        if (st.projection_complex &&
+            !(nway_agg && st.case_items.empty() && st.fn_items.empty() &&
+              st.arith_items.empty() && st.window_items.empty())) {
             return fail(openads::AE_INTERNAL_ERROR,
-                "multi-table join: only column and <alias>.* projections "
-                "are supported");
+                "multi-table join: only column, <alias>.* and aggregate "
+                "projections are supported");
         }
         auto& s = state();
         std::lock_guard<std::recursive_mutex> lk(s.mu);
@@ -26038,43 +26052,96 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             outcols.push_back(OutCol{
                 ti, static_cast<std::uint16_t>(fi), std::move(ofld)});
         };
-        if (st.select_items.empty()) {
-            // bare `SELECT *` across all tables, in FROM order.
-            for (std::size_t i = 0; i < N; ++i) {
-                const auto& flds = tbls[i]->driver()->fields();
-                for (std::int32_t k = 0;
-                     k < static_cast<std::int32_t>(flds.size()); ++k)
-                    add_out(i, k);
-            }
-        } else {
-            for (const auto& si : st.select_items) {
-                if (si.wildcard) {
-                    auto a = alias_idx.find(lc(si.alias));
-                    if (a == alias_idx.end()) {
-                        close_all();
-                        return fail(openads::AE_COLUMN_NOT_FOUND,
-                                    si.alias.c_str());
-                    }
-                    const auto& flds =
-                        tbls[a->second]->driver()->fields();
+        if (!nway_agg) {
+            if (st.select_items.empty()) {
+                // bare `SELECT *` across all tables, in FROM order.
+                for (std::size_t i = 0; i < N; ++i) {
+                    const auto& flds = tbls[i]->driver()->fields();
                     for (std::int32_t k = 0;
                          k < static_cast<std::int32_t>(flds.size()); ++k)
-                        add_out(a->second, k);
-                } else {
-                    std::size_t ti; std::int32_t fi;
-                    if (!resolve(si.alias, si.column, ti, fi)) {
-                        close_all();
-                        return fail(openads::AE_COLUMN_NOT_FOUND,
-                                    si.column.c_str());
+                        add_out(i, k);
+                }
+            } else {
+                for (const auto& si : st.select_items) {
+                    if (si.wildcard) {
+                        auto a = alias_idx.find(lc(si.alias));
+                        if (a == alias_idx.end()) {
+                            close_all();
+                            return fail(openads::AE_COLUMN_NOT_FOUND,
+                                        si.alias.c_str());
+                        }
+                        const auto& flds =
+                            tbls[a->second]->driver()->fields();
+                        for (std::int32_t k = 0;
+                             k < static_cast<std::int32_t>(flds.size()); ++k)
+                            add_out(a->second, k);
+                    } else {
+                        std::size_t ti; std::int32_t fi;
+                        if (!resolve(si.alias, si.column, ti, fi)) {
+                            close_all();
+                            return fail(openads::AE_COLUMN_NOT_FOUND,
+                                        si.column.c_str());
+                        }
+                        add_out(ti, fi);
                     }
-                    add_out(ti, fi);
                 }
             }
+            if (outcols.empty()) {
+                close_all();
+                return fail(openads::AE_INTERNAL_ERROR,
+                            "multi-table join: empty projection");
+            }
         }
-        if (outcols.empty()) {
-            close_all();
-            return fail(openads::AE_INTERNAL_ERROR,
-                        "multi-table join: empty projection");
+
+        // --- 6a. Aggregate mode: resolve aggregate source columns and
+        //         GROUP BY key columns against the joined tables. The walk
+        //         accumulates instead of emitting rows.
+        struct NAggSlot {
+            openads::sql::Aggregate def;
+            std::size_t   ti = 0;
+            std::int32_t  fi = -1;      // -1 for COUNT(*)
+            std::uint8_t  dec = 0;      // source decimals (money: 4)
+        };
+        struct NKeyCol {
+            std::size_t   ti = 0;
+            std::int32_t  fi = -1;
+            openads::drivers::DbfField ofld;   // mapped output descriptor
+        };
+        std::vector<NAggSlot> nslots;
+        std::vector<NKeyCol>  nkeys;
+        if (nway_agg) {
+            for (const auto& a : st.aggregates) {
+                NAggSlot slot;
+                slot.def = a;
+                if (a.kind != openads::sql::AggregateKind::CountStar) {
+                    if (!resolve(std::string(), a.column,
+                                 slot.ti, slot.fi)) {
+                        close_all();
+                        return fail(openads::AE_COLUMN_NOT_FOUND,
+                                    a.column.c_str());
+                    }
+                    const auto& sfd = tbls[slot.ti]->driver()->fields()[
+                        static_cast<std::size_t>(slot.fi)];
+                    using FT = openads::drivers::DbfFieldType;
+                    slot.dec = (sfd.type == FT::AdtMoney ||
+                                sfd.type == FT::Currency)
+                             ? 4 : sfd.decimals;
+                }
+                nslots.push_back(std::move(slot));
+            }
+            for (const auto& gname : st.group_by) {
+                NKeyCol kc;
+                if (!resolve(std::string(), gname, kc.ti, kc.fi)) {
+                    close_all();
+                    return fail(openads::AE_COLUMN_NOT_FOUND,
+                                gname.c_str());
+                }
+                kc.ofld = scriptbridge::join_out_field(
+                    tbls[kc.ti]->driver()->fields()[
+                        static_cast<std::size_t>(kc.fi)]);
+                if (kc.ofld.name.size() > 10) kc.ofld.name.resize(10);
+                nkeys.push_back(std::move(kc));
+            }
         }
 
         // --- 7. Residual WHERE evaluator over the bound rows. Rows are
@@ -26241,9 +26308,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             recs[i] = 0;
         }
 
-        // --- 8. Output DBF header + field descriptors. ---
-        std::uint16_t out_hlen = static_cast<std::uint16_t>(
-            32 + 32 * outcols.size() + 1);
+        // --- 8. Output DBF header + field descriptors (plain-projection
+        //         mode; aggregate mode writes its own file after the walk).
         std::uint32_t out_rlen = 1;
         for (const auto& oc : outcols) out_rlen += oc.fld.length;
         if (out_rlen > 0xFFFF) {
@@ -26252,7 +26318,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         "multi-table join: record exceeds 64 KiB");
         }
         std::vector<std::uint8_t> file;
-        {
+        if (!nway_agg) {
+            std::uint16_t out_hlen = static_cast<std::uint16_t>(
+                32 + 32 * outcols.size() + 1);
             std::array<std::uint8_t, 32> hdr{};
             hdr[0] = 0x03;
             stamp_dbf_header_today(hdr.data());
@@ -26273,10 +26341,62 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             file.push_back(0x0D);
         }
 
-        // --- 9. Left-deep nested-loop join walk; emit projected rows
-        //         from the decoded values of the bound (positioned) rows.
+        // --- 9. Left-deep nested-loop join walk. Plain mode emits the
+        //         projected row; aggregate mode accumulates into per-group
+        //         slots (group key from the GROUP BY columns of the bound
+        //         rows; no GROUP BY = one global group).
+        struct NAcc {
+            std::vector<std::string>   key_parts;
+            std::vector<double>        sum, minv, maxv;
+            std::vector<std::uint64_t> cnt;
+            std::uint64_t              rows = 0;
+        };
+        std::unordered_map<std::string, NAcc> ngroups;
+        std::vector<std::string> ngroup_order;
         std::uint32_t emitted = 0;
         auto emit_row = [&]() {
+            if (nway_agg) {
+                std::string key;
+                std::vector<std::string> parts;
+                parts.reserve(nkeys.size());
+                for (const auto& kc : nkeys) {
+                    std::string kv = slice(kc.ti, kc.fi);
+                    parts.push_back(kv);
+                    key += kv;
+                    key.push_back('\x1f');
+                }
+                auto git = ngroups.find(key);
+                if (git == ngroups.end()) {
+                    NAcc acc;
+                    acc.key_parts = std::move(parts);
+                    acc.sum.assign(nslots.size(), 0.0);
+                    acc.minv.assign(nslots.size(),
+                        std::numeric_limits<double>::infinity());
+                    acc.maxv.assign(nslots.size(),
+                        -std::numeric_limits<double>::infinity());
+                    acc.cnt.assign(nslots.size(), 0);
+                    git = ngroups.emplace(key, std::move(acc)).first;
+                    ngroup_order.push_back(key);
+                }
+                auto& acc = git->second;
+                ++acc.rows;
+                for (std::size_t i2 = 0; i2 < nslots.size(); ++i2) {
+                    if (nslots[i2].def.kind ==
+                        openads::sql::AggregateKind::CountStar) {
+                        ++acc.cnt[i2];
+                        continue;
+                    }
+                    auto v = tbls[nslots[i2].ti]->read_field(
+                        static_cast<std::uint16_t>(nslots[i2].fi));
+                    if (!v || v.value().is_null) continue;
+                    double d = v.value().as_double;
+                    ++acc.cnt[i2];
+                    acc.sum[i2] += d;
+                    if (d < acc.minv[i2]) acc.minv[i2] = d;
+                    if (d > acc.maxv[i2]) acc.maxv[i2] = d;
+                }
+                return;
+            }
             std::vector<std::uint8_t> rec(out_rlen, ' ');
             rec[0] = ' ';
             std::size_t off = 1;
@@ -26330,6 +26450,208 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             recs[level] = 0;
         };
         walk(0);
+
+        // --- 9a. Aggregate mode: build the result file from the group
+        //         accumulators (same output conventions as the
+        //         single-table grouped path: SELECT-list order via the
+        //         $AGG_<n> placeholders, N(20,dp) aggregate cells named
+        //         alias / EXPR / EXPR_1, group keys with their mapped
+        //         source descriptor, groups sorted ascending, HAVING
+        //         evaluated per group).
+        if (nway_agg) {
+            auto ndp = [&](std::size_t i) -> int {
+                using K = openads::sql::AggregateKind;
+                switch (nslots[i].def.kind) {
+                    case K::CountStar: case K::Count: return 0;
+                    // AVG keeps the SOURCE column's decimals (oracle
+                    // 2026-07-21: money -> 4dp, integer -> 0dp; not 6).
+                    default: return static_cast<int>(nslots[i].dec);
+                }
+            };
+            auto ci_eq_n = [](const std::string& x, const std::string& y) {
+                if (x.size() != y.size()) return false;
+                for (std::size_t z = 0; z < x.size(); ++z)
+                    if (std::toupper(static_cast<unsigned char>(x[z])) !=
+                        std::toupper(static_cast<unsigned char>(y[z])))
+                        return false;
+                return true;
+            };
+            struct NOut {
+                bool          is_agg = false;
+                std::size_t   idx    = 0;
+                std::string   name;
+                char          type   = 'N';
+                std::uint16_t len    = 20;
+                std::uint8_t  dec    = 0;
+            };
+            std::vector<NOut> nouts;
+            {
+                std::size_t unal = 0;
+                for (const auto& pj : st.projection) {
+                    NOut o;
+                    if (pj.rfind("$AGG_", 0) == 0) {
+                        o.is_agg = true;
+                        o.idx = static_cast<std::size_t>(
+                            std::stoul(pj.substr(5)));
+                        std::string nm = nslots[o.idx].def.alias;
+                        if (nm.empty()) {
+                            nm = unal == 0 ? "EXPR"
+                               : "EXPR_" + std::to_string(unal);
+                            ++unal;
+                        }
+                        o.name = nm;
+                        o.type = 'N'; o.len = 20;
+                        o.dec  = static_cast<std::uint8_t>(ndp(o.idx));
+                    } else {
+                        std::int32_t gi = -1;
+                        for (std::size_t j2 = 0; j2 < st.group_by.size();
+                             ++j2)
+                            if (ci_eq_n(st.group_by[j2], pj)) {
+                                gi = static_cast<std::int32_t>(j2); break;
+                            }
+                        if (gi < 0) {
+                            close_all();
+                            return fail(openads::AE_PARSE_ERROR,
+                                ("SELECT column must be a GROUP BY key: " +
+                                 pj).c_str());
+                        }
+                        o.is_agg = false;
+                        o.idx = static_cast<std::size_t>(gi);
+                        const auto& kf = nkeys[o.idx].ofld;
+                        o.name = kf.name;
+                        o.type = kf.raw_type
+                               ? static_cast<char>(kf.raw_type) : 'C';
+                        o.len  = kf.length;
+                        o.dec  = kf.decimals;
+                    }
+                    nouts.push_back(std::move(o));
+                }
+            }
+            auto agg_at = [&](const NAcc& acc, std::size_t si) -> double {
+                using K = openads::sql::AggregateKind;
+                switch (nslots[si].def.kind) {
+                    case K::CountStar:
+                        return static_cast<double>(acc.rows);
+                    case K::Count:
+                        return static_cast<double>(acc.cnt[si]);
+                    case K::Sum: return acc.sum[si];
+                    case K::Avg:
+                        return acc.cnt[si]
+                            ? scriptbridge::avg_truncate(
+                                  acc.sum[si] /
+                                      static_cast<double>(acc.cnt[si]),
+                                  static_cast<int>(nslots[si].dec))
+                            : 0.0;
+                    case K::Min: return acc.cnt[si] ? acc.minv[si] : 0.0;
+                    case K::Max: return acc.cnt[si] ? acc.maxv[si] : 0.0;
+                }
+                return 0.0;
+            };
+            auto resolve_nslot = [&](const openads::sql::HavingCmp& ha)
+                                   -> std::int32_t {
+                for (std::size_t i = 0; i < nslots.size(); ++i)
+                    if (nslots[i].def.kind == ha.agg.kind &&
+                        nslots[i].def.column == ha.agg.column)
+                        return static_cast<std::int32_t>(i);
+                if (ha.agg.kind == openads::sql::AggregateKind::CountStar)
+                    for (std::size_t i = 0; i < nslots.size(); ++i)
+                        if (nslots[i].def.kind ==
+                            openads::sql::AggregateKind::CountStar)
+                            return static_cast<std::int32_t>(i);
+                return -1;
+            };
+            std::function<bool(const openads::sql::HavingExpr&,
+                               const NAcc&)> eval_nhaving;
+            eval_nhaving = [&](const openads::sql::HavingExpr& n,
+                               const NAcc& acc) -> bool {
+                using K = openads::sql::HavingExpr::Kind;
+                if (n.kind == K::And) {
+                    for (auto& cn : n.children)
+                        if (!eval_nhaving(*cn, acc)) return false;
+                    return true;
+                }
+                if (n.kind == K::Or) {
+                    for (auto& cn : n.children)
+                        if (eval_nhaving(*cn, acc)) return true;
+                    return false;
+                }
+                if (n.kind == K::Not) return !eval_nhaving(*n.child, acc);
+                std::int32_t si = resolve_nslot(n.cmp);
+                if (si < 0) return false;
+                double v   = agg_at(acc, static_cast<std::size_t>(si));
+                double rhs = n.cmp.num;
+                switch (n.cmp.op) {
+                    case openads::sql::WhereOp::Eq: return v == rhs;
+                    case openads::sql::WhereOp::Ne: return v != rhs;
+                    case openads::sql::WhereOp::Lt: return v <  rhs;
+                    case openads::sql::WhereOp::Gt: return v >  rhs;
+                    case openads::sql::WhereOp::Le: return v <= rhs;
+                    case openads::sql::WhereOp::Ge: return v >= rhs;
+                    default: return false;
+                }
+            };
+
+            // A global aggregate (no GROUP BY) always yields one row,
+            // even when the join matched nothing.
+            if (st.group_by.empty() && ngroups.empty()) {
+                NAcc acc;
+                acc.sum.assign(nslots.size(), 0.0);
+                acc.minv.assign(nslots.size(),
+                    std::numeric_limits<double>::infinity());
+                acc.maxv.assign(nslots.size(),
+                    -std::numeric_limits<double>::infinity());
+                acc.cnt.assign(nslots.size(), 0);
+                ngroups.emplace(std::string(), std::move(acc));
+                ngroup_order.push_back(std::string());
+            }
+
+            std::uint16_t agg_hlen = static_cast<std::uint16_t>(
+                32 + 32 * nouts.size() + 1);
+            std::uint32_t agg_rlen = 1;
+            for (const auto& o : nouts) agg_rlen += o.len;
+            {
+                std::array<std::uint8_t, 32> hdr{};
+                hdr[0] = 0x03;
+                stamp_dbf_header_today(hdr.data());
+                hdr[8]  = static_cast<std::uint8_t>( agg_hlen       & 0xFFu);
+                hdr[9]  = static_cast<std::uint8_t>((agg_hlen >> 8) & 0xFFu);
+                hdr[10] = static_cast<std::uint8_t>( agg_rlen       & 0xFFu);
+                hdr[11] = static_cast<std::uint8_t>((agg_rlen >> 8) & 0xFFu);
+                file.insert(file.end(), hdr.begin(), hdr.end());
+                for (const auto& o : nouts) {
+                    std::array<std::uint8_t, 32> fd{};
+                    std::memcpy(fd.data(), o.name.data(),
+                                std::min(o.name.size(), std::size_t{11}));
+                    fd[11] = static_cast<std::uint8_t>(o.type);
+                    fd[16] = static_cast<std::uint8_t>(o.len);
+                    fd[17] = o.dec;
+                    file.insert(file.end(), fd.begin(), fd.end());
+                }
+                file.push_back(0x0D);
+            }
+            std::sort(ngroup_order.begin(), ngroup_order.end());
+            for (const auto& key : ngroup_order) {
+                auto& acc = ngroups[key];
+                if (st.having && !eval_nhaving(*st.having, acc)) continue;
+                file.push_back(' ');
+                for (const auto& o : nouts) {
+                    if (o.is_agg) {
+                        char nbuf[48] = {0};
+                        std::snprintf(nbuf, sizeof(nbuf), "%-20.*f",
+                                      static_cast<int>(o.dec),
+                                      agg_at(acc, o.idx));
+                        file.insert(file.end(), nbuf, nbuf + 20);
+                    } else {
+                        std::string kp = o.idx < acc.key_parts.size()
+                            ? acc.key_parts[o.idx] : std::string();
+                        for (std::uint16_t b = 0; b < o.len; ++b)
+                            file.push_back(b < kp.size()
+                                ? static_cast<std::uint8_t>(kp[b]) : ' ');
+                    }
+                }
+                ++emitted;
+            }
+        }
 
         file.push_back(0x1A);
         file[4] = static_cast<std::uint8_t>( emitted        & 0xFFu);
@@ -27092,7 +27414,10 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     case K::Sum:       return acc.sum[si];
                     case K::Avg:
                         return acc.count[si]
-                            ? acc.sum[si] / static_cast<double>(acc.count[si])
+                            ? scriptbridge::avg_truncate(
+                                  acc.sum[si] /
+                                      static_cast<double>(acc.count[si]),
+                                  static_cast<int>(slots[si].decimals))
                             : 0.0;
                     case K::Min:
                         return acc.count[si] ? acc.minv[si] : 0.0;
@@ -27151,7 +27476,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 using K = openads::sql::AggregateKind;
                 switch (slots[i].def.kind) {
                     case K::CountStar: case K::Count: return 0;
-                    case K::Avg: return 6;
+                    // AVG keeps the SOURCE column's decimals (oracle
+                    // 2026-07-21: money -> 4dp, integer -> 0dp; not 6).
                     default: return static_cast<int>(slots[i].decimals);
                 }
             };
@@ -27303,7 +27629,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 using K = openads::sql::AggregateKind;
                 switch (slots[i].def.kind) {
                     case K::CountStar: case K::Count: return 0;
-                    case K::Avg: return 6;
+                    // AVG keeps the SOURCE column's decimals (oracle
+                    // 2026-07-21: money -> 4dp, integer -> 0dp; not 6).
                     default: return static_cast<int>(slots[i].decimals);
                 }
             };
@@ -27345,7 +27672,10 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         v = sum[i]; break;
                     case K::Avg:
                         v = count[i]
-                          ? sum[i] / static_cast<double>(count[i]) : 0.0;
+                          ? scriptbridge::avg_truncate(
+                                sum[i] / static_cast<double>(count[i]),
+                                static_cast<int>(slots[i].decimals))
+                          : 0.0;
                         break;
                     case K::Min:
                         v = count[i] ? minv[i] : 0.0; break;
@@ -27740,7 +28070,10 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     case K::Sum:       return acc.sum[si];
                     case K::Avg:
                         return acc.count[si]
-                            ? acc.sum[si] / static_cast<double>(acc.count[si])
+                            ? scriptbridge::avg_truncate(
+                                  acc.sum[si] /
+                                      static_cast<double>(acc.count[si]),
+                                  static_cast<int>(slots[si].decimals))
                             : 0.0;
                     case K::Min:
                         return acc.count[si] ? acc.minv[si] : 0.0;
@@ -27769,7 +28102,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 using K = openads::sql::AggregateKind;
                 switch (slots[i].def.kind) {
                     case K::CountStar: case K::Count: return 0;
-                    case K::Avg: return 6;
+                    // AVG keeps the SOURCE column's decimals (oracle
+                    // 2026-07-21: money -> 4dp, integer -> 0dp; not 6).
                     default: return static_cast<int>(slots[i].decimals);
                 }
             };
@@ -28161,7 +28495,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             using K = openads::sql::AggregateKind;
             switch (slots[i].def.kind) {
                 case K::CountStar: case K::Count: return 0;
-                case K::Avg: return 6;
+                // AVG keeps the SOURCE column's decimals (oracle
+                // 2026-07-21: money -> 4dp, integer -> 0dp; not 6).
                 default: return static_cast<int>(slots[i].decimals);
             }
         };
@@ -28212,8 +28547,11 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     break;
                 case openads::sql::AggregateKind::Avg:
                     std::snprintf(buf, sizeof(buf), "%.*f", agg_dp(i),
-                        count[i] ? sum[i] / static_cast<double>(count[i])
-                                 : 0.0);
+                        count[i]
+                            ? scriptbridge::avg_truncate(
+                                  sum[i] / static_cast<double>(count[i]),
+                                  agg_dp(i))
+                            : 0.0);
                     break;
                 case openads::sql::AggregateKind::Min:
                     if (count[i] == 0) std::memcpy(buf, "0", 2);
