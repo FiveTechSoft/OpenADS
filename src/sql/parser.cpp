@@ -646,11 +646,27 @@ parse_cmp(Cursor& c, const std::string& sql) {
                         "unsupported function call on RHS of WHERE comparison: " + id, sql};
                 }
             } else {
-                node->cmp.is_outer_ref       = true;
-                node->cmp.outer_column       = id;
-                node->cmp.outer_column_alias = id_alias;   // for N-way joins
-                node->cmp.is_numeric         = false;
-                node->cmp.literal            = id;     // diagnostic fallback
+                std::string uid2;
+                uid2.reserve(id.size());
+                for (char ch : id)
+                    uid2.push_back(static_cast<char>(
+                        std::toupper(static_cast<unsigned char>(ch))));
+                if (uid2 == "TRUE" || uid2 == "FALSE") {
+                    // S4 — logical literal (`inactive = false`). Compare
+                    // against the field's decoded display text: 'T' / 'F'
+                    // for DBF and ADT logicals alike. Previously the
+                    // bareword became an outer-ref "column" that never
+                    // resolved (0 rows on single tables; kills the
+                    // N-way join spine outright).
+                    node->cmp.literal    = (uid2 == "TRUE") ? "T" : "F";
+                    node->cmp.is_numeric = false;
+                } else {
+                    node->cmp.is_outer_ref       = true;
+                    node->cmp.outer_column       = id;
+                    node->cmp.outer_column_alias = id_alias;   // N-way joins
+                    node->cmp.is_numeric         = false;
+                    node->cmp.literal            = id;   // diagnostic fallback
+                }
             }
         }
     }
