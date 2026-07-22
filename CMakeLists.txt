@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 project(OpenADS
-    VERSION 1.8.23
+    VERSION 1.8.24
     LANGUAGES C CXX
     DESCRIPTION "Open-source ADS-compatible engine"
 )
@@ -41,7 +41,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # shared-library link path requires every translation unit pulled
 # in to be position-independent, otherwise we hit
 # `R_X86_64_TPOFF32 ... can not be used when making a shared
-# object; recompile with -fPIC`. Force PIC globally — Windows
+# object; recompile with -fPIC`. Force PIC globally ÔÇö Windows
 # silently ignores the flag, so this is a no-op there.
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
@@ -52,7 +52,7 @@ endif()
 option(OPENADS_BUILD_TESTS "Build OpenADS unit tests" ON)
 option(OPENADS_WARNINGS_AS_ERRORS "Treat warnings as errors" ON)
 
-# M12.12 — real TLS transport via vendored mbedtls (Apache-2.0).
+# M12.12 ÔÇö real TLS transport via vendored mbedtls (Apache-2.0).
 # Off by default so existing builds don't pull a network dependency
 # at configure time. When ON, FetchContent downloads mbedtls 3.6 LTS
 # at configure time and links it into openads_core; AdsConnect60
@@ -60,7 +60,7 @@ option(OPENADS_WARNINGS_AS_ERRORS "Treat warnings as errors" ON)
 # AE_FUNCTION_NOT_AVAILABLE.
 option(OPENADS_WITH_TLS "Enable TLS transport (vendors mbedtls 3.6 LTS via FetchContent)" OFF)
 
-# studio.web — embedded HTTP web console inside openads_serverd.
+# studio.web ÔÇö embedded HTTP web console inside openads_serverd.
 # When ON, serverd gains a `--http-port N` flag that exposes a
 # single-page admin UI + REST API on top of the running engine,
 # so the database can be administered from any browser on the LAN
@@ -68,7 +68,7 @@ option(OPENADS_WITH_TLS "Enable TLS transport (vendors mbedtls 3.6 LTS via Fetch
 # and nlohmann/json (MIT) at configure time via FetchContent.
 option(OPENADS_WITH_HTTP "Enable embedded HTTP web console (Studio) in openads_serverd / ace64.dll" ON)
 
-# OpenADS Plus — optional SQLite-backed table driver (static amalgamation).
+# OpenADS Plus ÔÇö optional SQLite-backed table driver (static amalgamation).
 # On by default; set OFF for dev builds that skip the FetchContent download.
 option(OPENADS_WITH_SQLITE "Enable the SQLite-backed table driver (vendors the SQLite amalgamation via FetchContent)" ON)
 # Optional PostgreSQL table driver (libpq). OFF by default.
@@ -86,9 +86,9 @@ option(OPENADS_BUILD_ODBC_DRIVER "Build the OpenADS ODBC driver DLL (Windows)" O
 # mbedtls which OPENADS_WITH_TLS already fetches. OFF by default.
 option(OPENADS_WITH_MSSQL "Enable native MS SQL Server / TDS backend" OFF)
 # Opt-in: build the SQLite backend from the SQLite3 Multiple Ciphers
-# amalgamation (SQLCipher-compatible encryption at rest, self-contained — no
+# amalgamation (SQLCipher-compatible encryption at rest, self-contained ÔÇö no
 # external OpenSSL) instead of plain SQLite. Vendored under
-# third_party/sqlcipher/ (not committed — see .gitignore).
+# third_party/sqlcipher/ (not committed ÔÇö see .gitignore).
 option(OPENADS_WITH_SQLCIPHER "Build the SQL backend with SQLCipher-compatible encryption (SQLite3 Multiple Ciphers)" OFF)
 if(OPENADS_WITH_SQLCIPHER)
     set(OPENADS_WITH_SQLITE ON CACHE BOOL "" FORCE)
@@ -145,7 +145,7 @@ if(OPENADS_WITH_HTTP)
     set(HTTPLIB_USE_ZLIB_IF_AVAILABLE    OFF CACHE BOOL "" FORCE)
     set(HTTPLIB_USE_BROTLI_IF_AVAILABLE  OFF CACHE BOOL "" FORCE)
     set(HTTPLIB_REQUIRE_OPENSSL          OFF CACHE BOOL "" FORCE)
-    # Vendored statically into ace64.dll / serverd — don't let httplib or
+    # Vendored statically into ace64.dll / serverd ÔÇö don't let httplib or
     # nlohmann/json export their headers and *Config.cmake into our package.
     set(HTTPLIB_INSTALL OFF CACHE BOOL "" FORCE)
     set(JSON_Install    OFF CACHE BOOL "" FORCE)
@@ -168,7 +168,7 @@ endif()
 
 if(OPENADS_WITH_SQLITE)
     if(OPENADS_WITH_SQLCIPHER)
-        # SQLite3 Multiple Ciphers amalgamation — SQLCipher-compatible AES at
+        # SQLite3 Multiple Ciphers amalgamation ÔÇö SQLCipher-compatible AES at
         # rest, self-contained. Vendored under third_party/sqlcipher/.
         set(_openads_sqlite_src "${CMAKE_SOURCE_DIR}/third_party/sqlcipher/sqlite3mc_amalgamation.c")
         set(_openads_sqlite_inc "${CMAKE_SOURCE_DIR}/third_party/sqlcipher")
@@ -181,7 +181,7 @@ if(OPENADS_WITH_SQLITE)
     else()
         # Use a locally vendored amalgamation under third_party/sqlite/ when
         # present (offline / air-gapped builds); otherwise fetch it. The
-        # amalgamation is not committed — see .gitignore.
+        # amalgamation is not committed ÔÇö see .gitignore.
         set(_openads_sqlite_src "${CMAKE_SOURCE_DIR}/third_party/sqlite/sqlite3.c")
         set(_openads_sqlite_inc "${CMAKE_SOURCE_DIR}/third_party/sqlite")
         if(NOT EXISTS "${_openads_sqlite_src}")
@@ -361,7 +361,7 @@ if(OPENADS_BUILD_TESTS)
 endif()
 
 # ---------------------------------------------------------------------------
-# Install rules + CPack — produce a structured, reproducible package with the
+# Install rules + CPack ÔÇö produce a structured, reproducible package with the
 # same shape the release.yml staging assembles by hand (engine DLL + drop-in
 # ACE-named copy, import libs, server/bench CLIs, headers, docs). Purely
 # additive: a plain `cmake --build` is unaffected; `cmake --install` /
@@ -435,7 +435,7 @@ install(FILES "${CMAKE_SOURCE_DIR}/tools/scripts/systemd/openads-serverd.service
     DESTINATION "${OA_INSTALL_DOC}/service" OPTIONAL)
 
 # Onboarding files that land with sibling PRs (#88 config template, #90 kit).
-# OPTIONAL keeps this PR self-contained against upstream/main — they install
+# OPTIONAL keeps this PR self-contained against upstream/main ÔÇö they install
 # automatically once those merge.
 install(FILES "${CMAKE_SOURCE_DIR}/openads.ini.sample"
               "${CMAKE_SOURCE_DIR}/QUICKSTART.md"

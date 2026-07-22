@@ -1,0 +1,12 @@
+--- a/src/network/session.cpp
++++ b/src/network/session.cpp
+@@ -1545,6 +1545,9 @@
+                 iit->second, which, kb.data(),
+                 static_cast<UNSIGNED16>(klen), dtype);
+             if (rrc != 0) { reply = err("SetScope", rrc); break; }
++            if (auto tit = index_table_.find(iid); tit != index_table_.end()) {
++                ordered_tables_.insert(tit->second);
++            }
+             reply.opcode = Opcode::SetScopeAck;
+             break;
+         }
