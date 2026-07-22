@@ -381,6 +381,19 @@ v1.8.6/v1.8.7 — where `INDEX ON` briefly built keys without CP-852
 casing — `REINDEX` once after configuring the collation, the same
 rebuild SAP requires after an OEM collation-language change.
 
+### Remote TCP authentication
+
+Protect remote connections by registering one or more server credentials:
+
+```bat
+openads_serverd --data C:\app\data --auth-user client:change-me
+```
+
+The equivalent `openads.ini` setting is repeatable: `auth_user = client:change-me`.
+When configured, `AdsConnect60()` must provide matching credentials;
+failures return `AE_LOGIN_FAILED` (`7077`). Use `tls://host:port/data` rather
+than `tcp://` when credentials must be encrypted on the network.
+
 ### Studio web console (in-process, LocalServer mode)
 
 OpenADS ships a single-page web admin console (Studio) that lists

@@ -34,3 +34,8 @@ data = .
 
 # Studio logins (repeatable). Omit entirely to leave the console open.
 # http_user = admin:change-me
+
+# TCP wire authentication for AdsConnect60 (repeatable). When configured,
+# every remote connection must supply a matching user/password.
+# Use tls:// in the client URI to protect credentials in transit.
+# auth_user = client:change-me

@@ -290,6 +290,10 @@ Notation:
   doesn't require auth).
 - ConnectAck: `bytes` — `connected:<dir>` (informational).
 
+When the server has `--auth-user` / `auth_user` credentials, the user and
+password must match a configured account or the server returns `AE_LOGIN_FAILED`
+(`7077`). The Connect payload is not encrypted; use `tls://` for confidentiality.
+
 ### 5.3 Disconnect
 - C→S only. Empty payload. No ack — server closes the socket.
 

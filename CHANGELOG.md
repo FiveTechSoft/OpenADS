@@ -2596,3 +2596,12 @@ call lands on OpenADS' `ace64.dll` with no Harbour rebuild.
 - One `tests/harbour_smoke/` integration harness producing a
   runnable `smoke.exe` that exercises the full Harbour →
   rddads.lib → OpenADS path.
+## 1.8.22 — 2026-07-22
+
+### Added — TCP connection authentication
+
+`AdsConnect60()` now supports server-enforced user/password credentials for
+remote wire connections. Configure accounts with
+`openads_serverd --auth-user user:password` or `auth_user = user:password` in
+`openads.ini`; invalid credentials are rejected with `AE_LOGIN_FAILED`
+(`7077`). Use `tls://` URIs to protect credentials in transit.

@@ -49,7 +49,8 @@ void on_signal(int) { g_running.store(false); }
 void usage(const char* argv0) {
     std::fprintf(stderr,
         "usage: %s [--host HOST] [--port PORT] [--backlog N]\n"
-        "          [--http-port PORT] [--data DIR] [--http-user U:P]...\n"
+        "          [--http-port PORT] [--data DIR] [--auth-user U:P]...\n"
+        "          [--http-user U:P]...\n"
         "  --host       bind address (default 0.0.0.0)\n"
         "  --port       TCP wire port (default 6262, 0 = ephemeral)\n"
         "  --backlog    listen() backlog (default 16)\n"
@@ -63,6 +64,8 @@ void usage(const char* argv0) {
         "               under --data (default OFF; see EnableFileFunc)\n"
         "  --http-user  user:password — register a Studio login\n"
         "               (repeatable; if none given, console is open)\n"
+        "  --auth-user  user:password — require this login for TCP\n"
+        "               AdsConnect60 connections (repeatable)\n"
         "  --config     read settings from an openads.ini file (CLI flags\n"
         "               given after it still win); see openads.ini.sample\n"
         "  --setup      interactive first-run wizard: asks port/path/etc,\n"
@@ -90,6 +93,7 @@ struct Args {
     std::string   error_log_path;
     std::uint32_t error_log_max_kb = 0;
     std::vector<std::pair<std::string, std::string>> http_users;
+    std::vector<std::pair<std::string, std::string>> auth_users;
 };
 
 bool parse_args(int argc, char** argv, Args& out) {
@@ -123,6 +127,17 @@ bool parse_args(int argc, char** argv, Args& out) {
             out.http_users.emplace_back(up.substr(0, colon),
                                          up.substr(colon + 1));
         }
+        else if (a == "--auth-user" && i + 1 < argc) {
+            std::string up = argv[++i];
+            auto colon = up.find(':');
+            if (colon == std::string::npos || colon == 0) {
+                std::fprintf(stderr,
+                    "--auth-user expects user:password\n");
+                return false;
+            }
+            out.auth_users.emplace_back(up.substr(0, colon),
+                                        up.substr(colon + 1));
+        }
         else {
             std::fprintf(stderr, "unknown arg: %s\n", a.c_str());
             return false;
@@ -144,6 +159,7 @@ void apply_ini(const openads::serverd::IniConfig& cfg, Args& out) {
     if (cfg.has_error_log_path) out.error_log_path   = cfg.error_log_path;
     if (cfg.has_error_log_max)  out.error_log_max_kb = cfg.error_log_max_kb;
     for (const auto& u : cfg.http_users) out.http_users.push_back(u);
+    for (const auto& u : cfg.auth_users) out.auth_users.push_back(u);
 }
 
 // Resolve the effective Args from defaults, an optional `--config <path>`
@@ -249,6 +265,8 @@ int run_server(const Args& args, bool console) {
     if (!args.data_dir.empty() && args.data_dir != ".")
         srv.set_data_dir(args.data_dir);
     srv.set_enable_file_func(args.enable_file_func);
+    for (const auto& u : args.auth_users)
+        srv.add_credential(u.first, u.second);
 
     // The HTTP Studio console browses one directory; when --data lists
     // several roots (";"-separated, for the wire-protocol jail — see

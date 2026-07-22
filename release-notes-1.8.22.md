@@ -1,6 +1,13 @@
-# OpenADS 1.8.21
+# OpenADS 1.8.22
 
 ## Changes
+
+### Added — TCP connection authentication
+
+Configure repeatable server credentials with `--auth-user client:change-me`
+or `auth_user = client:change-me` in `openads.ini`. `AdsConnect60()` forwards
+its credentials and invalid or missing credentials return `AE_LOGIN_FAILED`
+(`7077`). Use a `tls://host:port/data` URI to encrypt credentials in transit.
 
 ### Added — server prints version on launch
 
@@ -8,7 +15,7 @@
 (same string as `--version`):
 
 ```text
-openads_serverd 1.8.21 listening on 0.0.0.0:6262 (backlog=16)
+openads_serverd 1.8.22 listening on 0.0.0.0:6262 (backlog=16)
 ```
 
 The error-log “server started” line also includes the version (useful
@@ -26,5 +33,5 @@ when the process runs as a Windows Service with no console).
 
 | Archive | Contents |
 |---------|----------|
-| `openads-1.8.21-windows-x64.zip` | `ace64.dll`, `openace64.dll`, `openads_serverd.exe` (HTTP ON), import libs |
-| `openads-1.8.21-windows-x86.zip` | `ace32.dll`, `openace32.dll` (stdcall), `openads_serverd.exe` (HTTP ON), import libs |
+| `openads-1.8.22-windows-x64.zip` | `ace64.dll`, `openace64.dll`, `openads_serverd.exe` (HTTP ON), import libs |
+| `openads-1.8.22-windows-x86.zip` | `ace32.dll`, `openace32.dll` (stdcall), `openads_serverd.exe` (HTTP ON), import libs |

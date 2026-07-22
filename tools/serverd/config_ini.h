@@ -47,6 +47,7 @@ struct IniConfig {
     bool          has_error_log_max  = false;
     std::uint32_t error_log_max_kb   = 0;
     std::vector<std::pair<std::string, std::string>> http_users;
+    std::vector<std::pair<std::string, std::string>> auth_users;
 };
 
 // Parse INI *text* (already loaded into memory). Returns true on success.
@@ -55,7 +56,8 @@ struct IniConfig {
 //   host, port, backlog, http_port, data (alias: data_dir; may list
 //   several roots separated by ';', e.g. "C:\data;D:\more-data" — see
 //   Server::set_data_dir / platform::split_data_roots),
-//   http_user (value is user:password, repeatable).
+//   http_user (value is user:password, repeatable),
+//   auth_user (value is user:password, repeatable; required by TCP clients).
 bool parse_ini(const std::string& text, IniConfig& out, std::string& error);
 
 // Convenience wrapper: read the file at `path` then parse_ini() it.

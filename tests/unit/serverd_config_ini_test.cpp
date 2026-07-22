@@ -26,7 +26,8 @@ TEST_CASE("parse_ini reads every recognised key") {
         "backlog = 32\n"
         "http_port = 8080\n"
         "data = C:/app/data\n"
-        "http_user = admin:secret\n");
+        "http_user = admin:secret\n"
+        "auth_user = client:secret2\n");
     CHECK(cfg.has_host);
     CHECK(cfg.host == "127.0.0.1");
     CHECK(cfg.has_port);
@@ -40,6 +41,9 @@ TEST_CASE("parse_ini reads every recognised key") {
     REQUIRE(cfg.http_users.size() == 1);
     CHECK(cfg.http_users[0].first == "admin");
     CHECK(cfg.http_users[0].second == "secret");
+    REQUIRE(cfg.auth_users.size() == 1);
+    CHECK(cfg.auth_users[0].first == "client");
+    CHECK(cfg.auth_users[0].second == "secret2");
 }
 
 TEST_CASE("parse_ini leaves the has_* flags clear for absent keys") {
@@ -50,6 +54,7 @@ TEST_CASE("parse_ini leaves the has_* flags clear for absent keys") {
     CHECK_FALSE(cfg.has_http_port);
     CHECK_FALSE(cfg.has_data);
     CHECK(cfg.http_users.empty());
+    CHECK(cfg.auth_users.empty());
 }
 
 TEST_CASE("parse_ini ignores comments, blanks and a [server] header") {
@@ -116,6 +121,12 @@ TEST_CASE("parse_ini rejects http_user without a colon") {
     IniConfig cfg;
     std::string err;
     CHECK_FALSE(parse_ini("http_user = adminsecret\n", cfg, err));
+}
+
+TEST_CASE("parse_ini rejects auth_user without a colon") {
+    IniConfig cfg;
+    std::string err;
+    CHECK_FALSE(parse_ini("auth_user = clientsecret\n", cfg, err));
 }
 
 TEST_CASE("parse_ini rejects a line with no equals sign") {
