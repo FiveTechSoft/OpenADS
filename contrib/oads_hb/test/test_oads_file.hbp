@@ -1,0 +1,25 @@
+# OADS_HB file functions test (x64 MinGW)
+#
+# Usage:
+#   set OPENADS_LIB=C:\OpenADS\dist\import-libs\x64\mingw
+#   set PATH=C:\OpenADS\build\default\src\Release;%PATH%
+#   hbmk2 test_oads_file.hbp
+#
+# Remote (iMac):
+#   set OPENADS_TEST_REMOTE=tcp://192.168.18.184:6262//Users/anto/OpenADS/data
+#   test_oads_file.exe
+
+test_oads_file.prg
+../oads_hb.c
+
+-comp=mingw64
+
+-w3
+-es2
+
+-lace64
+-L${OPENADS_LIB}
+
+-lrddads
+-lrddcdx
+-lrddntx

@@ -259,6 +259,7 @@ add_executable(openads_unit_tests
     unit/abi_dd_invoicing_test.cpp
     unit/abi_fetch_where_test.cpp
     unit/backend_tier1_test.cpp
+    unit/abi_oads_file_funcs_test.cpp
 )
 
 # OpenADS ODBC driver (provider) test — drives the driver's SQL* exports
@@ -424,3 +425,7 @@ target_link_libraries(remote_bench PRIVATE openads_ace)
 add_executable(remote_test bench/remote_test.cpp)
 target_include_directories(remote_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(remote_test PRIVATE openads_ace)
+
+add_executable(oads_imac_test bench/oads_imac_test.cpp)
+target_include_directories(oads_imac_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(oads_imac_test PRIVATE openads_ace)
