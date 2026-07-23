@@ -28,7 +28,11 @@ $cases = [ordered]@{
 "fn_PhysPos"        = "SELECT PhysPos('CKwdsBAAAAAQAAAAAB') AS v FROM system.iota";
 
 # ---- read-only / result-set procs ----------------------------------------
-"sp_GetPhysicalPath" = "EXECUTE PROCEDURE sp_GetPhysicalPath()";
+# sp_GetPhysicalPath is in $shapeCases: each engine must return ITS OWN
+# sandbox's physical path, so the raw strings can never match — the shape
+# regex accepts either sandbox dir. (OA's column name shows the DBF
+# 10-char truncation `databasepa` — free-table __output temp; lookups by
+# the full name still resolve via the field_index truncation fallback.)
 "sp_mgAllLocks"      = "EXECUTE PROCEDURE sp_mgGetAllLocksAllTablesAllUsers()";
 
 # ---- writing procs: run, then verify the observable side effects ---------
@@ -69,6 +73,7 @@ $shapeCases = [ordered]@{
 "guid_C"    = @("SELECT NEWIDSTRING(CURLYBRACES) AS v FROM system.iota", '^\[\{"v":"\{[0-9a-f-]{36}\}"\}\]$');
 "guid_M"    = @("SELECT NEWIDSTRING(MIME) AS v FROM system.iota",        '^\[\{"v":"[A-Za-z0-9+/]{22}=="\}\]$');
 "guid_F"    = @("SELECT NEWIDSTRING(FILE) AS v FROM system.iota",        '^\[\{"v":"[A-Za-z0-9_-]{22}"\}\]$');
+"sp_GetPhysicalPath" = @("EXECUTE PROCEDURE sp_GetPhysicalPath()",       '^\[\{"databasepa(th)?":"F:\\\\tmp\\\\parity\\\\(sap|oa)_data\\\\"\}\]$');
 }
 
 # ---- cases where BOTH engines must reject (any rc): OA reports native

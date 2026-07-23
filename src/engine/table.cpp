@@ -139,12 +139,12 @@ std::int32_t Table::field_index(const std::string& name) const noexcept {
     const auto& fs = driver_->fields();
     // Case-insensitive: DBF field names are always uppercase in storage;
     // SQL column names / index expressions may arrive in any case.
-    auto scan = [&]() -> std::int32_t {
+    auto scan_for = [&](const std::string& want) -> std::int32_t {
         for (std::size_t i = 0; i < fs.size(); ++i) {
-            if (fs[i].name.size() != name.size()) continue;
+            if (fs[i].name.size() != want.size()) continue;
             bool eq = true;
-            for (std::size_t j = 0; j < name.size(); ++j) {
-                if (std::toupper(static_cast<unsigned char>(name[j])) !=
+            for (std::size_t j = 0; j < want.size(); ++j) {
+                if (std::toupper(static_cast<unsigned char>(want[j])) !=
                     std::toupper(static_cast<unsigned char>(fs[i].name[j]))) {
                     eq = false; break;
                 }
@@ -152,6 +152,16 @@ std::int32_t Table::field_index(const std::string& name) const noexcept {
             if (eq) return static_cast<std::int32_t>(i);
         }
         return -1;
+    };
+    auto scan = [&]() -> std::int32_t {
+        std::int32_t found = scan_for(name);
+        // DBF storage truncates field names to 10 characters at CREATE
+        // (a proc __output column `databasepath` lands as DATABASEPA in
+        // the temp free table), so a longer lookup name can only mean
+        // the truncated field — retry with the storage-truncated form.
+        if (found < 0 && name.size() > 10)
+            found = scan_for(name.substr(0, 10));
+        return found;
     };
     // O(1) repeat lookups via an upper-cased-name cache. Wrapped so an
     // allocation failure degrades to the linear scan rather than violating

@@ -21931,9 +21931,15 @@ struct AbiBridge final : openads::script::SqlBridge {
         std::memcpy(sbuf.data(), sql.c_str(), sql.size() + 1);
         ADSHANDLE hc = 0;
         UNSIGNED32 rc = AdsExecuteSQLDirect(hStmt, sbuf.data(), &hc);
-        if (rc != 0)
+        if (rc != 0) {
+            // Surface the INNER error text — the statement prefix alone
+            // hides which piece of a multi-statement script failed.
+            std::string inner = openads::abi::last_error_message();
             return openads::util::Error{static_cast<std::int32_t>(rc), 0,
-                "embedded SQL failed: " + sql.substr(0, 80), ""};
+                "embedded SQL failed" +
+                    (inner.empty() ? std::string() : (" [" + inner + "]")) +
+                    ": " + sql.substr(0, 80), ""};
+        }
         if (hc == 0)
             return std::unique_ptr<openads::script::SqlCursor>{};
         return std::unique_ptr<openads::script::SqlCursor>(

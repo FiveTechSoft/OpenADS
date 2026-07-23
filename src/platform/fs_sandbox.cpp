@@ -8,15 +8,30 @@ namespace fs = std::filesystem;
 namespace openads::platform {
 
 std::string fold_absolute_to_relative(const std::string& client_path) {
-    fs::path p(client_path);
-    if (!p.is_absolute() && !p.has_root_name()) return client_path;
-    // Drop drive/root; keep relative path under it.
-    fs::path rel = p.relative_path();
-    if (rel.empty() || rel == ".") {
-        // bare "C:\" style — no useful leaf
-        return p.filename().string();
+    // Must be host-independent (#133): a Windows client can send
+    // "C:\dir\f" to a POSIX server, where std::filesystem does NOT
+    // recognize the drive letter — is_absolute()/has_root_name() are
+    // both false and the old code returned the path verbatim, leaking
+    // "C:" past the jail. Normalize separators and strip a drive-letter
+    // prefix + leading root slashes ourselves before handing the
+    // remainder to std::filesystem.
+    std::string s = client_path;
+    for (char& ch : s) if (ch == '\\') ch = '/';
+    if (s.size() >= 2 &&
+        ((s[0] >= 'A' && s[0] <= 'Z') || (s[0] >= 'a' && s[0] <= 'z')) &&
+        s[1] == ':') {
+        s.erase(0, 2);                 // drop "C:"
     }
-    return rel.generic_string();
+    std::size_t b = s.find_first_not_of('/');
+    if (b == std::string::npos) {
+        // Path was only a drive/root with no leaf — nothing to fold.
+        return fs::path(client_path).filename().string();
+    }
+    s.erase(0, b);                     // drop leading root slashes
+    fs::path p(s);
+    if (p.is_absolute() || p.has_root_name()) p = p.relative_path();
+    if (p.empty() || p == ".") return p.filename().string();
+    return p.generic_string();
 }
 
 std::optional<std::string> resolve_fs_path(const std::string& root,

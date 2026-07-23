@@ -1508,13 +1508,19 @@ util::Result<SelectStmt> parse_select(const std::string& sql) {
     // M10.46 — `FROM (SELECT ...) [AS alias]`. Capture the inner
     // SELECT text + scan past the matching ')' so subsequent
     // WHERE / ORDER BY parse against the outer cursor.
+    // S4 — `FROM (EXECUTE PROCEDURE name(args)) [alias]` is the same
+    // shape (SAP: sp_GetPhysicalPath selects from
+    // `(EXECUTE PROCEDURE sp_MgGetAllTables()) a`); the executor's
+    // derived-table recursion produces the proc's __output cursor.
     if (c.match_char('(')) {
-        if (!c.peek_keyword("SELECT")) {
+        bool is_exec = c.peek_keyword("EXECUTE");
+        if (!c.peek_keyword("SELECT") && !is_exec) {
             return util::Error{7200, 0,
                 "expected SELECT inside derived table", sql};
         }
-        std::string inner = "SELECT ";
-        c.match_keyword("SELECT");
+        std::string inner;
+        if (is_exec) { inner = "EXECUTE "; c.match_keyword("EXECUTE"); }
+        else         { inner = "SELECT ";  c.match_keyword("SELECT");  }
         int depth = 1;
         while (depth > 0) {
             if (c.eof()) {
@@ -1533,6 +1539,14 @@ util::Result<SelectStmt> parse_select(const std::string& sql) {
         }
         stmt.derived_sql = std::move(inner);
         if (c.match_keyword("AS")) {
+            stmt.derived_alias = c.read_identifier();
+        } else if (!c.eof() && !c.peek_char(',') && !c.peek_char(';') &&
+                   !c.peek_keyword("WHERE") && !c.peek_keyword("ORDER") &&
+                   !c.peek_keyword("GROUP") && !c.peek_keyword("HAVING") &&
+                   !c.peek_keyword("UNION") && !c.peek_keyword("INNER") &&
+                   !c.peek_keyword("LEFT")  && !c.peek_keyword("RIGHT") &&
+                   !c.peek_keyword("FULL")  && !c.peek_keyword("JOIN")) {
+            // Bare derived-table alias (`) a WHERE ...`).
             stmt.derived_alias = c.read_identifier();
         }
     } else {
