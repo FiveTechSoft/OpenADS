@@ -27710,8 +27710,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         // ignored — a join always exposed every merged column). Left
         // columns resolve by name; a right-table column that collides
         // with a left name is reachable via its merged `R_<name>` form.
+        std::vector<std::uint16_t> jproj;
         if (!parsed.value().projection.empty()) {
-            std::vector<std::uint16_t> jproj;
             jproj.reserve(parsed.value().projection.size());
             for (const auto& col : parsed.value().projection) {
                 std::int32_t fidx = ctbl->field_index(col);
@@ -27724,8 +27724,70 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     return fail(openads::AE_COLUMN_NOT_FOUND, col.c_str());
                 jproj.push_back(static_cast<std::uint16_t>(fidx));
             }
-            cursor_projections()[gh] = std::move(jproj);
         }
+        // S4 — DISTINCT / TOP / LIMIT [OFFSET] on the joined cursor
+        // (previously silently ignored). Same shape as the single-table
+        // M10.31/M10.32 block: operate on the post-WHERE /
+        // post-ORDER-BY traversal sequence; DISTINCT dedups by the
+        // projected columns (all merged columns for SELECT *).
+        if (parsed.value().distinct || parsed.value().limit >= 0 ||
+            parsed.value().offset > 0) {
+            std::vector<std::uint32_t> seq;
+            if (ctbl->has_recno_sequence()) {
+                seq = ctbl->recno_sequence();
+            } else {
+                std::uint32_t rcount = ctbl->record_count();
+                seq.reserve(rcount);
+                for (std::uint32_t r = 1; r <= rcount; ++r) {
+                    if (auto g = ctbl->goto_record(r); !g) continue;
+                    if (ctbl->is_deleted()) continue;
+                    if (!ctbl->passes_filter()) continue;
+                    seq.push_back(r);
+                }
+            }
+            if (parsed.value().distinct) {
+                std::vector<std::uint16_t> didx = jproj;
+                if (didx.empty()) {
+                    std::uint16_t nf = ctbl->field_count();
+                    didx.reserve(nf);
+                    for (std::uint16_t i = 0; i < nf; ++i)
+                        didx.push_back(i);
+                }
+                std::unordered_set<std::string> seen2;
+                std::vector<std::uint32_t> dedup;
+                dedup.reserve(seq.size());
+                for (auto r : seq) {
+                    if (auto g = ctbl->goto_record(r); !g) continue;
+                    std::string key;
+                    for (auto fi : didx) {
+                        auto v = ctbl->read_field(fi);
+                        if (v) key.append(v.value().as_string);
+                        key.push_back('\x1f');
+                    }
+                    if (seen2.insert(std::move(key)).second)
+                        dedup.push_back(r);
+                }
+                seq = std::move(dedup);
+            }
+            std::int64_t off = parsed.value().offset > 0
+                             ? parsed.value().offset : 0;
+            if (off > static_cast<std::int64_t>(seq.size())) {
+                seq.clear();
+            } else if (off > 0) {
+                seq.erase(seq.begin(), seq.begin() +
+                    static_cast<std::vector<std::uint32_t>::
+                        difference_type>(off));
+            }
+            if (parsed.value().limit >= 0 &&
+                static_cast<std::size_t>(parsed.value().limit) <
+                    seq.size()) {
+                seq.resize(static_cast<std::size_t>(
+                    parsed.value().limit));
+            }
+            ctbl->clear_filter();
+            ctbl->set_recno_sequence(std::move(seq));
+        }
+        if (!jproj.empty()) cursor_projections()[gh] = std::move(jproj);
         *phCursor = gh;
         return ok();
     }
