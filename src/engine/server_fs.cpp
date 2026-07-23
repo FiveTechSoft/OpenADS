@@ -250,7 +250,10 @@ util::Result<std::unique_ptr<FsFile>> fs_open(const std::string& abs_path,
     std::ios::openmode om = std::ios::binary;
     if (create) {
         om |= std::ios::in | std::ios::out | std::ios::trunc;
-    } else if (mode == ADS_FO_READ) {
+    } else if (mode == ADS_FO_READ || mode == 3 /*ADS_READONLY*/) {
+        // Two conventions reach here: Harbour-style FO_READ (0) and the
+        // SAP ace.h ADS_READONLY (3) that oads_FOpen callers pass. Both
+        // must open read-only so FWrite on the handle fails.
         om |= std::ios::in;
     } else if (mode == ADS_FO_WRITE) {
         om |= std::ios::in | std::ios::out;

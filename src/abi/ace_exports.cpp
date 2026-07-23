@@ -8435,8 +8435,10 @@ UNSIGNED32 ENTRYPOINT AdsFSeek(ADSHANDLE hFile, SIGNED32 lOffset,
         if (usOrigin == 1) way = std::ios::cur;
         else if (usOrigin == 2) way = std::ios::end;
         lf->stream.clear();
+        // std::fstream keeps ONE shared file position for get and put;
+        // a second seekp with ios::cur would apply the offset AGAIN
+        // (SEEK_CUR +3 from 2 landed at 8 instead of 5).
         lf->stream.seekg(lOffset, way);
-        lf->stream.seekp(lOffset, way);
         *pulPos = static_cast<UNSIGNED32>(lf->stream.tellg());
         return ok();
     }

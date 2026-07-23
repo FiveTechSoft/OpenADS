@@ -147,10 +147,12 @@ void oads_round_trip( ADSHANDLE hConn, const char* tag )
     CHECK( std::string( buf, nr ) == "OADS!" );
 
     // --- oads_FSeek: SEEK_CUR by 0 (no move) -------------------------
+    // The FRead above consumed 5 bytes from offset 6, so the current
+    // position is 11 (reads ADVANCE the file position, POSIX-style).
     rc = oads_FSeek( hf, 0, 1 /*CUR*/, &pos );
     INFO( "FSeek(0,CUR) rc=", rc, " pos=", pos );
     REQUIRE( rc == 0 );
-    CHECK( pos == 6 );
+    CHECK( pos == 11 );
 
     // --- oads_FSeek: SEEK_END -----------------------------------------
     rc = oads_FSeek( hf, 0, 2 /*END*/, &pos );

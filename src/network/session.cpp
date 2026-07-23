@@ -2579,8 +2579,9 @@ DispatchResult Session::dispatch(const Frame& f) {
                 if (origin == 1) way = std::ios::cur;
                 else if (origin == 2) way = std::ios::end;
                 it->second->stream.clear();
+                // ONE shared fstream position — a second seekp with
+                // ios::cur would apply a relative offset twice.
                 it->second->stream.seekg(off, way);
-                it->second->stream.seekp(off, way);
                 auto pos = static_cast<std::uint32_t>(
                     it->second->stream.tellg());
                 reply.opcode = Opcode::FSeekAck;
