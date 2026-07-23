@@ -1,13 +1,13 @@
 /*
- * oads_hb.c — Harbour HB_FUNC wrappers for the oads_*() C API.
+ * oads_hb.c ï¿½ Harbour HB_FUNC wrappers for the oads_*() C API.
  *
  * Drop this file into your hbmk2 project (or compile as a static lib)
- * to get OADS_FOPEN(), OADS_FCREATE(), OADS_FCLOSE(), OADS_FREAD(),
- * OADS_FWRITE(), OADS_FSEEK() callable from Harbour PRG code.
- *
- * These are thin wrappers over the oads_*() exports from the OpenADS
+ * to get OADS_FOPEN(), OADS_CHECKEXISTENCE(), OADS_DELETEFILE(), OADS_RENAMEFILE(),
+ * OADS_FCREATE(), OADS_FCLOSE(), OADS_FREAD(), OADS_FWRITE(), OADS_FSEEK(),
+ * OADS_GETFILESIZE(), OADS_GETFILEDATE(), OADS_GETFILETIME(), OADS_DIRMAKE(),
+ * OADS_DIRREMOVE(), OADS_DIREXIST(), OADS_DIRECTORY() callable from Harbour PRG code.
  * DLL / shared library.  The oads_*() functions are themselves aliases
- * for AdsF*() — same implementation, different name for legacy callers.
+ * for AdsF*() ï¿½ same implementation, different name for legacy callers.
  *
  * Calling conventions from PRG:
  *
@@ -27,6 +27,7 @@
 #include "hbapi.h"
 #include "hbapiitm.h"
 #include "openads/ace.h"
+#include <vector>
 
 /* ------------------------------------------------------------------ */
 /*  OADS_FCreate( hConn, cFileName, nAttribute ) -> hFile (0 on fail) */
@@ -153,4 +154,163 @@ HB_FUNC( OADS_FSEEK )
 
     oads_FSeek( hFile, lOffset, usOrigin, &ulPos );
     hb_retnl( ( long ) ulPos );
+}
+
+/* ------------------------------------------------------------------ */
+/*  OADS_CheckExistence( hConn, cName ) -> lExists (.T./.F.)          */
+/* ------------------------------------------------------------------ */
+HB_FUNC( OADS_CHECKEXISTENCE )
+{
+    ADSHANDLE  hConn   = ( ADSHANDLE ) hb_parnint( 1 );
+    const char *szName = hb_parc( 2 );
+    UNSIGNED16 usExists = 0;
+
+    if( szName )
+        oads_CheckExistence( hConn, ( UNSIGNED8 * ) szName, &usExists );
+    hb_retl( usExists != 0 );
+}
+
+/* ------------------------------------------------------------------ */
+/*  OADS_DeleteFile( hConn, cName ) -> lOk                            */
+/* ------------------------------------------------------------------ */
+HB_FUNC( OADS_DELETEFILE )
+{
+    ADSHANDLE  hConn   = ( ADSHANDLE ) hb_parnint( 1 );
+    const char *szName = hb_parc( 2 );
+    UNSIGNED32 ulRc    = 1;
+
+    if( szName )
+        ulRc = oads_DeleteFile( hConn, ( UNSIGNED8 * ) szName );
+    hb_retl( ulRc == 0 );
+}
+
+/* ------------------------------------------------------------------ */
+/*  OADS_RenameFile( hConn, cOld, cNew ) -> lOk                       */
+/* ------------------------------------------------------------------ */
+HB_FUNC( OADS_RENAMEFILE )
+{
+    ADSHANDLE  hConn  = ( ADSHANDLE ) hb_parnint( 1 );
+    const char *szOld = hb_parc( 2 );
+    const char *szNew = hb_parc( 3 );
+    UNSIGNED32 ulRc   = 1;
+
+    if( szOld && szNew )
+        ulRc = oads_RenameFile( hConn, ( UNSIGNED8 * ) szOld,
+                                       ( UNSIGNED8 * ) szNew );
+    hb_retl( ulRc == 0 );
+}
+
+/* ------------------------------------------------------------------ */
+/*  OADS_GetFileSize( hConn, cName ) -> nSize                         */
+/* ------------------------------------------------------------------ */
+HB_FUNC( OADS_GETFILESIZE )
+{
+    ADSHANDLE  hConn   = ( ADSHANDLE ) hb_parnint( 1 );
+    const char *szName = hb_parc( 2 );
+    UNSIGNED32 ulSize  = 0;
+
+    if( szName )
+        oads_GetFileSize( hConn, ( UNSIGNED8 * ) szName, &ulSize );
+    hb_retnl( ( long ) ulSize );
+}
+
+/* ------------------------------------------------------------------ */
+/*  OADS_GetFileDate( hConn, cName ) -> cDate                         */
+/* ------------------------------------------------------------------ */
+HB_FUNC( OADS_GETFILEDATE )
+{
+    ADSHANDLE  hConn   = ( ADSHANDLE ) hb_parnint( 1 );
+    const char *szName = hb_parc( 2 );
+    UNSIGNED8  aucDate[ 32 ] = {};
+    UNSIGNED16 usLen   = sizeof( aucDate );
+
+    if( szName )
+        oads_GetFileDate( hConn, ( UNSIGNED8 * ) szName, aucDate, &usLen );
+    hb_retclen( ( char * ) aucDate, usLen );
+}
+
+/* ------------------------------------------------------------------ */
+/*  OADS_GetFileTime( hConn, cName ) -> cTime                         */
+/* ------------------------------------------------------------------ */
+HB_FUNC( OADS_GETFILETIME )
+{
+    ADSHANDLE  hConn   = ( ADSHANDLE ) hb_parnint( 1 );
+    const char *szName = hb_parc( 2 );
+    UNSIGNED8  aucTime[ 32 ] = {};
+    UNSIGNED16 usLen   = sizeof( aucTime );
+
+    if( szName )
+        oads_GetFileTime( hConn, ( UNSIGNED8 * ) szName, aucTime, &usLen );
+    hb_retclen( ( char * ) aucTime, usLen );
+}
+
+/* ------------------------------------------------------------------ */
+/*  OADS_DirMake( hConn, cPath ) -> lOk                               */
+/* ------------------------------------------------------------------ */
+HB_FUNC( OADS_DIRMAKE )
+{
+    ADSHANDLE  hConn  = ( ADSHANDLE ) hb_parnint( 1 );
+    const char *szPath = hb_parc( 2 );
+    UNSIGNED32 ulRc    = 1;
+
+    if( szPath )
+        ulRc = oads_DirMake( hConn, ( UNSIGNED8 * ) szPath );
+    hb_retl( ulRc == 0 );
+}
+
+/* ------------------------------------------------------------------ */
+/*  OADS_DirRemove( hConn, cPath ) -> lOk                             */
+/* ------------------------------------------------------------------ */
+HB_FUNC( OADS_DIRREMOVE )
+{
+    ADSHANDLE  hConn  = ( ADSHANDLE ) hb_parnint( 1 );
+    const char *szPath = hb_parc( 2 );
+    UNSIGNED32 ulRc    = 1;
+
+    if( szPath )
+        ulRc = oads_DirRemove( hConn, ( UNSIGNED8 * ) szPath );
+    hb_retl( ulRc == 0 );
+}
+
+/* ------------------------------------------------------------------ */
+/*  OADS_DirExist( hConn, cPath ) -> lExists (.T./.F.)                */
+/* ------------------------------------------------------------------ */
+HB_FUNC( OADS_DIREXIST )
+{
+    ADSHANDLE  hConn   = ( ADSHANDLE ) hb_parnint( 1 );
+    const char *szPath = hb_parc( 2 );
+    UNSIGNED16 usExists = 0;
+
+    if( szPath )
+        oads_DirExist( hConn, ( UNSIGNED8 * ) szPath, &usExists );
+    hb_retl( usExists != 0 );
+}
+
+/* ------------------------------------------------------------------ */
+/*  OADS_Directory( hConn, cMask, nAttr ) -> cBuf                     */
+/* ------------------------------------------------------------------ */
+HB_FUNC( OADS_DIRECTORY )
+{
+    ADSHANDLE  hConn  = ( ADSHANDLE ) hb_parnint( 1 );
+    const char *szMask = hb_parc( 2 );
+    UNSIGNED16 usAttr  = ( UNSIGNED16 ) hb_parni( 3 );
+    UNSIGNED32 ulLen   = 0;
+
+    /* First call: get required buffer size */
+    if( szMask )
+        oads_Directory( hConn, ( UNSIGNED8 * ) szMask, usAttr, nullptr, &ulLen );
+
+    if( ulLen == 0 || ulLen > 1024 * 1024 )
+    {
+        hb_retc( "" );
+        return;
+    }
+
+    std::vector<unsigned char> buf( ulLen );
+    UNSIGNED32 ulRc = oads_Directory( hConn, ( UNSIGNED8 * ) szMask, usAttr,
+                                      buf.data(), &ulLen );
+    if( ulRc == 0 )
+        hb_retclen( ( char * ) buf.data(), ulLen );
+    else
+        hb_retc( "" );
 }

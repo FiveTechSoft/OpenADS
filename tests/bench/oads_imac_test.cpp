@@ -24,6 +24,7 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include <vector>
 
 // -- iMac connection details ------------------------------------------
 
@@ -305,6 +306,151 @@ static void test_errors()
            "FOpen(null name) -> error" );
 }
 
+// -- test: CheckExistence + RenameFile + DeleteFile --------------------
+
+static void test_existence_rename_delete( ADSHANDLE hConn )
+{
+    printf( "\n=== oads_CheckExistence + oads_RenameFile + oads_DeleteFile ===\n" );
+
+    // create a file first
+    ADSHANDLE hf = 0;
+    oads_FCreate( hConn, (UNSIGNED8*)"oads_imac_exist.txt", 0, &hf );
+    UNSIGNED32 nw = 0;
+    oads_FWrite( hf, "exists!", 7, &nw );
+    oads_FClose( hf );
+
+    // CheckExistence: must exist
+    UNSIGNED16 usExists = 0;
+    UNSIGNED32 rc = oads_CheckExistence( hConn, (UNSIGNED8*)"oads_imac_exist.txt", &usExists );
+    check( rc == 0 && usExists == 1, "CheckExistence -> file exists" );
+
+    // CheckExistence: must NOT exist
+    usExists = 1;
+    rc = oads_CheckExistence( hConn, (UNSIGNED8*)"oads_imac_nope.txt", &usExists );
+    check( rc == 0 && usExists == 0, "CheckExistence -> missing file not found" );
+
+    // RenameFile
+    rc = oads_RenameFile( hConn, (UNSIGNED8*)"oads_imac_exist.txt",
+                                  (UNSIGNED8*)"oads_imac_renamed.txt" );
+    check( rc == 0, "RenameFile -> success" );
+
+    // old must be gone
+    usExists = 0;
+    oads_CheckExistence( hConn, (UNSIGNED8*)"oads_imac_exist.txt", &usExists );
+    check( usExists == 0, "RenameFile -> old file gone" );
+
+    // new must exist
+    usExists = 0;
+    oads_CheckExistence( hConn, (UNSIGNED8*)"oads_imac_renamed.txt", &usExists );
+    check( usExists == 1, "RenameFile -> new file exists" );
+
+    // DeleteFile
+    rc = oads_DeleteFile( hConn, (UNSIGNED8*)"oads_imac_renamed.txt" );
+    check( rc == 0, "DeleteFile -> success" );
+
+    usExists = 0;
+    oads_CheckExistence( hConn, (UNSIGNED8*)"oads_imac_renamed.txt", &usExists );
+    check( usExists == 0, "DeleteFile -> file gone" );
+}
+
+// -- test: GetFileSize + GetFileDate + GetFileTime ---------------------
+
+static void test_file_size_date_time( ADSHANDLE hConn )
+{
+    printf( "\n=== oads_GetFileSize + oads_GetFileDate + oads_GetFileTime ===\n" );
+
+    // create a known-size file
+    ADSHANDLE hf = 0;
+    oads_FCreate( hConn, (UNSIGNED8*)"oads_imac_meta.txt", 0, &hf );
+    const char* data = "Hello metadata!";
+    UNSIGNED32 nw = 0;
+    oads_FWrite( hf, data, (UNSIGNED32) strlen( data ), &nw );
+    oads_FClose( hf );
+
+    // GetFileSize
+    UNSIGNED32 ulSize = 0;
+    UNSIGNED32 rc = oads_GetFileSize( hConn, (UNSIGNED8*)"oads_imac_meta.txt", &ulSize );
+    check( rc == 0 && ulSize == strlen( data ),
+           "GetFileSize -> 15 bytes" );
+
+    // GetFileDate
+    UNSIGNED8 aucDate[32] = {};
+    UNSIGNED16 usLen = sizeof( aucDate );
+    rc = oads_GetFileDate( hConn, (UNSIGNED8*)"oads_imac_meta.txt", aucDate, &usLen );
+    check( rc == 0 && usLen >= 8, "GetFileDate -> non-empty" );
+
+    // GetFileTime
+    UNSIGNED8 aucTime[32] = {};
+    usLen = sizeof( aucTime );
+    rc = oads_GetFileTime( hConn, (UNSIGNED8*)"oads_imac_meta.txt", aucTime, &usLen );
+    check( rc == 0 && usLen >= 4, "GetFileTime -> non-empty" );
+
+    // cleanup
+    oads_DeleteFile( hConn, (UNSIGNED8*)"oads_imac_meta.txt" );
+}
+
+// -- test: DirMake + DirExist + DirRemove ------------------------------
+
+static void test_dir_ops( ADSHANDLE hConn )
+{
+    printf( "\n=== oads_DirMake + oads_DirExist + oads_DirRemove ===\n" );
+
+    const char* dir = "oads_imac_testdir";
+
+    // DirExist: must not exist
+    UNSIGNED16 usExists = 1;
+    oads_DirExist( hConn, (UNSIGNED8*) dir, &usExists );
+    check( usExists == 0, "DirExist -> directory does not exist yet" );
+
+    // DirMake
+    UNSIGNED32 rc = oads_DirMake( hConn, (UNSIGNED8*) dir );
+    check( rc == 0, "DirMake -> success" );
+
+    // DirExist: must exist
+    usExists = 0;
+    rc = oads_DirExist( hConn, (UNSIGNED8*) dir, &usExists );
+    check( rc == 0 && usExists == 1, "DirExist -> directory exists after make" );
+
+    // DirRemove
+    rc = oads_DirRemove( hConn, (UNSIGNED8*) dir );
+    check( rc == 0, "DirRemove -> success" );
+
+    // DirExist: gone
+    usExists = 1;
+    oads_DirExist( hConn, (UNSIGNED8*) dir, &usExists );
+    check( usExists == 0, "DirExist -> directory gone after remove" );
+}
+
+// -- test: Directory (packed listing) ----------------------------------
+
+static void test_directory_listing( ADSHANDLE hConn )
+{
+    printf( "\n=== oads_Directory ===\n" );
+
+    // create a file so listing has content
+    ADSHANDLE hf = 0;
+    oads_FCreate( hConn, (UNSIGNED8*)"oads_imac_listme.txt", 0, &hf );
+    UNSIGNED32 nw = 0;
+    oads_FWrite( hf, "x", 1, &nw );
+    oads_FClose( hf );
+
+    // first call: get size
+    UNSIGNED32 ulLen = 0;
+    UNSIGNED32 rc = oads_Directory( hConn, (UNSIGNED8*)"oads_imac_listme.*",
+                                    0, nullptr, &ulLen );
+    check( rc != 0 || ulLen > 0, "Directory -> size probe returns needed bytes" );
+
+    // second call: fill buffer
+    std::vector<UNSIGNED8> buf( ulLen > 0 ? ulLen : 4096 );
+    ulLen = (UNSIGNED32) buf.size();
+    rc = oads_Directory( hConn, (UNSIGNED8*)"oads_imac_listme.*",
+                          0, buf.data(), &ulLen );
+    check( rc == 0 && ulLen > 0, "Directory -> listing returned data" );
+
+    // cleanup
+    oads_DeleteFile( hConn, (UNSIGNED8*)"oads_imac_listme.txt" );
+}
+
 // -- cleanup ---------------------------------------------------------
 
 static void cleanup( ADSHANDLE hConn )
@@ -317,6 +463,8 @@ static void cleanup( ADSHANDLE hConn )
         "oads_imac_ow.txt",
         "oads_imac_big.bin",
         "oads_imac_chunks.txt",
+        "oads_imac_meta.txt",
+        "oads_imac_listme.txt",
         nullptr
     };
 
@@ -324,6 +472,17 @@ static void cleanup( ADSHANDLE hConn )
     {
         UNSIGNED32 rc = AdsDeleteFile( hConn, (UNSIGNED8*) files[i] );
         printf( "  Deleted %s: %s\n", files[i],
+                rc == 0 ? "OK" : "(not found or error)" );
+    }
+
+    const char* dirs[] = {
+        "oads_imac_testdir",
+        nullptr
+    };
+    for( int i = 0; dirs[i]; i++ )
+    {
+        UNSIGNED32 rc = AdsDirRemove( hConn, (UNSIGNED8*) dirs[i] );
+        printf( "  RmDir  %s: %s\n", dirs[i],
                 rc == 0 ? "OK" : "(not found or error)" );
     }
 
@@ -358,6 +517,10 @@ int main()
     test_large_io( hConn );
     test_chunked_read( hConn );
     test_errors();
+    test_existence_rename_delete( hConn );
+    test_file_size_date_time( hConn );
+    test_dir_ops( hConn );
+    test_directory_listing( hConn );
     cleanup( hConn );
 
     printf( "\n========================================\n" );

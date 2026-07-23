@@ -164,6 +164,16 @@ EXPORTS
     oads_FRead@16               = oads_FRead
     oads_FWrite@16              = oads_FWrite
     oads_FSeek@16               = oads_FSeek
+    oads_CheckExistence@8       = oads_CheckExistence
+    oads_DeleteFile@8           = oads_DeleteFile
+    oads_RenameFile@12          = oads_RenameFile
+    oads_GetFileSize@12         = oads_GetFileSize
+    oads_GetFileTime@16         = oads_GetFileTime
+    oads_GetFileDate@16         = oads_GetFileDate
+    oads_DirMake@8              = oads_DirMake
+    oads_DirRemove@8            = oads_DirRemove
+    oads_DirExist@12            = oads_DirExist
+    oads_Directory@20           = oads_Directory
     AdsDeleteIndex@4            = AdsDeleteIndex
     AdsDeleteRecord@4           = AdsDeleteRecord
     AdsDisconnect@4             = AdsDisconnect

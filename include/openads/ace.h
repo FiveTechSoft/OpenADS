@@ -116,6 +116,24 @@ UNSIGNED32 ENTRYPOINT oads_FWrite      (ADSHANDLE hFile, const void* pBuf,
                                UNSIGNED32 ulLen, UNSIGNED32* pulWritten);
 UNSIGNED32 ENTRYPOINT oads_FSeek       (ADSHANDLE hFile, SIGNED32 lOffset,
                                UNSIGNED16 usOrigin, UNSIGNED32* pulPos);
+UNSIGNED32 ENTRYPOINT oads_CheckExistence (ADSHANDLE  hConnect, UNSIGNED8* pucName,
+                                UNSIGNED16* pbExists);
+UNSIGNED32 ENTRYPOINT oads_DeleteFile     (ADSHANDLE  hConnect, UNSIGNED8* pucName);
+UNSIGNED32 ENTRYPOINT oads_RenameFile     (ADSHANDLE  hConnect, UNSIGNED8* pucOld,
+                                UNSIGNED8* pucNew);
+UNSIGNED32 ENTRYPOINT oads_GetFileSize    (ADSHANDLE  hConnect, UNSIGNED8* pucName,
+                                UNSIGNED32* pulSize);
+UNSIGNED32 ENTRYPOINT oads_GetFileTime    (ADSHANDLE  hConnect, UNSIGNED8* pucName,
+                                UNSIGNED8* pucTime, UNSIGNED16* pusLen);
+UNSIGNED32 ENTRYPOINT oads_GetFileDate    (ADSHANDLE  hConnect, UNSIGNED8* pucName,
+                                UNSIGNED8* pucDate, UNSIGNED16* pusLen);
+UNSIGNED32 ENTRYPOINT oads_DirMake        (ADSHANDLE  hConnect, UNSIGNED8* pucPath);
+UNSIGNED32 ENTRYPOINT oads_DirRemove      (ADSHANDLE  hConnect, UNSIGNED8* pucPath);
+UNSIGNED32 ENTRYPOINT oads_DirExist       (ADSHANDLE  hConnect, UNSIGNED8* pucPath,
+                                UNSIGNED16* pbExists);
+UNSIGNED32 ENTRYPOINT oads_Directory      (ADSHANDLE  hConnect, UNSIGNED8* pucMask,
+                                UNSIGNED16 usAttr, UNSIGNED8* pucBuffer,
+                                UNSIGNED32* pulBufLen);
 UNSIGNED32 ENTRYPOINT AdsCloseAllTables(void);
 UNSIGNED32 ENTRYPOINT AdsGetRecordLength(ADSHANDLE hTable, UNSIGNED32* pulLen);
 

@@ -1,11 +1,14 @@
 // abi_oads_file_funcs_test.cpp
 //
-// Exercises ALL 6 oads_*() C functions (the legacy filesystem aliases):
-//   oads_FOpen, oads_FCreate, oads_FClose, oads_FRead, oads_FWrite, oads_FSeek
+// Exercises ALL 16 oads_*() C functions (the legacy filesystem aliases):
+//   oads_FOpen, oads_FCreate, oads_FClose, oads_FRead, oads_FWrite, oads_FSeek,
+//   oads_CheckExistence, oads_DeleteFile, oads_RenameFile,
+//   oads_GetFileSize, oads_GetFileDate, oads_GetFileTime,
+//   oads_DirMake, oads_DirRemove, oads_DirExist, oads_Directory
 //
 // Tests run in two modes:
-//   1. LOCAL  — in-process engine against a temp data dir (always runs).
-//   2. REMOTE — against an openads_serverd. Gated on OPENADS_TEST_REMOTE.
+//   1. LOCAL  â€“ in-process engine against a temp data dir (always runs).
+//   2. REMOTE â€“ against an openads_serverd. Gated on OPENADS_TEST_REMOTE.
 //
 // Build:
 //   cmake --build build --target openads_unit_tests
@@ -172,7 +175,7 @@ void oads_round_trip( ADSHANDLE hConn, const char* tag )
 
 } // anonymous namespace
 
-// -- LOCAL tests ------------------------------------------------------
+// -- LOCAL tests: original 6 functions ---------------------------------
 
 TEST_CASE( "oads_* local: full round-trip (create/write/close/open/read/seek)" )
 {
@@ -352,7 +355,7 @@ TEST_CASE( "oads_* local: FCreate overwrites existing file" )
     REQUIRE( oads_FWrite( hf, "BB", 2, &nw ) == 0 );
     REQUIRE( oads_FClose( hf ) == 0 );
 
-    // read back — must be "BB", not "BBAA"
+    // read back â€“ must be "BB", not "BBAA"
     REQUIRE( oads_FOpen( h, (UNSIGNED8*)"over.txt", ADS_READONLY, &hf ) == 0 );
     char buf[16] = {};
     UNSIGNED32 nr = 0;
@@ -380,6 +383,237 @@ TEST_CASE( "oads_* local: bad handle returns error" )
 
     UNSIGNED32 pos = 0;
     CHECK( oads_FSeek( 99999, 0, 0, &pos ) != 0 );
+}
+
+// -- LOCAL tests: new functions (CheckExistence through Directory) -----
+
+TEST_CASE( "oads_* local: CheckExistence detects existing file" )
+{
+    auto dir = fs::temp_directory_path() / "oads_file_exist";
+    std::error_code ec;
+    fs::remove_all( dir, ec );
+    fs::create_directories( dir );
+
+    ADSHANDLE h = local_connect( dir );
+    ADSHANDLE hf = 0;
+
+    // file does not exist yet
+    UNSIGNED16 usExists = 1;
+    oads_CheckExistence( h, (UNSIGNED8*)"ghost.txt", &usExists );
+    CHECK( usExists == 0 );
+
+    // create file
+    REQUIRE( oads_FCreate( h, (UNSIGNED8*)"ghost.txt", 0, &hf ) == 0 );
+    UNSIGNED32 nw = 0;
+    oads_FWrite( hf, "hi", 2, &nw );
+    oads_FClose( hf );
+
+    // now it exists
+    usExists = 0;
+    REQUIRE( oads_CheckExistence( h, (UNSIGNED8*)"ghost.txt", &usExists ) == 0 );
+    CHECK( usExists == 1 );
+
+    REQUIRE( AdsDisconnect( h ) == 0 );
+    fs::remove_all( dir, ec );
+}
+
+TEST_CASE( "oads_* local: DeleteFile removes a file" )
+{
+    auto dir = fs::temp_directory_path() / "oads_file_delete";
+    std::error_code ec;
+    fs::remove_all( dir, ec );
+    fs::create_directories( dir );
+
+    ADSHANDLE h = local_connect( dir );
+    ADSHANDLE hf = 0;
+
+    // create file
+    REQUIRE( oads_FCreate( h, (UNSIGNED8*)"deleteme.txt", 0, &hf ) == 0 );
+    UNSIGNED32 nw = 0;
+    oads_FWrite( hf, "bye", 3, &nw );
+    oads_FClose( hf );
+
+    // delete it
+    REQUIRE( oads_DeleteFile( h, (UNSIGNED8*)"deleteme.txt" ) == 0 );
+
+    // confirm gone
+    UNSIGNED16 usExists = 1;
+    oads_CheckExistence( h, (UNSIGNED8*)"deleteme.txt", &usExists );
+    CHECK( usExists == 0 );
+
+    REQUIRE( AdsDisconnect( h ) == 0 );
+    fs::remove_all( dir, ec );
+}
+
+TEST_CASE( "oads_* local: RenameFile renames a file" )
+{
+    auto dir = fs::temp_directory_path() / "oads_file_rename";
+    std::error_code ec;
+    fs::remove_all( dir, ec );
+    fs::create_directories( dir );
+
+    ADSHANDLE h = local_connect( dir );
+    ADSHANDLE hf = 0;
+
+    // create file
+    REQUIRE( oads_FCreate( h, (UNSIGNED8*)"old.txt", 0, &hf ) == 0 );
+    UNSIGNED32 nw = 0;
+    oads_FWrite( hf, "data", 4, &nw );
+    oads_FClose( hf );
+
+    // rename
+    REQUIRE( oads_RenameFile( h, (UNSIGNED8*)"old.txt",
+                                    (UNSIGNED8*)"new.txt" ) == 0 );
+
+    // old gone
+    UNSIGNED16 usExists = 1;
+    oads_CheckExistence( h, (UNSIGNED8*)"old.txt", &usExists );
+    CHECK( usExists == 0 );
+
+    // new exists
+    usExists = 0;
+    REQUIRE( oads_CheckExistence( h, (UNSIGNED8*)"new.txt", &usExists ) == 0 );
+    CHECK( usExists == 1 );
+
+    // read content from new
+    ADSHANDLE hf2 = 0;
+    REQUIRE( oads_FOpen( h, (UNSIGNED8*)"new.txt", ADS_READONLY, &hf2 ) == 0 );
+    char buf[16] = {};
+    UNSIGNED32 nr = 0;
+    oads_FRead( hf2, buf, sizeof( buf ), &nr );
+    CHECK( nr == 4 );
+    CHECK( std::string( buf, nr ) == "data" );
+    oads_FClose( hf2 );
+
+    REQUIRE( AdsDisconnect( h ) == 0 );
+    fs::remove_all( dir, ec );
+}
+
+TEST_CASE( "oads_* local: GetFileSize returns correct size" )
+{
+    auto dir = fs::temp_directory_path() / "oads_file_size";
+    std::error_code ec;
+    fs::remove_all( dir, ec );
+    fs::create_directories( dir );
+
+    ADSHANDLE h = local_connect( dir );
+    ADSHANDLE hf = 0;
+
+    // create file with known content
+    REQUIRE( oads_FCreate( h, (UNSIGNED8*)"sized.txt", 0, &hf ) == 0 );
+    const char* data = "Hello, world!";
+    UNSIGNED32 nw = 0;
+    oads_FWrite( hf, data, (UNSIGNED32) std::strlen( data ), &nw );
+    oads_FClose( hf );
+
+    // check size
+    UNSIGNED32 ulSize = 0;
+    REQUIRE( oads_GetFileSize( h, (UNSIGNED8*)"sized.txt", &ulSize ) == 0 );
+    CHECK( ulSize == 13 );
+
+    REQUIRE( AdsDisconnect( h ) == 0 );
+    fs::remove_all( dir, ec );
+}
+
+TEST_CASE( "oads_* local: GetFileDate and GetFileTime return data" )
+{
+    auto dir = fs::temp_directory_path() / "oads_file_datetime";
+    std::error_code ec;
+    fs::remove_all( dir, ec );
+    fs::create_directories( dir );
+
+    ADSHANDLE h = local_connect( dir );
+    ADSHANDLE hf = 0;
+
+    // create file
+    REQUIRE( oads_FCreate( h, (UNSIGNED8*)"dated.txt", 0, &hf ) == 0 );
+    UNSIGNED32 nw = 0;
+    oads_FWrite( hf, "x", 1, &nw );
+    oads_FClose( hf );
+
+    // GetFileDate
+    UNSIGNED8 aucDate[32] = {};
+    UNSIGNED16 usLen = sizeof( aucDate );
+    REQUIRE( oads_GetFileDate( h, (UNSIGNED8*)"dated.txt", aucDate, &usLen ) == 0 );
+    CHECK( usLen >= 8 );  // at least "MM/DD/YY"
+
+    // GetFileTime
+    UNSIGNED8 aucTime[32] = {};
+    usLen = sizeof( aucTime );
+    REQUIRE( oads_GetFileTime( h, (UNSIGNED8*)"dated.txt", aucTime, &usLen ) == 0 );
+    CHECK( usLen >= 4 );  // at least "HH:MM"
+
+    REQUIRE( AdsDisconnect( h ) == 0 );
+    fs::remove_all( dir, ec );
+}
+
+TEST_CASE( "oads_* local: DirMake + DirExist + DirRemove round-trip" )
+{
+    auto dir = fs::temp_directory_path() / "oads_file_dirops";
+    std::error_code ec;
+    fs::remove_all( dir, ec );
+    fs::create_directories( dir );
+
+    ADSHANDLE h = local_connect( dir );
+    const char* dirname = "testdir";
+
+    // dir does not exist yet
+    UNSIGNED16 usExists = 1;
+    oads_DirExist( h, (UNSIGNED8*) dirname, &usExists );
+    CHECK( usExists == 0 );
+
+    // create
+    REQUIRE( oads_DirMake( h, (UNSIGNED8*) dirname ) == 0 );
+
+    // exists now
+    usExists = 0;
+    REQUIRE( oads_DirExist( h, (UNSIGNED8*) dirname, &usExists ) == 0 );
+    CHECK( usExists == 1 );
+
+    // remove
+    REQUIRE( oads_DirRemove( h, (UNSIGNED8*) dirname ) == 0 );
+
+    // gone
+    usExists = 1;
+    oads_DirExist( h, (UNSIGNED8*) dirname, &usExists );
+    CHECK( usExists == 0 );
+
+    REQUIRE( AdsDisconnect( h ) == 0 );
+    fs::remove_all( dir, ec );
+}
+
+TEST_CASE( "oads_* local: Directory listing returns file info" )
+{
+    auto dir = fs::temp_directory_path() / "oads_file_dirlist";
+    std::error_code ec;
+    fs::remove_all( dir, ec );
+    fs::create_directories( dir );
+
+    ADSHANDLE h = local_connect( dir );
+    ADSHANDLE hf = 0;
+
+    // create a file so we can list it
+    REQUIRE( oads_FCreate( h, (UNSIGNED8*)"listme.txt", 0, &hf ) == 0 );
+    UNSIGNED32 nw = 0;
+    oads_FWrite( hf, "x", 1, &nw );
+    oads_FClose( hf );
+
+    // first call: get required buffer size
+    UNSIGNED32 ulLen = 0;
+    UNSIGNED32 rc = oads_Directory( h, (UNSIGNED8*)"listme.*", 0, nullptr, &ulLen );
+    INFO( "Directory size probe rc=", rc, " ulLen=", ulLen );
+    // The function may return error when buffer is null; ulLen should be > 0
+
+    // second call: fill buffer
+    std::vector<UNSIGNED8> buf( ulLen > 0 ? ulLen : 4096 );
+    ulLen = (UNSIGNED32) buf.size();
+    rc = oads_Directory( h, (UNSIGNED8*)"listme.*", 0, buf.data(), &ulLen );
+    INFO( "Directory fill rc=", rc, " ulLen=", ulLen );
+    CHECK( rc == 0 );
+    CHECK( ulLen > 0 );
+
+    REQUIRE( AdsDisconnect( h ) == 0 );
+    fs::remove_all( dir, ec );
 }
 
 // -- REMOTE tests (embedded server) ----------------------------------
@@ -442,7 +676,7 @@ TEST_CASE( "oads_* remote embedded: EnableFileFunc off denies" )
     fs::remove_all( data );
 }
 
-// -- REMOTE tests (live server — iMac on LAN) ------------------------
+// -- REMOTE tests (live server - iMac on LAN) ------------------------
 
 TEST_CASE( "oads_* remote live: full round-trip against iMac"
            * doctest::skip( remote_uri_env() == nullptr ) )

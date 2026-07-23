@@ -138,6 +138,16 @@ EXPORTS
     oads_FRead
     oads_FWrite
     oads_FSeek
+    oads_CheckExistence
+    oads_DeleteFile
+    oads_RenameFile
+    oads_GetFileSize
+    oads_GetFileTime
+    oads_GetFileDate
+    oads_DirMake
+    oads_DirRemove
+    oads_DirExist
+    oads_Directory
     AdsClearCallbackFunction
     AdsClearFilter
     AdsClearRelation

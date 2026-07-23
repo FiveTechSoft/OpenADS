@@ -8470,6 +8470,45 @@ UNSIGNED32 ENTRYPOINT oads_FSeek(ADSHANDLE hFile, SIGNED32 lOffset,
     return AdsFSeek(hFile, lOffset, usOrigin, pulPos);
 }
 
+UNSIGNED32 ENTRYPOINT oads_CheckExistence(ADSHANDLE hConnect, UNSIGNED8* pucName,
+                                          UNSIGNED16* pbExists) {
+    return AdsCheckExistence(hConnect, pucName, pbExists);
+}
+UNSIGNED32 ENTRYPOINT oads_DeleteFile(ADSHANDLE hConnect, UNSIGNED8* pucName) {
+    return AdsDeleteFile(hConnect, pucName);
+}
+UNSIGNED32 ENTRYPOINT oads_RenameFile(ADSHANDLE hConnect, UNSIGNED8* pucOld,
+                                      UNSIGNED8* pucNew) {
+    return AdsRenameFile(hConnect, pucOld, pucNew);
+}
+UNSIGNED32 ENTRYPOINT oads_GetFileSize(ADSHANDLE hConnect, UNSIGNED8* pucName,
+                                       UNSIGNED32* pulSize) {
+    return AdsGetFileSize(hConnect, pucName, pulSize);
+}
+UNSIGNED32 ENTRYPOINT oads_GetFileTime(ADSHANDLE hConnect, UNSIGNED8* pucName,
+                                       UNSIGNED8* pucTime, UNSIGNED16* pusLen) {
+    return AdsGetFileTime(hConnect, pucName, pucTime, pusLen);
+}
+UNSIGNED32 ENTRYPOINT oads_GetFileDate(ADSHANDLE hConnect, UNSIGNED8* pucName,
+                                       UNSIGNED8* pucDate, UNSIGNED16* pusLen) {
+    return AdsGetFileDate(hConnect, pucName, pucDate, pusLen);
+}
+UNSIGNED32 ENTRYPOINT oads_DirMake(ADSHANDLE hConnect, UNSIGNED8* pucPath) {
+    return AdsDirMake(hConnect, pucPath);
+}
+UNSIGNED32 ENTRYPOINT oads_DirRemove(ADSHANDLE hConnect, UNSIGNED8* pucPath) {
+    return AdsDirRemove(hConnect, pucPath);
+}
+UNSIGNED32 ENTRYPOINT oads_DirExist(ADSHANDLE hConnect, UNSIGNED8* pucPath,
+                                    UNSIGNED16* pbExists) {
+    return AdsDirExist(hConnect, pucPath, pbExists);
+}
+UNSIGNED32 ENTRYPOINT oads_Directory(ADSHANDLE hConnect, UNSIGNED8* pucMask,
+                                     UNSIGNED16 usAttr, UNSIGNED8* pucBuffer,
+                                     UNSIGNED32* pulBufLen) {
+    return AdsDirectory(hConnect, pucMask, usAttr, pucBuffer, pulBufLen);
+}
+
 // SAP's ace.h declares `AdsCloseAllTables(void)`: close every table
 // the calling process has opened. We accept the same 0-arg form;
 // per-connection close still works through AdsCloseTable().
