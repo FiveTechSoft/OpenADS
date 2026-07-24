@@ -23,8 +23,9 @@ $cases = [ordered]@{
 "fn_EoM_dec"        = "SELECT EoM(12,2025) AS v FROM system.iota";
 "fn_MonthsRented"   = "SELECT MonthsRented('16201 Ashely Park Plc', {d '2016-01-01'}, {d '2018-01-01'}) AS v FROM system.iota";
 "fn_MonthsOnMarket" = "SELECT MonthsOnTheMarket('16201 Ashely Park Plc', {d '2016-01-01'}, {d '2018-01-01'}) AS v FROM system.iota";
-"fn_CurrentLease"   = "SELECT CurrentLease('16201 Ashely Park Plc', {d '2017-01-15'}) AS v FROM system.iota";
-"fn_CurrentLease2"  = "SELECT CurrentLease('2503 E. Curtis St.', {d '2017-06-01'}) AS v FROM system.iota";
+# fn_CurrentLease/2 are in $oaCorrectCases: SAP's OWN dictionary has the
+# CurrentLease body truncated, so SAP errors 5133 while OpenADS runs the
+# function and returns the answer SAP's own data confirms is correct.
 "fn_PhysPos"        = "SELECT PhysPos('CKwdsBAAAAAQAAAAAB') AS v FROM system.iota";
 
 # ---- read-only / result-set procs ----------------------------------------
@@ -85,6 +86,18 @@ $bothFailCases = [ordered]@{
 "sp_SaveIntoAuditLog" = "EXECUTE PROCEDURE sp_SaveIntoAuditLog('properties','PARITYKEY01','INSERT')";
 }
 
+# ---- OA-correct / SAP-data-broken: SAP's pmsys DD stores these UDF bodies
+# ---- truncated, so SAP itself fails 5133; OpenADS decodes the full body and
+# ---- returns the value SAP's own leases data confirms (verified by direct
+# ---- SELECT against the SAP sandbox, 2026-07-24). SAP must produce its 5133
+# ---- envelope; OA must produce the exact correct answer. -------------------
+$oaCorrectCases = [ordered]@{
+"fn_CurrentLease"  = @("SELECT CurrentLease('16201 Ashely Park Plc', {d '2017-01-15'}) AS v FROM system.iota",
+                       'NativeError = 5133;', '[{"v":"LS17-00000003"}]');
+"fn_CurrentLease2" = @("SELECT CurrentLease('2503 E. Curtis St.', {d '2017-06-01'}) AS v FROM system.iota",
+                       'NativeError = 5133;', '[{"v":"LS17-00000005"}]');
+}
+
 # ---- NEWIDSTRING error parity: message text differs (known gap), rc must
 # ---- agree (SAP 7200/2159 invalid arg; 7200/2158 fn not found) -------------
 $rcCases = [ordered]@{
@@ -118,6 +131,22 @@ foreach ($k in $shapeCases.Keys) {
         $pass++
     } else {
         "DIFF  {0,-22} (shape)" -f $k
+        "      SAP: " + $a.Substring(0, [Math]::Min(160, $a.Length))
+        "      OA : " + $b.Substring(0, [Math]::Min(160, $b.Length))
+        $fail++
+    }
+}
+
+foreach ($k in $oaCorrectCases.Keys) {
+    $q = $oaCorrectCases[$k][0]
+    $sapPat = $oaCorrectCases[$k][1]; $oaExact = $oaCorrectCases[$k][2]
+    $a = (& $dd --lib $SapLib --db $SapDb --user $user --password $pw --sql $q 2>&1) -join " "
+    $b = (& $dd --lib $OaLib  --db $OaDb  --user $user --password $pw --sql $q 2>&1) -join " "
+    if ($a.Contains($sapPat) -and $b -eq $oaExact) {
+        "PASS  {0,-22} OA correct, SAP 5133 (its DD is broken)" -f $k
+        $pass++
+    } else {
+        "DIFF  {0,-22} (oa-correct)" -f $k
         "      SAP: " + $a.Substring(0, [Math]::Min(160, $a.Length))
         "      OA : " + $b.Substring(0, [Math]::Min(160, $b.Length))
         $fail++

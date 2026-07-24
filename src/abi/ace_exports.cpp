@@ -22155,6 +22155,17 @@ inline openads::util::Result<std::string> run_dd_procedure(
             Value v = Value::null();
             if (i < args.size()) {
                 const auto& a = args[i];
+                // SAP type-checks argument binding at prepare: a {d …}
+                // temporal literal bound to an Integer-family parameter is
+                // AQE 2124 (oracle 2026-07-24, sp_ChargeMonthlyRent —
+                // small ints print as <Integer> in the message).
+                if (a.is_temporal && ps[i].type == Type::Integer) {
+                    return openads::util::Error{2124, 0,
+                        "Invalid operand for operator: <assignment> "
+                        "Target Data Type: <Integer> "
+                        "Source Data Type: <Date> "
+                        "Target Name: " + ps[i].name, ""};
+                }
                 if (a.is_numeric) {
                     if (a.number == std::floor(a.number) &&
                         std::abs(a.number) < 1e15)
@@ -22808,6 +22819,11 @@ inline std::string sql_error_envelope(std::int32_t code,
             state = "S0000"; native = 2121;
             text = "Column not found: " + msg;
             loc_token = msg;
+            break;
+        case 2124:              // arg-binding type check (pre-shaped msg)
+            state = "S0000";
+            if (msg.find("Source Data Type: <Date>") != std::string::npos)
+                loc_token = "{d";   // locate the offending {d …} literal
             break;
         case 5000:
             if (msg.rfind("procedure not registered", 0) == 0) {

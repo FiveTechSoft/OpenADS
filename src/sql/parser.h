@@ -455,9 +455,13 @@ util::Result<CreateProcedureStmt> parse_create_procedure(const std::string& sql)
 // string literals or numeric literals; the executor passes them
 // joined by 0x1F to the loaded DLL function.
 struct ExecuteProcedureArg {
-    bool        is_numeric = false;
+    bool        is_numeric  = false;
     std::string text;
-    double      number     = 0.0;
+    double      number      = 0.0;
+    // S4 — argument was a {d …}/{ts …} temporal literal. SAP type-checks
+    // EXECUTE PROCEDURE argument binding: a Date into an Integer param
+    // is AQE 2124 at prepare, not a silent coercion.
+    bool        is_temporal = false;
 };
 
 struct ExecuteProcedureStmt {

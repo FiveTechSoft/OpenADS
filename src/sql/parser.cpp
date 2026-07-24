@@ -2049,8 +2049,9 @@ parse_execute_procedure(const std::string& sql) {
                     c.consume_char();          // skip the d/t/ts marker
                 auto s = c.read_string_literal();
                 if (!s) return s.error();
-                a.text       = std::move(s).value();
-                a.is_numeric = false;
+                a.text        = std::move(s).value();
+                a.is_numeric  = false;
+                a.is_temporal = true;
                 if (!c.match_char('}'))
                     return util::Error{7200, 0,
                         "expected '}' to close temporal literal", sql};
