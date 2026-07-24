@@ -268,6 +268,7 @@ endif()
 # ace32.dll / ace64.dll without recompiling consuming applications.
 # ----------------------------------------------------------------------
 add_library(openads_ace SHARED
+    abi/adsfunc.c
     abi/legacy_crt_shims.cpp
 )
 
