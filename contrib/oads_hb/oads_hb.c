@@ -1,26 +1,20 @@
-/*
- * oads_hb.c � Harbour HB_FUNC wrappers for the oads_*() C API.
+﻿/*
+ * oads_hb.c -- Harbour HB_FUNC wrappers for the oads_*() C API.
  *
- * Drop this file into your hbmk2 project (or compile as a static lib)
- * to get OADS_FOPEN(), OADS_CHECKEXISTENCE(), OADS_DELETEFILE(), OADS_RENAMEFILE(),
- * OADS_FCREATE(), OADS_FCLOSE(), OADS_FREAD(), OADS_FWRITE(), OADS_FSEEK(),
- * OADS_GETFILESIZE(), OADS_GETFILEDATE(), OADS_GETFILETIME(), OADS_DIRMAKE(),
- * OADS_DIRREMOVE(), OADS_DIREXIST(), OADS_DIRECTORY() callable from Harbour PRG code.
- * DLL / shared library.  The oads_*() functions are themselves aliases
- * for AdsF*() � same implementation, different name for legacy callers.
+ * Drop this file into your hbmk2 project to get OADS_FOPEN(),
+ * OADS_FCREATE(), OADS_FCLOSE(), OADS_FREAD(), OADS_FWRITE(),
+ * OADS_FSEEK(), OADS_CHECKEXISTENCE(), OADS_DELETEFILE(),
+ * OADS_RENAMEFILE(), OADS_GETFILESIZE(), OADS_GETFILEDATE(),
+ * OADS_GETFILETIME(), OADS_DIRMAKE(), OADS_DIRREMOVE(),
+ * OADS_DIREXIST(), OADS_DIRECTORY() callable from Harbour PRG code.
  *
- * Calling conventions from PRG:
- *
- *   hFile := OADS_FCreate( hConn, cFileName, nAttribute )
- *   hFile := OADS_FOpen( hConn, cFileName, nMode )
- *   lOk   := OADS_FClose( hFile )
- *   nWritten := OADS_FWrite( hFile, cBuffer )          -- writes all bytes
- *   cBuf  := OADS_FRead( hFile, nLen )                  -- returns string
- *   nPos  := OADS_FSeek( hFile, nOffset, nOrigin )      -- 0=SET,1=CUR,2=END
- *   lOk   := OADS_FWrite( hFile, cBuffer, @nWritten )   -- with byte count
- *   nRead := OADS_FRead( hFile, @cBuffer, nLen )         -- @ form
+ * The actual C implementations live in adsfunc.c (or inside the
+ * OpenADS DLL).  This file only contains the Harbour<->C glue.
  *
  * Build (hbmk2):
+ *   hbmk2 myproject.hbp oads_hb.c adsfunc.c -I/path/to/openads/include
+ *
+ * Or if oads_*() are already exported by the DLL (openace64.dll):
  *   hbmk2 myproject.hbp oads_hb.c -L/path/to/openads/importlib -lace64
  */
 
@@ -28,17 +22,16 @@
 #include "hbapiitm.h"
 #include "openads/ace.h"
 
-
 /* ------------------------------------------------------------------ */
 /*  OADS_FCreate( hConn, cFileName, nAttribute ) -> hFile (0 on fail) */
 /* ------------------------------------------------------------------ */
 HB_FUNC( OADS_FCREATE )
 {
-    ADSHANDLE  hConn     = ( ADSHANDLE ) hb_parnint( 1 );
-    const char *szName   = hb_parc( 2 );
-    UNSIGNED16 usAttr    = ( UNSIGNED16 ) hb_parni( 3 );
-    ADSHANDLE  hFile     = 0;
-    UNSIGNED32 ulRc      = 1;
+    ADSHANDLE  hConn   = ( ADSHANDLE ) hb_parnint( 1 );
+    const char *szName = hb_parc( 2 );
+    UNSIGNED16 usAttr  = ( UNSIGNED16 ) hb_parni( 3 );
+    ADSHANDLE  hFile   = 0;
+    UNSIGNED32 ulRc    = 1;
 
     if( szName )
         ulRc = oads_FCreate( hConn, ( UNSIGNED8 * ) szName, usAttr, &hFile );
@@ -47,15 +40,14 @@ HB_FUNC( OADS_FCREATE )
 
 /* ------------------------------------------------------------------ */
 /*  OADS_FOpen( hConn, cFileName, nMode ) -> hFile (0 on fail)       */
-/*  nMode: 0 = read/write (default), 3 = ADS_READONLY                */
 /* ------------------------------------------------------------------ */
 HB_FUNC( OADS_FOPEN )
 {
-    ADSHANDLE  hConn     = ( ADSHANDLE ) hb_parnint( 1 );
-    const char *szName   = hb_parc( 2 );
-    UNSIGNED16 usMode    = ( UNSIGNED16 ) hb_parni( 3 );
-    ADSHANDLE  hFile     = 0;
-    UNSIGNED32 ulRc      = 1;
+    ADSHANDLE  hConn   = ( ADSHANDLE ) hb_parnint( 1 );
+    const char *szName = hb_parc( 2 );
+    UNSIGNED16 usMode  = ( UNSIGNED16 ) hb_parni( 3 );
+    ADSHANDLE  hFile   = 0;
+    UNSIGNED32 ulRc    = 1;
 
     if( szName )
         ulRc = oads_FOpen( hConn, ( UNSIGNED8 * ) szName, usMode, &hFile );
@@ -76,9 +68,9 @@ HB_FUNC( OADS_FCLOSE )
 /* ------------------------------------------------------------------ */
 HB_FUNC( OADS_FWRITE )
 {
-    ADSHANDLE hFile   = ( ADSHANDLE ) hb_parnint( 1 );
-    const char *szBuf = hb_parc( 2 );
-    UNSIGNED32 ulLen  = ( UNSIGNED32 ) hb_parclen( 2 );
+    ADSHANDLE hFile      = ( ADSHANDLE ) hb_parnint( 1 );
+    const char *szBuf    = hb_parc( 2 );
+    UNSIGNED32 ulLen     = ( UNSIGNED32 ) hb_parclen( 2 );
     UNSIGNED32 ulWritten = 0;
     UNSIGNED32 ulRc;
 
@@ -92,13 +84,11 @@ HB_FUNC( OADS_FWRITE )
 
     if( hb_pcount() >= 3 && HB_ISBYREF( 3 ) )
     {
-        /* OADS_FWrite( hFile, cBuf, @nWritten ) -> lOk */
         hb_stornl( ( long ) ulWritten, 3 );
         hb_retl( ulRc == 0 );
     }
     else
     {
-        /* OADS_FWrite( hFile, cBuf ) -> nBytesWritten */
         hb_retnl( ( long ) ulWritten );
     }
 }
@@ -109,14 +99,13 @@ HB_FUNC( OADS_FWRITE )
 /* ------------------------------------------------------------------ */
 HB_FUNC( OADS_FREAD )
 {
-    ADSHANDLE hFile    = ( ADSHANDLE ) hb_parnint( 1 );
+    ADSHANDLE hFile   = ( ADSHANDLE ) hb_parnint( 1 );
     UNSIGNED32 ulLen;
-    UNSIGNED32 ulRead  = 0;
+    UNSIGNED32 ulRead = 0;
     char *pBuf;
 
     if( hb_pcount() >= 3 && HB_ISBYREF( 2 ) )
     {
-        /* @cBuf form: OADS_FRead( hFile, @cBuf, nLen ) -> nRead */
         HB_SIZE nBufLen;
         ulLen = ( UNSIGNED32 ) hb_parnl( 3 );
         pBuf  = ( char * ) hb_xgrab( ulLen + 1 );
@@ -129,7 +118,6 @@ HB_FUNC( OADS_FREAD )
     }
     else
     {
-        /* simple form: OADS_FRead( hFile, nLen ) -> cData */
         ulLen = ( UNSIGNED32 ) hb_parnl( 2 );
         pBuf  = ( char * ) hb_xgrab( ulLen + 1 );
         oads_FRead( hFile, pBuf, ulLen, &ulRead );
@@ -141,7 +129,7 @@ HB_FUNC( OADS_FREAD )
 
 /* ------------------------------------------------------------------ */
 /*  OADS_FSeek( hFile, nOffset, nOrigin ) -> nPosition                */
-/*  nOrigin: 0 = SEEK_SET (beginning), 1 = SEEK_CUR, 2 = SEEK_END   */
+/*  nOrigin: 0 = SEEK_SET, 1 = SEEK_CUR, 2 = SEEK_END                */
 /* ------------------------------------------------------------------ */
 HB_FUNC( OADS_FSEEK )
 {
@@ -155,7 +143,7 @@ HB_FUNC( OADS_FSEEK )
 }
 
 /* ------------------------------------------------------------------ */
-/*  OADS_CheckExistence( hConn, cName ) -> lExists (.T./.F.)          */
+/*  OADS_CheckExistence( hConn, cName ) -> lExists                    */
 /* ------------------------------------------------------------------ */
 HB_FUNC( OADS_CHECKEXISTENCE )
 {
@@ -219,7 +207,7 @@ HB_FUNC( OADS_GETFILEDATE )
 {
     ADSHANDLE  hConn   = ( ADSHANDLE ) hb_parnint( 1 );
     const char *szName = hb_parc( 2 );
-    UNSIGNED8  aucDate[ 32 ] = {};
+    UNSIGNED8  aucDate[ 32 ] = { 0 };
     UNSIGNED16 usLen   = sizeof( aucDate );
 
     if( szName )
@@ -234,7 +222,7 @@ HB_FUNC( OADS_GETFILETIME )
 {
     ADSHANDLE  hConn   = ( ADSHANDLE ) hb_parnint( 1 );
     const char *szName = hb_parc( 2 );
-    UNSIGNED8  aucTime[ 32 ] = {};
+    UNSIGNED8  aucTime[ 32 ] = { 0 };
     UNSIGNED16 usLen   = sizeof( aucTime );
 
     if( szName )
@@ -271,7 +259,7 @@ HB_FUNC( OADS_DIRREMOVE )
 }
 
 /* ------------------------------------------------------------------ */
-/*  OADS_DirExist( hConn, cPath ) -> lExists (.T./.F.)                */
+/*  OADS_DirExist( hConn, cPath ) -> lExists                          */
 /* ------------------------------------------------------------------ */
 HB_FUNC( OADS_DIREXIST )
 {
@@ -296,7 +284,6 @@ HB_FUNC( OADS_DIRECTORY )
     unsigned char *buf;
     UNSIGNED32 ulRc;
 
-    /* First call: get required buffer size */
     if( szMask )
         oads_Directory( hConn, ( UNSIGNED8 * ) szMask, usAttr, NULL, &ulLen );
 
@@ -306,7 +293,7 @@ HB_FUNC( OADS_DIRECTORY )
         return;
     }
 
-    buf = (unsigned char *)hb_xgrab( ulLen );
+    buf = ( unsigned char * ) hb_xgrab( ulLen );
     ulRc = oads_Directory( hConn, ( UNSIGNED8 * ) szMask, usAttr,
                            buf, &ulLen );
     if( ulRc == 0 )

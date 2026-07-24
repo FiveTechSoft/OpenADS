@@ -24,6 +24,7 @@ add_library(openads_core STATIC
     engine/server_fs.cpp
     abi/ace_exports.cpp
     abi/ace_stubs.cpp
+    abi/adsfunc.c
     abi/openads_sql_c.cpp
     abi/last_error.cpp
     abi/charset.cpp
