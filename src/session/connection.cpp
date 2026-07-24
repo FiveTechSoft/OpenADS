@@ -827,7 +827,10 @@ Connection::execute_procedure(const std::string& name,
                               const std::string& packed_args) {
     auto it = procedures_.find(name);
     if (it == procedures_.end()) {
-        return util::Error{5000, 0, "procedure not registered", name};
+        // Name rides in the MESSAGE (last_error drops the detail field);
+        // the SQL error envelope extracts it after the colon.
+        return util::Error{5000, 0, "procedure not registered: " + name,
+                           name};
     }
     if (!it->second.fn) {
         return util::Error{5000, 0, "procedure has null fn pointer", name};

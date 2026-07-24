@@ -42,7 +42,8 @@ $cases = [ordered]@{
 # is the error-wrap gap.
 "chk_auditlog_count"   = "SELECT COUNT(*) AS n FROM auditlog WHERE TableKey = 'PARITYKEY01'";
 "sp_ChargeMonthlyRent" = "EXECUTE PROCEDURE sp_ChargeMonthlyRent({d '2026-07-01'})";
-"chk_charges_month"    = "SELECT COUNT(*) AS n FROM encitems WHERE CatCode = 'RENT'";
+# chk_charges_month is in $shapeCases: the 5004 envelope embeds the
+# per-engine sandbox path, so raw strings can never match.
 "sp_ChargeLateFees"    = "EXECUTE PROCEDURE sp_ChargeLateFees({d '2026-07-10'})";
 "sp_createrem"         = "EXECUTE PROCEDURE sp_createremforunchargedrents({d '2026-07-01'})";
 "chk_reminders"        = "SELECT COUNT(*) AS n FROM reminders";
@@ -74,6 +75,7 @@ $shapeCases = [ordered]@{
 "guid_M"    = @("SELECT NEWIDSTRING(MIME) AS v FROM system.iota",        '^\[\{"v":"[A-Za-z0-9+/]{22}=="\}\]$');
 "guid_F"    = @("SELECT NEWIDSTRING(FILE) AS v FROM system.iota",        '^\[\{"v":"[A-Za-z0-9_-]{22}"\}\]$');
 "sp_GetPhysicalPath" = @("EXECUTE PROCEDURE sp_GetPhysicalPath()",       '^\[\{"databasepa(th)?":"F:\\\\tmp\\\\parity\\\\(sap|oa)_data\\\\"\}\]$');
+"chk_charges_month"  = @("SELECT COUNT(*) AS n FROM encitems WHERE CatCode = 'RENT'", '^\{"error":"rc=7200","msg":"Error 7200:  AQE Error:  State = HY000;   NativeError = 5004;  \[iAnywhere Solutions\]\[Advantage SQL\]\[ASA\] Error 5004:  Either ACE could not find the specified file, or you do not have sufficient rights to access the file\.  F:\\\\tmp\\\\parity\\\\(sap|oa)_data\\\\encitems\.adt Table name: encitems"\}$');
 }
 
 # ---- cases where BOTH engines must reject (any rc): OA reports native

@@ -22846,6 +22846,94 @@ inline std::string join_cell_text(openads::engine::Table& t,
     return s;
 }
 
+// S4 — SAP wraps EVERY SQL-statement failure as rc 7200 with an AQE
+// envelope; the native code and a SQLSTATE ride inside the TEXT
+// (oracle-probed 2026-07-23):
+//   Error 7200:  AQE Error:  State = S0000;   NativeError = 2121;
+//   [iAnywhere Solutions][Advantage SQL Engine]Column not found: x ...
+// File-level errors use the ASA branding instead:
+//   ... NativeError = 5004;  [iAnywhere Solutions][Advantage SQL][ASA]
+//   Error 5004:  Either ACE could not find the specified file, ...
+// Spacing is significant (2 spaces after "7200:"/"AQE Error:"/";" before
+// the brand, 3 after the State) — replicated byte-for-byte.
+inline std::string sql_error_envelope(std::int32_t code,
+                                      const std::string& msg,
+                                      const std::string& sql) {
+    std::string  state  = "HY000";
+    std::int32_t native = code;
+    std::string  text   = msg;
+    bool         asa    = false;
+    std::string  loc_token;    // when set, append SAP's location suffix
+    switch (code) {
+        case 5004:              // missing table — msg pre-shaped at source
+            asa = true;
+            break;
+        case 5063:              // AE_COLUMN_NOT_FOUND -> SQL engine 2121
+            state = "S0000"; native = 2121;
+            text = "Column not found: " + msg;
+            loc_token = msg;
+            break;
+        case 5000:
+            if (msg.rfind("procedure not registered", 0) == 0) {
+                native = 2198;
+                std::string nm;
+                auto colon = msg.find(':');
+                if (colon != std::string::npos)
+                    nm = msg.substr(colon + 1);
+                text = "The stored procedure name is invalid:" + nm;
+                if (nm.size() > 1) loc_token = nm.substr(1);
+            }
+            break;
+        case 7200: {
+            if (msg.rfind("unknown function", 0) == 0) {
+                state = "S0000"; native = 2158;
+                std::string nm = msg;
+                auto q1 = nm.find('\'');
+                auto q2 = nm.rfind('\'');
+                if (q1 != std::string::npos && q2 > q1)
+                    nm = nm.substr(q1 + 1, q2 - q1 - 1);
+                text = "Scalar function not found: " + nm;
+                loc_token = nm;
+            } else {
+                state = "42000"; native = 2115;   // generic parse error
+            }
+            break;
+        }
+        default:
+            break;              // native code + our text, HY000
+    }
+    std::string env = "Error 7200:  AQE Error:  State = " + state +
+                      ";   NativeError = " + std::to_string(native) + ";  ";
+    env += asa ? "[iAnywhere Solutions][Advantage SQL][ASA] Error 5004:  "
+               : "[iAnywhere Solutions][Advantage SQL Engine]";
+    env += text;
+    // SAP's location suffix is the 1-based character offset of the
+    // offending token in the statement text.
+    if (!loc_token.empty() && !sql.empty()) {
+        auto ifind = [&]() -> std::size_t {
+            if (loc_token.size() > sql.size()) return std::string::npos;
+            for (std::size_t i = 0; i + loc_token.size() <= sql.size();
+                 ++i) {
+                bool eq = true;
+                for (std::size_t j = 0; j < loc_token.size(); ++j) {
+                    if (std::toupper(static_cast<unsigned char>(
+                            sql[i + j])) !=
+                        std::toupper(static_cast<unsigned char>(
+                            loc_token[j]))) { eq = false; break; }
+                }
+                if (eq) return i;
+            }
+            return std::string::npos;
+        };
+        std::size_t at = ifind();
+        if (at != std::string::npos) {
+            env += " -- Location of error in the SQL statement is: " +
+                   std::to_string(at + 1);
+        }
+    }
+    return env;
+}
+
 } // namespace scriptbridge
 
 // ---- S4: connection-scoped trigger row images + session #temp tables ----
@@ -23762,7 +23850,32 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 return c->adopt_table(std::move(mt).value(), tname);
             }
         }
-        return c->open_table(resolved, ttype, omode, lmode);
+        auto ot = c->open_table(resolved, ttype, omode, lmode);
+        if (!ot && (ot.error().code == 5103 || ot.error().code == 7041)) {
+            // SAP reports a missing table in a SQL statement as ACE 5004
+            // with the resolved path and the table name (the AQE envelope
+            // at the statement boundary adds the 7200 wrapper). Replicated
+            // byte-for-byte for parity.
+            std::string p = c->data_dir();
+            if (!p.empty() && p.back() != '\\' && p.back() != '/')
+                p += '\\';
+            p += tname;
+            std::string base = tname;
+            std::size_t slash = base.find_last_of("\\/");
+            if (slash != std::string::npos) base = base.substr(slash + 1);
+            if (base.find('.') == std::string::npos)
+                // DD connections resolve bare table names as ADT (SAP's
+                // default dictionary table type); free connections by the
+                // statement's table type.
+                p += (c->has_dd() ||
+                      ttype == openads::engine::TableType::Adt)
+                   ? ".adt" : ".dbf";
+            return openads::util::Error{5004, 0,
+                "Either ACE could not find the specified file, or you do "
+                "not have sufficient rights to access the file.  " + p +
+                " Table name: " + tname, ""};
+        }
+        return ot;
     };
 
     // Per-operation ACL check for SQL statements when check_rights is set.
@@ -30725,9 +30838,31 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
 // lands in the SAP-style ads_err error log with the statement text —
 // matching ADS, whose error log records the SQL errors (7200 etc.) it
 // raises while serving clients. Success paths pay nothing.
+// S4 — AQE envelope depth guard. Internal recursion (derived tables,
+// INTO snapshots, script-bridge embedded SQL) re-enters
+// AdsExecuteSQLDirect; only the OUTERMOST, client-facing call wraps the
+// failure as SAP's rc-7200 AQE envelope. Inner calls keep the native
+// code + message so engine/script error handling is unaffected — same
+// as SAP, whose envelopes carry the innermost native code.
+static thread_local int sql_exec_depth_ = 0;
+
 UNSIGNED32 ENTRYPOINT AdsExecuteSQLDirect(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                                ADSHANDLE* phCursor) {
+    struct DepthGuard {
+        ~DepthGuard() { --sql_exec_depth_; }
+    } depth_guard;
+    ++sql_exec_depth_;
     UNSIGNED32 rc = exec_sql_direct_impl(hStatement, pucSQL, phCursor);
+    if (rc != openads::AE_SUCCESS && sql_exec_depth_ == 1) {
+        std::string sql_text = pucSQL != nullptr
+            ? openads::abi::to_internal(pucSQL, 0) : std::string();
+        std::string env = scriptbridge::sql_error_envelope(
+            static_cast<std::int32_t>(rc),
+            openads::abi::last_error_message(), sql_text);
+        openads::abi::set_last_error(openads::util::Error{
+            7200, 0, std::move(env), ""});
+        rc = 7200;
+    }
     // RCB 07/15/2026: SAP ADS positions a SQL result cursor ON the first
     // record after execute; OpenADS was leaving the engine Table at BOF, so a
     // client that reads the current record immediately (the SAP-supported

@@ -729,12 +729,14 @@ TEST_CASE("Perms: column-level SELECT enforcement") {
         AdsCloseTable(hc);
     }
 
-    // Explicit forbidden column → access denied.
+    // Explicit forbidden column → access denied. Since the S4 AQE
+    // envelope, every client-facing SQL failure returns 7200 (SAP
+    // semantics) with the native code inside the message text.
     {
         UNSIGNED8 sql[64] = "SELECT DEPOSIT FROM tbl";
         ADSHANDLE hc = 0;
         UNSIGNED32 rc = AdsExecuteSQLDirect(hStmt, sql, &hc);
-        CHECK(rc == openads::AE_ACCESS_DENIED);
+        CHECK(rc == 7200u);
         if (hc) AdsCloseTable(hc);
     }
 
