@@ -113,16 +113,14 @@ HB_FUNC( OADS_FREAD )
     UNSIGNED32 ulLen;
     UNSIGNED32 ulRead  = 0;
     char *pBuf;
-    UNSIGNED32 ulRc;
 
     if( hb_pcount() >= 3 && HB_ISBYREF( 2 ) )
     {
         /* @cBuf form: OADS_FRead( hFile, @cBuf, nLen ) -> nRead */
         HB_SIZE nBufLen;
-        hb_clearex( 2 );
         ulLen = ( UNSIGNED32 ) hb_parnl( 3 );
         pBuf  = ( char * ) hb_xgrab( ulLen + 1 );
-        ulRc  = oads_FRead( hFile, pBuf, ulLen, &ulRead );
+        oads_FRead( hFile, pBuf, ulLen, &ulRead );
         memset( pBuf + ulRead, 0, 1 );
         nBufLen = ( HB_SIZE ) ulRead;
         hb_storclen( pBuf, nBufLen, 2 );
@@ -134,7 +132,7 @@ HB_FUNC( OADS_FREAD )
         /* simple form: OADS_FRead( hFile, nLen ) -> cData */
         ulLen = ( UNSIGNED32 ) hb_parnl( 2 );
         pBuf  = ( char * ) hb_xgrab( ulLen + 1 );
-        ulRc  = oads_FRead( hFile, pBuf, ulLen, &ulRead );
+        oads_FRead( hFile, pBuf, ulLen, &ulRead );
         memset( pBuf + ulRead, 0, 1 );
         hb_retclen( pBuf, ( HB_SIZE ) ulRead );
         hb_xfree( pBuf );
