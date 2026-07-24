@@ -27,7 +27,7 @@
 #include "hbapi.h"
 #include "hbapiitm.h"
 #include "openads/ace.h"
-#include <vector>
+
 
 /* ------------------------------------------------------------------ */
 /*  OADS_FCreate( hConn, cFileName, nAttribute ) -> hFile (0 on fail) */
@@ -295,10 +295,12 @@ HB_FUNC( OADS_DIRECTORY )
     const char *szMask = hb_parc( 2 );
     UNSIGNED16 usAttr  = ( UNSIGNED16 ) hb_parni( 3 );
     UNSIGNED32 ulLen   = 0;
+    unsigned char *buf;
+    UNSIGNED32 ulRc;
 
     /* First call: get required buffer size */
     if( szMask )
-        oads_Directory( hConn, ( UNSIGNED8 * ) szMask, usAttr, nullptr, &ulLen );
+        oads_Directory( hConn, ( UNSIGNED8 * ) szMask, usAttr, NULL, &ulLen );
 
     if( ulLen == 0 || ulLen > 1024 * 1024 )
     {
@@ -306,11 +308,12 @@ HB_FUNC( OADS_DIRECTORY )
         return;
     }
 
-    std::vector<unsigned char> buf( ulLen );
-    UNSIGNED32 ulRc = oads_Directory( hConn, ( UNSIGNED8 * ) szMask, usAttr,
-                                      buf.data(), &ulLen );
+    buf = (unsigned char *)hb_xgrab( ulLen );
+    ulRc = oads_Directory( hConn, ( UNSIGNED8 * ) szMask, usAttr,
+                           buf, &ulLen );
     if( ulRc == 0 )
-        hb_retclen( ( char * ) buf.data(), ulLen );
+        hb_retclen( ( char * ) buf, ulLen );
     else
         hb_retc( "" );
+    hb_xfree( buf );
 }
