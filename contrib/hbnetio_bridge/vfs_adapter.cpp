@@ -110,17 +110,17 @@ util::Result<void> VfsAdapter::login() {
     std::uint8_t reply[vfs::MSGLEN];
     auto recv = transport_->recv(reply, vfs::MSGLEN);
     if (!recv) return recv.error();
-    if (*recv != vfs::MSGLEN) {
-        return util::Error{1, "LOGIN reply too short"};
+    if (recv.value() != vfs::MSGLEN) {
+        return util::Error{1, 0, "LOGIN reply too short", ""};
     }
 
     std::uint32_t msg = get_u32(reply + 0);
     if (msg == vfs::MSG_LOGIN && get_u32(reply + 4) == vfs::CONNECTED) {
         connected_ = true;
-        return util::Ok();
+        return {};
     }
 
-    return util::Error{2, "LOGIN rejected by server"};
+    return util::Error{2, 0, "LOGIN rejected by server", ""};
 }
 
 // ---------------------------------------------------------------------------
@@ -142,10 +142,10 @@ util::Result<void> VfsAdapter::recv_header(std::uint8_t* buf) {
     while (got < vfs::MSGLEN) {
         auto n = transport_->recv(buf + got, vfs::MSGLEN - got);
         if (!n) return n.error();
-        if (*n == 0) return util::Error{3, "connection closed during recv"};
-        got += *n;
+        if (n.value() == 0) return util::Error{3, 0, "connection closed during recv", ""};
+        got += n.value();
     }
-    return util::Ok();
+    return {};
 }
 
 // ---------------------------------------------------------------------------
@@ -177,7 +177,7 @@ util::Result<bool> VfsAdapter::send_msg(std::uint32_t msg,
     std::uint32_t reply_msg = get_u32(reply + 0);
     if (reply_msg == vfs::MSG_ERROR) {
         std::uint32_t err = get_u32(reply + 4);
-        return util::Error{static_cast<int>(err), "VFS server error"};
+        return util::Error{static_cast<int>(err), 0, "VFS server error", ""};
     }
 
     return true;
@@ -207,7 +207,7 @@ util::Result<std::uint32_t> VfsAdapter::send_simple(std::uint32_t msg,
     std::uint32_t reply_msg = get_u32(reply + 0);
     if (reply_msg == vfs::MSG_ERROR) {
         std::uint32_t err = get_u32(reply + 4);
-        return util::Error{static_cast<int>(err), "VFS server error"};
+        return util::Error{static_cast<int>(err), 0, "VFS server error", ""};
     }
 
     return reply_msg;
@@ -238,7 +238,7 @@ VfsAdapter::send_recv(std::uint32_t msg, const void* data, std::uint32_t len) {
     std::uint32_t reply_msg = get_u32(hdr + 0);
     if (reply_msg == vfs::MSG_ERROR) {
         std::uint32_t err = get_u32(hdr + 4);
-        return util::Error{static_cast<int>(err), "VFS server error"};
+        return util::Error{static_cast<int>(err), 0, "VFS server error", ""};
     }
 
     // Some replies include a payload size in bytes 4..7
@@ -254,8 +254,8 @@ VfsAdapter::send_recv(std::uint32_t msg, const void* data, std::uint32_t len) {
             auto n = transport_->recv(payload.data() + got,
                                       payload_size - got);
             if (!n) return n.error();
-            if (*n == 0) return util::Error{4, "connection closed"};
-            got += *n;
+            if (n.value() == 0) return util::Error{4, 0, "connection closed", ""};
+            got += n.value();
         }
         // Return header + payload as one buffer
         std::vector<std::uint8_t> result(vfs::MSGLEN + payload_size);
@@ -316,7 +316,7 @@ util::Result<VfsHandle> VfsAdapter::open(const std::string& path,
     std::uint32_t reply_msg = get_u32(reply + 0);
     if (reply_msg == vfs::MSG_ERROR) {
         std::uint32_t err = get_u32(reply + 4);
-        return util::Error{static_cast<int>(err), "VFS open failed"};
+        return util::Error{static_cast<int>(err), 0, "VFS open failed", ""};
     }
 
     VfsHandle h;
@@ -342,7 +342,7 @@ util::Result<void> VfsAdapter::close(VfsHandle& h) {
     if (!recv) return recv.error();
 
     h.valid = false;
-    return util::Ok();
+    return {};
 }
 
 
@@ -392,7 +392,7 @@ util::Result<void> VfsAdapter::unlock(VfsHandle& h, std::uint64_t offset,
     auto sent = transport_->send(hdr, vfs::MSGLEN);
     if (!sent) return sent.error();
 
-    return util::Ok();
+    return {};
 }
 
 util::Result<int> VfsAdapter::test_lock(VfsHandle& h, std::uint64_t offset,
@@ -441,7 +441,7 @@ util::Result<std::size_t> VfsAdapter::read(VfsHandle& h, void* buf,
     std::uint32_t reply_msg = get_u32(reply + 0);
     if (reply_msg == vfs::MSG_ERROR) {
         std::uint32_t err = get_u32(reply + 4);
-        return util::Error{static_cast<int>(err), "VFS read failed"};
+        return util::Error{static_cast<int>(err), 0, "VFS read failed", ""};
     }
 
     std::uint32_t nread = get_u32(reply + 4);
@@ -453,8 +453,8 @@ util::Result<std::size_t> VfsAdapter::read(VfsHandle& h, void* buf,
         auto nr = transport_->recv(
             static_cast<std::uint8_t*>(buf) + got, nread - got);
         if (!nr) return nr.error();
-        if (*nr == 0) return util::Error{5, "connection closed during read"};
-        got += *nr;
+        if (nr.value() == 0) return util::Error{5, 0, "connection closed during read", ""};
+        got += nr.value();
     }
 
     return static_cast<std::size_t>(nread);
@@ -487,7 +487,7 @@ util::Result<std::size_t> VfsAdapter::write(VfsHandle& h, const void* buf,
     std::uint32_t reply_msg = get_u32(reply + 0);
     if (reply_msg == vfs::MSG_ERROR) {
         std::uint32_t err = get_u32(reply + 4);
-        return util::Error{static_cast<int>(err), "VFS write failed"};
+        return util::Error{static_cast<int>(err), 0, "VFS write failed", ""};
     }
 
     return static_cast<std::size_t>(get_u32(reply + 4));
@@ -519,7 +519,7 @@ util::Result<std::size_t> VfsAdapter::read_at(VfsHandle& h, void* buf,
     std::uint32_t reply_msg = get_u32(reply + 0);
     if (reply_msg == vfs::MSG_ERROR) {
         std::uint32_t err = get_u32(reply + 4);
-        return util::Error{static_cast<int>(err), "VFS read_at failed"};
+        return util::Error{static_cast<int>(err), 0, "VFS read_at failed", ""};
     }
 
     std::uint32_t nread = get_u32(reply + 4);
@@ -530,8 +530,8 @@ util::Result<std::size_t> VfsAdapter::read_at(VfsHandle& h, void* buf,
         auto nr = transport_->recv(
             static_cast<std::uint8_t*>(buf) + got, nread - got);
         if (!nr) return nr.error();
-        if (*nr == 0) return util::Error{6, "connection closed"};
-        got += *nr;
+        if (nr.value() == 0) return util::Error{6, 0, "connection closed", ""};
+        got += nr.value();
     }
 
     return static_cast<std::size_t>(nread);
@@ -564,7 +564,7 @@ util::Result<std::size_t> VfsAdapter::write_at(VfsHandle& h, const void* buf,
     std::uint32_t reply_msg = get_u32(reply + 0);
     if (reply_msg == vfs::MSG_ERROR) {
         std::uint32_t err = get_u32(reply + 4);
-        return util::Error{static_cast<int>(err), "VFS write_at failed"};
+        return util::Error{static_cast<int>(err), 0, "VFS write_at failed", ""};
     }
 
     return static_cast<std::size_t>(get_u32(reply + 4));
@@ -612,7 +612,7 @@ util::Result<void> VfsAdapter::truncate(VfsHandle& h,
     auto recv = recv_header(reply);
     if (!recv) return recv.error();
 
-    return util::Ok();
+    return {};
 }
 
 util::Result<std::int64_t> VfsAdapter::size(VfsHandle& h) {
@@ -660,7 +660,7 @@ util::Result<void> VfsAdapter::commit(VfsHandle& h) {
     auto sent = transport_->send(hdr, vfs::MSGLEN);
     if (!sent) return sent.error();
 
-    return util::Ok();
+    return {};
 }
 
 
@@ -672,14 +672,14 @@ util::Result<bool> VfsAdapter::exists(const std::string& path) {
     std::uint16_t len = static_cast<std::uint16_t>(path.size());
     auto result = send_simple(vfs::MSG_EXISTS, path.data(), len);
     if (!result) return result.error();
-    return *result == vfs::MSG_EXISTS;
+    return result.value() == vfs::MSG_EXISTS;
 }
 
 util::Result<void> VfsAdapter::erase(const std::string& path) {
     std::uint16_t len = static_cast<std::uint16_t>(path.size());
     auto result = send_simple(vfs::MSG_DELETE, path.data(), len);
     if (!result) return result.error();
-    return util::Ok();
+    return {};
 }
 
 util::Result<void> VfsAdapter::rename(const std::string& old_path,
@@ -706,7 +706,7 @@ util::Result<void> VfsAdapter::rename(const std::string& old_path,
     auto recv = recv_header(reply);
     if (!recv) return recv.error();
 
-    return util::Ok();
+    return {};
 }
 
 util::Result<void> VfsAdapter::copy(const std::string& src,
@@ -733,7 +733,7 @@ util::Result<void> VfsAdapter::copy(const std::string& src,
     auto recv = recv_header(reply);
     if (!recv) return recv.error();
 
-    return util::Ok();
+    return {};
 }
 
 
@@ -745,21 +745,21 @@ util::Result<bool> VfsAdapter::dir_exists(const std::string& path) {
     std::uint16_t len = static_cast<std::uint16_t>(path.size());
     auto result = send_simple(vfs::MSG_DIREXISTS, path.data(), len);
     if (!result) return result.error();
-    return *result == vfs::MSG_DIREXISTS;
+    return result.value() == vfs::MSG_DIREXISTS;
 }
 
 util::Result<void> VfsAdapter::dir_make(const std::string& path) {
     std::uint16_t len = static_cast<std::uint16_t>(path.size());
     auto result = send_simple(vfs::MSG_DIRMAKE, path.data(), len);
     if (!result) return result.error();
-    return util::Ok();
+    return {};
 }
 
 util::Result<void> VfsAdapter::dir_remove(const std::string& path) {
     std::uint16_t len = static_cast<std::uint16_t>(path.size());
     auto result = send_simple(vfs::MSG_DIRREMOVE, path.data(), len);
     if (!result) return result.error();
-    return util::Ok();
+    return {};
 }
 
 
@@ -810,7 +810,7 @@ util::Result<void> VfsAdapter::attr_set(const std::string& path,
     auto recv = recv_header(reply);
     if (!recv) return recv.error();
 
-    return util::Ok();
+    return {};
 }
 
 util::Result<VfsAdapter::Timestamp>
@@ -862,15 +862,15 @@ util::Result<void> VfsAdapter::time_set(const std::string& path,
     auto recv = recv_header(reply);
     if (!recv) return recv.error();
 
-    return util::Ok();
+    return {};
 }
 
 
 // ===========================================================================
-// DistributedLockGuard (RAII wrapper)
+// VfsLockGuard (RAII wrapper)
 // ===========================================================================
 
-DistributedLockGuard::DistributedLockGuard(VfsAdapter& adapter,
+VfsLockGuard::VfsLockGuard(VfsAdapter& adapter,
                                             VfsHandle& handle,
                                             std::uint64_t offset,
                                             std::uint64_t length)
@@ -878,14 +878,14 @@ DistributedLockGuard::DistributedLockGuard(VfsAdapter& adapter,
       offset_(offset), length_(length) {
     auto result = adapter_.lock(handle_, offset_, length_,
                                 vfs::FLX_EXCLUSIVE | vfs::FLX_WAIT);
-    locked_ = result.has_value() && *result;
+    locked_ = result.has_value() && result.value();
 }
 
-DistributedLockGuard::~DistributedLockGuard() {
+VfsLockGuard::~VfsLockGuard() {
     release();
 }
 
-void DistributedLockGuard::release() {
+void VfsLockGuard::release() {
     if (locked_) {
         adapter_.unlock(handle_, offset_, length_);
         locked_ = false;

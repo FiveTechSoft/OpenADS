@@ -76,7 +76,7 @@ DistributedLockManager::try_lock_with_retry(const std::string& lock_path,
     //              endif
     auto handle = adapter_.open(lock_path,
                                 vfs::FO_READWRITE | vfs::FO_CREAT);
-    if (!handle) return handle.error();
+    if (!handle.has_value()) return handle.error();
 
     VfsHandle h = std::move(handle).value();
 
@@ -90,19 +90,19 @@ DistributedLockManager::try_lock_with_retry(const std::string& lock_path,
 
     while (true) {
         auto locked = adapter_.lock(h, 0, 1, lock_flags);
-        if (locked && *locked) {
+        if (locked && locked.value()) {
             return h;   // Lock acquired
         }
 
         if (!wait) {
             adapter_.close(h);
-            return util::Error{10, "lock not available (non-blocking)"};
+            return util::Error{10, 0, "lock not available (non-blocking)", ""};
         }
 
         // Retry with backoff (mirrors: hb_idleSleep(2))
         if (elapsed >= timeout) {
             adapter_.close(h);
-            return util::Error{11, "lock timeout exceeded"};
+            return util::Error{11, 0, "lock timeout exceeded", ""};
         }
 
         std::this_thread::sleep_for(
@@ -123,7 +123,7 @@ DistributedLockManager::acquire(const std::string& lock_path,
     std::string actual_path = make_lock_path(lock_path);
 
     auto handle = try_lock_with_retry(actual_path, true, timeout_ms);
-    if (!handle) return handle.error();
+    if (!handle.has_value()) return handle.error();
 
     VfsHandle h = std::move(handle).value();
 
@@ -158,7 +158,7 @@ DistributedLockManager::try_acquire(const std::string& lock_path,
     std::string actual_path = make_lock_path(lock_path);
 
     auto handle = try_lock_with_retry(actual_path, false, 0);
-    if (!handle) return handle.error();
+    if (!handle.has_value()) return handle.error();
 
     VfsHandle h = std::move(handle).value();
 
@@ -193,7 +193,7 @@ DistributedLockManager::release(const std::string& lock_path) {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = locks_.find(actual_path);
     if (it == locks_.end() || !it->second.held) {
-        return util::Error{12, "lock not held"};
+        return util::Error{12, 0, "lock not held", ""};
     }
 
     // Unlock on server
@@ -216,7 +216,7 @@ DistributedLockManager::release(const std::string& lock_path) {
     }
 
     locks_.erase(it);
-    return util::Ok();
+    return {};
 }
 
 
@@ -267,7 +267,7 @@ DistributedLockManager::lock_info(const std::string& lock_path) const {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = locks_.find(make_lock_path(lock_path));
     if (it == locks_.end()) {
-        return util::Error{13, "lock not found"};
+        return util::Error{13, 0, "lock not found", ""};
     }
     return it->second;
 }
@@ -311,7 +311,7 @@ DistributedLockManager::heartbeat(const std::string& lock_path) {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = locks_.find(actual_path);
     if (it == locks_.end() || !it->second.held) {
-        return util::Error{14, "lock not held for heartbeat"};
+        return util::Error{14, 0, "lock not held for heartbeat", ""};
     }
 
     // Refresh the acquisition timestamp
@@ -326,7 +326,7 @@ DistributedLockManager::heartbeat(const std::string& lock_path) {
     h.path  = actual_path;
     adapter_.test_lock(h, 0, 1, vfs::FLX_EXCLUSIVE);
 
-    return util::Ok();
+    return {};
 }
 
 

@@ -274,7 +274,7 @@ private:
 
 
 // ---------------------------------------------------------------------------
-// DistributedLockGuard — RAII wrapper for remote file locking
+// VfsLockGuard — RAII wrapper for remote file locking
 // ---------------------------------------------------------------------------
 //
 // Mirrors the pattern from hbnetio's __isLocked() function:
@@ -286,20 +286,20 @@ private:
 //   }
 //
 // Usage:
-//   DistributedLockGuard guard(adapter, handle, 0, 1);
+//   VfsLockGuard guard(adapter, handle, 0, 1);
 //   if (guard.locked()) {
 //       // ... exclusive access to file ...
 //   }
 //   // guard destructor calls unlock()
 //
-class DistributedLockGuard {
+class VfsLockGuard {
 public:
-    DistributedLockGuard(VfsAdapter& adapter, VfsHandle& handle,
+    VfsLockGuard(VfsAdapter& adapter, VfsHandle& handle,
                          std::uint64_t offset, std::uint64_t length);
-    ~DistributedLockGuard();
+    ~VfsLockGuard();
 
-    DistributedLockGuard(const DistributedLockGuard&) = delete;
-    DistributedLockGuard& operator=(const DistributedLockGuard&) = delete;
+    VfsLockGuard(const VfsLockGuard&) = delete;
+    VfsLockGuard& operator=(const VfsLockGuard&) = delete;
 
     bool locked() const noexcept { return locked_; }
 

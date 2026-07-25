@@ -77,7 +77,7 @@ RpcBridge::handle_call(const std::string& func_name,
         std::lock_guard<std::mutex> lock(mu_);
         auto it = funcs_.find(func_name);
         if (it == funcs_.end()) {
-            return util::Error{20, "function not found: " + func_name};
+            return util::Error{20, 0, "function not found: " + func_name, ""};
         }
         func = it->second;
     }
@@ -93,7 +93,7 @@ RpcBridge::handle_proc(const std::string& proc_name,
         std::lock_guard<std::mutex> lock(mu_);
         auto it = procs_.find(proc_name);
         if (it == procs_.end()) {
-            return util::Error{21, "procedure not found: " + proc_name};
+            return util::Error{21, 0, "procedure not found: " + proc_name, ""};
         }
         proc = it->second;
     }
@@ -141,11 +141,11 @@ util::Result<void> RpcBridge::stream_send(std::uint32_t stream_id,
     std::lock_guard<std::mutex> lock(mu_);
     auto it = streams_.find(stream_id);
     if (it == streams_.end() || !it->second->active) {
-        return util::Error{22, "stream not found or inactive"};
+        return util::Error{22, 0, "stream not found or inactive", ""};
     }
 
     it->second->callback(stream_id, data);
-    return util::Ok();
+    return {};
 }
 
 void RpcBridge::close_stream(std::uint32_t stream_id) {
@@ -244,7 +244,7 @@ RpcClient::proc_exec(const std::string& name,
         payload.data(), payload.size());
 
     if (!result) return result.error();
-    return util::Ok();
+    return {};
 }
 
 util::Result<void>
@@ -264,7 +264,7 @@ RpcClient::proc_exec_w(const std::string& name,
         payload.data(), payload.size());
 
     if (!result) return result.error();
-    return util::Ok();
+    return {};
 }
 
 util::Result<bool>
@@ -276,9 +276,9 @@ RpcClient::proc_exists(const std::string& name) {
 
     if (!result) return result.error();
 
-    auto unpacked = rpc_serial::unpack_u32(*result);
+    auto unpacked = rpc_serial::unpack_u32(result.value());
     if (!unpacked) return unpacked.error();
-    return *unpacked != 0;
+    return unpacked.value() != 0;
 }
 
 
@@ -303,9 +303,9 @@ RpcClient::open_data_stream(const std::string& func_name,
 
     if (!result) return result.error();
 
-    auto stream_id = rpc_serial::unpack_u32(*result);
+    auto stream_id = rpc_serial::unpack_u32(result.value());
     if (!stream_id) return stream_id.error();
-    return *stream_id;
+    return stream_id.value();
 }
 
 util::Result<std::uint32_t>
@@ -333,7 +333,7 @@ RpcClient::close_stream(std::uint32_t stream_id) {
         packed.data(), packed.size());
 
     if (!result) return result.error();
-    return util::Ok();
+    return {};
 }
 
 
@@ -371,8 +371,8 @@ RpcClient::send_and_recv(std::uint8_t opcode, const void* data,
     while (got < 4) {
         auto n = transport_->recv(hdr + got, 4 - got);
         if (!n) return n.error();
-        if (*n == 0) return util::Error{23, "connection closed"};
-        got += *n;
+        if (n.value() == 0) return util::Error{23, 0, "connection closed", ""};
+        got += n.value();
     }
 
     std::uint32_t reply_len = (static_cast<std::uint32_t>(hdr[0]) << 24) |
@@ -387,8 +387,8 @@ RpcClient::send_and_recv(std::uint8_t opcode, const void* data,
     while (got < reply_len) {
         auto n = transport_->recv(reply_buf.data() + got, reply_len - got);
         if (!n) return n.error();
-        if (*n == 0) return util::Error{24, "connection closed during reply"};
-        got += *n;
+        if (n.value() == 0) return util::Error{24, 0, "connection closed during reply", ""};
+        got += n.value();
     }
 
     // First byte is the reply opcode — skip it, return payload
@@ -447,14 +447,14 @@ std::vector<std::uint8_t> pack_u64(std::uint64_t v) {
 
 util::Result<std::string> unpack_string(const std::vector<std::uint8_t>& data) {
     if (data.size() < 4) {
-        return util::Error{30, "string too short"};
+        return util::Error{30, 0, "string too short", ""};
     }
     std::uint32_t len = static_cast<std::uint32_t>(data[0]) |
                         (static_cast<std::uint32_t>(data[1]) << 8) |
                         (static_cast<std::uint32_t>(data[2]) << 16) |
                         (static_cast<std::uint32_t>(data[3]) << 24);
     if (data.size() < 4 + len) {
-        return util::Error{31, "string truncated"};
+        return util::Error{31, 0, "string truncated", ""};
     }
     return std::string(data.begin() + 4, data.begin() + 4 + len);
 }
@@ -462,21 +462,21 @@ util::Result<std::string> unpack_string(const std::vector<std::uint8_t>& data) {
 util::Result<std::vector<std::uint8_t>>
 unpack_raw(const std::vector<std::uint8_t>& data) {
     if (data.size() < 4) {
-        return util::Error{32, "raw data too short"};
+        return util::Error{32, 0, "raw data too short", ""};
     }
     std::uint32_t len = static_cast<std::uint32_t>(data[0]) |
                         (static_cast<std::uint32_t>(data[1]) << 8) |
                         (static_cast<std::uint32_t>(data[2]) << 16) |
                         (static_cast<std::uint32_t>(data[3]) << 24);
     if (data.size() < 4 + len) {
-        return util::Error{33, "raw data truncated"};
+        return util::Error{33, 0, "raw data truncated", ""};
     }
     return std::vector<std::uint8_t>(data.begin() + 4, data.begin() + 4 + len);
 }
 
 util::Result<std::uint32_t> unpack_u32(const std::vector<std::uint8_t>& data) {
     if (data.size() < 4) {
-        return util::Error{34, "u32 too short"};
+        return util::Error{34, 0, "u32 too short", ""};
     }
     return static_cast<std::uint32_t>(data[0]) |
            (static_cast<std::uint32_t>(data[1]) << 8) |
@@ -486,7 +486,7 @@ util::Result<std::uint32_t> unpack_u32(const std::vector<std::uint8_t>& data) {
 
 util::Result<std::uint64_t> unpack_u64(const std::vector<std::uint8_t>& data) {
     if (data.size() < 8) {
-        return util::Error{35, "u64 too short"};
+        return util::Error{35, 0, "u64 too short", ""};
     }
     std::uint64_t v = 0;
     for (int i = 0; i < 8; ++i) {
@@ -518,7 +518,7 @@ pack_params(const std::vector<std::vector<std::uint8_t>>& params) {
 util::Result<std::vector<std::vector<std::uint8_t>>>
 unpack_params(const std::vector<std::uint8_t>& data) {
     if (data.size() < 2) {
-        return util::Error{36, "params too short"};
+        return util::Error{36, 0, "params too short", ""};
     }
 
     std::uint16_t count = static_cast<std::uint16_t>(data[0]) |
@@ -529,7 +529,7 @@ unpack_params(const std::vector<std::uint8_t>& data) {
 
     for (std::uint16_t i = 0; i < count; ++i) {
         if (off + 4 > data.size()) {
-            return util::Error{37, "param length truncated"};
+            return util::Error{37, 0, "param length truncated", ""};
         }
         std::uint32_t len = static_cast<std::uint32_t>(data[off]) |
                             (static_cast<std::uint32_t>(data[off + 1]) << 8) |
@@ -538,7 +538,7 @@ unpack_params(const std::vector<std::uint8_t>& data) {
         off += 4;
 
         if (off + len > data.size()) {
-            return util::Error{38, "param data truncated"};
+            return util::Error{38, 0, "param data truncated", ""};
         }
         params.emplace_back(data.begin() + off, data.begin() + off + len);
         off += len;

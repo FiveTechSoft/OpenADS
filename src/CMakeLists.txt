@@ -1,4 +1,4 @@
-add_library(openads_aes_impl OBJECT
+﻿add_library(openads_aes_impl OBJECT
     ${CMAKE_SOURCE_DIR}/third_party/tinyaes/aes128_impl.c
     ${CMAKE_SOURCE_DIR}/third_party/tinyaes/aes256_impl.c
 )
@@ -86,6 +86,15 @@ add_library(openads_core STATIC
     sql_backend/sql_system_catalog.cpp
     sql_backend/enterprise_config.cpp
 )
+# hbnetio Bridge (VFS adapter, distributed lock manager, RPC bridge)
+if(OPENADS_WITH_HBNETIO_BRIDGE)
+    target_sources(openads_core PRIVATE
+        ${CMAKE_SOURCE_DIR}/contrib/hbnetio_bridge/vfs_adapter.cpp
+        ${CMAKE_SOURCE_DIR}/contrib/hbnetio_bridge/dist_lock_mgr.cpp
+        ${CMAKE_SOURCE_DIR}/contrib/hbnetio_bridge/rpc_bridge.cpp
+    )
+    target_compile_definitions(openads_core PUBLIC OPENADS_WITH_HBNETIO_BRIDGE=1)
+endif()
 
 if(OPENADS_WITH_POSTGRESQL)
     target_sources(openads_core PRIVATE
@@ -114,7 +123,7 @@ endif()
 
 if(OPENADS_WITH_MSSQL)
     # The native MSSQL backend tunnels the TLS handshake inside TDS packets,
-    # so it links mbedtls symbols directly — require OPENADS_WITH_TLS.
+    # so it links mbedtls symbols directly â€” require OPENADS_WITH_TLS.
     if(NOT OPENADS_WITH_TLS)
         message(FATAL_ERROR
             "OPENADS_WITH_MSSQL=ON requires OPENADS_WITH_TLS=ON "
@@ -141,7 +150,7 @@ if(OPENADS_WITH_FIREBIRD)
         sql_backend/firebird_connection.cpp
     )
     # sql_common.cpp is already compiled unconditionally above (shared by the
-    # SQLite/ODBC/PostgreSQL/MariaDB backends) — do NOT add it again here.
+    # SQLite/ODBC/PostgreSQL/MariaDB backends) â€” do NOT add it again here.
 endif()
 
 if(WIN32)
@@ -176,7 +185,7 @@ target_link_libraries(openads_core PRIVATE openads_aes_impl)
 # ace_exports.cpp is a very large TU that overflows the Windows COFF object
 # section limit. MSVC needs /bigobj (C1128); MinGW's GNU assembler needs the
 # equivalent -Wa,-mbig-obj. Neither flag exists on ELF/Mach-O toolchains, so
-# guard by compiler — never pass /bigobj to GCC/Clang.
+# guard by compiler â€” never pass /bigobj to GCC/Clang.
 if(MSVC)
     set_source_files_properties(abi/ace_exports.cpp PROPERTIES COMPILE_OPTIONS "/bigobj")
 elseif(MINGW)
@@ -184,7 +193,7 @@ elseif(MINGW)
 endif()
 
 if(UNIX)
-    # RCB 2026-07-10 — CMAKE_DL_LIBS for dladdr in platform/path.cpp
+    # RCB 2026-07-10 â€” CMAKE_DL_LIBS for dladdr in platform/path.cpp
     # (module_directory(), used to find adslocal.cfg next to the DLL).
     target_link_libraries(openads_core PUBLIC pthread ${CMAKE_DL_LIBS})
 endif()
@@ -279,7 +288,7 @@ if(WIN32)
     # Apps linked against an
     # ace32.lib / ace64.lib whose imports are by-ordinal need a
     # custom .def whose @N values match the SAP-shipped DLL the
-    # user is replacing — generate it once per-machine with
+    # user is replacing â€” generate it once per-machine with
     # tools/scripts/sap_ordinals_to_def.py and pass it in via
     # -DOPENADS_ACE_DEF=<path> at configure time.
     set(OPENADS_ACE_DEF "${CMAKE_CURRENT_SOURCE_DIR}/openads_ace.def"
@@ -291,7 +300,7 @@ if(WIN32)
         # detection, treats the file as a linker script, and errors on the
         # first `;`. Regenerate a GNU-clean def (EXPORTS + names only) at
         # configure time and feed that to the linker instead. Read with
-        # file(READ) — not file(STRINGS) — so the `;` in comment lines is
+        # file(READ) â€” not file(STRINGS) â€” so the `;` in comment lines is
         # not misparsed as a CMake list separator.
         file(READ "${OPENADS_ACE_DEF}" _ace_def_raw)
         string(REGEX REPLACE "(^|\n)[ \t]*;[^\n]*" "\\1" _ace_def_clean "${_ace_def_raw}")
@@ -315,7 +324,7 @@ target_include_directories(openads_ace
 
 target_link_libraries(openads_ace PRIVATE openads_core)
 
-# studio.embed — when OPENADS_WITH_HTTP is on, fold the same
+# studio.embed â€” when OPENADS_WITH_HTTP is on, fold the same
 # Studio HTTP console that openads_serverd ships into the DLL,
 # behind the AdsStudioStart / AdsStudioStop / AdsStudioPort
 # extension entry points (plus the OPENADS_STUDIO_PORT env-var
