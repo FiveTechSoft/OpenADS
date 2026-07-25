@@ -1,4 +1,18 @@
-﻿## 1.8.28 - 2026-07-25
+﻿## 1.8.29 - 2026-07-25
+
+### Fixed - CDX seek_key B-tree descent: O(log N) instead of O(N)
+
+Replaced the linear-scan seek_key implementation with a proper B-tree
+descent using binary search at each branch node and within leaf pages.
+
+- Branch nodes: binary-search entry keys, follow child pointer to the
+  correct subtree
+- Leaf nodes: binary-search decoded entries
+- Benchmark: 1,294x faster sequential, 1,162x faster random seeks
+  on 50,000-key index (3.2 µs/seek vs 4,149 µs/seek)
+- Fixes extremely slow GOTO with active CDX order (47s → <0.05s for
+  20,000 records)
+## 1.8.28 - 2026-07-25
 
 ### Added - hbnetio Bridge: Virtual File System + RPC Integration
 

@@ -6,11 +6,34 @@ nav_order: 0
 permalink: /en/whatsnew/
 ---
 
-# What's New (v1.0.0-rc29 -> v1.8.28)
+# What's New (v1.0.0-rc29 -> v1.8.29)
 
 This page summarises the most notable changes since the
 v1.0.0-rc29 release. For the full commit-by-commit history see
 the [CHANGELOG](https://github.com/FiveTechSoft/OpenADS/blob/main/CHANGELOG.md).
+
+---
+
+## v1.8.29 Highlights
+
+### CDX index seek: 1,000x+ faster GOTO with active order
+
+The `seek_key` function used a **linear scan** through decoded branch
+pages — O(N) per seek, degenerating to O(N²) for a full traversal of
+20,000+ records.  Replaced with a proper **B-tree descent**: at each
+internal node, binary-search the branch keys to find the correct child
+pointer, then descend.  The leaf search is also now binary (O(log M)).
+
+Benchmark on 50,000 keys (key_size=20):
+
+| Operation             | Before       | After     | Speedup  |
+|-----------------------|--------------|-----------|----------|
+| Sequential seek_key   | 4,149 µs     | 3.2 µs    | **1,294x** |
+| Random seek_key       | 4,215 µs     | 3.6 µs    | **1,162x** |
+| Soft seek (miss)      | 8,318 µs     | 2.4 µs    | **3,518x** |
+
+This fixes the extremely slow GOTO reported by Tim Stone: 47 seconds
+for 20,000 records with an active CDX order.
 
 ---
 

@@ -1,5 +1,22 @@
 ﻿## What's New
 
+### CDX seek_key: 1,000x+ faster GOTO with active order (v1.8.29)
+
+The `seek_key` function used a **linear scan** through decoded branch
+pages — O(N) per seek, degenerating to O(N²) for a full traversal of
+20,000+ records.  Replaced with a proper **B-tree descent** using binary
+search at each internal node and within leaf pages.
+
+| Operation             | Before       | After     | Speedup  |
+|-----------------------|--------------|-----------|----------|
+| Sequential seek_key   | 4,149 µs     | 3.2 µs    | **1,294x** |
+| Random seek_key       | 4,215 µs     | 3.6 µs    | **1,162x** |
+| Soft seek (miss)      | 8,318 µs     | 2.4 µs    | **3,518x** |
+
+This fixes the extremely slow GOTO with active CDX order: 47 seconds
+for 20,000 records → under 0.05 seconds.
+## What's New
+
 ### hbnetio Bridge for OpenADS (v1.8.28)
 
 OpenADS can now transparently bridge to harbour's hbnetio virtual file
