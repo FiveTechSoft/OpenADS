@@ -67,6 +67,53 @@ TEST_CASE("M4 ADI driver: list_tags and iterate landlords.adi") {
     CHECK(seen.count(last.value().recno) == 1);
 }
 
+// ── CICHAR case-insensitive seek ────────────────────────────────────────────
+//
+// landlords.LandLordID is CICHAR; SAP finds a stored key regardless of the
+// search key's case. seek_key on the exact stored key must hit, and seek_key
+// on its case-flipped form must land on the SAME record.
+
+TEST_CASE("M4 ADI driver: CICHAR seek is case-insensitive (landlords.LandLordID)") {
+    fs::path adi_path = fixture_adi_dir() / "landlords.adi";
+    REQUIRE(fs::exists(adi_path));
+
+    openads::drivers::adi::AdiIndex idx;
+    REQUIRE(idx.open_named(adi_path.string(),
+                           openads::drivers::IndexOpenMode::ReadOnly,
+                           "LandLordID"));
+
+    // Grab a real stored key + its recno.
+    auto first = idx.seek_first();
+    REQUIRE(first);
+    REQUIRE(first.value().positioned);
+    const std::uint32_t want_recno = first.value().recno;
+    std::string key = idx.current_key();
+    // Trailing-space-trim the padded key so the search key is a realistic
+    // client value ("LL17-00000001"), not the full padded width.
+    while (!key.empty() && key.back() == ' ') key.pop_back();
+    REQUIRE(!key.empty());
+
+    // Exact-case seek hits.
+    auto exact = idx.seek_key(key, /*soft=*/false);
+    REQUIRE(exact);
+    CHECK(exact.value().hit == openads::drivers::SeekHit::Exact);
+    CHECK(exact.value().recno == want_recno);
+
+    // Case-flipped seek must hit the SAME record (CICHAR collation).
+    std::string flipped = key;
+    for (char& ch : flipped) {
+        unsigned char u = static_cast<unsigned char>(ch);
+        if (u >= 'A' && u <= 'Z') ch = static_cast<char>(u - 'A' + 'a');
+        else if (u >= 'a' && u <= 'z') ch = static_cast<char>(u - 'a' + 'A');
+    }
+    if (flipped != key) {                 // only meaningful if it has letters
+        auto ci = idx.seek_key(flipped, /*soft=*/false);
+        REQUIRE(ci);
+        CHECK(ci.value().hit == openads::drivers::SeekHit::Exact);
+        CHECK(ci.value().recno == want_recno);
+    }
+}
+
 // ── ABI integration test ────────────────────────────────────────────────────
 
 TEST_CASE("M4 ADI ABI: AdsOpenIndex + AdsSetOrder iterates landlords.adt") {

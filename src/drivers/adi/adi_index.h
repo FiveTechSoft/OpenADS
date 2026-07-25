@@ -227,6 +227,12 @@ private:
     // key_total_len_ bytes (memcmp; CICHAR case-insensitivity deferred).
     int compare_keys_(const std::string& a, const std::string& b) const noexcept;
 
+    // CICHAR collation: return a comparison-normalized copy of a key with
+    // CICHAR components upper-cased (CHAR and numeric bytes untouched), so
+    // seeks/descents on a case-insensitive key match regardless of case.
+    // No-op (returns the input) when the key has no CICHAR component.
+    std::string fold_for_compare_(const std::string& k) const;
+
     // Initialise all tag-related state from a list of 1-based field numbers,
     // a root page, a field-descriptor table, and the ADT layout sizes.
     // Field descriptors are passed as four parallel arrays to avoid exposing
@@ -260,6 +266,10 @@ private:
 
     // All key components (1 entry for simple, >1 for compound indexes).
     std::vector<FieldComp> key_fields_;
+
+    // True when any key component is CICHAR — enables case-insensitive
+    // seek/compare (fold_for_compare_).
+    bool has_ci_component_ = false;
 
     // Key type and branch-entry geometry (computed at open time).
     bool          char_key_          = false; // first component is CICHAR or CHAR

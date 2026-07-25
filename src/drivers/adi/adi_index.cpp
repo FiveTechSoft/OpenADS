@@ -435,11 +435,34 @@ util::Result<std::string> AdiIndex::key_for_recno_(std::uint32_t recno) {
 
 // ── AdiIndex::compare_keys_ ─────────────────────────────────────────────────
 
+std::string AdiIndex::fold_for_compare_(const std::string& k) const {
+    if (!has_ci_component_) return k;
+    std::string out = k;
+    std::size_t pos = 0;
+    for (const auto& kf : key_fields_) {
+        const bool is_c =
+            (kf.type == ADT_TYPE_CICHAR || kf.type == ADT_TYPE_CHAR);
+        const std::size_t seg = is_c ? kf.length : 8u;
+        if (kf.type == ADT_TYPE_CICHAR) {
+            const std::size_t end = std::min(pos + seg, out.size());
+            for (std::size_t i = pos; i < end; ++i)
+                out[i] = static_cast<char>(std::toupper(
+                    static_cast<unsigned char>(out[i])));
+        }
+        pos += seg;
+    }
+    return out;
+}
+
 int AdiIndex::compare_keys_(const std::string& a,
                              const std::string& b) const noexcept {
-    std::size_t len = std::min({a.size(), b.size(),
+    // CICHAR components collate case-insensitively (SAP semantics); the
+    // fold is a no-op for indexes with no CICHAR component.
+    const std::string fa = fold_for_compare_(a);
+    const std::string fb = fold_for_compare_(b);
+    std::size_t len = std::min({fa.size(), fb.size(),
                                 static_cast<std::size_t>(key_total_len_)});
-    return std::memcmp(a.data(), b.data(), len);
+    return std::memcmp(fa.data(), fb.data(), len);
 }
 
 // ── AdiIndex::make_positioned_ ──────────────────────────────────────────────
@@ -523,6 +546,7 @@ util::Result<void> AdiIndex::apply_tag_(
         return util::Error{5004, 0, "ADI tag has no field numbers", ""};
 
     key_fields_.clear();
+    has_ci_component_ = false;
     std::uint32_t total_key_len = 0;
     bool first = true;
 
@@ -539,6 +563,7 @@ util::Result<void> AdiIndex::apply_tag_(
 
         bool is_c = (kf.type == ADT_TYPE_CICHAR || kf.type == ADT_TYPE_CHAR);
         total_key_len += is_c ? static_cast<std::uint32_t>(kf.length) : 8u;
+        if (kf.type == ADT_TYPE_CICHAR) has_ci_component_ = true;
 
         if (first) {
             tag_name_   = fd_names[fi];
@@ -812,12 +837,19 @@ util::Result<SeekOutcome> AdiIndex::seek_key(const std::string& key, bool soft) 
             std::uint16_t cnt = page_count(pg.data());
             if (cnt == 0) { SeekOutcome o; o.hit = SeekHit::AfterEnd; return o; }
             if (is_dense_leaf(lv)) { dense_pg = cur; break; }
-            // Branch: take first entry whose key >= seek key.
+            // Branch: take first entry whose key >= seek key. CICHAR
+            // components fold to upper on BOTH sides so a mismatched-case
+            // search key descends the same subtree as the stored key.
+            const std::string fnkey = fold_for_compare_(nkey);
             int chosen = static_cast<int>(cnt) - 1;
             for (int i = 0; i < static_cast<int>(cnt); ++i) {
                 const std::uint8_t* ek = pg.data() + ADI_TREE_ENTRY_START
                     + static_cast<std::uint32_t>(i) * branch_entry_sz_;
-                if (std::memcmp(nkey.data(), ek, key_total_len_) <= 0) {
+                const std::string fek = fold_for_compare_(
+                    std::string(reinterpret_cast<const char*>(ek),
+                                key_total_len_));
+                if (std::memcmp(fnkey.data(), fek.data(),
+                                key_total_len_) <= 0) {
                     chosen = i; break;
                 }
             }
