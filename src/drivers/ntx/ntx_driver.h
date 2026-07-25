@@ -15,6 +15,8 @@ public:
 
     std::uint32_t record_count() const noexcept override
     { return inner_.record_count(); }
+    void refresh_record_count_from_disk() noexcept override
+    { inner_.refresh_record_count_from_disk(); }
     std::uint16_t record_length() const noexcept override
     { return inner_.record_length(); }
     std::uint16_t header_length() const noexcept override

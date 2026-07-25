@@ -1,5 +1,32 @@
 ﻿## What's New
 
+### Fix: multi-user record count staleness (v1.8.30)
+
+When multiple instances share a table via remote connection, Browse() and
+LastRec() showed only records visible at open time. Records appended by
+other connections were invisible — causing "phantom records" and stale
+record counts.
+
+**Root cause:** Three-layer caching was never invalidated by external writes:
+
+| Layer | Location | Problem |
+|-------|----------|---------|
+| Client `rec_count_cached` | `AdsGetRecordCount` | Cached forever; only cleared on local writes |
+| `AdsRefreshRecord` | `ace_exports.cpp` | Only cleared `row_valid`, not `rec_count_cached` |
+| Server `rec_count_` | `GetRecordCount` handler | Returned stale in-memory value |
+
+**Fix:** `AdsRefreshRecord` now clears `rec_count_cached`. The server's
+`GetRecordCount` handler now re-reads the DBF header from disk before
+responding. New `IDriver::refresh_record_count_from_disk()` virtual method
+ensures all drivers (CDX, ADT, NTX, Cached) can refresh.
+
+**Impact:** 30 concurrent instances each appending 5 records → all instances
+now see all 150 records after repositioning (GoTop/GoBottom/Browse).
+
+---
+
+## What's New
+
 ### CDX seek_key: 1,000x+ faster GOTO with active order (v1.8.29)
 
 The `seek_key` function used a **linear scan** through decoded branch

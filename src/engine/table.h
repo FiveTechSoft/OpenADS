@@ -132,6 +132,12 @@ public:
     util::Result<void> set_field_null(std::uint16_t field_idx);
 
     std::uint32_t record_count() const noexcept;
+    // Re-read the on-disk record count so concurrent appends by other
+    // connections become visible.  Called by the server before answering
+    // GetRecordCount and by AdsRefreshRecord.
+    void refresh_record_count_from_disk() noexcept {
+        driver_->refresh_record_count_from_disk();
+    }
     // Clipper / SAP-ACE convention: phantom position past last
     // record reports recno()=LastRec()+1, so an empty table reads
     // as recno=1.

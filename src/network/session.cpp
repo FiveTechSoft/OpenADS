@@ -1346,6 +1346,9 @@ DispatchResult Session::dispatch(const Frame& f) {
             }
             auto* tbl = sess_conn_->lookup_table(it->second);
             if (!tbl) { reply = err("GetRecordCount: lookup failed"); break; }
+            // Refresh the on-disk record count so concurrent appends by
+            // other connections are visible (multiuser coherence).
+            tbl->refresh_record_count_from_disk();
             std::uint32_t rc = tbl->record_count();
             reply.opcode = Opcode::GetRecordCountAck;
             write_u32_le(rc, reply.payload);

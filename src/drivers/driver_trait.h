@@ -83,6 +83,13 @@ public:
     // second table). Sequential SKIP does NOT call this, so a scan keeps
     // serving from the block. Default no-op for drivers without a cache.
     virtual void invalidate_read_cache() noexcept {}
+
+    // Re-read the on-disk record count so the in-memory value reflects
+    // appends/deletes made by other connections.  The server calls this
+    // when answering GetRecordCount to keep the value fresh across
+    // concurrent clients.  Default no-op (drivers that cache the count
+    // in rec_count_ must override).
+    virtual void refresh_record_count_from_disk() noexcept {}
 };
 
 } // namespace openads::drivers

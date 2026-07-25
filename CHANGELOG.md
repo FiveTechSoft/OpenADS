@@ -1,4 +1,43 @@
-﻿## 1.8.29 - 2026-07-25
+﻿## 1.8.30 - 2026-07-25
+
+### Fixed - Multi-user record count staleness: concurrent appends now visible
+
+When multiple instances/connections share a table, Browse() and LastRec()
+showed only the records visible at open time. New records appended by
+other connections were invisible until the client re-opened the table.
+
+Root cause: three-layer caching that was never invalidated by external writes:
+
+1. **Client-side remote `rec_count_cached`** — `AdsGetRecordCount` cached
+   the record count on first call and served stale data forever. Only
+   cleared on local writes (Append/Delete/Recall/Pack/Zap), NOT when
+   another connection appended.
+
+2. **`AdsRefreshRecord` didn't clear `rec_count_cached`** — calling
+   `AdsRefreshRecord` (or `dbGoTop`/`dbGoBottom` which invoke it) only
+   cleared `row_valid` but left the stale record count in cache.
+
+3. **Server-side `rec_count_` was never refreshed** — the `GetRecordCount`
+   wire opcode returned the in-memory `rec_count_` without re-reading
+   the DBF header, so concurrent appends by other clients were invisible.
+
+Changes:
+- `ace_exports.cpp`: `AdsRefreshRecord` now clears `rec_count_cached` for
+  remote tables, forcing a fresh `GetRecordCount` round-trip.
+- `session.cpp`: `GetRecordCount` handler now calls
+  `refresh_record_count_from_disk()` before returning the count.
+- `driver_trait.h`: New virtual `refresh_record_count_from_disk()` method
+  on `IDriver` interface.
+- `cdx_driver.h`: CdxDriver overrides to call `refresh_count_shared_()`.
+- `adt_driver.h`: AdtDriver overrides to call `refresh_record_count_()`.
+- `ntx_driver.h`: NtxDriver forwards to inner CdxDriver.
+- `cached_driver.h`: CachedDriver forwards to inner driver.
+- `table.h`: Table exposes `refresh_record_count_from_disk()`.
+
+This ensures multi-instance Browse() scenarios (e.g. 30 concurrent
+instances each appending records) see all records from all connections.
+
+## 1.8.29 - 2026-07-25
 
 ### Fixed - CDX seek_key B-tree descent: O(log N) instead of O(N)
 

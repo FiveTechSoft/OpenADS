@@ -6,11 +6,41 @@ nav_order: 0
 permalink: /en/whatsnew/
 ---
 
-# What's New (v1.0.0-rc29 -> v1.8.29)
+# What's New (v1.0.0-rc29 -> v1.8.30)
 
 This page summarises the most notable changes since the
 v1.0.0-rc29 release. For the full commit-by-commit history see
 the [CHANGELOG](https://github.com/FiveTechSoft/OpenADS/blob/main/CHANGELOG.md).
+
+---
+
+## v1.8.30 Highlights
+
+### Fix: multi-user record count staleness
+
+When multiple instances/connections share a table, `Browse()` and
+`LastRec()` showed only the records visible at open time. Records
+appended by other connections were invisible.
+
+**Root cause:** Three layers of caching that were never invalidated
+by external writes:
+
+1. `AdsGetRecordCount` cached the record count on first call and
+   served stale data forever (only cleared on local writes).
+2. `AdsRefreshRecord` only cleared `row_valid`, not `rec_count_cached`.
+3. The server's `GetRecordCount` handler returned a stale in-memory
+   value without re-reading the DBF header from disk.
+
+**Fix:**
+
+- `AdsRefreshRecord` now clears `rec_count_cached` for remote tables,
+  forcing a fresh `GetRecordCount` round-trip.
+- Server `GetRecordCount` handler re-reads the DBF header from disk.
+- New `IDriver::refresh_record_count_from_disk()` virtual method for
+  all drivers (CDX, ADT, NTX, Cached).
+
+**Impact:** 30 concurrent instances each appending records now all
+see every record after repositioning (GoTop / GoBottom / Browse).
 
 ---
 

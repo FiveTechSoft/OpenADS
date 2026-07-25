@@ -60,6 +60,9 @@ public:
         bump_autoinc(std::uint16_t field_index) override;
 
     void invalidate_read_cache() noexcept override {}
+    void refresh_record_count_from_disk() noexcept override {
+        if (inner_) inner_->refresh_record_count_from_disk();
+    }
 
     TableCacheMode mode() const noexcept { return mode_; }
 

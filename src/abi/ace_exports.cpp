@@ -7890,6 +7890,7 @@ UNSIGNED32 ENTRYPOINT AdsRefreshRecord(ADSHANDLE hTable) {
     if (auto* rt = get_remote_table(hTable)) {
         remote_settle_cursor(rt);                   // M12.21 option C
         rt->row_valid = false;                      // M12.17 cache invalidation
+        rt->rec_count_cached = false;               // force fresh record count from server
         auto r = rt->conn->refresh_record(rt->id);
         if (!r) return fail(r.error());
         return ok();

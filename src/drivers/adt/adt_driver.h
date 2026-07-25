@@ -58,6 +58,10 @@ public:
     util::Result<std::uint32_t>
         bump_autoinc(std::uint16_t field_index) override;
 
+    void refresh_record_count_from_disk() noexcept override {
+        (void)refresh_record_count_();
+    }
+
 private:
     util::Result<void> refresh_record_count_();
     util::Result<void> rewrite_header_();
