@@ -1,4 +1,4 @@
-#include "drivers/cdx/cdx_index.h"
+﻿#include "drivers/cdx/cdx_index.h"
 
 #include "engine/oem_collation.h"
 
@@ -177,7 +177,7 @@ encode_compact_leaf_static(
     // 5-byte struct-tag layout (and req_byte_override fixes it outright).
     // If the resulting rn_bits cannot represent the largest recno on this
     // page, `recno & rec_mask` below would drop the high bits and corrupt
-    // the index silently. Refuse the encode instead — a 5000 here is far
+    // the index silently. Refuse the encode instead â€” a 5000 here is far
     // better than an out-of-range recno surfacing on a later ordered walk.
     if (max_rec > rec_mask) {
         return util::Error{5000, 0,
@@ -228,7 +228,7 @@ encode_compact_leaf_static(
             return util::Error{5000, 0, "CDX leaf entry overflow", ""};
         }
         // Entry headers grow right; suffix area grows left. They MUST
-        // NOT overlap — without this check the encoder silently
+        // NOT overlap â€” without this check the encoder silently
         // corrupts the page once `(i+1)*key_bytes > buf_pos`, which
         // surfaces as 6106 dup/trl-out-of-range on the next decode.
         if (static_cast<std::uint32_t>((i + 1) * key_bytes) > buf_pos) {
@@ -632,7 +632,7 @@ CdxIndex::open_named(const std::string& path,
         std::uint32_t abs_pos = 512u + static_cast<std::uint32_t>(fep_pos);
         std::uint32_t abs_end = abs_pos + fep_len;
         // Fail loud on a corrupt header: silently dropping the FOR would
-        // reopen a conditional tag as unconditional — the very data-integrity
+        // reopen a conditional tag as unconditional â€” the very data-integrity
         // defect this change exists to prevent.
         if (abs_pos < 512 || abs_end > CDX_HEADER_LEN) {
             return util::Error{6106, 0,
@@ -705,7 +705,7 @@ int CdxIndex::compare_keys_(const char* a, const char* b,
                             std::size_t len) const noexcept {
     // FoxNumeric and NtxNumeric keys are binary order-preserving encodings
     // (FoxPro/Harbour HB_DBL2ORD / NTX zero-padded magnitude).  They MUST
-    // be compared with raw memcmp — the OEM collation sort table remaps
+    // be compared with raw memcmp â€” the OEM collation sort table remaps
     // bytes and destroys the binary ordering, causing DbSeek to miss keys
     // that were correctly inserted during CREATE INDEX.  (#130 regression
     // for numeric Val() CDX seek.)
@@ -797,77 +797,141 @@ CdxIndex::seek_key(const std::string& key, bool soft) {
     if (padded.size() < key_size_) padded.append(key_size_ - padded.size(), ' ');
     if (padded.size() > key_size_) padded.resize(key_size_);
 
-    // Clipper / DBFCDX partial-seek: a search key SHORTER than the index
-    // key matches on the PREFIX (finds the first stored key beginning
-    // with it). Compare only over the original search-key length, not the
-    // space-padded full width — otherwise SEEK "ART-00024800" against a
-    // stored "ART-00024800 desc ..." key misses (the search's trailing
-    // spaces sort below the stored "desc"). A full-length key gives
-    // cmp_len == key_size_, so exact seeks are unchanged.
+    // Clipper / DBFCDX partial-seek: compare only over the original
+    // search-key length, not the space-padded full width.
     const std::size_t cmp_len =
         std::min<std::size_t>(key.size(), key_size_);
 
-    auto first = seek_first();
-    if (!first) return first.error();
-    if (!first.value().positioned) {
+    // ------------------------------------------------------------------
+    // B-tree descent: traverse from root to the correct leaf using
+    // binary search at each internal node (O(log N) instead of O(N)).
+    // ------------------------------------------------------------------
+    std::uint32_t page_off = root_page_;
+    while (true) {
+        auto pg = get_page_(page_off);
+        if (!pg) return pg.error();
+        std::uint16_t attr = read_u16_le(pg.value()->data());
+
+        if (attr & CDX_NODE_LEAF) {
+            // Reached a leaf — decode and search within it
+            cur_leaf_ = page_off;
+            auto dec = decode_leaf_(page_off);
+            if (!dec) return dec.error();
+            cur_decoded_ = std::move(dec).value();
+            break;
+        }
+
+        // Internal (branch) node: binary search entries to find child.
+        // Branch entry layout: [key(key_size)][recno(4 BE)][child(4 BE)]
+        // Entry stride = key_size + 8.
+        std::uint16_t nkeys = read_u16_le(pg.value()->data() + 2);
+        if (nkeys == 0) {
+            return SeekOutcome{SeekHit::AfterEnd, 0, false};
+        }
+
+        std::uint8_t* base = pg.value()->data();
+        const std::size_t stride = static_cast<std::size_t>(key_size_) + 8;
+
+        // Binary search: find first entry where padded <= entry.key
+        // (matches Harbour's hb_cdxPageSeekKey on branch pages)
+        int lo = 0, hi = nkeys - 1;
+        while (lo < hi) {
+            int mid = (lo + hi) >> 1;
+            const std::uint8_t* ek = base + CDX_INT_HEADSIZE + mid * stride;
+            int cmp = compare_keys_(padded.data(), reinterpret_cast<const char*>(ek), cmp_len);
+            if (cmp > 0)
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+        // lo == hi == index of first entry where padded <= entry.key
+        // Child pointer for entry[i] is at the end of the entry:
+        //   base + CDX_INT_HEADSIZE + (i+1)*stride - 4
+        const std::uint8_t* cp =
+            base + CDX_INT_HEADSIZE + static_cast<std::size_t>(lo + 1) * stride - 4;
+        page_off = (static_cast<std::uint32_t>(cp[0]) << 24) |
+                   (static_cast<std::uint32_t>(cp[1]) << 16) |
+                   (static_cast<std::uint32_t>(cp[2]) <<  8) |
+                    static_cast<std::uint32_t>(cp[3]);
+    }
+
+    if (cur_decoded_.empty()) {
+        cur_state_ = soft ? CurState::AfterEnd : CurState::AfterEndKey;
+        cur_index_ = -1;
         return SeekOutcome{SeekHit::AfterEnd, 0, false};
     }
 
-    while (true) {
-        for (std::size_t i = 0; i < cur_decoded_.size(); ++i) {
+    // ------------------------------------------------------------------
+    // Leaf search: binary search within the decoded leaf entries.
+    // ------------------------------------------------------------------
+    {
+        int lo = 0, hi = static_cast<int>(cur_decoded_.size()) - 1;
+        while (lo < hi) {
+            int mid = (lo + hi) >> 1;
             int cmp = compare_keys_(padded.data(),
-                                    cur_decoded_[i].first.data(), cmp_len);
-            if (cmp == 0) {
-                cur_index_ = static_cast<std::int32_t>(i);
-                cur_state_ = CurState::Positioned;
-                current_key_ = cur_decoded_[i].first;
-                return SeekOutcome{SeekHit::Exact, cur_decoded_[i].second, true};
-            }
-            if (cmp < 0) {
-                if (!soft) {
-                    // Hard seek miss with key strictly less than
-                    // cur_decoded_[i]: park cursor "between"
-                    // cur_decoded_[i-1] and cur_decoded_[i]. The
-                    // Between state lets next() advance onto idx i
-                    // and prev() retreat onto idx i-1, matching
-                    // Clipper SKIP after a failed hard seek.
-                    if (i == 0) {
-                        cur_state_ = CurState::BeforeBegin;
-                        cur_index_ = -1;
-                    } else {
-                        cur_index_ = static_cast<std::int32_t>(i);
-                        cur_state_ = CurState::Between;
-                    }
-                    return SeekOutcome{SeekHit::AfterEnd, 0, false};
-                }
-                cur_index_ = static_cast<std::int32_t>(i);
-                cur_state_ = CurState::Positioned;
-                current_key_ = cur_decoded_[i].first;
-                return SeekOutcome{SeekHit::AfterKey, cur_decoded_[i].second, true};
-            }
+                                    cur_decoded_[static_cast<std::size_t>(mid)].first.data(),
+                                    cmp_len);
+            if (cmp > 0)
+                lo = mid + 1;
+            else
+                hi = mid;
         }
+        // lo == first entry where padded <= entry.key
+        int i = lo;
+        int cmp = compare_keys_(padded.data(),
+                                cur_decoded_[static_cast<std::size_t>(i)].first.data(),
+                                cmp_len);
+        if (cmp == 0) {
+            // Exact match
+            cur_index_ = static_cast<std::int32_t>(i);
+            cur_state_ = CurState::Positioned;
+            current_key_ = cur_decoded_[static_cast<std::size_t>(i)].first;
+            return SeekOutcome{SeekHit::Exact, cur_decoded_[static_cast<std::size_t>(i)].second, true};
+        }
+        if (cmp < 0) {
+            // padded < cur_decoded_[i].first
+            if (!soft) {
+                if (i == 0) {
+                    cur_state_ = CurState::BeforeBegin;
+                    cur_index_ = -1;
+                } else {
+                    cur_index_ = static_cast<std::int32_t>(i);
+                    cur_state_ = CurState::Between;
+                }
+                return SeekOutcome{SeekHit::AfterEnd, 0, false};
+            }
+            cur_index_ = static_cast<std::int32_t>(i);
+            cur_state_ = CurState::Positioned;
+            current_key_ = cur_decoded_[static_cast<std::size_t>(i)].first;
+            return SeekOutcome{SeekHit::AfterKey, cur_decoded_[static_cast<std::size_t>(i)].second, true};
+        }
+    }
+
+    // padded > every key in this leaf — try next leaf for soft seek,
+    // or treat as past-end for hard seek.
+    // For soft seeks: advance to the next leaf and return its first entry.
+    if (soft) {
         auto pg = get_page_(cur_leaf_);
         if (!pg) return pg.error();
         std::uint32_t right = read_u32_le(pg.value()->data() + 8);
-        if (right == 0xFFFFFFFFu || right == 0) break;
-        cur_leaf_ = right;
-        // Skip over empty leaves (erase leaves holes) so the scan keeps
-        // finding live keys instead of stopping at the first hole.
-        if (auto sk = skip_empty_leaves_right_(cur_leaf_, cur_decoded_); !sk)
-            return sk.error();
-        if (cur_decoded_.empty()) break;
+        if (right != 0xFFFFFFFFu && right != 0) {
+            cur_leaf_ = right;
+            if (auto sk = skip_empty_leaves_right_(cur_leaf_, cur_decoded_); !sk)
+                return sk.error();
+            if (!cur_decoded_.empty()) {
+                cur_index_ = 0;
+                cur_state_ = CurState::Positioned;
+                current_key_ = cur_decoded_[0].first;
+                return SeekOutcome{SeekHit::AfterKey, cur_decoded_[0].second, true};
+            }
+        }
     }
-    // Search key was strictly greater than every key in the tree.
-    // For SOFT seeks: park at AfterEnd (real past-end behaviour).
-    // For HARD seeks (eg. goto_record's index resync on a recno
-    // whose key is past every indexed key): use AfterEndKey so
-    // SKIP(+1) wraps to the first entry and SKIP(-1) resumes from
-    // the last entry. Mirrors Clipper / DBFCDX SKIP-from-out-of-
-    // range-recno semantics.
     cur_state_ = soft ? CurState::AfterEnd : CurState::AfterEndKey;
     cur_index_ = -1;
     return SeekOutcome{SeekHit::AfterEnd, 0, false};
 }
+
+    
 
 util::Result<SeekOutcome> CdxIndex::next() {
     // From BeforeBegin: clamp back to the first leaf's first key
@@ -1054,7 +1118,7 @@ CdxIndex::insert_into_subtree_(std::uint32_t      subtree_root,
             return {};
         }
 
-        // Overflow → split. Find the largest mid such that BOTH halves
+        // Overflow â†’ split. Find the largest mid such that BOTH halves
         // re-encode within a 512-byte page. Compact-leaf packing is
         // dup/trl-prefix dependent so a fixed midpoint isn't enough.
         std::size_t mid = keys.size() / 2;
@@ -1188,7 +1252,7 @@ CdxIndex::insert_into_subtree_(std::uint32_t      subtree_root,
         return {};
     }
 
-    // Branch overflow → split midpoint. Branch encode is fixed-stride
+    // Branch overflow â†’ split midpoint. Branch encode is fixed-stride
     // so a single midpoint always works.
     std::size_t mid = entries.size() / 2;
     using diff_t = std::vector<BranchEntry>::difference_type;
@@ -1256,7 +1320,7 @@ CdxIndex::insert(std::uint32_t recno, const std::string& key) {
 
     if (!promote.have) return {};
 
-    // Root split → allocate new branch root with two children.
+    // Root split â†’ allocate new branch root with two children.
     std::uint32_t new_root = allocate_page_();
 
     std::vector<BranchEntry> entries = {
@@ -1280,7 +1344,7 @@ CdxIndex::build_bulk(std::vector<std::pair<std::string, std::uint32_t>> keys) {
     }
     invalidate_pos_cache();
 
-    // Pad to key_size_ and sort by (key, recno) — the CDX leaf order. Ties
+    // Pad to key_size_ and sort by (key, recno) â€” the CDX leaf order. Ties
     // on key resolve by recno so a forward seek surfaces the first-inserted
     // recno, matching the incremental insert path (upper_bound on key,recno).
     for (auto& kv : keys) {
@@ -1291,7 +1355,7 @@ CdxIndex::build_bulk(std::vector<std::pair<std::string, std::uint32_t>> keys) {
     }
     // FoxNumeric / NtxNumeric keys are binary order-preserving encodings
     // that must sort by raw byte order.  OEM collation must NOT be applied
-    // — it remaps bytes and destroys the numeric ordering.  (#130)
+    // â€” it remaps bytes and destroys the numeric ordering.  (#130)
     const bool numeric_keys =
         (key_enc_ == openads::drivers::KeyEncoding::FoxNumeric ||
          key_enc_ == openads::drivers::KeyEncoding::NtxNumeric);
@@ -1420,7 +1484,7 @@ CdxIndex::build_bulk(std::vector<std::pair<std::string, std::uint32_t>> keys) {
 
 const std::vector<std::uint32_t>& CdxIndex::ordered_recnos_cached() {
     if (pos_cache_valid_) return pos_walk_;
-    // Save the navigation cursor — the walk below moves it, and callers
+    // Save the navigation cursor â€” the walk below moves it, and callers
     // (scrollbar / OrdKeyNo) must not see their position change.
     std::uint32_t  s_leaf    = cur_leaf_;
     std::int32_t   s_index   = cur_index_;
@@ -1598,7 +1662,7 @@ util::Result<void> CdxIndex::flush() {
         auto r = flush_page_(off);
         if (!r) return r.error();
     }
-    // Persist root_page_ / counter — `insert` already does this on
+    // Persist root_page_ / counter â€” `insert` already does this on
     // every root change, but a paranoia rewrite here keeps the
     // sub-tag header in sync if the caller reaches `flush` via a
     // different path (eg. set_options + clear_data + insert chain).
@@ -1697,7 +1761,7 @@ util::Result<void> CdxIndex::free_tree_(std::uint32_t off) {
     if (!w) return w.error();
     if (w.value() < link.size()) {
         // A short write would leave a dangling free-list head pointing at a
-        // page whose next-free link was never fully stored — fail loud
+        // page whose next-free link was never fully stored â€” fail loud
         // rather than silently corrupt the chain.
         return util::Error{6106, 0,
             "CDX free-list link short write", ""};
@@ -1741,7 +1805,7 @@ std::uint32_t CdxIndex::allocate_page_() {
         return off;
     }
     // Otherwise extend the file. The global tail map (keyed by path) keeps
-    // concurrent tags on the same .cdx from handing out the same offset —
+    // concurrent tags on the same .cdx from handing out the same offset â€”
     // the multi-tag allocator invariant.
     std::lock_guard<std::mutex> lk(g_cdx_alloc_mu);
     auto& tail = g_cdx_alloc_tail[path_];
