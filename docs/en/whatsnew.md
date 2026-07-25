@@ -1,4 +1,4 @@
----
+﻿---
 title: What's New
 layout: default
 parent: Home (EN)
@@ -6,7 +6,7 @@ nav_order: 0
 permalink: /en/whatsnew/
 ---
 
-# What's New (v1.0.0-rc29 → v1.8.21)
+# What's New (v1.0.0-rc29 -> v1.8.28)
 
 This page summarises the most notable changes since the
 v1.0.0-rc29 release. For the full commit-by-commit history see
@@ -19,7 +19,7 @@ the [CHANGELOG](https://github.com/FiveTechSoft/OpenADS/blob/main/CHANGELOG.md).
 ### Server prints version on launch
 
 `openads_serverd` includes the build version in the startup banner
-and in the error-log “server started” entry (same string as
+and in the error-log â€œserver startedâ€ entry (same string as
 `--version`).
 
 ---
@@ -31,14 +31,14 @@ and in the error-log “server started” entry (same string as
 Windows release builds ship `openads_serverd` with **`OPENADS_WITH_HTTP=ON`**,
 so `--http-port 6263` enables Studio at `http://localhost:6263`.
 
-`ace.h` now defines SAP DD properties **121–130**, including
+`ace.h` now defines SAP DD properties **121â€“130**, including
 `ADS_DD_DISABLE_DLL_CACHING` (125) required by Harbour rddads.
 
 ---
 
 ## v1.8.19 Highlights
 
-### REMOTE — scope + SET DELETED ON: no more xBrowse ghost rows
+### REMOTE â€” scope + SET DELETED ON: no more xBrowse ghost rows
 
 `OrdKeyCount` counted deleted keys inside an index scope while
 navigation skipped them. FiveWin xBrowse then showed blank/skipped
@@ -52,14 +52,14 @@ scoped walk. Update **client DLL and** `openads_serverd`.
 ### Server filesystem API (`oads_*` / `Ads*`)
 
 Clients can manage files and directories **under the server data root**
-without a mapped drive — LetoDB-style helpers with OpenADS names.
+without a mapped drive â€” LetoDB-style helpers with OpenADS names.
 
 | Capability | ACE functions |
 |---|---|
 | Exists / erase / rename | [`AdsCheckExistence`](../functions/ads-check-existence/), [`AdsDeleteFile`](../functions/ads-delete-file/), [`AdsRenameFile`](../functions/ads-rename-file/) |
 | Size / time / date | [`AdsGetFileSize`](../functions/ads-get-file-size/), [`AdsGetFileTime`](../functions/ads-get-file-time/), [`AdsGetFileDate`](../functions/ads-get-file-date/) |
 | List / directories | [`AdsDirectory`](../functions/ads-directory/), [`AdsDirExist`](../functions/ads-dir-exist/), [`AdsDirMake`](../functions/ads-dir-make/), [`AdsDirRemove`](../functions/ads-dir-remove/) |
-| Low-level I/O | [`AdsFOpen`](../functions/ads-fopen/) · [`AdsFCreate`](../functions/ads-fcreate/) · [`AdsFClose`](../functions/ads-fclose/) · [`AdsFRead`](../functions/ads-fread/) · [`AdsFWrite`](../functions/ads-fwrite/) · [`AdsFSeek`](../functions/ads-fseek/) |
+| Low-level I/O | [`AdsFOpen`](../functions/ads-fopen/) Â· [`AdsFCreate`](../functions/ads-fcreate/) Â· [`AdsFClose`](../functions/ads-fclose/) Â· [`AdsFRead`](../functions/ads-fread/) Â· [`AdsFWrite`](../functions/ads-fwrite/) Â· [`AdsFSeek`](../functions/ads-fseek/) |
 
 **Security:** remote ops require `EnableFileFunc=1` in `openads.ini` or
 `--enable-file-func` on `openads_serverd` (default **off**). Paths are
@@ -78,9 +78,9 @@ Binaries for Windows x64 and x86 are attached to the
 
 ## v1.8.17 Highlights
 
-### REMOTE — `DbCreate` / `AdsCreateTable` no longer writes next to the app
+### REMOTE â€” `DbCreate` / `AdsCreateTable` no longer writes next to the app
 
-When connected with `AdsConnect60(tcp://…)`, create still wrote the
+When connected with `AdsConnect60(tcp://â€¦)`, create still wrote the
 table on the **client** cwd; the post-create open was remote and
 failed with **ADSCDX/5103**. Create/drop now go over the wire;
 tables land under the server data directory. Update **both**
@@ -90,42 +90,42 @@ tables land under the server data directory. Update **both**
 
 ## v1.8.14 Highlights
 
-### SQL — result cursor no longer starts at a phantom empty row
+### SQL â€” result cursor no longer starts at a phantom empty row
 
 `AdsExecuteSQLDirect` / `AdsExecuteSQL` left the result cursor
 *before* the first row, where SAP ADS positions it *on* the first
-row — so reading the current record right after executing returned
+row â€” so reading the current record right after executing returned
 a phantom empty row on every query. The result now lands on row 1,
 matching SAP, for engine tables, `system.*`/aggregate results,
 SQL-backend cursors and remote clients alike. Callers that already
 issue `AdsGotoTop` first are unaffected.
 
-### REMOTE — backward (PgUp) read-ahead
+### REMOTE â€” backward (PgUp) read-ahead
 
 Read-ahead was forward-only: a `Skip(-1)` browse paid one round-trip
-per row. Reverse scans now prefetch too — a 300-row reverse scan
-dropped from 299 wire requests to 7 — and a new capability bit keeps
+per row. Reverse scans now prefetch too â€” a 300-row reverse scan
+dropped from 299 wire requests to 7 â€” and a new capability bit keeps
 mixed old/new client-server pairs correct in both directions.
 
 ### The server's real version is now visible from the client
 
 Repeated "the fix didn't help" reports keep resolving to an old
 `openads_serverd` still running (a live Windows service holds its
-exe open, so copying an update over it can fail silently) — and
+exe open, so copying an update over it can fail silently) â€” and
 there was no way to prove it from the client side: the wire
 handshake and `AdsMgGetInstallInfo` both answered hardcoded strings.
 Now the handshake carries the real build version
 (`openads/1.8.14`), and `AdsMgGetInstallInfo` on a **remote**
-management handle reports the **server's** version — against any
+management handle reports the **server's** version â€” against any
 server ever shipped (old builds identify themselves as `0.3.2`).
 From Harbour: `AdsMgConnect("host:port")`,
 `AdsMgGetInstallInfo()[3]`, `AdsMgDisconnect()`.
 
-### REMOTE — `CloseTable` kept the table files open on the server
+### REMOTE â€” `CloseTable` kept the table files open on the server
 
 Closing a remote table released the client's view of it, but the
 server-side "shadow" handle (used for ordered navigation, scopes and
-locks) stayed open until the session disconnected — so erasing,
+locks) stayed open until the session disconnected â€” so erasing,
 renaming or reopening the just-closed `.dbf`/`.cdx`/`.fpt` in
 exclusive mode failed with "file in use", and app-level retry loops
 turned that into seconds of delay or an apparent hang at
@@ -135,15 +135,15 @@ the table.
 Update `openads_serverd` for the CloseTable fix; update
 `openace64.dll` too to see the server's version from the client. New
 example: `examples/fivewin/xbpaint_delscope.prg` (logs the server
-version, then drives the exact xBrowse repaint shape — page reads,
-`AdsGetRelKeyPos`/`AdsSetRelKeyPos`, scrollbar drags — over a remote
+version, then drives the exact xBrowse repaint shape â€” page reads,
+`AdsGetRelKeyPos`/`AdsSetRelKeyPos`, scrollbar drags â€” over a remote
 scoped table with `SET DELETED ON`).
 
 ---
 
 ## v1.8.13 Highlights
 
-### REMOTE — ordered/scoped browses: correctness + read-ahead
+### REMOTE â€” ordered/scoped browses: correctness + read-ahead
 
 Wraps up the `SET DELETED` remote work: flipping `AdsShowDeleted`
 now invalidates the client's read-ahead block (deleted rows no
@@ -155,7 +155,7 @@ ordered scan dropped from 598 wire round-trips to 7), `AdsCacheRecords`
 is honoured, and `GotoTop`/`Seek` return the landed row so the first
 read after a reposition is free.
 
-Update **both** `openads_serverd` and `openace64.dll` — several of
+Update **both** `openads_serverd` and `openace64.dll` â€” several of
 these fixes are client-side. New example:
 `examples/fivewin/xbrowse_delscope.prg` (FWH xBrowse, remote,
 `SET DELETED ON` + index scope, deletions inside the scope).
@@ -164,7 +164,7 @@ these fixes are client-side. New example:
 
 ## v1.8.12 Highlights
 
-### ENGINE — multi-record `Skip` over deleted rows
+### ENGINE â€” multi-record `Skip` over deleted rows
 
 Follow-up to v1.8.10/v1.8.11: with the deleted-row filter active, a
 remote natural-order browse could show a **duplicate of the previous
@@ -182,17 +182,17 @@ mode). Regression tests: three M12.33 cases in
 
 ## v1.8.11 Highlights
 
-### REMOTE — `SET DELETED ON` before connect
+### REMOTE â€” `SET DELETED ON` before connect
 
 Follow-up to v1.8.10: the flag now also reaches the server when
-`SET DELETED ON` runs **before** `AdsConnect60` — the order every
+`SET DELETED ON` runs **before** `AdsConnect60` â€” the order every
 rddads / FiveWin app uses. The client syncs the state right after
 connecting, and the server re-applies it to the lazily-created ABI
 connection used for ordered/scoped navigation.
 
 Requires updated `openace64.dll` **and** `openads_serverd`. Regression
 tests: `remote scoped walk honours SET DELETED ON issued before
-connect` (+ `… before first ordered op`) in
+connect` (+ `â€¦ before first ordered op`) in
 `abi_remote_index_nav_test.cpp`; wire probe
 `tools/remote_deleted_probe.cpp`.
 
@@ -200,7 +200,7 @@ connect` (+ `… before first ordered op`) in
 
 ## v1.8.10 Highlights
 
-### REMOTE — `SET DELETED ON` on scoped walks
+### REMOTE â€” `SET DELETED ON` on scoped walks
 
 `AdsShowDeleted(0)` (SET DELETED ON) now propagates to the server over
 the wire (`ShowDeleted` 0xDA/0xDB). Scoped index navigation
@@ -215,7 +215,7 @@ test: `remote AdsSetScope with SET DELETED ON skips deleted rows` in
 
 ## v1.8.1 Highlights
 
-### ABI — `OrdScope` string key padding
+### ABI â€” `OrdScope` string key padding
 
 Harbour passes scope strings at trimmed length, but CDX keys are
 space-padded. `setScopeTop` / `setScopeBottom` on a character work-order
@@ -227,13 +227,13 @@ field (top == bottom) could land `GotoTop` at EOF on **local and remote**.
 
 ## v1.8.0 Highlights
 
-### CDX — NTXPL852 / PL852 OEM collation
+### CDX â€” NTXPL852 / PL852 OEM collation
 
 `AdsSetCollation` accepts `NTXPL852` and `PL852` for Polish CP-852 index
-sorting. Ł (0x9D) sorts between L and M on CDX build, seek, insert, and
-reindex — matching Harbour / Clipper local-server behaviour.
+sorting. Å (0x9D) sorts between L and M on CDX build, seek, insert, and
+reindex â€” matching Harbour / Clipper local-server behaviour.
 
-### CDX — bulk `REINDEX`
+### CDX â€” bulk `REINDEX`
 
 `Table::reindex()` for CDX tags uses the same bottom-up `build_bulk()`
 path as `CREATE INDEX`, replacing the slow erase-then-insert walk.
@@ -247,17 +247,17 @@ and ABI soft/hard seek + index walk.
 
 ## v1.7.0 Highlights
 
-### REMOTE — `AdsSetScope` / `OrdScope` navigation
+### REMOTE â€” `AdsSetScope` / `OrdScope` navigation
 
 `OrdScope` top/bottom bounds were sent to the server but `GotoTop`/`Skip`
-ignored them — scoped walks returned every record in the table. Fixed by
+ignored them â€” scoped walks returned every record in the table. Fixed by
 marking the parent table in `ordered_tables_` after `SetScope`, and by
 always syncing `SetOrder` before remote index navigation.
 
 Requires updated `openace64.dll` **and** `openads_serverd`. Regression
 tests in `abi_remote_index_nav_test`; harness `openads_remote_scope_probe`.
 
-### Docs — CDX rollback warning
+### Docs â€” CDX rollback warning
 
 [Migrating from ADS](migrating-from-ads/) now warns that CDX files written
 by OpenADS use Harbour's `RCHB` header and are unreadable by SAP ACE
@@ -268,9 +268,9 @@ possible.
 
 ## v1.6.5 Highlights
 
-### REMOTE — `OrdKeyCount()` + `AdsGetDate()` fixes
+### REMOTE â€” `OrdKeyCount()` + `AdsGetDate()` fixes
 
-- **`OrdKeyCount()` returned 0** on remote aliases — xBrowse grids showed
+- **`OrdKeyCount()` returned 0** on remote aliases â€” xBrowse grids showed
   no rows. New `GetKeyCount` wire opcode (0xB0/0xB1) computes the true
   filtered key count from the active index order.
 - **`AdsGetDate()` crashed** on remote `ADS_DATE` columns when rddads
@@ -281,13 +281,13 @@ possible.
 
 ## v1.6.4 Highlights
 
-### REMOTE — FiveWin TDataBase / ADSRDD fixes (Dates + unlocked writes)
+### REMOTE â€” FiveWin TDataBase / ADSRDD fixes (Dates + unlocked writes)
 
 - Date columns (`ADS_DATE`) no longer crash `FieldGet` / `AdsGetJulian` in
   remote mode (safe ordinal resolution + row cache + server `YYYYMMDD`
   normalisation).
 - `FieldPut` / `AdsSet*` on an unlocked record now returns
-  `AE_RECORD_NOT_LOCKED` (5035) instead of AV — the "probe lock by write"
+  `AE_RECORD_NOT_LOCKED` (5035) instead of AV â€” the "probe lock by write"
   idiom works and produces the expected `EG_UNLOCKED`.
 - All remote Get/Set paths hardened against field ordinals passed as small
   pointers; repeated `FieldGet` and post-open/EOF cases are stable.
@@ -299,17 +299,17 @@ See CHANGELOG for full details. Requires updated `openace64.dll` +
 
 ## v1.6.3 Highlights
 
-### REMOTE / FWH — xBrowse over `tcp://`
+### REMOTE / FWH â€” xBrowse over `tcp://`
 
 Fixes Harbour `ADSCDX` + FWH `xBrowse` / `TDataBase` with production CDX
 tags (`OrdSetFocus`, e.g. `CUSTNAME`):
 
-- **`AdsKeyNo` / scrollbar** — logical key position (`1..n`) instead of
+- **`AdsKeyNo` / scrollbar** â€” logical key position (`1..n`) instead of
   physical `RecNo`; `AdsGetRelKeyPos` / `AdsSetRelKeyPos` for remote
   indexed tables.
-- **Bookmark `DbGoto` after paint** — server syncs the ABI index cursor
+- **Bookmark `DbGoto` after paint** â€” server syncs the ABI index cursor
   on `GotoRecord` so rows no longer shift on every `Refresh`.
-- **GoUp at top** — `AdsAtBOF` reports BOF after `Skip(-1)` at key #1;
+- **GoUp at top** â€” `AdsAtBOF` reports BOF after `Skip(-1)` at key #1;
   stops the first-row rubber-band repeat.
 
 Requires **both** `openace64.dll` (client) and an updated
@@ -346,11 +346,11 @@ Windows GitHub Actions job plus `run_harbour_smoke.ps1` /
 over `tcp://`. Local `AdsAggregate` / `AdsFetchWhere` on in-process DBF
 tables.
 
-### Plus — SQLite & MSSQL navigational write
+### Plus â€” SQLite & MSSQL navigational write
 
 SQLite and native MS SQL Server (TDS) backends now support
 `AdsAppendRecord`, `AdsSetString`, `AdsWriteRecord`, and
-`AdsDeleteRecord` — parity with MariaDB, PostgreSQL, Firebird, and ODBC.
+`AdsDeleteRecord` â€” parity with MariaDB, PostgreSQL, Firebird, and ODBC.
 MSSQL `ADS_STRING` fields are padded to declared width on read.
 
 ### Engine
@@ -362,7 +362,7 @@ columns together).
 
 ## v1.5.0 Highlights
 
-### SQL Backend — Transaction Management (SQLRDD Pattern)
+### SQL Backend â€” Transaction Management (SQLRDD Pattern)
 
 New `BackendTxManager` provides nested transaction support for SQL
 backends: BEGIN/COMMIT with SAVEPOINT emulation at nesting > 1,
@@ -370,28 +370,28 @@ auto-commit after N DML statements (configurable), and dirty-flag
 tracking. Available on SQLite and PostgreSQL via `BackendTableOps`
 vtable (`begin_tx`/`commit_tx`/`rollback_tx`/`set_auto_commit`).
 
-### SQL Backend — Lazy Column Loading with Learning
+### SQL Backend â€” Lazy Column Loading with Learning
 
 `BackendFieldOptimizer` tracks which columns are actually read per
 table. After 5 unique single-column fetches, it automatically
-switches to `SELECT *` — avoiding repeated demand-fetches for
+switches to `SELECT *` â€” avoiding repeated demand-fetches for
 tables where many columns are eventually needed.
 
-### SQL Backend — Restrictor Composition
+### SQL Backend â€” Restrictor Composition
 
 `BackendWhereBuilder` combines For clause, user filter, scope
 bounds, index restrictions, AOF predicates, and recno filters into
 a single AND-ed WHERE clause. Handles exact seek (collapses to `=`)
 and range seek.
 
-### SQL Push-Down — 50+ New Translatable Functions
+### SQL Push-Down â€” 50+ New Translatable Functions
 
 The `try_emit_sql_where()` emitter now translates STR, VAL, DTOS,
 DTOC, CTOD, ROUND, CEILING, MOD, EXP, LOG, SQRT, SIGN, PADR/PADL/PADC,
 STRTRAN, LEFT, RIGHT, AT/ATNUM, IIF, IF, NIL, ISNULL, ISBLANK, EMPTY,
 LEN, YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, DOW, CDOW, CMONTH, NOW,
 and more into portable SQL. The `$` contains operator now supports
-field-to-field (`field1 $ field2 → field2 LIKE '%' || field1 || '%'`).
+field-to-field (`field1 $ field2 â†’ field2 LIKE '%' || field1 || '%'`).
 
 ### UNION / UNION ALL
 
@@ -405,7 +405,7 @@ New `ALTER TABLE`, `DROP TABLE`, `DROP INDEX` statement parsers with
 support for IF EXISTS, quoted identifiers, and column definitions.
 Ready for backend execution hooks.
 
-### AOF Expression — LIKE and IS NULL
+### AOF Expression â€” LIKE and IS NULL
 
 The AOF expression layer now supports `LIKE '%pattern%'` with `%`/`_`
 wildcards, and `IS NULL` / `IS NOT NULL` unary operators.
@@ -426,13 +426,13 @@ an alternative storage layer. New source files:
 - `src/sql_backend/sqlite_table.h`
 - `src/sql_backend/sqlite_index.h`
 
-### SQL Backends — PostgreSQL / MariaDB / ODBC (OpenADS Plus)
+### SQL Backends â€” PostgreSQL / MariaDB / ODBC (OpenADS Plus)
 
 OpenADS can now open tables on **PostgreSQL**, **MariaDB / MySQL**
 and any **ODBC**-reachable engine behind the ACE ABI, selected by
 the connection URI (`postgresql://` / `mariadb://` / `odbc://`),
 exactly like the SQLite backend. From the application's point of
-view the table behaves like any other work area — navigation,
+view the table behaves like any other work area â€” navigation,
 field read, and column SEEK all work.
 
 These four SQL backends sit behind a single **pluggable
@@ -446,10 +446,10 @@ the `tcp://` remote paths are unchanged fall-throughs. Identifiers
 are validated to safe ASCII and SEEK values use prepared-statement
 parameters (no string concatenation). See `docs/OPENADS_PLUS.md`.
 
-### ADT Validation Patches (F1–F7, R1–R3)
+### ADT Validation Patches (F1â€“F7, R1â€“R3)
 
 ADT table validation now includes a full set of structural
-patches (F1–F7) and record-level checks (R1–R3), strengthening
+patches (F1â€“F7) and record-level checks (R1â€“R3), strengthening
 the integrity guarantees for `.adt` files produced by SAP
 Advantage.
 
@@ -458,23 +458,23 @@ Advantage.
 OpenADS can now operate end-to-end on native `.adt` / `.adi` /
 `.adm` files:
 
-- **Create** — `AdsCreateTable(ADS_ADT)` writes a valid table
+- **Create** â€” `AdsCreateTable(ADS_ADT)` writes a valid table
   header, field descriptors, and an optional `.adm` memo store.
-- **Write** — `AdsAppendRecord` / `AdsWriteRecord` persist rows
+- **Write** â€” `AdsAppendRecord` / `AdsWriteRecord` persist rows
   and memo payloads.
-- **Read** — Re-open, field get, record count, memo round-trip.
-- **Index** — `AdsCreateIndex61` builds `.adi` bags (first tag
+- **Read** â€” Re-open, field get, record count, memo round-trip.
+- **Index** â€” `AdsCreateIndex61` builds `.adi` bags (first tag
   via `AdiIndex::create`, additional tags via `add_tag`).
-- **Seek** — `AdsSeek` on character and numeric ADI keys.
-- **AUTOINC** — counter seeded from existing rows at open time;
-  descriptor tail bytes 139–143 stay zero on disk.
-- **ADM memo layout** — 8-byte blocks with a 1024-byte metadata
+- **Seek** â€” `AdsSeek` on character and numeric ADI keys.
+- **AUTOINC** â€” counter seeded from existing rows at open time;
+  descriptor tail bytes 139â€“143 stay zero on disk.
+- **ADM memo layout** â€” 8-byte blocks with a 1024-byte metadata
   prefix.
 
 ### ADI Write Path
 
-The ADI index driver now supports write operations — `insert`,
-`erase`, and `flush` — including dense-leaf recno decoding and
+The ADI index driver now supports write operations â€” `insert`,
+`erase`, and `flush` â€” including dense-leaf recno decoding and
 character-key seek. This completes the read-write cycle for ADI
 indexes.
 
@@ -482,9 +482,9 @@ indexes.
 
 Triggers now fire with proper timing dispatch:
 
-- **BEFORE** — runs before the DML statement.
-- **INSTEAD_OF** — replaces the DML on views.
-- **AFTER** — runs after successful execution.
+- **BEFORE** â€” runs before the DML statement.
+- **INSTEAD_OF** â€” replaces the DML on views.
+- **AFTER** â€” runs after successful execution.
 
 Priority sort, `__error` table for failures,
 `sp_DisableTriggers` / `sp_EnableTriggers` stored procedures,
@@ -498,34 +498,34 @@ received extensive work:
 
 - **Inline cell editing** with dirty tracking and visual
   feedback.
-- **Index management** — save and delete indexes via API.
-- **Trigger CRUD** — add, delete, and edit triggers with
+- **Index management** â€” save and delete indexes via API.
+- **Trigger CRUD** â€” add, delete, and edit triggers with
   splitter and inline validation.
 - **AOF (Rushmore) filter toolbar** in the table browser.
 - **ADS SQL syntax highlighting** with HeidiSQL-like colours.
 - **Stored procedure / function source viewer** with parameter
   grid and Save-to-DD.
 - **Index tag browser**, field type labels, and SQL scripts.
-- **Connection menu** — New DD, Open DD, Free Tables.
+- **Connection menu** â€” New DD, Open DD, Free Tables.
 - **Effective Permissions** and **Members** tabs on user/group
   panels.
 - **RI tag dropdowns** populated from binary `.add` files.
 
-### openmonitor — TUI and Web Dashboard
+### openmonitor â€” TUI and Web Dashboard
 
 A new `openmonitor` tool provides both a terminal UI (TUI) and a
 web dashboard for monitoring and administering `openads_serverd`.
 
-### OpenADS Studio — Responsive (phone / tablet)
+### OpenADS Studio â€” Responsive (phone / tablet)
 
-The Studio web console now adapts to small screens — usable from a
+The Studio web console now adapts to small screens â€” usable from a
 phone or tablet, not just a desktop browser. Below ~768 px the
-table-list sidebar becomes a slide-in **drawer** (☰ in the header,
+table-list sidebar becomes a slide-in **drawer** (â˜° in the header,
 dimmed backdrop, auto-close on select); the tab bar scrolls
 horizontally and forms / modals reflow to a single column with
-larger touch targets. A long-standing dark-theme bug — the
+larger touch targets. A long-standing dark-theme bug â€” the
 `--panel` / `--panel-2` / `--border` CSS variables were
-self-referential, so panels and borders rendered transparent — is
+self-referential, so panels and borders rendered transparent â€” is
 fixed as part of this work.
 
 ### Remote Scan Performance (sequential prefetch)
@@ -538,9 +538,9 @@ the client serves them locally and folds the consumed count back
 into the next wire step so the server cursor never desyncs.
 `AdsAtEOF` / `AdsAtBOF` are answered from the cached current row and
 `AdsIsFound` from a cached `Found()` flag. Result: a 50k-record
-loopback scan is **~3.9× faster** (NAV-only) / **~3.3×** (3-field
+loopback scan is **~3.9Ã— faster** (NAV-only) / **~3.3Ã—** (3-field
 read), with `IsFound` round-trips dropping to zero. The change is
-additive and backward-compatible — old clients (no capability
+additive and backward-compatible â€” old clients (no capability
 advertised) keep the previous wire behaviour byte-for-byte.
 
 ### PHP Native Extension (`php_openads`)
@@ -586,25 +586,25 @@ results are served through a handle-based result set
 ### FetchWhere V2
 
 `AdsFetchWhere` now serves forward scans from a cached result
-set — no per-match `goto_record` round-trip. The client
+set â€” no per-match `goto_record` round-trip. The client
 receives rows in bulk and walks them locally, with optional
 per-row recno (`WANT_RECNO` flag). Non-AOF `SET FILTER` bulk
 scans are routed through `AdsFetchWhere` for significant
 throughput gains.
 
-### ODBC Driver (slice 1–3)
+### ODBC Driver (slice 1â€“3)
 
 A full ODBC driver (`openads_odbc.dll`) is now available:
 
 - **SELECT round-trip** with scrollable cursors
   (`SQLFetchScroll`).
-- **Typed column access** — `SQLDescribeCol` /
+- **Typed column access** â€” `SQLDescribeCol` /
   `SQLColAttribute` / `SQLGetData` dispatch through the
   backend ops vtable.
 - **Positional parameter binding** via `SQLBindParameter`.
-- **Catalog functions** — `SQLPrimaryKeys` /
+- **Catalog functions** â€” `SQLPrimaryKeys` /
   `system.primarykeys`.
-- **App-lock emulation** — `rLock()`/`fLock()` via SQL Server
+- **App-lock emulation** â€” `rLock()`/`fLock()` via SQL Server
   `sp_getapplock`, PostgreSQL advisory locks, MariaDB named
   locks, and Firebird `OPENADS$LOCKS` table.
 
@@ -612,7 +612,7 @@ A full ODBC driver (`openads_odbc.dll`) is now available:
 
 `AdsAppendRecord` / `AdsSetField` / `AdsWriteRecord` /
 `AdsDeleteRecord` now work end-to-end on PostgreSQL, MariaDB,
-and Firebird backends — no ODBC passthrough required.
+and Firebird backends â€” no ODBC passthrough required.
 
 ### SQL Push-Down Expansion
 
@@ -636,7 +636,7 @@ corruption when 32-bit Harbour apps call ACE functions through
 the DLL. The x86 `.def` file and import library are updated
 to match. (Reported by Jonsson / RusSoft Ltda.)
 
-### CI — msvc-x86 Build Leg
+### CI â€” msvc-x86 Build Leg
 
 A new `msvc-x86` matrix entry in `.github/workflows/ci.yml`
 ensures 32-bit builds are tested on every PR, catching
@@ -649,85 +649,85 @@ signature mismatches, `/WX` warnings) before they reach main.
 
 ### Engine
 
-- **CDX tag order** — `list_tags()` now sorts by tag-header
+- **CDX tag order** â€” `list_tags()` now sorts by tag-header
   offset (creation order) instead of alphabetical leaf order.
   Fixes `DBSETORDER(n)` selecting the wrong tag on CDX bags
   written by SAP ADS or BCC Harbour. (Reported by Jonsson /
   RusSoft Ltda.)
-- **CDX expression-index key size** — composite expression
+- **CDX expression-index key size** â€” composite expression
   keys (e.g. `UPPER(cName)`) are now sized from the expression's
   natural fixed-width length, not the first record's content
   length. The old rtrim truncated keys, causing rows out of
   order after reindex on large tables. (Reported by Jonsson /
   RusSoft Ltda.)
-- **CDX empty-leaf walk** — forward and backward index walks now
+- **CDX empty-leaf walk** â€” forward and backward index walks now
   skip empty leaves left behind by `erase()`. Fixes REINDEX /
   bulk-delete `ADSCDX/5000`. (PR #63)
-- **CDX leaf recno bits** — `compute_layout` sizes the
+- **CDX leaf recno bits** â€” `compute_layout` sizes the
   record-number field from `max_rec`, not just key length, so
-  wide-key tags no longer truncate recnos ≥ 4096. (PR #62)
-- **CDX prefix seek** — `seek_key` compares only the search-key
+  wide-key tags no longer truncate recnos â‰¥ 4096. (PR #62)
+- **CDX prefix seek** â€” `seek_key` compares only the search-key
   length, so partial seeks like `SEEK "ART-00024800"` match stored
   `"ART-00024800 desc ..."` keys. (PR #62)
-- **Conditional FOR on logical fields** — the index expression
+- **Conditional FOR on logical fields** â€” the index expression
   evaluator now treats logical fields as numeric (0/1) instead of
   truthy strings, so `FOR ACTIVE` correctly filters `.F.` records.
   (PR #121)
-- **INDEX ON corruption** — prevent `INDEX ON` from corrupting
+- **INDEX ON corruption** â€” prevent `INDEX ON` from corrupting
   source table indexes. (PR #118)
-- **MSSQL backward SKIP** — off-by-one: `abs_n == pos` now reaches
+- **MSSQL backward SKIP** â€” off-by-one: `abs_n == pos` now reaches
   row 0 instead of reporting BOF. (PR #65)
-- **ABI typed getters for SQL backends** — `AdsGetDouble`/`Long`/`
+- **ABI typed getters for SQL backends** â€” `AdsGetDouble`/`Long`/`
   LongLong`/`String` dispatch through the backend ops vtable, so
   PostgreSQL returns real values. (PR #66)
-- **`AdsGetIndexHandle` for SQL backends** — resolves by-name for
+- **`AdsGetIndexHandle` for SQL backends** â€” resolves by-name for
   PG tables so indexed seek works end-to-end. (PR #66)
-- **NTX numeric key format** — numeric fields indexed into an NTX
+- **NTX numeric key format** â€” numeric fields indexed into an NTX
   bag now store keys in the native DBFNTX form (zero-padded
   magnitude + complemented negatives) instead of space-padded
   `STR()` text. A native xBase reader's `dbSeek(<number>)` now
   matches the on-disk key. Reopened index bags retain the numeric
   encoding. (PR #67)
-- **Numeric `dbSeek`** — rddads sends `ADS_STRING` key type for
+- **Numeric `dbSeek`** â€” rddads sends `ADS_STRING` key type for
   numeric seeks; the engine now handles this correctly.
-- **`ALIAS->FIELD` in numeric seek** — strip `ALIAS->` prefix so
+- **`ALIAS->FIELD` in numeric seek** â€” strip `ALIAS->` prefix so
   aliased CDX tags find keys.
-- **Transaction rollback** — physically removes appended records
+- **Transaction rollback** â€” physically removes appended records
   on rollback instead of leaving ghost rows.
-- **LockMgr held-state leak** — `held_` is now cleared on unlock
+- **LockMgr held-state leak** â€” `held_` is now cleared on unlock
   so the next lock takes a real OS lock.
-- **`AdsGetRecordCount`** — now respects `bFilterOption`.
-- **`AdsSetRelation`** — fails honestly when appropriate.
-- **`seek_key`** — `walk_to_last` now honours `SET DELETED ON`.
-- **Empty table navigation** — correctly handles tables with zero
+- **`AdsGetRecordCount`** â€” now respects `bFilterOption`.
+- **`AdsSetRelation`** â€” fails honestly when appropriate.
+- **`seek_key`** â€” `walk_to_last` now honours `SET DELETED ON`.
+- **Empty table navigation** â€” correctly handles tables with zero
   records.
-- **Deleted-record navigation** — proper state after skip past
+- **Deleted-record navigation** â€” proper state after skip past
   deleted rows.
-- **LockMgr lock refcount** — repeated locks on the same key are
+- **LockMgr lock refcount** â€” repeated locks on the same key are
   now refcounted; the OS lock is released only when the final
   holder unlocks.
-- **WAL record bounds checks** — `TxLog::read_all` validates each
+- **WAL record bounds checks** â€” `TxLog::read_all` validates each
   UPDATE/APPEND field length before reading, so truncated or
   corrupt WAL files no longer over-read.
 
 ### ABI
 
-- **Out-of-bounds read** in numeric key formatting — prevented.
-- **Swapped option bits** — `ADS_DESCENDING` (0x02) and
+- **Out-of-bounds read** in numeric key formatting â€” prevented.
+- **Swapped option bits** â€” `ADS_DESCENDING` (0x02) and
   `ADS_COMPOUND` (0x08) were decoded incorrectly in
   `AdsCreateIndex61`.
-- **Case-insensitive field-name resolution** — `field_index` is
+- **Case-insensitive field-name resolution** â€” `field_index` is
   now cached for performance.
-- **`AE_NO_CURRENT_RECORD`** — returns 5068 instead of 5026.
-- **`OrdListAdd`** — falls back to basename when a relative path
+- **`AE_NO_CURRENT_RECORD`** â€” returns 5068 instead of 5026.
+- **`OrdListAdd`** â€” falls back to basename when a relative path
   double-prefixes the table directory.
-- **Trig helper linkage** — C++ linkage for `trig_*` helpers to
+- **Trig helper linkage** â€” C++ linkage for `trig_*` helpers to
   silence MSVC C4190.
-- **`AdsGetField` crash on SQL backends** — reading by field ordinal
+- **`AdsGetField` crash on SQL backends** â€” reading by field ordinal
   no longer crashes.
-- **AdsGetRecordCount on conditional ORDER** — counts FOR matches
+- **AdsGetRecordCount on conditional ORDER** â€” counts FOR matches
   correctly. (PR #100)
-- **`AdsSetAOF` for non-optimisable filters** — now returns
+- **`AdsSetAOF` for non-optimisable filters** â€” now returns
   `AE_INVALID_EXPRESSION` instead of success, so stock rddads
   falls back to client-side filtering. The old behaviour silently
   disabled `SET FILTER` entirely. (Reported by Jonsson / RusSoft
@@ -735,12 +735,12 @@ signature mismatches, `/WX` warnings) before they reach main.
 
 ### ODBC Driver
 
-- **x86 build** — `C4100` (unused parameter) and `C2733`
+- **x86 build** â€” `C4100` (unused parameter) and `C2733`
   (`SQLLEN*` vs `SQLPOINTER` signature mismatch) fixed for 32-bit
   MSVC `/WX`. (PR #119)
-- **DM/ADO conformance** — descriptor handles, `SQLBindCol`, and
+- **DM/ADO conformance** â€” descriptor handles, `SQLBindCol`, and
   `BIT` type mapping fixed.
-- **`SQL_DRIVER_ODBC_VER` / `SQL_ODBC_VER`** — now reported in
+- **`SQL_DRIVER_ODBC_VER` / `SQL_ODBC_VER`** â€” now reported in
   `SQLGetInfo`.
 
 ### DA-Web Security
@@ -753,32 +753,32 @@ signature mismatches, `/WX` warnings) before they reach main.
 
 ### Platform / Build
 
-- **macOS** — sign-conversion and unused-function warnings fixed.
-- **GCC** — `-Werror` warnings resolved (shadow, implicit
+- **macOS** â€” sign-conversion and unused-function warnings fixed.
+- **GCC** â€” `-Werror` warnings resolved (shadow, implicit
   conversion, format-truncation, stringop-truncation).
-- **MSVC** — x86 `__stdcall` decoration mismatch and x64
+- **MSVC** â€” x86 `__stdcall` decoration mismatch and x64
   `_wfsopen` crash fixed.
-- **Clang** — `-Wc2y-extensions` guard for older Apple Clang.
-- **POSIX fd-0 collision** — file handles are now stored as
+- **Clang** â€” `-Wc2y-extensions` guard for older Apple Clang.
+- **POSIX fd-0 collision** â€” file handles are now stored as
   `(fd + 1)` so a real fd 0 (returned by `open()` when stdin is
   closed) is no longer mistaken for the "not open" sentinel.
-- **POSIX `EINTR` retry** — `pread` / `pwrite` retry on signal
+- **POSIX `EINTR` retry** â€” `pread` / `pwrite` retry on signal
   interruption instead of failing the I/O.
-- **POSIX zero-length mmap** — `map_readonly` rejects zero-length
+- **POSIX zero-length mmap** â€” `map_readonly` rejects zero-length
   maps instead of calling `mmap` with length 0.
 
 ### CDX
 
 - Shared header lock on open so concurrent appends don't fail.
 - Structural CDX named per-table, not per-directory session.
-- **Stale record-count refresh on the fetch path** — a driver
+- **Stale record-count refresh on the fetch path** â€” a driver
   caches the DBF record count at open; in a multiuser deployment a
   peer append could leave the cache lagging, so an index walk that
-  reached a just-appended row (e.g. mid-`REPLACE … FOR`) failed
+  reached a just-appended row (e.g. mid-`REPLACE â€¦ FOR`) failed
   hard with spurious error 5000. `read_record_raw` /
   `write_record_raw` now re-read the on-disk count under a shared
   header lock before declaring a recno out of range (slow path
-  only — a normal forward scan pays nothing).
+  only â€” a normal forward scan pays nothing).
 
 ### Remote (Wire)
 
@@ -789,16 +789,16 @@ signature mismatches, `/WX` warnings) before they reach main.
 
 ## Documentation
 
-- **CONTRIBUTING.md** — new contribution guide with PR workflow,
+- **CONTRIBUTING.md** â€” new contribution guide with PR workflow,
   protocol policy, and clean-room rules.
-- **Wire Protocol DD API** — comprehensive Data Dictionary API
-  reference (§9) added.
-- **DA-Web GUIDE.md** — full user guide for the DA-Web browser
+- **Wire Protocol DD API** â€” comprehensive Data Dictionary API
+  reference (Â§9) added.
+- **DA-Web GUIDE.md** â€” full user guide for the DA-Web browser
   interface.
-- **README** — comprehensive post-rc29 status update covering
+- **README** â€” comprehensive post-rc29 status update covering
   ADI write path, ADT creation, AES mode, and DA-Web scope.
-- **Cookbook** — new `cookbook/` folder with runnable,
-  heavily-commented Harbour examples (simple → advanced). The
+- **Cookbook** â€” new `cookbook/` folder with runnable,
+  heavily-commented Harbour examples (simple â†’ advanced). The
   `console/` track is pure xBase: create / index seek /
   transactions / DBF maintenance (`ADSCDX`), SQL via
   `AdsCreateSQLStatement` + `AdsExecuteSQLDirect`, native ADT
@@ -809,7 +809,7 @@ signature mismatches, `/WX` warnings) before they reach main.
   content checksum and a seek-vs-scan headline. A FiveWin
   `xbrowse` CRUD sample and connection-string / field-type /
   troubleshooting guides round it out.
-- **API Reference (PT)** — all 364 ACE functions documented in
+- **API Reference (PT)** â€” all 364 ACE functions documented in
   Portuguese with syntax, parameters, return values, and examples.
 
 ---
@@ -819,7 +819,7 @@ signature mismatches, `/WX` warnings) before they reach main.
 - **Windows Inno Setup installer** (`openads-setup.iss`).
 - **CPack packages** with guaranteed `openace32.lib` /
   `openace64.lib` in Windows archives.
-- **Release CI** — `openace{32,64}.lib` shipped in release
+- **Release CI** â€” `openace{32,64}.lib` shipped in release
   archives automatically.
 
 ---
@@ -833,7 +833,7 @@ signature mismatches, `/WX` warnings) before they reach main.
   key size at scale), `abi_multitag_order_nav_test.cpp`
   (multi-tag navigation), `abi_ntx_numeric_edge_test.cpp` (NTX
   numeric edge cases), `cdx_empty_tree_test.cpp`, and more.
-- **x86 CI** — `msvc-x86` build leg catches 32-bit breakage on
+- **x86 CI** â€” `msvc-x86` build leg catches 32-bit breakage on
   every PR.
 - Harbour demo in `examples/adt-native/` (by glokcode).
 
@@ -841,8 +841,49 @@ signature mismatches, `/WX` warnings) before they reach main.
 
 ## Contributors
 
-- **Jonsson / RusSoft Ltda.** — CDX tag order, expression-index
+- **Jonsson / RusSoft Ltda.** â€” CDX tag order, expression-index
   key size, `AdsSetAOF` non-optimisable filter, and x86 calling
   convention fixes.
-- **Admnwk** — ODBC driver, SQL push-down, aggregation, FetchWhere
+- **Admnwk** â€” ODBC driver, SQL push-down, aggregation, FetchWhere
   V2, native write path, and CI improvements.
+
+---
+
+## v1.8.28 Highlights
+
+### hbnetio Bridge — Virtual File System + RPC Integration
+
+OpenADS can now transparently bridge to harbour hbnetio virtual file
+system and RPC capabilities, enabling multi-client concurrent access to
+shared files on a remote hbnetio server (e.g. AWS EC2).
+
+Three components in `contrib/hbnetio_bridge/`:
+
+**VFS Adapter** — maps hb_vf*() operations over OpenADS ITransport:
+
+- File open/close/read/write/seek/truncate
+- Byte-range locking (exclusive + shared, blocking + non-blocking)
+- Directory operations (exists/make/remove)
+- File attributes and timestamps
+- Hard/symbolic links
+- Implements the exact hbnetio 24-byte LE wire protocol
+
+**Distributed Lock Manager** — implements the __isLocked() pattern:
+
+- Automatic .lck file creation and management
+- Configurable retry with backoff (mirrors hb_idleSleep(2))
+- Session-scoped lock tracking with RAII guards
+- Bulk release on session disconnect
+- Heartbeat for long-held locks
+
+**RPC Bridge** — maps hbnetio RPC to OpenADS session dispatch:
+
+- netio_FuncExec / netio_ProcExec / netio_ProcExecW
+- netio_ProcExists / netio_OpenDataStream / netio_GetData
+- Built-in server_version / server_time / server_uptime
+
+Enable: `cmake -DOPENADS_WITH_HBNETIO_BRIDGE=ON ..`
+
+Wire opcodes 0xF0-0xFC (no conflict with existing opcodes).
+
+Full guide: [hbnetio Bridge](../hbnetio-bridge/).
