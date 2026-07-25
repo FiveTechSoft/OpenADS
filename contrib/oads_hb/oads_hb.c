@@ -302,3 +302,18 @@ HB_FUNC( OADS_DIRECTORY )
         hb_retc( "" );
     hb_xfree( buf );
 }
+
+/* ------------------------------------------------------------------ */
+/*  OAds_FExist( hConn, cFileName ) -> lExists                         */
+/*  Alias for OAds_CheckExistence, file-specific naming                */
+/* ------------------------------------------------------------------ */
+HB_FUNC( OADS_FEXIST )
+{
+    ADSHANDLE  hConn   = ( ADSHANDLE ) hb_parnint( 1 );
+    const char *szName = hb_parc( 2 );
+    UNSIGNED16 usExists = 0;
+
+    if( szName )
+        oads_CheckExistence( hConn, ( UNSIGNED8 * ) szName, &usExists );
+    hb_retl( usExists != 0 );
+}

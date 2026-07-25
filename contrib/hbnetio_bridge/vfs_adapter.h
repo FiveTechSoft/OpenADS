@@ -108,17 +108,17 @@ namespace vfs {
     constexpr std::uint32_t FILES_MAX      = 8192;
 
     // Lock flags (from Harbour's hbapifs.h)
-    constexpr std::uint16_t FLX_EXCLUSIVE  = 0x0001;
-    constexpr std::uint16_t FLX_SHARED     = 0x0002;
-    constexpr std::uint16_t FLX_WAIT       = 0x0010;
+    constexpr std::uint16_t FLX_EXCLUSIVE  = 0x0000;  // HB_FLX_EXCLUSIVE
+    constexpr std::uint16_t FLX_SHARED     = 0x0100;  // HB_FLX_SHARED
+    constexpr std::uint16_t FLX_WAIT       = 0x0200;  // HB_FLX_WAIT
 
     // File open flags (Harbour FO_* and HB_FO_*)
     constexpr std::uint32_t FO_READ        = 0x0000;
     constexpr std::uint32_t FO_WRITE       = 0x0001;
     constexpr std::uint32_t FO_READWRITE   = 0x0002;
-    constexpr std::uint32_t FO_CREAT       = 0x0010;
-    constexpr std::uint32_t FO_TRUNC       = 0x0020;
-    constexpr std::uint32_t FO_EXCL        = 0x0040;
+    constexpr std::uint32_t FO_CREAT       = 0x0100;  // HB_FO_CREAT
+    constexpr std::uint32_t FO_TRUNC       = 0x0200;  // HB_FO_TRUNC
+    constexpr std::uint32_t FO_EXCL        = 0x0400;  // HB_FO_EXCL
 } // namespace vfs
 
 
