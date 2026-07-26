@@ -31377,7 +31377,21 @@ UNSIGNED32 ENTRYPOINT AdsGetHandleType(ADSHANDLE h, UNSIGNED16* p) {
     auto& s = state();
     auto kind = s.registry.kind_of(h);
     switch (kind) {
-        case HandleKind::Connection:
+        case HandleKind::Connection: {
+            // ADS_DATABASE_CONNECTION means "connected to a DATA DICTIONARY",
+            // not merely "is a connection". Reporting it for a free-table
+            // connection makes Harbour's rddads take its dictionary path and
+            // open every table with ADS_DEFAULT, expecting the dictionary to
+            // resolve the format; the default is DBF, so an ADT table is then
+            // parsed as a DBF (garbage field count and names) and the USE dies
+            // with EG_CORRUPTION / EDBF_CORRUPT while every ACE call still
+            // reports success. Only a connection that actually carries a
+            // dictionary gets the flag.
+            auto* c = s.registry.lookup<Connection>(h, HandleKind::Connection);
+            *p = (c != nullptr && c->has_dd()) ? ADS_DATABASE_CONNECTION
+                                               : ADS_NONE;
+            break;
+        }
         case HandleKind::RemoteConnection:
             *p = ADS_DATABASE_CONNECTION;  break;
         case HandleKind::Table:
