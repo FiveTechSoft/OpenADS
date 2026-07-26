@@ -96,6 +96,7 @@ add_executable(openads_unit_tests
     unit/abi_index_expr_validation_test.cpp
     unit/abi_zap_pack_test.cpp
     unit/abi_pack_reindex_softseek_test.cpp
+    unit/abi_stale_index_walk_test.cpp
     unit/abi_ntx_pack_reindex_test.cpp
     unit/abi_ntx_pack_reindex_multipage_test.cpp
     unit/abi_ntx_multipage_dup_test.cpp
