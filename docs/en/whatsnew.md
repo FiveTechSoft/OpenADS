@@ -6,11 +6,37 @@ nav_order: 0
 permalink: /en/whatsnew/
 ---
 
-# What's New (v1.0.0-rc29 -> v1.8.31)
+# What's New (v1.0.0-rc29 -> v1.8.32)
 
 This page summarises the most notable changes since the
 v1.0.0-rc29 release. For the full commit-by-commit history see
 the [CHANGELOG](https://github.com/FiveTechSoft/OpenADS/blob/main/CHANGELOG.md).
+
+---
+
+## v1.8.32 Highlights
+
+### Comprehensive Lock Test Coverage
+
+New test suite with **23 test cases** covering previously untested lock API
+surfaces. Key findings documented:
+
+| API | Behavior |
+|-----|----------|
+| `AdsGetNumLocks` | Counts **record locks only** — table locks not included |
+| `AdsTestRecLocks` | No-op diagnostic — always returns 0 regardless of state |
+| `AdsIsTableLocked` | Reflects `AdsLockTable` only — exclusive open not reported |
+| Re-entrant lock | 2x `AdsLockRecord` on same recno requires 2x `AdsUnlockRecord` |
+
+### Remote Lock Contention Tests (Pritpal Bedi scenarios)
+
+6 new tests reproducing multi-instance lock scenarios over TCP:
+- Record lock contention fails cleanly (does not hang)
+- Write without lock returns error 5035 (GoHot guard)
+- FLock contention resolves within retry window
+- FLock allows writes without per-record lock
+- Exclusive open allows writes (remote mode)
+- Append auto-lock works over wire
 
 ---
 

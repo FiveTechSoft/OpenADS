@@ -6,11 +6,39 @@ nav_order: 0
 permalink: /es/novedades/
 ---
 
-# Novedades (v1.0.0-rc29 → v1.8.21)
+# Novedades (v1.0.0-rc29 → v1.8.32)
 
 Esta página resume los cambios más destacados desde la versión
 v1.0.0-rc29. Para el historial completo de commits, consulta el
 [CHANGELOG](https://github.com/FiveTechSoft/OpenADS/blob/main/CHANGELOG.md).
+
+---
+
+## Destacados v1.8.32
+
+### Cobertura comprehensiva de tests de bloqueo
+
+Nueva suite de tests (`abi_lock_comprehensive_test.cpp`) con **23 test cases**
+que cubren superficies de API de bloqueo previamente no testeadas.
+
+Comportamientos documentados:
+
+| API | Comportamiento |
+|-----|----------------|
+| `AdsGetNumLocks` | Cuenta **solo locks de registro** — locks de tabla no incluidos |
+| `AdsTestRecLocks` | No-op diagnóstico: siempre retorna 0 sin importar el estado |
+| `AdsIsTableLocked` | Refleja solo `AdsLockTable` — exclusive open no se reporta |
+| Lock re-entrant | 2x `AdsLockRecord` en mismo recno requiere 2x `AdsUnlockRecord` |
+
+### Tests de contención de bloqueo REMOTE (escenarios de Pritpal Bedi)
+
+6 nuevos tests que reproducen escenarios de bloqueo multi-instancia por TCP:
+- Contención de lock de registro falla limpiamente (no se cuelga)
+- Write sin lock retorna error 5035 (guard GoHot)
+- Contención de FLock se resuelve dentro de la ventana de retry
+- FLock permite writes sin lock de registro explícito
+- Exclusive open permite writes (modo remoto)
+- Append auto-lock funciona por wire
 
 ---
 

@@ -6,6 +6,61 @@
 
 ---
 
+## 2026-07-26 — Pruebas de bloqueo: cobertura comprehensiva
+
+### Archivo nuevo: `tests/unit/abi_lock_comprehensive_test.cpp`
+
+23 nuevos test cases que cubren gaps en la suite de locking existente.
+
+### Hallazgos documentados
+
+| API / Comportamiento | Detalle |
+|----------------------|---------|
+| `AdsGetNumLocks` | Cuenta **solo locks de registro**, NO locks de tabla |
+| `AdsTestRecLocks` | No-op diagnóstico: siempre retorna 0 (AE_SUCCESS) sin importar el estado |
+| `AdsGetAllLocks` | Retorna array con los recnos lockeados; table locks no aparecen |
+| `AdsIsTableLocked` | Solo refleja `AdsLockTable`, NO `AdsExclusive` en local mode |
+| Exclusive open (local) | `AdsIsTableLocked` retorna 0; `AdsSetString` retorna 5035 (lock required) |
+| Exclusive open (remote) | El servidor gestiona el lock, write sin lock explícito funciona |
+| Re-entrant lock | 2x `AdsLockRecord` mismo recno → 2x `AdsUnlockRecord` necesarios |
+
+### Tests nuevos
+
+| Test | Qué valida |
+|------|------------|
+| `AdsGetNumLocks returns 0 on freshly opened table` | Lock count starts at 0 |
+| `AdsGetNumLocks increments with each record lock` | Count increments/decrements correctly |
+| `AdsGetNumLocks does NOT count table lock` | Table lock is NOT counted |
+| `AdsGetAllLocks returns locked record numbers` | Returns {3,7,15} correctly |
+| `AdsGetAllLocks returns 0 count when table-locked` | Table lock doesn't appear |
+| `AdsIsTableLocked: no lock → FALSE, lock → TRUE` | Basic lock/unlock cycle |
+| `AdsIsTableLocked returns FALSE when only record-locked` | Record lock ≠ table lock |
+| `AdsTestRecLocks: diagnostic hook — always returns success` | Documents no-op behavior |
+| `AdsGetTableLockType: returns the open-mode lock type` | Shared vs Exclusive |
+| `Multi-record lock accumulation` | Lock 5, unlock reverse, verify count each step |
+| `Re-entrant record lock: two locks on same recno` | Need two unlocks |
+| `Closing a table releases all its record locks` | No locks after close+reopen |
+| `Lock on NTX table: lock and unlock record successfully` | NTX lock offsets work |
+| `Exclusive open: table is reported locked; record lock still needed for writes in local mode` | Documents local exclusive behavior |
+| `AdsIsRecordLocked: record 0 (current) vs explicit recno` | Current record vs explicit |
+| `Append auto-lock: GetNumLocks increments, then decrements on unlock` | Auto-lock + unlock cycle |
+| `Table lock and record locks coexist independently` | Coexistence of both lock types |
+| `AdsGetAllLocks: lock many records, verify all returned` | 5 locks, sorted compare |
+| `AdsIsRecordLocked on record 0 with no current record` | BOF state edge case |
+| `Lock retry: tight policy → contention resolved within expected window` | Timing of retry loop |
+| `Disconnect releases all locks on all tables` | Disconnect cleans up all locks |
+| `AdsIsRecordLocked after write+flush preserves lock state` | Write doesn't drop lock |
+
+### Pruebas completadas hoy
+
+| Suite | Resultado |
+|-------|-----------|
+| Lock tests locales (37 tests) | ✅ 37/37 passed (23 new + 14 existing) |
+| Total assertions lock | 511 passed, 0 failed |
+| Full test suite (smoke subset) | ✅ Sin regresiones |
+
+---
+
 ## 2026-07-01 — Investigación y fix del reporte FWH REMOTE
 
 ### Problema reportado

@@ -49,6 +49,7 @@ add_executable(openads_unit_tests
     unit/session_connection_test.cpp
     unit/abi_smoke_test.cpp
     unit/abi_write_smoke_test.cpp
+    unit/abi_pritpal_lock_test.cpp
     unit/ntx_index_test.cpp
     unit/cdx_index_test.cpp
     unit/engine_order_test.cpp
@@ -172,6 +173,7 @@ add_executable(openads_unit_tests
     unit/abi_remote_index_nav_test.cpp
     unit/abi_remote_prodcdx_test.cpp
     unit/abi_append_autolock_test.cpp
+    unit/abi_lock_comprehensive_test.cpp
     unit/abi_get_set_record_test.cpp
     unit/abi_set_relation_test.cpp
     unit/abi_record_crc_aof_test.cpp

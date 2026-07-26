@@ -1,4 +1,40 @@
-﻿## 1.8.31 - 2026-07-26
+﻿## 1.8.32 - 2026-07-26
+
+### Added - Comprehensive Lock Test Coverage
+
+New test suite (`abi_lock_comprehensive_test.cpp`) with 23 test cases
+covering previously untested lock API surfaces and edge cases.
+
+Tests added:
+- `AdsGetNumLocks` — counts record locks only (not table locks)
+- `AdsGetAllLocks` — returns array of locked record numbers
+- `AdsIsTableLocked` — reflects AdsLockTable only (not exclusive mode)
+- `AdsTestRecLocks` — documents no-op behavior (always returns 0)
+- `AdsGetTableLockType` — reports Shared vs Exclusive open mode
+- Multi-record lock accumulation and reverse-order unlock
+- Re-entrant record lock (2x lock requires 2x unlock)
+- Lock persistence across table close/reopen
+- Lock on NTX tables
+- Exclusive open behavior (local vs remote)
+- AdsIsRecordLocked on current record (0) vs explicit recno
+- Append auto-lock with GetNumLocks verification
+- Table lock + record lock coexistence
+- Lock retry policy timing verification
+- Disconnect releases all locks on all tables
+
+### Added - Remote Lock Contention Tests
+
+New test suite (`abi_pritpal_lock_test.cpp`) reproducing Pritpal Bedi's
+multi-instance lock scenarios over TCP:
+
+- Record lock contention: B's AdsLockRecord fails (does not hang)
+- Write without lock returns error 5035 (GoHot guard)
+- FLock contention: B's AdsLockTable fails after retries
+- Write with FLock succeeds without per-record lock
+- Exclusive open allows writes without lock (remote)
+- Freshly-appended record writable without explicit lock
+
+## 1.8.31 - 2026-07-26
 
 ### Added - Write-Guard (GoHot) Enforcement
 
