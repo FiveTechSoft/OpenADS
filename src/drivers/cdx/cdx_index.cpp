@@ -837,7 +837,8 @@ CdxIndex::seek_key(const std::string& key, bool soft) {
         int lo = 0, hi = nkeys - 1;
         while (lo < hi) {
             int mid = (lo + hi) >> 1;
-            const std::uint8_t* ek = base + CDX_INT_HEADSIZE + mid * stride;
+            const std::uint8_t* ek = base + CDX_INT_HEADSIZE +
+                static_cast<std::size_t>(mid) * stride;
             int cmp = compare_keys_(padded.data(), reinterpret_cast<const char*>(ek), cmp_len);
             if (cmp > 0)
                 lo = mid + 1;
