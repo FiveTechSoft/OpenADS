@@ -10150,6 +10150,21 @@ UNSIGNED32 ENTRYPOINT AdsGetRecordCount(ADSHANDLE hTable, UNSIGNED16 bFilterOpti
                 cdx->ordered_recnos_cached().size());
             return ok();
         }
+        if (auto* adi =
+                dynamic_cast<openads::drivers::adi::AdiIndex*>(idx)) {
+            // Native ADI tag: same rule as CDX — count the index walk, not
+            // the table, so a FOR-clause tag reports its matching subset.
+            const bool hide_del = t && !t->show_deleted_records();
+            const std::uint32_t saved_rn = t ? t->recno() : 0u;
+            std::uint32_t n = 0;
+            for (std::uint32_t rn : adi->ordered_recnos_cached()) {
+                if (!hide_del) { ++n; continue; }
+                if (t->goto_record(rn) && !t->is_deleted()) ++n;
+            }
+            *pulRecordCount = n;
+            if (hide_del && saved_rn != 0) (void)t->goto_record(saved_rn);
+            return ok();
+        }
     }
     // M10.31 / M10.32 — when SQL has materialised a traversal sequence
     // (DISTINCT / LIMIT / OFFSET / ORDER BY), report that sequence's
@@ -12726,7 +12741,10 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
     for (const auto& name : tags) {
         if (count >= cap) break;
         std::unique_ptr<openads::drivers::IIndex> sub;
-        if (is_adi) {
+        // A rerouted bag was listed through CdxIndex above, so it must be
+        // opened through CdxIndex too — handing a CDX-format .adi to the
+        // native AdiIndex reader fails and drops every tag on the floor.
+        if (is_adi && !adt_to_cdx) {
             auto idx = std::make_unique<openads::drivers::adi::AdiIndex>();
             if (auto r = idx->open_named(path,
                               openads::drivers::IndexOpenMode::Shared,
@@ -35221,6 +35239,23 @@ UNSIGNED32 ENTRYPOINT AdsGetKeyCount(ADSHANDLE hIndex, UNSIGNED16 /*usFilter*/,
                 *pulCount = static_cast<UNSIGNED32>(
                     adi->ordered_recnos_cached().size());
             }
+            return ok();
+        }
+        if (auto* adi =
+                dynamic_cast<openads::drivers::adi::AdiIndex*>(ord->index())) {
+            // Same reasoning for a native ADI tag: a v2 tag with a FOR clause
+            // holds only the matching rows, so falling through to the table's
+            // record_count() reported every row and broke OrdKeyCount on a
+            // conditional order (the ERP's ORD5 FOR cCorEnvEle != 'S').
+            const bool hide_del = !t->show_deleted_records();
+            const std::uint32_t saved_rn = t->recno();
+            std::uint32_t n = 0;
+            for (std::uint32_t rn : adi->ordered_recnos_cached()) {
+                if (!hide_del) { ++n; continue; }
+                if (t->goto_record(rn) && !t->is_deleted()) ++n;
+            }
+            *pulCount = n;
+            if (hide_del && saved_rn != 0) (void)t->goto_record(saved_rn);
             return ok();
         }
     }
