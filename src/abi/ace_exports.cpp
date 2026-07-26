@@ -12343,13 +12343,40 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
         }
     }
 
-    // Targeted for the common rddads pattern INDEX ON Val(charfield) seen in the repro for #130.
-    // If the expression string contains Val(, treat as numeric key (will be confirmed by evaluate in collection).
+    // Targeted for the common rddads pattern INDEX ON Val(charfield) (#130).
+    // The record-1 probe above cannot run on an empty table, so fall back to a
+    // syntactic test — but only when the WHOLE expression is that call.
+    //
+    // Testing for "VAL(" anywhere misfires on a CHARACTER key that merely
+    // contains one: `cDocumeTra+STR(VAL(cConIntTra),3,0)` is a concatenation
+    // producing text, and marking it numeric makes the build loop demand a
+    // number from it and fail with ADSCDX/5000 "failed to evaluate numeric
+    // index expression" partway through the table.
     if (is_cdx && !cdx_numeric_key) {
-        std::string u = expr;
-        for (char &c : u) c = static_cast<char>(toupper(static_cast<unsigned char>(c)));
-        if (u.find("VAL(") != std::string::npos) {
-            cdx_numeric_key = true;
+        std::string u;
+        u.reserve(expr.size());
+        for (char c : expr)
+            u.push_back(static_cast<char>(std::toupper(
+                static_cast<unsigned char>(c))));
+        while (!u.empty() && std::isspace(static_cast<unsigned char>(u.back())))
+            u.pop_back();
+        std::size_t b = 0;
+        while (b < u.size() && std::isspace(static_cast<unsigned char>(u[b])))
+            ++b;
+        u.erase(0, b);
+        if (u.rfind("VAL(", 0) == 0 && !u.empty() && u.back() == ')') {
+            // The ')' closing the leading VAL( must be the last character;
+            // otherwise the call is just one component of a bigger expression.
+            int depth = 0;
+            std::size_t close = std::string::npos;
+            for (std::size_t i = 3; i < u.size(); ++i) {   // u[3] == '('
+                if (u[i] == '(') {
+                    ++depth;
+                } else if (u[i] == ')') {
+                    if (--depth == 0) { close = i; break; }
+                }
+            }
+            if (close == u.size() - 1) cdx_numeric_key = true;
         }
     }
 
