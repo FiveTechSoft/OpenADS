@@ -12426,6 +12426,34 @@ make_index_for(const std::string& path) {
 
 } // extern "C++"
 
+namespace {
+// Route an ADT table's .adi bag through the CdxIndex engine (full evaluated
+// key + 32-bit recno), so compound / computed / FOR tags work over ADT the
+// same way they do over DBF. The file is then CDX-format even though it is
+// named .adi — only enable when those .ADI files are NOT interchanged with
+// real Advantage. Gate: env OPENADS_ADT_CDX_INDEX=1.
+bool adt_cdx_index_enabled() {
+    const char* e = std::getenv("OPENADS_ADT_CDX_INDEX");
+    return e != nullptr && e[0] == '1';
+}
+
+// A .adi bag written by the CdxIndex reroute carries the Harbour CDX structure
+// signature "RCHB" at byte offset 20 (see cdx_index.cpp); a native AdiIndex bag
+// does not. Detecting it lets the OPEN path pick the right engine REGARDLESS of
+// OPENADS_ADT_CDX_INDEX. Without this, a .adi built CDX-format (reroute on at
+// reindex) but opened with the flag absent routes to the native AdiIndex
+// reader, which cannot parse it -> 5004 -> the table opens with 0 indexes and
+// the first DBSETORDER/SEEK fails.
+bool adi_bag_is_cdx_format(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return false;
+    char hdr[24] = {0};
+    f.read(hdr, sizeof(hdr));
+    if (f.gcount() < 24) return false;
+    return hdr[20] == 'R' && hdr[21] == 'C' && hdr[22] == 'H' && hdr[23] == 'B';
+}
+} // namespace
+
 // Compare two filesystem paths for the "is this the same on-disk
 // file?" question. Falls back to a case-insensitive lexical compare
 // when canonical resolution fails (e.g. file doesn't exist yet).
@@ -12643,7 +12671,15 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
         // reopening takes the CDX path instead of misreading it as NTX.
         is_cdx = file_has_cdx_signature(path);
     }
-    if (is_cdx) {
+    // Open an ADT table's .adi through the CdxIndex engine when the env opt-in
+    // is set OR the bag on disk is already CDX-format (reroute-written). The
+    // format check makes OPEN robust to a missing env flag; it mirrors the
+    // create-side routing in AdsCreateIndex61.
+    const bool is_adt_tbl =
+        (dynamic_cast<openads::drivers::adt::AdtDriver*>(t->driver()) != nullptr);
+    const bool adt_to_cdx = is_adi && is_adt_tbl &&
+        (adt_cdx_index_enabled() || adi_bag_is_cdx_format(path));
+    if (is_cdx || adt_to_cdx) {
         auto r = openads::drivers::cdx::CdxIndex::list_tags(path);
         if (!r) return fail(r.error());
         tags = std::move(r).value();
@@ -13305,50 +13341,81 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
         exists = (is_cdx || is_adi) && fs::exists(p, ec);
     }
 
-    if (is_adi && is_adt_table) {
-        // ADT tables use a single .adi bag; each tag indexes one field.
+    // ADT table + .adi bag -> route to the CdxIndex engine when the env opt-in
+    // is set OR the bag already exists in CDX format (so adding a tag to a
+    // reroute-built bag stays CDX even with the flag absent — never mix formats
+    // in one bag). A fresh bag (the ERP erases the .adi before reindex) has no
+    // file, so the env flag decides the format to write.
+    const bool adt_to_cdx = is_adi && is_adt_table &&
+        (adt_cdx_index_enabled() ||
+         (std::filesystem::exists(p) && adi_bag_is_cdx_format(p.string())));
+
+    if (is_adi && is_adt_table && !adt_to_cdx) {
+        // ADT tables use a single .adi bag. Prefer bare field, but allow
+        // compound expressions (Russoft INDEX ON fld1+fld2 for .ADI) by
+        // falling back to first field for tag metadata. Keys are built from
+        // the full evaluated expr at population time.
         const std::string bare = openads::engine::strip_alias_qualifiers(expr);
         std::int32_t fidx = t->field_index(bare);
+        const bool is_compound = (fidx < 0);  // computed / multi-field expression
         if (fidx < 0) {
-            return fail(openads::AE_COLUMN_NOT_FOUND,
-                        "ADI index expression must be a bare field name");
+            fidx = 0;  // fallback for compound expr
         }
         if (fidx + 1 > 255) {
             return fail(openads::AE_INTERNAL_ERROR,
                         "ADI index does not support field numbers greater than 255");
         }
         const auto& fd = t->field_descriptor(static_cast<std::uint16_t>(fidx));
+        const std::uint16_t adt_t = static_cast<std::uint16_t>(
+            static_cast<unsigned char>(fd.raw_type));
+        const bool is_char_field =
+            adt_t == openads::drivers::adi::ADT_TYPE_CHAR ||
+            adt_t == openads::drivers::adi::ADT_TYPE_CICHAR;
+        // The v2 opaque-key leaf (full key stored, memcmp-ordered) is correct for
+        // char fields and ANY computed/compound expression — exactly what the ERP
+        // uses (STR()/DTOS()/concat → character keys). A BARE numeric/date field
+        // keeps the legacy numeric ADI leaf (sign-flipped float keys) so the
+        // existing packed-key seeks keep working.
+        const bool use_v2 = is_char_field || is_compound;
         openads::drivers::adi::AdiIndex::CreateParams cp{};
         cp.field_num   = static_cast<std::uint8_t>(fidx + 1);
         cp.field_name  = fd.name;
-        cp.adt_type    = static_cast<std::uint16_t>(
-            static_cast<unsigned char>(fd.raw_type));
+        cp.adt_type    = adt_t;
         cp.fld_length  = fd.length;
+        cp.record_offset = fd.record_offset;
         cp.adt_hdr_len = t->driver()->header_length();
         cp.adt_rec_len = t->driver()->record_length();
         cp.unique      = unique;
-        // Pass the real table path so a non-structural bag (its .adi stem
-        // differs from the table's) opens the correct companion ADT instead
-        // of deriving "<bag>.adt" from the index file name.
-        cp.adt_path    = t->path();
-
-        const bool is_char_key =
-            cp.adt_type == openads::drivers::adi::ADT_TYPE_CHAR ||
-            cp.adt_type == openads::drivers::adi::ADT_TYPE_CICHAR;
-        klen = is_char_key ? fd.length : 8;
+        cp.adt_path    = t->path();  // important for .DAT + ADS_ADT case (not .adt)
+        if (use_v2) {
+            // identity by NAME + persisted expression/FOR + full opaque key
+            // (klen stays the full evaluated-expression length; the build loop
+            // below evaluates the whole expression).
+            cp.tag_name    = tag;
+            cp.key_expr    = expr;
+            cp.for_expr    = for_expr;
+            cp.key_len     = static_cast<std::uint16_t>(klen);
+            cp.descending  = descend;
+        } else {
+            klen = 8;  // bare numeric/date → legacy numeric ADI leaf geometry
+        }
 
         if (exists) {
+            // v2 identity is the TAG name (list_tags returns tag names now);
+            // legacy callers without a tag_name fall back to the field name.
+            const std::string ident =
+                cp.tag_name.empty() ? fd.name : cp.tag_name;
             auto tags = openads::drivers::adi::AdiIndex::list_tags(
                 p.string(), t->path());
             bool have_tag = false;
             if (tags) {
                 for (const auto& tn : tags.value()) {
-                    if (tn.size() == fd.name.size()) {
+                    if (tn.size() == ident.size()) {
                         bool eq = true;
                         for (std::size_t i = 0; i < tn.size(); ++i) {
                             if (std::tolower(static_cast<unsigned char>(tn[i])) !=
                                 std::tolower(static_cast<unsigned char>(
-                                    fd.name[i]))) {
+                                    ident[i]))) {
                                 eq = false;
                                 break;
                             }
@@ -13361,7 +13428,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
                 openads::drivers::adi::AdiIndex existing;
                 auto reopen = existing.open_named(
                     p.string(), openads::drivers::IndexOpenMode::Shared,
-                    fd.name, t->path());
+                    ident, t->path());
                 if (!reopen) return fail(reopen.error());
                 if (auto cl = existing.clear_data(); !cl) return fail(cl.error());
                 idx_owner = std::make_unique<
@@ -13380,7 +13447,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
             idx_owner = std::make_unique<openads::drivers::adi::AdiIndex>(
                 std::move(created).value());
         }
-    } else if (is_cdx && exists) {
+    } else if ((is_cdx || adt_to_cdx) && exists) {
         // Harbour rddads / Clipper semantics: re-creating an
         // existing tag is a silent overwrite, not an error. If the
         // tag already exists, open it and clear its B+tree so the
@@ -13420,7 +13487,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
             idx_owner = std::make_unique<openads::drivers::cdx::CdxIndex>(
                 std::move(added).value());
         }
-    } else if (is_cdx) {
+    } else if (is_cdx || adt_to_cdx) {
         auto created = openads::drivers::cdx::CdxIndex::create(
             p.string(), tag, expr, klen, unique, descend, for_expr);
         if (!created) return fail(created.error());
