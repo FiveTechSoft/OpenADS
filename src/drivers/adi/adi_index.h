@@ -94,9 +94,12 @@ public:
     util::Result<void> open(const std::string& path, IndexOpenMode mode) override;
 
     std::string    name()       const override { return tag_name_; }
-    std::string    expression() const override { return tag_name_; }
+    std::string    expression() const override {
+        return tag_expr_.empty() ? tag_name_ : tag_expr_;
+    }
     std::string    file_path()  const override { return adi_path_; }
-    bool           descending() const override { return false; }
+    std::string    condition()  const override { return tag_cond_; }
+    bool           descending() const override { return descending_; }
     bool           unique()     const override { return unique_; }
     std::uint16_t  key_length() const override {
         return static_cast<std::uint16_t>(key_total_len_);
@@ -116,15 +119,23 @@ public:
                                const std::string& key) override;
     util::Result<void> flush() override;
 
-    // Logical-position cache for O(1) scrollbar / OrdKeyNo / OrdKeyCount.
-    // Walks the B-tree ONCE (lazily) into an ordered recno list + a
-    // recno->position map, reused until the index is modified.
+    // Number of index entries (keys). For a conditional (FOR) tag this is fewer
+    // than the table's record count. O(1) after the first call (uses the
+    // logical-position cache below).
+    util::Result<std::uint32_t> entry_count();
+
+    // Logical-position cache for the browse scrollbar math (mirrors CdxIndex):
+    // ordered_recnos_cached() is the recno list in key order; pos_of_recno_cached
+    // maps a recno to its 0-based position. Built lazily by walking the dense-leaf
+    // chain once (O(n)); then AdsGetKeyNum / GetRelKeyPos / SetRelKeyPos are O(1)
+    // per paint instead of an O(n) index walk (which froze large browses).
+    // Invalidated on insert / erase / clear_data / build_bulk.
     const std::vector<std::uint32_t>& ordered_recnos_cached();
     std::uint32_t pos_of_recno_cached(std::uint32_t recno);
     void invalidate_pos_cache() {
         pos_cache_valid_ = false;
-        pos_recnos_.clear();
-        pos_map_.clear();
+        ordered_recnos_.clear();
+        pos_of_recno_.clear();
     }
 
     // Parameters for writing a fresh single-tag .adi skeleton.
@@ -136,6 +147,16 @@ public:
         std::uint32_t adt_hdr_len = 0;   // ADT header length (bytes 32..35)
         std::uint32_t adt_rec_len = 0;   // ADT record length
         bool          unique      = false;
+        std::uint16_t record_offset = 0; // record offset of the (first) field (for fallback without re-opening ADT file)
+        // v2 (OpenADS-proprietary) tag metadata — persisted in the per-tag
+        // header so tag identity is by NAME and the key expression / FOR
+        // condition survive a reopen (the legacy format only stored a field
+        // number). key_len is the full evaluated-key length (ACE klen).
+        std::string   tag_name;          // tag name (e.g. "ORD1"); identity key in v2
+        std::string   key_expr;          // index key expression (e.g. cA+cB / DTOS(d))
+        std::string   for_expr;          // FOR condition (empty = unconditional)
+        std::uint16_t key_len     = 0;   // full key length (klen from ACE)
+        bool          descending  = false;
         // Full path of the ADT table this index belongs to. Required for a
         // NON-STRUCTURAL bag, whose .adi stem differs from the table's (the
         // `INDEX ON ... TAG ... TO <other path>` form). When empty, the
@@ -157,7 +178,15 @@ public:
 
     // Wipe the B+tree for this tag (root dense leaf count → 0) so a
     // CREATE INDEX overwrite can rebuild from scratch.
-    util::Result<void> clear_data();
+    util::Result<void> clear_data() override;
+
+    // Bulk-load the (v2) tag from a key set in one bottom-up pass (sort → pack
+    // dense leaves → build branch levels), far faster than per-record insert on
+    // a full REINDEX. Only the v2 opaque-key leaf is supported; a legacy
+    // (field-derived) tag falls back to the per-record default. Call clear_data
+    // first / use on a fresh tag.
+    util::Result<void> build_bulk(
+        std::vector<std::pair<std::string, std::uint32_t>> keys) override;
 
     // Multi-tag API (mirrors CdxIndex). adt_path is the owning table's path;
     // when empty the companion ADT is derived from the .adi stem (structural
@@ -170,20 +199,6 @@ public:
                                   IndexOpenMode       mode,
                                   const std::string&  field_name,
                                   const std::string&  adt_path = {});
-
-    // Create a new ADI file with one tag (expression = comma-separated column names).
-    // On return the AdiIndex is positioned on that tag and ready for inserts.
-    static util::Result<AdiIndex> create(const std::string& adi_path,
-                                         const std::string& adt_path,
-                                         const std::string& expression,
-                                         bool               unique);
-
-    // Add a new tag to an existing ADI file.
-    // On return the AdiIndex is positioned on the new tag and ready for inserts.
-    static util::Result<AdiIndex> add_tag(const std::string& adi_path,
-                                           const std::string& adt_path,
-                                           const std::string& expression,
-                                           bool               unique);
 
 private:
     // Read / write a 512-byte page from/to the ADI file
@@ -215,6 +230,23 @@ private:
     // Load the dense leaf at page_no into cur_page_ and update cursor metadata
     util::Result<void> load_dense_leaf_(std::uint32_t page_no);
 
+    // Adopt an already-read dense-leaf page as the cursor's current leaf: sets
+    // cur_pg_/cur_cnt_/cur_lsib_/cur_rsib_ and, for a v2 tag, decodes the
+    // front-coded entries into leaf_entries_ (legacy tags leave it empty).
+    void adopt_leaf_page_(std::uint32_t page_no, const Page& pg);
+
+    // Render a v2 front-coded dense-leaf page (header + sub-header + entries)
+    // from a key-ordered run. Returns false if the run overflows one page
+    // (the caller must split first).
+    bool render_v2_leaf_(
+        Page& pg,
+        const std::vector<std::pair<std::uint32_t, std::string>>& ents,
+        std::uint32_t lsib, std::uint32_t rsib) const;
+
+    // v2 (front-coded) erase: decode the owning leaf, drop (recno,key),
+    // re-encode (or unlink an emptied page). ikey must already be klen bytes.
+    util::Result<void> erase_v2_(std::uint32_t recno, const std::string& ikey);
+
     // Navigate to the first (leftmost) entry of the B-tree
     util::Result<SeekOutcome> navigate_leftmost_();
 
@@ -236,7 +268,7 @@ private:
     std::uint32_t branch_entry_page_(const std::uint8_t* pg, int idx) const noexcept;
 
     // Compare two keys.  For numeric keys 8-byte memcmp; for char keys
-    // key_total_len_ bytes (memcmp; CICHAR case-insensitivity deferred).
+    // key_total_len_ bytes, with CICHAR components folded (see below).
     int compare_keys_(const std::string& a, const std::string& b) const noexcept;
 
     // CICHAR collation: return a comparison-normalized copy of a key with
@@ -257,7 +289,8 @@ private:
         const std::vector<std::uint16_t>& fd_lengths,
         const std::vector<std::string>&   fd_names,
         std::uint32_t hlen, std::uint32_t rlen,
-        bool unique);
+        bool unique,
+        std::uint32_t v2_key_len = 0);  // >0 → v2 leaf (recno4B + opaque key)
 
 
     // Open mode (set by open / open_named)
@@ -269,7 +302,10 @@ private:
     std::string     adi_path_;
 
     // Tag metadata (primary / first-component field)
-    std::string     tag_name_;        // ADT field name of first component
+    std::string     tag_name_;        // v2: tag name; legacy: ADT field name
+    std::string     tag_expr_;        // v2: key expression (empty in legacy)
+    std::string     tag_cond_;        // v2: FOR condition (empty = unconditional)
+    bool            descending_ = false;
     std::uint32_t   root_page_  = 0;
     std::uint16_t   adt_type_   = 0;  // type of first-component field
     std::uint16_t   fld_offset_ = 0;  // offset of first-component field in ADT record
@@ -293,8 +329,27 @@ private:
     std::uint32_t   adt_hdr_len_ = 0;
     std::uint32_t   adt_rec_len_ = 0;
 
+    // v2 (OpenADS-proprietary) leaf: dense entries store [recno 4B][full key],
+    // so navigation/seek read the key from the leaf (no ADT re-read) and recno
+    // is 4 bytes. false = legacy field-derived leaf.
+    bool            key_in_leaf_ = false;
+
+    // Logical-position cache (recno-in-key-order + reverse map). entry_count()
+    // is its size. Invalidated via invalidate_pos_cache().
+    std::vector<std::uint32_t>                          ordered_recnos_;
+    std::unordered_map<std::uint32_t, std::uint32_t>    pos_of_recno_;
+    bool                                                pos_cache_valid_ = false;
+
+    // v2 front-coded dense leaf decoded into (recno, full key) pairs in key
+    // order — the in-memory image of the current leaf. Populated by
+    // adopt_leaf_page_ for v2 tags; empty for legacy field-derived leaves
+    // (which are read directly from cur_page_ with the fixed entry_size_).
+    std::vector<std::pair<std::uint32_t, std::string>> leaf_entries_;
+
     // Dense-leaf cursor
-    std::uint32_t   entry_size_ = 3;  // dense_entry_size(fld_length_)
+    std::uint32_t   entry_size_ = 3;  // legacy: dense_entry_size(); v2 leaf is
+                                      // front-coded (variable) — entry_size_ is
+                                      // unused on the v2 path.
     std::uint32_t   cur_pg_    = ADI_INVALID_PAGE;
     std::int32_t    cur_idx_   = -1;
     std::uint16_t   cur_cnt_   = 0;
@@ -304,8 +359,6 @@ private:
     std::string     current_key_;
     Page            cur_page_{};
 
-    std::vector<std::uint32_t>                       pos_recnos_;
-    std::unordered_map<std::uint32_t, std::uint32_t> pos_map_;
     bool                                             pos_cache_valid_ = false;
 };
 

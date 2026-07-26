@@ -86,6 +86,33 @@ public:
     virtual util::Result<void> erase (std::uint32_t recno,
                                       const std::string& key) = 0;
     virtual util::Result<void> flush() = 0;
+
+    // Reset the index to empty so a caller (REINDEX / PACK) can rebuild it.
+    // Default: collect every entry then erase it (works for any IIndex).
+    // CdxIndex / AdiIndex override with an O(1)-ish structural reset.
+    virtual util::Result<void> clear_data() {
+        std::vector<std::pair<std::uint32_t, std::string>> entries;
+        auto s = seek_first();
+        while (s && s.value().positioned) {
+            entries.emplace_back(s.value().recno, current_key());
+            s = next();
+        }
+        for (auto& kv : entries) {
+            if (auto e = erase(kv.first, kv.second); !e) return e.error();
+        }
+        return {};
+    }
+
+    // Bulk-load (key, recno) pairs into a freshly-cleared index. Default:
+    // per-record insert. CdxIndex / AdiIndex override with a bottom-up bulk
+    // build (~10x faster on a full REINDEX). Call clear_data() first.
+    virtual util::Result<void>
+    build_bulk(std::vector<std::pair<std::string, std::uint32_t>> keys) {
+        for (auto& kv : keys) {
+            if (auto e = insert(kv.second, kv.first); !e) return e.error();
+        }
+        return {};
+    }
 };
 
 } // namespace openads::drivers

@@ -52,12 +52,135 @@ void set_u32_be(std::uint8_t* p, std::uint32_t v) noexcept {
 }
 
 // Dense entry recno from a raw byte buffer (not a Page), given 0-based idx.
+// v2 leaf entry (esz >= 4: recno[4 LE] + key[klen]) carries a 4-byte recno
+// (supports >65535 records). Legacy entries are 2 or 3 bytes (recno 2B / 1B).
 std::uint32_t dense_recno_from_buf(const std::uint8_t* base, std::uint32_t idx,
                                    std::uint32_t esz) noexcept {
     const std::uint8_t* e = base + idx * esz;
+    if (esz >= 4)
+        return static_cast<std::uint32_t>(e[0])
+             | (static_cast<std::uint32_t>(e[1]) << 8)
+             | (static_cast<std::uint32_t>(e[2]) << 16)
+             | (static_cast<std::uint32_t>(e[3]) << 24);
     if (esz >= 3)
         return static_cast<std::uint32_t>(e[0]) | (static_cast<std::uint32_t>(e[1]) << 8);
     return e[0];
+}
+
+// v2 dense-leaf entry key: klen opaque bytes right after the 4-byte recno.
+// The full evaluated key lives in the leaf, so navigation/seek never re-read
+// the ADT record (and compound/computed keys work without an evaluator).
+std::string dense_entry_key_from_buf(const std::uint8_t* base, std::uint32_t idx,
+                                     std::uint32_t esz,
+                                     std::uint32_t klen) noexcept {
+    return std::string(reinterpret_cast<const char*>(base + idx * esz + 4), klen);
+}
+
+// ── Front-coding codec for the v2 dense leaf ─────────────────────────────────
+// A v2 dense leaf stores VARIABLE-length entries, each front-coded against the
+// PREVIOUS entry to elide the shared key prefix (SAP-style dup/trail), so the
+// .adi reaches parity with ADS-SAP (~3x smaller than storing the full key per
+// entry). On-disk entry, from ADI_DENSE_ENTRY_START, in key order:
+//   recno[4 LE] + dup[1] + suffix[(klen - dup) bytes]
+//   dup    = number of leading bytes shared with the previous entry (0 = first)
+//   suffix = key[dup .. klen]
+// Reconstruction:  key = prev_key[0..dup] + suffix. The recno stays at offset 0
+// of every entry. dup is a single byte, so the shared prefix is capped at 254;
+// a wider key just front-codes less (still correct).
+
+// Bytes of shared prefix between two klen-length keys, as written by the codec.
+std::uint8_t fc_dup(const char* prev, const char* cur,
+                    std::uint32_t klen) noexcept {
+    const std::uint32_t cap = klen < 254u ? klen : 254u;
+    std::uint32_t d = 0;
+    while (d < cap && prev[d] == cur[d]) ++d;
+    return static_cast<std::uint8_t>(d);
+}
+
+// Encode key-ordered (recno, key) entries into `body` (at most `cap` bytes).
+// Each key must already be exactly klen bytes. Returns bytes written, or 0 if
+// the set does not fit in cap (the caller then splits). An empty set writes 0.
+std::size_t fc_encode_leaf(
+        const std::vector<std::pair<std::uint32_t, std::string>>& es,
+        std::uint32_t klen, std::uint8_t* body, std::size_t cap) noexcept {
+    std::size_t off = 0;
+    const char* prev = nullptr;
+    for (const auto& e : es) {
+        const char* k = e.second.data();
+        std::uint8_t dup = prev ? fc_dup(prev, k, klen) : std::uint8_t{0};
+        std::size_t suffix_len = static_cast<std::size_t>(klen) - dup;
+        std::size_t need = 5u + suffix_len;
+        if (off + need > cap) return 0;
+        body[off]     = static_cast<std::uint8_t>( e.first        & 0xFFu);
+        body[off + 1] = static_cast<std::uint8_t>((e.first >>  8) & 0xFFu);
+        body[off + 2] = static_cast<std::uint8_t>((e.first >> 16) & 0xFFu);
+        body[off + 3] = static_cast<std::uint8_t>((e.first >> 24) & 0xFFu);
+        body[off + 4] = dup;
+        std::memcpy(body + off + 5, k + dup, suffix_len);
+        off += need;
+        prev = k;
+    }
+    return off;
+}
+
+// Decode `count` front-coded entries from `body` into `out` (recno, full key).
+void fc_decode_leaf(const std::uint8_t* body, std::uint16_t count,
+                    std::uint32_t klen,
+                    std::vector<std::pair<std::uint32_t, std::string>>& out) {
+    out.clear();
+    out.reserve(count);  // reserve up front: keeps the prev pointer below valid
+    const std::string* prev = nullptr;
+    std::size_t off = 0;
+    for (std::uint16_t i = 0; i < count; ++i) {
+        std::uint32_t recno =
+              static_cast<std::uint32_t>(body[off])
+            | (static_cast<std::uint32_t>(body[off + 1]) <<  8)
+            | (static_cast<std::uint32_t>(body[off + 2]) << 16)
+            | (static_cast<std::uint32_t>(body[off + 3]) << 24);
+        std::uint32_t dup = body[off + 4];
+        if (dup > klen) dup = klen;  // defensive against a corrupt dup byte
+        std::size_t suffix_len = static_cast<std::size_t>(klen) - dup;
+        std::string key;
+        key.reserve(klen);
+        if (dup && prev) key.assign(*prev, 0, dup);
+        key.append(reinterpret_cast<const char*>(body + off + 5), suffix_len);
+        if (key.size() < klen) key.append(klen - key.size(), ' ');
+        out.emplace_back(recno, std::move(key));
+        prev = &out.back().second;
+        off += 5u + suffix_len;
+    }
+}
+
+// Choose a split index in [1, n-1] so BOTH halves front-code within cap, as
+// balanced as possible. Returns 0 only when no single-page split exists (one
+// entry alone exceeds cap — a degenerate, far-too-wide key).
+std::size_t fc_pick_split(
+        const std::vector<std::pair<std::uint32_t, std::string>>& es,
+        std::uint32_t klen, std::size_t cap) noexcept {
+    const std::size_t n = es.size();
+    if (n < 2) return 0;
+    // The first entry of a leaf always costs 5+klen (dup=0); a later entry i
+    // costs 5 + (klen - dup(i-1,i)). size([lo,hi)) = first_cost + Σ inc(lo+1..hi-1).
+    const std::size_t first_cost = 5u + klen;
+    std::vector<std::size_t> pref(n, 0);  // pref[i] = Σ_{j=1..i} inc(j)
+    for (std::size_t i = 1; i < n; ++i) {
+        std::uint8_t dup = fc_dup(es[i - 1].second.data(),
+                                  es[i].second.data(), klen);
+        pref[i] = pref[i - 1] + (5u + (static_cast<std::size_t>(klen) - dup));
+    }
+    auto fits = [&](std::size_t lo, std::size_t hi) {
+        return first_cost + (pref[hi - 1] - pref[lo]) <= cap;
+    };
+    const std::size_t mid = n / 2;
+    for (std::size_t d = 0; d < n; ++d) {
+        std::size_t up = mid + d;
+        if (up >= 1 && up <= n - 1 && fits(0, up) && fits(up, n)) return up;
+        if (mid >= d) {
+            std::size_t dn = mid - d;
+            if (dn >= 1 && dn <= n - 1 && fits(0, dn) && fits(dn, n)) return dn;
+        }
+    }
+    return 0;
 }
 
 platform::OpenMode map_open_mode(IndexOpenMode m) noexcept {
@@ -134,6 +257,11 @@ std::uint32_t dense_entry_recno(const std::uint8_t* pg, int idx,
                                 std::uint32_t entry_sz) noexcept {
     const std::uint8_t* e = pg + ADI_DENSE_ENTRY_START
                             + static_cast<std::uint32_t>(idx) * entry_sz;
+    if (entry_sz >= 4)  // v2: recno[4 LE] + key[klen]
+        return static_cast<std::uint32_t>(e[0])
+             | (static_cast<std::uint32_t>(e[1]) << 8)
+             | (static_cast<std::uint32_t>(e[2]) << 16)
+             | (static_cast<std::uint32_t>(e[3]) << 24);
     if (entry_sz >= 3)
         return static_cast<std::uint32_t>(e[0]) | (static_cast<std::uint32_t>(e[1]) << 8);
     return e[0];  // 2-byte entry: recno in byte 0, byte 1 is key-flags
@@ -324,11 +452,83 @@ std::vector<std::uint8_t> parse_fmarker_all(const AdiIndex::Page& pg) {
     return result;
 }
 
+// ── v2 (OpenADS-proprietary) per-tag metadata ────────────────────────────────
+// Stored in the per-tag header page (page XX). Gives tag identity by NAME and
+// persists the key expression + FOR condition + full key length across reopen
+// (the legacy format only stored an F-marker field number). Region lives at
+// offsets 40..495, clear of the legacy control bytes (0..23) and footer
+// (506/510). Pages without the magic are legacy and fall back to field identity.
+constexpr std::uint16_t ADI_V2_MAGIC      = 0xAD32;
+constexpr std::size_t   ADI_V2_OFF_MAGIC  = 40;   // u16 LE magic
+constexpr std::size_t   ADI_V2_OFF_KEYLEN = 42;   // u16 LE full key length (klen)
+constexpr std::size_t   ADI_V2_OFF_FLAGS  = 44;   // u8: bit0 unique, bit1 descending
+constexpr std::size_t   ADI_V2_OFF_NLEN   = 48;   // u16 LE len(tag_name)
+constexpr std::size_t   ADI_V2_OFF_ELEN   = 50;   // u16 LE len(key_expr)
+constexpr std::size_t   ADI_V2_OFF_FLEN   = 52;   // u16 LE len(for_expr)
+constexpr std::size_t   ADI_V2_OFF_STRS   = 64;   // tag_name | key_expr | for_expr
+constexpr std::size_t   ADI_V2_STRS_MAX   = 431;  // 64..495 inclusive
+
+struct AdiV2Meta {
+    bool          has = false;
+    std::string   tag_name, key_expr, for_expr;
+    std::uint16_t key_len = 0;
+    bool          unique = false, descending = false;
+};
+
+void write_adi_v2_meta(AdiIndex::Page& pg,
+                       const AdiIndex::CreateParams& cp) noexcept {
+    // Only stamp the v2 region when the caller actually supplied v2 data (the
+    // ERP / ACE path sets key_len + tag_name). Legacy callers leave it absent so
+    // the page reads as a pure field-identity legacy tag.
+    if (cp.key_len == 0 && cp.tag_name.empty()) return;
+    std::string nm = cp.tag_name, ke = cp.key_expr, fe = cp.for_expr;
+    if (nm.size() > 63) nm.resize(63);
+    if (nm.size() + ke.size() + fe.size() > ADI_V2_STRS_MAX) {
+        if (ke.size() > 254) ke.resize(254);
+        std::size_t used = nm.size() + ke.size();
+        std::size_t room = used < ADI_V2_STRS_MAX ? ADI_V2_STRS_MAX - used : 0;
+        if (fe.size() > room) fe.resize(room);
+    }
+    set_u16_le(pg.data() + ADI_V2_OFF_MAGIC, ADI_V2_MAGIC);
+    set_u16_le(pg.data() + ADI_V2_OFF_KEYLEN, cp.key_len);
+    std::uint8_t flags = 0;
+    if (cp.unique)     flags |= 0x01u;
+    if (cp.descending) flags |= 0x02u;
+    pg[ADI_V2_OFF_FLAGS] = flags;
+    set_u16_le(pg.data() + ADI_V2_OFF_NLEN, static_cast<std::uint16_t>(nm.size()));
+    set_u16_le(pg.data() + ADI_V2_OFF_ELEN, static_cast<std::uint16_t>(ke.size()));
+    set_u16_le(pg.data() + ADI_V2_OFF_FLEN, static_cast<std::uint16_t>(fe.size()));
+    std::size_t o = ADI_V2_OFF_STRS;
+    std::memcpy(pg.data() + o, nm.data(), nm.size()); o += nm.size();
+    std::memcpy(pg.data() + o, ke.data(), ke.size()); o += ke.size();
+    std::memcpy(pg.data() + o, fe.data(), fe.size());
+}
+
+AdiV2Meta read_adi_v2_meta(const AdiIndex::Page& pg) noexcept {
+    AdiV2Meta m;
+    if (u16_le(pg.data() + ADI_V2_OFF_MAGIC) != ADI_V2_MAGIC) return m;
+    std::size_t nl = u16_le(pg.data() + ADI_V2_OFF_NLEN);
+    std::size_t el = u16_le(pg.data() + ADI_V2_OFF_ELEN);
+    std::size_t fl = u16_le(pg.data() + ADI_V2_OFF_FLEN);
+    if (nl + el + fl > ADI_V2_STRS_MAX) return m;  // corrupt → treat as legacy
+    m.has        = true;
+    m.key_len    = u16_le(pg.data() + ADI_V2_OFF_KEYLEN);
+    std::uint8_t flags = pg[ADI_V2_OFF_FLAGS];
+    m.unique     = (flags & 0x01u) != 0;
+    m.descending = (flags & 0x02u) != 0;
+    std::size_t o = ADI_V2_OFF_STRS;
+    m.tag_name.assign(reinterpret_cast<const char*>(pg.data() + o), nl); o += nl;
+    m.key_expr.assign(reinterpret_cast<const char*>(pg.data() + o), el); o += el;
+    m.for_expr.assign(reinterpret_cast<const char*>(pg.data() + o), fl);
+    return m;
+}
+
 // One entry in the tag directory scan result.
 struct TagEntry {
     std::vector<std::uint8_t> fnums;  // 1-based field numbers (≥1 element)
     std::uint32_t             root_pg;
     bool                      unique = false;  // bit 0 of byte[14] in per-tag header page
+    AdiV2Meta                 v2;               // v2 metadata (v2.has == false in legacy)
 };
 
 // Scan tag directory (page 2) and return all tag entries.
@@ -362,12 +562,18 @@ scan_tagdir(platform::File& adi_f) {
         auto fnums = parse_fmarker_all(fmk.value());
         if (fnums.empty()) continue;
 
-        // Per-tag header is at page xx. Byte[14] bit 0 = unique flag.
+        // Per-tag header is at page xx. Byte[14] bit 0 = unique flag; the v2
+        // region (if present) carries tag name / expr / FOR / klen.
         bool uniq = false;
+        AdiV2Meta v2;
         auto hdr_pg = read_one_page(adi_f, static_cast<std::uint32_t>(xx));
-        if (hdr_pg) uniq = (hdr_pg.value()[14] & 0x01u) != 0;
+        if (hdr_pg) {
+            uniq = (hdr_pg.value()[14] & 0x01u) != 0;
+            v2 = read_adi_v2_meta(hdr_pg.value());
+            if (v2.has) uniq = v2.unique;
+        }
 
-        tags.push_back({std::move(fnums), root_pg, uniq});
+        tags.push_back({std::move(fnums), root_pg, uniq, std::move(v2)});
     }
     return tags;
 }
@@ -389,14 +595,48 @@ util::Result<void> AdiIndex::read_adi_page_(std::uint32_t page_no,
 
 // ── AdiIndex::load_dense_leaf_ ───────────────────────────────────────────────
 
+// Defined later in this file; needed by render_v2_leaf_ below.
+void write_empty_dense_leaf_page(AdiIndex::Page& pg, std::uint16_t adt_type,
+                                 std::uint16_t fld_length) noexcept;
+
 util::Result<void> AdiIndex::load_dense_leaf_(std::uint32_t page_no) {
-    if (auto r = read_adi_page_(page_no, cur_page_); !r) return r;
-    cur_pg_   = page_no;
-    cur_cnt_  = page_count(cur_page_.data());
-    cur_lsib_ = page_lsib(cur_page_.data());
-    cur_rsib_ = page_rsib(cur_page_.data());
-    cur_idx_  = -1;
+    Page pg{};
+    if (auto r = read_adi_page_(page_no, pg); !r) return r;
+    adopt_leaf_page_(page_no, pg);
     return {};
+}
+
+// ── AdiIndex::adopt_leaf_page_ ───────────────────────────────────────────────
+
+void AdiIndex::adopt_leaf_page_(std::uint32_t page_no, const Page& pg) {
+    cur_page_ = pg;
+    cur_pg_   = page_no;
+    cur_cnt_  = page_count(pg.data());
+    cur_lsib_ = page_lsib(pg.data());
+    cur_rsib_ = page_rsib(pg.data());
+    cur_idx_  = -1;
+    if (key_in_leaf_)
+        fc_decode_leaf(pg.data() + ADI_DENSE_ENTRY_START, cur_cnt_,
+                       key_total_len_, leaf_entries_);
+    else
+        leaf_entries_.clear();
+}
+
+// ── AdiIndex::render_v2_leaf_ ────────────────────────────────────────────────
+
+bool AdiIndex::render_v2_leaf_(
+        Page& pg,
+        const std::vector<std::pair<std::uint32_t, std::string>>& ents,
+        std::uint32_t lsib, std::uint32_t rsib) const {
+    // Header + sub-header (and a zeroed body so any unused tail stays clean).
+    write_empty_dense_leaf_page(pg, adt_type_, fld_length_);
+    set_u16_le(pg.data() + 2, static_cast<std::uint16_t>(ents.size()));
+    set_u32_le(pg.data() + 4, lsib);
+    set_u32_le(pg.data() + 8, rsib);
+    std::size_t n = fc_encode_leaf(ents, key_total_len_,
+                                   pg.data() + ADI_DENSE_ENTRY_START,
+                                   ADI_PAGE_SIZE - ADI_DENSE_ENTRY_START);
+    return ents.empty() || n > 0;  // n==0 with a non-empty run = page overflow
 }
 
 // ── AdiIndex::refresh_current_ ───────────────────────────────────────────────
@@ -408,11 +648,77 @@ util::Result<void> AdiIndex::refresh_current_() {
         current_key_.clear();
         return {};
     }
+    if (key_in_leaf_) {
+        // v2: the decoded front-coded leaf is the source of truth.
+        if (static_cast<std::size_t>(cur_idx_) >= leaf_entries_.size()) {
+            cur_recno_ = 0;
+            current_key_.clear();
+            return {};
+        }
+        cur_recno_   = leaf_entries_[cur_idx_].first;
+        current_key_ = leaf_entries_[cur_idx_].second;
+        return {};
+    }
     cur_recno_ = dense_entry_recno(cur_page_.data(), cur_idx_, entry_size_);
     auto k = key_for_recno_(cur_recno_);
     if (!k) return k.error();
     current_key_ = std::move(k).value();
     return {};
+}
+
+// ── AdiIndex::entry_count ────────────────────────────────────────────────────
+
+const std::vector<std::uint32_t>& AdiIndex::ordered_recnos_cached() {
+    if (pos_cache_valid_) return ordered_recnos_;
+    ordered_recnos_.clear();
+    pos_of_recno_.clear();
+    // Descend to the leftmost dense leaf.
+    Page pg{};
+    std::uint32_t cur = root_page_;
+    for (;;) {
+        if (!read_adi_page_(cur, pg)) { pos_cache_valid_ = true; return ordered_recnos_; }
+        if (is_dense_leaf(page_level(pg.data()))) break;
+        if (page_count(pg.data()) == 0) { pos_cache_valid_ = true; return ordered_recnos_; }
+        cur = branch_entry_page_(pg.data(), 0);
+    }
+    // Walk the dense-leaf chain left-to-right, collecting recnos in key order.
+    std::uint32_t guard = 0;
+    while (cur != ADI_INVALID_PAGE) {
+        if (!read_adi_page_(cur, pg)) break;
+        std::uint16_t cnt = page_count(pg.data());
+        if (key_in_leaf_) {
+            // v2: front-coded leaf — decode to recover recnos in key order.
+            std::vector<std::pair<std::uint32_t, std::string>> ents;
+            fc_decode_leaf(pg.data() + ADI_DENSE_ENTRY_START, cnt,
+                           key_total_len_, ents);
+            for (const auto& e : ents) {
+                pos_of_recno_[e.first] =
+                    static_cast<std::uint32_t>(ordered_recnos_.size());
+                ordered_recnos_.push_back(e.first);
+            }
+        } else {
+            for (std::uint16_t i = 0; i < cnt; ++i) {
+                std::uint32_t rn = dense_entry_recno(pg.data(), i, entry_size_);
+                pos_of_recno_[rn] =
+                    static_cast<std::uint32_t>(ordered_recnos_.size());
+                ordered_recnos_.push_back(rn);
+            }
+        }
+        cur = page_rsib(pg.data());
+        if (++guard > (1u << 24)) break;  // anti-loop on a corrupt rsib chain
+    }
+    pos_cache_valid_ = true;
+    return ordered_recnos_;
+}
+
+std::uint32_t AdiIndex::pos_of_recno_cached(std::uint32_t recno) {
+    ordered_recnos_cached();  // ensure built
+    auto it = pos_of_recno_.find(recno);
+    return it == pos_of_recno_.end() ? 0xFFFFFFFFu : it->second;
+}
+
+util::Result<std::uint32_t> AdiIndex::entry_count() {
+    return static_cast<std::uint32_t>(ordered_recnos_cached().size());
 }
 
 // ── AdiIndex::branch_entry_page_ ────────────────────────────────────────────
@@ -508,12 +814,8 @@ util::Result<SeekOutcome> AdiIndex::navigate_leftmost_() {
             SeekOutcome o; o.hit = SeekHit::AfterEnd; return o;
         }
         if (is_dense_leaf(lv)) {
-            cur_page_ = pg;
-            cur_pg_   = cur;
-            cur_cnt_  = ct;
-            cur_lsib_ = page_lsib(pg.data());
-            cur_rsib_ = page_rsib(pg.data());
-            cur_idx_  = 0;
+            adopt_leaf_page_(cur, pg);
+            cur_idx_ = 0;
             if (auto r = refresh_current_(); !r) return r.error();
             return make_positioned_();
         }
@@ -535,12 +837,8 @@ util::Result<SeekOutcome> AdiIndex::navigate_rightmost_() {
             SeekOutcome o; o.hit = SeekHit::AfterEnd; return o;
         }
         if (is_dense_leaf(lv)) {
-            cur_page_ = pg;
-            cur_pg_   = cur;
-            cur_cnt_  = ct;
-            cur_lsib_ = page_lsib(pg.data());
-            cur_rsib_ = page_rsib(pg.data());
-            cur_idx_  = static_cast<std::int32_t>(ct) - 1;
+            adopt_leaf_page_(cur, pg);
+            cur_idx_ = static_cast<std::int32_t>(cur_cnt_) - 1;
             if (auto r = refresh_current_(); !r) return r.error();
             return make_positioned_();
         }
@@ -560,7 +858,8 @@ util::Result<void> AdiIndex::apply_tag_(
     const std::vector<std::uint16_t>& fd_lengths,
     const std::vector<std::string>&   fd_names,
     std::uint32_t hlen, std::uint32_t rlen,
-    bool unique)
+    bool unique,
+    std::uint32_t v2_key_len)
 {
     if (fnums.empty())
         return util::Error{5004, 0, "ADI tag has no field numbers", ""};
@@ -611,6 +910,19 @@ util::Result<void> AdiIndex::apply_tag_(
         char_key_padded_len_ = 0;
         branch_entry_sz_     = ADI_TREE_ENTRY_SIZE;
     }
+
+    // v2 leaf: opaque full key stored in the leaf (recno 4B + klen key). The key
+    // is the ACE-evaluated expression key, ordered by memcmp — reuse the char
+    // branch machinery (full key + 4-byte child page), drop the field-derived
+    // geometry. key_for_recno_ is no longer consulted for navigation.
+    if (v2_key_len > 0) {
+        key_in_leaf_         = true;
+        char_key_            = true;
+        key_total_len_       = v2_key_len;
+        entry_size_          = 4u + v2_key_len;
+        char_key_padded_len_ = (v2_key_len + 3u) & ~3u;
+        branch_entry_sz_     = char_key_padded_len_ + 8u;
+    }
     return {};
 }
 
@@ -646,8 +958,17 @@ util::Result<void> AdiIndex::open(const std::string& path, IndexOpenMode mode) {
         lengths.push_back(fd.length);
         names.push_back(fd.name);
     }
-    return apply_tag_(tag.fnums, tag.root_pg, types, offsets, lengths, names,
-                      hlen, rlen, tag.unique);
+    if (auto r = apply_tag_(tag.fnums, tag.root_pg, types, offsets, lengths,
+                            names, hlen, rlen, tag.unique,
+                            tag.v2.has ? tag.v2.key_len : 0u); !r)
+        return r;
+    if (tag.v2.has) {
+        tag_name_   = tag.v2.tag_name;
+        tag_expr_   = tag.v2.key_expr;
+        tag_cond_   = tag.v2.for_expr;
+        descending_ = tag.v2.descending;
+    }
+    return {};
 }
 
 util::Result<void> AdiIndex::open_named(const std::string& adi_path,
@@ -691,13 +1012,28 @@ util::Result<void> AdiIndex::open_named(const std::string& adi_path,
     }
 
     for (const auto& tag : tags.value()) {
-        if (tag.fnums.empty()) continue;
-        std::uint8_t fnum = tag.fnums[0];
-        if (fnum == 0 || fnum > static_cast<unsigned>(fields.value().size())) continue;
-        const auto& fd = fields.value()[fnum - 1];
-        if (!name_eq(fd.name, field_name)) continue;
-        return apply_tag_(tag.fnums, tag.root_pg, types, offsets, lengths, names,
-                          hlen, rlen, tag.unique);
+        // v2: identity by tag NAME (the requested name is the tag name).
+        // Legacy: resolve the F-marker field's name.
+        bool match = false;
+        if (tag.v2.has && !tag.v2.tag_name.empty()) {
+            match = name_eq(tag.v2.tag_name, field_name);
+        } else if (!tag.fnums.empty()) {
+            std::uint8_t fnum = tag.fnums[0];
+            if (fnum != 0 && fnum <= static_cast<unsigned>(fields.value().size()))
+                match = name_eq(fields.value()[fnum - 1].name, field_name);
+        }
+        if (!match) continue;
+        if (auto r = apply_tag_(tag.fnums, tag.root_pg, types, offsets, lengths,
+                                names, hlen, rlen, tag.unique,
+                                tag.v2.has ? tag.v2.key_len : 0u); !r)
+            return r;
+        if (tag.v2.has) {
+            tag_name_   = tag.v2.tag_name;
+            tag_expr_   = tag.v2.key_expr;
+            tag_cond_   = tag.v2.for_expr;
+            descending_ = tag.v2.descending;
+        }
+        return {};
     }
     return util::Error{5004, 0, "ADI tag not found: " + field_name, adi_path};
 }
@@ -725,6 +1061,12 @@ AdiIndex::list_tags(const std::string& adi_path, const std::string& adt_path) {
     std::vector<std::string> names;
     names.reserve(tags.value().size());
     for (const auto& tag : tags.value()) {
+        // v2: identity by tag NAME (lets N tags share a field). Legacy: the
+        // resolved field name.
+        if (tag.v2.has && !tag.v2.tag_name.empty()) {
+            names.push_back(tag.v2.tag_name);
+            continue;
+        }
         if (tag.fnums.empty()) continue;
         std::uint8_t fnum = tag.fnums[0];
         if (fnum == 0 || fnum > static_cast<unsigned>(fields.value().size())) continue;
@@ -901,15 +1243,23 @@ util::Result<SeekOutcome> AdiIndex::seek_key(const std::string& key, bool soft) 
     if (auto r = load_dense_leaf_(dense_pg); !r) return r.error();
 
     for (int i = 0; i < static_cast<int>(cur_cnt_); ++i) {
-        std::uint32_t rno = dense_entry_recno(cur_page_.data(), i, entry_size_);
-        auto ck = key_for_recno_(rno);
-        if (!ck) return ck.error();
-        int cmp = compare_keys_(ck.value(), nkey);
+        std::uint32_t rno;
+        std::string ckv;
+        if (key_in_leaf_) {
+            rno = leaf_entries_[i].first;
+            ckv = leaf_entries_[i].second;
+        } else {
+            rno = dense_entry_recno(cur_page_.data(), i, entry_size_);
+            auto ck = key_for_recno_(rno);
+            if (!ck) return ck.error();
+            ckv = std::move(ck).value();
+        }
+        int cmp = compare_keys_(ckv, nkey);
         if (cmp > 0) {
             if (soft) {
                 cur_idx_     = i;
                 cur_recno_   = rno;
-                current_key_ = std::move(ck).value();
+                current_key_ = std::move(ckv);
                 SeekOutcome o;
                 o.hit        = SeekHit::AfterKey;
                 o.recno      = cur_recno_;
@@ -921,7 +1271,7 @@ util::Result<SeekOutcome> AdiIndex::seek_key(const std::string& key, bool soft) 
         if (cmp == 0) {
             cur_idx_     = i;
             cur_recno_   = rno;
-            current_key_ = std::move(ck).value();
+            current_key_ = std::move(ckv);
             return make_positioned_();
         }
     }
@@ -979,6 +1329,18 @@ util::Result<std::uint32_t> AdiIndex::alloc_page_() {
 
 void AdiIndex::build_dense_entry_(std::uint8_t* dst, std::uint32_t recno,
                                   const std::string& ikey) const noexcept {
+    if (key_in_leaf_) {
+        // v2: recno[4 LE] + key[key_total_len_] (the full evaluated key).
+        dst[0] = static_cast<std::uint8_t>( recno        & 0xFFu);
+        dst[1] = static_cast<std::uint8_t>((recno >>  8) & 0xFFu);
+        dst[2] = static_cast<std::uint8_t>((recno >> 16) & 0xFFu);
+        dst[3] = static_cast<std::uint8_t>((recno >> 24) & 0xFFu);
+        std::size_t n = std::min<std::size_t>(key_total_len_, ikey.size());
+        std::memcpy(dst + 4, ikey.data(), n);
+        if (n < key_total_len_)
+            std::memset(dst + 4 + n, ' ', key_total_len_ - n);  // pad char key
+        return;
+    }
     if (entry_size_ >= 3) {
         dst[0] = static_cast<std::uint8_t>(recno);
         dst[1] = static_cast<std::uint8_t>(recno >> 8);
@@ -1234,6 +1596,97 @@ util::Result<void> AdiIndex::insert(std::uint32_t recno,
 
     std::uint16_t leaf_lv  = page_level(pg.data());
     std::uint16_t leaf_cnt = page_count(pg.data());
+
+    // ── v2 front-coded leaf: decode → ordered insert → re-encode (or split) ──
+    if (key_in_leaf_) {
+        std::vector<std::pair<std::uint32_t, std::string>> ents;
+        fc_decode_leaf(pg.data() + ADI_DENSE_ENTRY_START, leaf_cnt,
+                       key_total_len_, ents);
+
+        // Insertion position by (key, recno) — the same order navigation uses.
+        std::size_t pos = 0;
+        while (pos < ents.size()) {
+            int cmp = compare_keys_(ents[pos].second, ikey);
+            if (cmp < 0 || (cmp == 0 && ents[pos].first < recno)) ++pos;
+            else break;
+        }
+        ents.insert(ents.begin() + static_cast<std::ptrdiff_t>(pos), {recno, ikey});
+
+        const std::uint32_t orig_lsib = page_lsib(pg.data());
+        const std::uint32_t orig_rsib = page_rsib(pg.data());
+
+        // Fits in this page?  Re-encode in place.
+        Page np{};
+        if (render_v2_leaf_(np, ents, orig_lsib, orig_rsib)) {
+            if (auto r = write_adi_page_(cur, np); !r) return r;
+            if (cur_pg_ == cur) {
+                cur_page_     = np;
+                leaf_entries_ = std::move(ents);
+                cur_cnt_      = static_cast<std::uint16_t>(leaf_entries_.size());
+                if (cur_idx_ >= static_cast<std::int32_t>(pos)) ++cur_idx_;
+            }
+            return {};
+        }
+
+        // Overflow → split the run into two front-coded leaves.
+        const std::size_t cap = ADI_PAGE_SIZE - ADI_DENSE_ENTRY_START;
+        std::size_t mid = fc_pick_split(ents, key_total_len_, cap);
+        if (mid == 0)
+            return util::Error{5000, 0, "ADI v2 leaf: key too wide to split", ""};
+        std::vector<std::pair<std::uint32_t, std::string>>
+            left(ents.begin(), ents.begin() + static_cast<std::ptrdiff_t>(mid)),
+            right(ents.begin() + static_cast<std::ptrdiff_t>(mid), ents.end());
+        std::string left_max  = left.back().second;
+        std::string right_max = right.back().second;
+
+        if (path.empty()) {
+            // Root is the dense leaf: two fresh pages, root becomes a branch.
+            // Allocate+write left BEFORE allocating right (alloc grows the file).
+            auto lp = alloc_page_(); if (!lp) return lp.error();
+            std::uint32_t left_pg = lp.value();
+            Page lpg{};
+            if (!render_v2_leaf_(lpg, left, orig_lsib, ADI_INVALID_PAGE))
+                return util::Error{5000, 0, "ADI v2 split: left overflow", ""};
+            if (auto r = write_adi_page_(left_pg, lpg); !r) return r;
+            auto rp = alloc_page_(); if (!rp) return rp.error();
+            std::uint32_t right_pg = rp.value();
+            set_u32_le(lpg.data() + 8, right_pg);          // patch left.rsib
+            if (auto r = write_adi_page_(left_pg, lpg); !r) return r;
+            Page rpg{};
+            if (!render_v2_leaf_(rpg, right, left_pg, orig_rsib))
+                return util::Error{5000, 0, "ADI v2 split: right overflow", ""};
+            if (auto r = write_adi_page_(right_pg, rpg); !r) return r;
+            if (orig_rsib != ADI_INVALID_PAGE) {
+                Page rsib{};
+                if (auto r = read_adi_page_(orig_rsib, rsib); !r) return r;
+                set_u32_le(rsib.data() + 4, right_pg);
+                if (auto r = write_adi_page_(orig_rsib, rsib); !r) return r;
+            }
+            cur_pg_ = ADI_INVALID_PAGE; cur_idx_ = -1; cur_cnt_ = 0;
+            return promote_split_(path, left_pg, left_max, right_pg, right_max);
+        }
+
+        // Non-root: left half stays in `cur`, right half goes to a new page.
+        auto rp = alloc_page_(); if (!rp) return rp.error();
+        std::uint32_t right_pg = rp.value();
+        Page lpg{};
+        if (!render_v2_leaf_(lpg, left, orig_lsib, right_pg))
+            return util::Error{5000, 0, "ADI v2 split: left overflow", ""};
+        if (auto r = write_adi_page_(cur, lpg); !r) return r;
+        Page rpg{};
+        if (!render_v2_leaf_(rpg, right, cur, orig_rsib))
+            return util::Error{5000, 0, "ADI v2 split: right overflow", ""};
+        if (auto r = write_adi_page_(right_pg, rpg); !r) return r;
+        if (orig_rsib != ADI_INVALID_PAGE) {
+            Page rsib{};
+            if (auto r = read_adi_page_(orig_rsib, rsib); !r) return r;
+            set_u32_le(rsib.data() + 4, right_pg);
+            if (auto r = write_adi_page_(orig_rsib, rsib); !r) return r;
+        }
+        cur_pg_ = ADI_INVALID_PAGE; cur_idx_ = -1; cur_cnt_ = 0;
+        return promote_split_(path, cur, left_max, right_pg, right_max);
+    }
+
     const std::uint32_t max_ents =
         (ADI_PAGE_SIZE - ADI_DENSE_ENTRY_START) / entry_size_;
 
@@ -1244,9 +1697,17 @@ util::Result<void> AdiIndex::insert(std::uint32_t recno,
         while (lo < hi) {
             int mid = (lo + hi) / 2;
             std::uint32_t mrec = dense_entry_recno(pg.data(), mid, entry_size_);
-            auto mk = key_for_recno_(mrec);
-            if (!mk) return mk.error();
-            int cmp = compare_keys_(mk.value(), ikey);
+            std::string mkv;
+            if (key_in_leaf_) {
+                mkv = dense_entry_key_from_buf(pg.data() + ADI_DENSE_ENTRY_START,
+                                               static_cast<std::uint32_t>(mid),
+                                               entry_size_, key_total_len_);
+            } else {
+                auto mk = key_for_recno_(mrec);
+                if (!mk) return mk.error();
+                mkv = std::move(mk).value();
+            }
+            int cmp = compare_keys_(mkv, ikey);
             if (cmp < 0 || (cmp == 0 && mrec < recno)) lo = mid + 1;
             else hi = mid;
         }
@@ -1339,15 +1800,25 @@ util::Result<void> AdiIndex::insert(std::uint32_t recno,
         cur_pg_ = ADI_INVALID_PAGE; cur_idx_ = -1; cur_cnt_ = 0;
 
         // Get max keys then rewrite root as branch.
-        auto left_max = key_for_recno_(dense_recno_from_buf(
-            combo.data(), lft_cnt - 1, entry_size_));
-        if (!left_max) return left_max.error();
-        auto right_max = key_for_recno_(dense_recno_from_buf(
-            combo.data(), total - 1, entry_size_));
-        if (!right_max) return right_max.error();
+        std::string left_max, right_max;
+        if (key_in_leaf_) {
+            left_max  = dense_entry_key_from_buf(combo.data(), lft_cnt - 1,
+                                                 entry_size_, key_total_len_);
+            right_max = dense_entry_key_from_buf(combo.data(), total - 1,
+                                                 entry_size_, key_total_len_);
+        } else {
+            auto lm = key_for_recno_(dense_recno_from_buf(
+                combo.data(), lft_cnt - 1, entry_size_));
+            if (!lm) return lm.error();
+            auto rm = key_for_recno_(dense_recno_from_buf(
+                combo.data(), total - 1, entry_size_));
+            if (!rm) return rm.error();
+            left_max = std::move(lm).value();
+            right_max = std::move(rm).value();
+        }
 
-        return promote_split_(path, left_pg,  left_max.value(),
-                                    right_pg, right_max.value());
+        return promote_split_(path, left_pg,  left_max,
+                                    right_pg, right_max);
     }
 
     // Non-root split: left half stays in cur, right half goes to new page.
@@ -1393,15 +1864,25 @@ util::Result<void> AdiIndex::insert(std::uint32_t recno,
         }
     }
 
-    auto left_max = key_for_recno_(dense_recno_from_buf(
-        combo.data(), lft_cnt - 1, entry_size_));
-    if (!left_max) return left_max.error();
-    auto right_max = key_for_recno_(dense_recno_from_buf(
-        combo.data(), total - 1, entry_size_));
-    if (!right_max) return right_max.error();
+    std::string left_max, right_max;
+    if (key_in_leaf_) {
+        left_max  = dense_entry_key_from_buf(combo.data(), lft_cnt - 1,
+                                             entry_size_, key_total_len_);
+        right_max = dense_entry_key_from_buf(combo.data(), total - 1,
+                                             entry_size_, key_total_len_);
+    } else {
+        auto lm = key_for_recno_(dense_recno_from_buf(
+            combo.data(), lft_cnt - 1, entry_size_));
+        if (!lm) return lm.error();
+        auto rm = key_for_recno_(dense_recno_from_buf(
+            combo.data(), total - 1, entry_size_));
+        if (!rm) return rm.error();
+        left_max = std::move(lm).value();
+        right_max = std::move(rm).value();
+    }
 
-    return promote_split_(path, cur,      left_max.value(),
-                                right_pg, right_max.value());
+    return promote_split_(path, cur,      left_max,
+                                right_pg, right_max);
 }
 
 // ── AdiIndex::erase ──────────────────────────────────────────────────────────
@@ -1421,6 +1902,8 @@ util::Result<void> AdiIndex::erase(std::uint32_t recno, const std::string& key) 
     } else {
         ikey.resize(8, '\0');
     }
+
+    if (key_in_leaf_) return erase_v2_(recno, ikey);
 
     // Seek to the correct dense leaf (soft=true: positions at or after key).
     auto sk = seek_key(ikey, /*soft=*/true);
@@ -1482,6 +1965,78 @@ util::Result<void> AdiIndex::erase(std::uint32_t recno, const std::string& key) 
             }
         }
         // Not on this leaf: advance to right sibling.
+        if (cur_rsib_ == ADI_INVALID_PAGE) break;
+        if (auto r = load_dense_leaf_(cur_rsib_); !r) return r.error();
+        cur_idx_ = 0;
+    }
+    return util::Error{5044, 0, "ADI: key not found for erase", ""};
+}
+
+// ── AdiIndex::erase_v2_ ──────────────────────────────────────────────────────
+
+util::Result<void> AdiIndex::erase_v2_(std::uint32_t recno,
+                                       const std::string& ikey) {
+    // Position at/after the key; seek_key decodes the owning leaf into
+    // leaf_entries_ and leaves cur_idx_ on the first entry >= ikey.
+    auto sk = seek_key(ikey, /*soft=*/true);
+    if (!sk) return sk.error();
+    if (sk.value().hit == SeekHit::AfterEnd || !sk.value().positioned)
+        return util::Error{5044, 0, "ADI: key not found for erase", ""};
+
+    for (;;) {
+        if (cur_pg_ == ADI_INVALID_PAGE) break;
+        for (std::size_t i = static_cast<std::size_t>(cur_idx_ < 0 ? 0 : cur_idx_);
+             i < leaf_entries_.size(); ++i) {
+            int cmp = compare_keys_(leaf_entries_[i].second, ikey);
+            if (cmp > 0)
+                return util::Error{5044, 0, "ADI: key not found for erase", ""};
+            if (cmp == 0 && leaf_entries_[i].first == recno) {
+                const std::uint32_t write_pg = cur_pg_;
+                const std::uint32_t lsib = cur_lsib_;
+                const std::uint32_t rsib = cur_rsib_;
+                std::vector<std::pair<std::uint32_t, std::string>> ents =
+                    leaf_entries_;
+                ents.erase(ents.begin() + static_cast<std::ptrdiff_t>(i));
+
+                if (ents.empty()) {
+                    // Bypass the now-empty leaf in the sibling chain, then write
+                    // it back empty (abandoned in place, like the legacy erase).
+                    if (lsib != ADI_INVALID_PAGE) {
+                        Page lp{};
+                        if (auto r = read_adi_page_(lsib, lp); !r) return r;
+                        set_u32_le(lp.data() + 8, rsib);
+                        if (auto r = write_adi_page_(lsib, lp); !r) return r;
+                    }
+                    if (rsib != ADI_INVALID_PAGE) {
+                        Page rp{};
+                        if (auto r = read_adi_page_(rsib, rp); !r) return r;
+                        set_u32_le(rp.data() + 4, lsib);
+                        if (auto r = write_adi_page_(rsib, rp); !r) return r;
+                    }
+                    Page ep{};
+                    render_v2_leaf_(ep, ents, lsib, rsib);  // count=0
+                    if (auto r = write_adi_page_(write_pg, ep); !r) return r;
+                    cur_pg_ = ADI_INVALID_PAGE;
+                    cur_idx_ = -1;
+                    cur_cnt_ = 0;
+                    leaf_entries_.clear();
+                    return {};
+                }
+
+                Page np{};
+                if (!render_v2_leaf_(np, ents, lsib, rsib))
+                    return util::Error{5000, 0, "ADI v2 erase: render overflow", ""};
+                if (auto r = write_adi_page_(write_pg, np); !r) return r;
+                cur_page_     = np;
+                leaf_entries_ = std::move(ents);
+                cur_cnt_      = static_cast<std::uint16_t>(leaf_entries_.size());
+                if (cur_idx_ > static_cast<std::int32_t>(i)) --cur_idx_;
+                if (cur_idx_ >= static_cast<std::int32_t>(cur_cnt_))
+                    cur_idx_ = static_cast<std::int32_t>(cur_cnt_) - 1;
+                return {};
+            }
+        }
+        // Key may continue on the right sibling.
         if (cur_rsib_ == ADI_INVALID_PAGE) break;
         if (auto r = load_dense_leaf_(cur_rsib_); !r) return r.error();
         cur_idx_ = 0;
@@ -1574,6 +2129,9 @@ void write_adi_per_tag_header_page(AdiIndex::Page& pg,
     pg[17] = 0x04;
     pg[506] = 0x01;
     pg[510] = 0x03;
+    // v2 metadata (tag name / key expr / FOR / klen). Additive: legacy readers
+    // ignore offsets 40..495; v2 readers prefer it over the F-marker identity.
+    write_adi_v2_meta(pg, cp);
 }
 
 void write_fmarker_page(AdiIndex::Page& pg, std::uint8_t field_num) noexcept {
@@ -1627,6 +2185,27 @@ util::Result<AdiIndex> AdiIndex::create(const std::string& adi_path,
     if (params.adt_hdr_len < 400 || params.adt_rec_len == 0)
         return util::Error{5004, 0, "ADI create: invalid ADT layout", ""};
 
+    // Ensure the parent directory for the .ADI exists. In some PRG contexts
+    // (different cPatTem, temp copies, or path construction in _Indexar),
+    // the index bag path may point to a dir that wasn't explicitly created.
+    // This makes creation more robust (real ADS would also need the dir).
+    {
+        namespace fs = std::filesystem;
+        fs::path ap(adi_path);
+        fs::path par = ap.parent_path();
+        if (!par.empty()) {
+            std::error_code ec;
+            fs::create_directories(par, ec);
+            // ignore ec; if it fails the subsequent open will report it
+        }
+    }
+
+    // Remove any existing file (stale from previous failed attempt may be locked or partial).
+    {
+        std::error_code ec;
+        std::filesystem::remove(adi_path, ec);
+    }
+
     auto fres = platform::File::open(adi_path, platform::OpenMode::CreateRW);
     if (!fres) return fres.error();
     platform::File file = std::move(fres).value();
@@ -1673,38 +2252,61 @@ util::Result<AdiIndex> AdiIndex::create(const std::string& adi_path,
     // caller-supplied table path when present, else the structural default.
     std::string adt_p = params.adt_path.empty()
         ? adt_path_for(adi_path) : params.adt_path;
-    auto fa = platform::File::open(adt_p, platform::OpenMode::ReadOnly);
-    if (!fa) return fa.error();
-    ix.adt_file_ = std::move(fa).value();
-
-    std::vector<std::uint16_t> types(1, params.adt_type);
-    std::vector<std::uint16_t> offsets(1, 0);
-    std::vector<std::uint16_t> lengths(1, params.fld_length);
-    std::vector<std::string>   names(1, params.field_name);
-
     std::uint32_t hlen = params.adt_hdr_len, rlen = params.adt_rec_len;
-    auto fields = read_adt_fields(ix.adt_file_, hlen, rlen);
-    if (!fields) return fields.error();
 
-    types.clear();
-    offsets.clear();
-    lengths.clear();
-    names.clear();
-    for (const auto& fd : fields.value()) {
+    auto fa = platform::File::open(adt_p, platform::OpenMode::ReadOnly);
+    std::vector<AdtFieldDesc> fields_vec;
+    if (fa) {
+        ix.adt_file_ = std::move(fa).value();
+        auto fields = read_adt_fields(ix.adt_file_, hlen, rlen);
+        if (fields) {
+            fields_vec = std::move(fields).value();
+        }
+    }
+    if (fields_vec.empty()) {
+        // Fallback when re-opening the ADT data file fails (e.g. share/lock
+        // issues with .DAT + ADS_ADT, or path casing). Use the info from
+        // CreateParams (populated from the already-open Table).
+        AdtFieldDesc fd;
+        fd.type = params.adt_type;
+        fd.offset = params.record_offset;
+        fd.length = params.fld_length;
+        fd.name = params.field_name;
+        fields_vec.push_back(fd);
+    }
+
+    std::vector<std::uint16_t> types;
+    std::vector<std::uint16_t> offsets;
+    std::vector<std::uint16_t> lengths;
+    std::vector<std::string>   names;
+    for (const auto& fd : fields_vec) {
         types.push_back(fd.type);
         offsets.push_back(fd.offset);
         lengths.push_back(fd.length);
         names.push_back(fd.name);
     }
 
+    // Always try to have adt_file_ open for later key_for_recno_ during insert and navigation.
+    if (!fa) {
+        auto fa2 = platform::File::open(adt_p, platform::OpenMode::ReadOnly);
+        if (fa2) {
+            ix.adt_file_ = std::move(fa2).value();
+        }
+    }
+
     std::vector<std::uint8_t> fnums{params.field_num};
     constexpr std::uint32_t kRootPage = 5;
     if (auto r = ix.apply_tag_(fnums, kRootPage, types, offsets, lengths, names,
-                               params.adt_hdr_len, params.adt_rec_len,
-                               params.unique);
+                               hlen, rlen,
+                               params.unique, params.key_len);
         !r) {
         return r.error();
     }
+    // v2 identity / expression in memory (matches what was persisted on disk).
+    if (!params.tag_name.empty()) ix.tag_name_ = params.tag_name;
+    ix.tag_expr_   = params.key_expr;
+    ix.tag_cond_   = params.for_expr;
+    ix.descending_ = params.descending;
     return ix;
 }
 
@@ -1744,21 +2346,25 @@ util::Result<AdiIndex> AdiIndex::add_tag(const std::string& adi_path,
     if (!fres) return fres.error();
     platform::File file = std::move(fres).value();
 
-    auto existing = list_tags(adi_path);
+    // Dedup by TAG NAME in v2 (lets N tags share a field, e.g. ORD1/ORD3/ORD4
+    // all over field 0); legacy callers without a tag_name dedup by field name.
+    const std::string& dedup_key =
+        params.tag_name.empty() ? params.field_name : params.tag_name;
+    auto existing = list_tags(adi_path, params.adt_path);
     if (!existing) return existing.error();
     for (const auto& tn : existing.value()) {
-        if (tn.size() != params.field_name.size()) continue;
+        if (tn.size() != dedup_key.size()) continue;
         bool eq = true;
         for (std::size_t i = 0; i < tn.size(); ++i) {
             if (std::tolower(static_cast<unsigned char>(tn[i])) !=
-                std::tolower(static_cast<unsigned char>(params.field_name[i]))) {
+                std::tolower(static_cast<unsigned char>(dedup_key[i]))) {
                 eq = false;
                 break;
             }
         }
         if (eq) {
             return util::Error{5044, 0,
-                "ADI already has a tag for field: " + params.field_name, ""};
+                "ADI already has a tag: " + dedup_key, ""};
         }
     }
 
@@ -1860,11 +2466,186 @@ util::Result<AdiIndex> AdiIndex::add_tag(const std::string& adi_path,
 
     std::vector<std::uint8_t> fnums{params.field_num};
     if (auto r = ix.apply_tag_(fnums, root_pg, types, offsets, lengths, names,
-                               hlen, rlen, params.unique);
+                               hlen, rlen, params.unique, params.key_len);
         !r) {
         return r.error();
     }
+    if (!params.tag_name.empty()) ix.tag_name_ = params.tag_name;
+    ix.tag_expr_   = params.key_expr;
+    ix.tag_cond_   = params.for_expr;
+    ix.descending_ = params.descending;
     return ix;
+}
+
+// ── AdiIndex::build_bulk ─────────────────────────────────────────────────────
+
+util::Result<void> AdiIndex::build_bulk(
+    std::vector<std::pair<std::string, std::uint32_t>> keys) {
+    if (mode_ == IndexOpenMode::ReadOnly)
+        return util::Error{5000, 0, "ADI index is read-only", ""};
+
+    if (!key_in_leaf_) {
+        // Legacy field-derived tag has no in-leaf key to bulk-pack; fall back to
+        // the per-record path (the empty tree was already prepared by the caller).
+        for (auto& kv : keys)
+            if (auto e = insert(kv.second, kv.first); !e) return e.error();
+        return {};
+    }
+
+    const std::uint32_t klen = key_total_len_;
+    // Sort by (key, recno): opaque memcmp on klen bytes, recno tie-break — the
+    // SAME order the per-record insert produces, so navigation is identical.
+    auto norm = [klen](const std::string& s) {
+        std::string k = s;
+        if (k.size() < klen) k.append(klen - k.size(), ' ');
+        else k.resize(klen);
+        return k;
+    };
+    for (auto& kv : keys) kv.first = norm(kv.first);
+    std::sort(keys.begin(), keys.end(),
+              [](const std::pair<std::string, std::uint32_t>& a,
+                 const std::pair<std::string, std::uint32_t>& b) {
+                  if (a.first != b.first) return a.first < b.first;
+                  return a.second < b.second;
+              });
+
+    // Seed the position cache directly from the sorted set (no re-walk needed).
+    invalidate_pos_cache();
+    ordered_recnos_.reserve(keys.size());
+    for (const auto& kv : keys) {
+        pos_of_recno_[kv.second] = static_cast<std::uint32_t>(ordered_recnos_.size());
+        ordered_recnos_.push_back(kv.second);
+    }
+    pos_cache_valid_ = true;
+
+    if (keys.empty()) return clear_data();
+
+    const std::size_t cap = ADI_PAGE_SIZE - ADI_DENSE_ENTRY_START;
+
+    // Partition the sorted keys into front-coded leaf runs: greedily extend a
+    // run while its encoded size stays within one page (always ≥1 entry/leaf).
+    // The per-leaf entry count is now VARIABLE — compression decides how many
+    // keys fit, so we can't slice by a fixed max_leaf any more.
+    std::vector<std::pair<std::size_t, std::size_t>> runs;  // [lo, hi)
+    {
+        const std::size_t n = keys.size();
+        std::size_t lo = 0;
+        while (lo < n) {
+            std::size_t sz = 5u + klen;          // first entry of a leaf: dup=0
+            std::size_t hi = lo + 1;
+            while (hi < n) {
+                std::uint8_t dup = fc_dup(keys[hi - 1].first.data(),
+                                          keys[hi].first.data(), klen);
+                std::size_t add = 5u + (static_cast<std::size_t>(klen) - dup);
+                if (sz + add > cap) break;
+                sz += add;
+                ++hi;
+            }
+            runs.push_back({lo, hi});
+            lo = hi;
+        }
+    }
+
+    auto write_leaf_run = [&](std::uint32_t page_no, std::size_t lo, std::size_t hi,
+                              std::uint32_t lsib, std::uint32_t rsib)
+            -> util::Result<std::string> {
+        std::vector<std::pair<std::uint32_t, std::string>> ents;
+        ents.reserve(hi - lo);
+        for (std::size_t i = lo; i < hi; ++i)
+            ents.emplace_back(keys[i].second, keys[i].first);
+        Page pg{};
+        if (!render_v2_leaf_(pg, ents, lsib, rsib))
+            return util::Error{5000, 0, "ADI build_bulk: leaf run overflow", ""};
+        if (auto w = write_adi_page_(page_no, pg); !w) return w.error();
+        return keys[hi - 1].first;  // max key of this leaf (already klen padded)
+    };
+
+    // Single dense leaf fits in the root.
+    if (runs.size() == 1) {
+        auto mk = write_leaf_run(root_page_, 0, keys.size(),
+                                 ADI_INVALID_PAGE, ADI_INVALID_PAGE);
+        if (!mk) return mk.error();
+        cur_pg_ = ADI_INVALID_PAGE; cur_idx_ = -1;
+        return {};
+    }
+
+    // Multi-level: build leaves in NEW pages (linked), then branch levels, with
+    // the TOP node written into root_page_ (the tag-directory-derived root, so a
+    // reopen finds it without a stored pointer).
+    struct Node { std::string max_key; std::uint32_t page; };
+    std::vector<Node> level;
+    {
+        const std::size_t nleaves = runs.size();
+        std::vector<std::uint32_t> pages(nleaves);
+        for (std::size_t i = 0; i < nleaves; ++i) {
+            auto p = alloc_page_(); if (!p) return p.error();
+            pages[i] = p.value();
+        }
+        level.reserve(nleaves);
+        for (std::size_t i = 0; i < nleaves; ++i) {
+            std::uint32_t lsib = (i == 0) ? ADI_INVALID_PAGE : pages[i - 1];
+            std::uint32_t rsib = (i + 1 < nleaves) ? pages[i + 1] : ADI_INVALID_PAGE;
+            auto mk = write_leaf_run(pages[i], runs[i].first, runs[i].second,
+                                     lsib, rsib);
+            if (!mk) return mk.error();
+            level.push_back({std::move(mk).value(), pages[i]});
+        }
+    }
+
+    const std::uint32_t max_branch =
+        (ADI_PAGE_SIZE - ADI_TREE_ENTRY_START) / branch_entry_sz_;
+    if (max_branch < 2)
+        return util::Error{5000, 0, "ADI build_bulk: branch fanout < 2 (key too wide)", ""};
+
+    auto write_branch = [&](std::uint32_t page_no, const std::vector<Node>& lv,
+                            std::size_t lo, std::size_t hi)
+            -> util::Result<std::string> {
+        Page pg{};
+        set_u16_le(pg.data(), ADI_LVL_BRANCH);
+        set_u16_le(pg.data() + 2, static_cast<std::uint16_t>(hi - lo));
+        set_u32_le(pg.data() + 4, ADI_INVALID_PAGE);
+        set_u32_le(pg.data() + 8, ADI_INVALID_PAGE);
+        for (std::size_t i = lo; i < hi; ++i) {
+            std::uint8_t* dst = pg.data() + ADI_TREE_ENTRY_START
+                              + (i - lo) * branch_entry_sz_;
+            std::memset(dst, 0, branch_entry_sz_);  // padded_key + cum[4]=0 + page[4]
+            const std::string& k = lv[i].max_key;
+            std::memcpy(dst, k.data(), std::min<std::size_t>(klen, k.size()));
+            std::uint8_t* pp = dst + char_key_padded_len_ + 4;
+            std::uint32_t pno = lv[i].page;
+            pp[0] = static_cast<std::uint8_t>( pno        & 0xFFu);
+            pp[1] = static_cast<std::uint8_t>((pno >>  8) & 0xFFu);
+            pp[2] = static_cast<std::uint8_t>((pno >> 16) & 0xFFu);
+            pp[3] = static_cast<std::uint8_t>((pno >> 24) & 0xFFu);
+        }
+        if (auto w = write_adi_page_(page_no, pg); !w) return w.error();
+        return lv[hi - 1].max_key;
+    };
+
+    // Reduce branch levels until the top fits in one page → write it at root_page_.
+    while (level.size() > max_branch) {
+        std::vector<Node> next;
+        const std::size_t m = level.size();
+        const std::size_t nbr = (m + max_branch - 1) / max_branch;
+        std::vector<std::uint32_t> pages(nbr);
+        for (std::size_t i = 0; i < nbr; ++i) {
+            auto p = alloc_page_(); if (!p) return p.error();
+            pages[i] = p.value();
+        }
+        next.reserve(nbr);
+        for (std::size_t i = 0; i < nbr; ++i) {
+            std::size_t lo = i * max_branch;
+            std::size_t hi = std::min(m, lo + max_branch);
+            auto mk = write_branch(pages[i], level, lo, hi);
+            if (!mk) return mk.error();
+            next.push_back({std::move(mk).value(), pages[i]});
+        }
+        level = std::move(next);
+    }
+    if (auto top = write_branch(root_page_, level, 0, level.size()); !top)
+        return top.error();
+    cur_pg_ = ADI_INVALID_PAGE; cur_idx_ = -1;
+    return {};
 }
 
 // ── AdiIndex::clear_data ─────────────────────────────────────────────────────
@@ -1872,346 +2653,30 @@ util::Result<AdiIndex> AdiIndex::add_tag(const std::string& adi_path,
 util::Result<void> AdiIndex::clear_data() {
     if (mode_ == IndexOpenMode::ReadOnly)
         return util::Error{5000, 0, "ADI index is read-only", ""};
+    invalidate_pos_cache();  // emptied
 
+    // Reset the tag's root to a single EMPTY dense leaf, regardless of the
+    // current B-tree depth. For a large index (>1 level) the root page is a
+    // BRANCH, not a dense leaf — the previous code rejected that with
+    // "root is not a dense leaf" and aborted (ADSCDX/5000) when a CREATE INDEX
+    // overwrite landed on a multi-level tag (e.g. reindexing ESTAELEC, 441k
+    // recs). The root lives at a fixed page (fmk_pg+1) and promote_split_ keeps
+    // root_page_ on root splits, so overwriting it with an empty dense leaf is
+    // exactly the state a freshly created tag starts from; the caller's
+    // per-record insert loop then rebuilds the tree. The old branch/leaf pages
+    // are abandoned in the file (reclaimed on the next full REINDEX that
+    // recreates the bag) — same trade-off as a CDX clear/rebuild.
     Page pg{};
-    if (auto r = read_adi_page_(root_page_, pg); !r) return r;
-    if (!is_dense_leaf(page_level(pg.data())))
-        return util::Error{5000, 0, "ADI clear_data: root is not a dense leaf", ""};
-
-    set_u16_le(pg.data() + 2, 0);
+    write_empty_dense_leaf_page(pg, adt_type_, fld_length_);  // count=0, lsib/rsib=INVALID
     cur_pg_   = root_page_;
     cur_page_ = pg;
     cur_cnt_  = 0;
     cur_idx_  = -1;
-    cur_lsib_ = page_lsib(pg.data());
-    cur_rsib_ = page_rsib(pg.data());
+    cur_lsib_ = ADI_INVALID_PAGE;
+    cur_rsib_ = ADI_INVALID_PAGE;
     cur_recno_   = 0;
     current_key_.clear();
     return write_adi_page_(root_page_, pg);
-}
-
-// ── ADI creation helpers ──────────────────────────────────────────────────────
-
-namespace {
-
-// Case-insensitive string comparison helper
-bool ci_eq(const std::string& a, const std::string& b) {
-    if (a.size() != b.size()) return false;
-    for (std::size_t i = 0; i < a.size(); ++i) {
-        if (std::tolower(static_cast<unsigned char>(a[i])) !=
-            std::tolower(static_cast<unsigned char>(b[i]))) return false;
-    }
-    return true;
-}
-
-// Split a comma-separated expression into individual trimmed column names.
-std::vector<std::string> split_expr(const std::string& expr) {
-    std::vector<std::string> parts;
-    std::size_t start = 0;
-    for (std::size_t i = 0; i <= expr.size(); ++i) {
-        if (i == expr.size() || expr[i] == ',') {
-            std::string s = expr.substr(start, i - start);
-            // trim whitespace
-            while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front())))
-                s.erase(s.begin());
-            while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back())))
-                s.pop_back();
-            if (!s.empty()) parts.push_back(std::move(s));
-            start = i + 1;
-        }
-    }
-    return parts;
-}
-
-// Write one 512-byte ADI page.
-util::Result<void> write_page(platform::File& f, std::uint32_t page_no,
-                               const AdiIndex::Page& pg) {
-    auto r = f.write_at(static_cast<std::uint64_t>(page_no) * ADI_PAGE_SIZE,
-                        pg.data(), pg.size());
-    if (!r) return r.error();
-    if (r.value() != ADI_PAGE_SIZE)
-        return util::Error{5000, 0, "short ADI page write in create", ""};
-    return {};
-}
-
-// Build the F-marker string for a list of 1-based field numbers.
-std::string build_fmarker(const std::vector<std::uint8_t>& fnums) {
-    std::string s;
-    for (std::size_t i = 0; i < fnums.size(); ++i) {
-        if (i > 0) s += ";F";
-        else s += "F";
-        s += std::to_string(fnums[i]);
-    }
-    return s;
-}
-
-// Write the 3 pages for one ADI tag (per-tag header, F-marker, empty root leaf)
-// starting at page hdr_pg.  Returns nothing.
-util::Result<void> write_tag_pages(platform::File& f,
-                                   std::uint32_t hdr_pg,
-                                   const std::vector<std::uint8_t>& fnums,
-                                   bool unique,
-                                   bool char_key) {
-    // Per-tag header page
-    AdiIndex::Page hdr{};
-    hdr[14] = unique ? 0x01u : 0x00u;
-    if (auto r = write_page(f, hdr_pg, hdr); !r) return r;
-
-    // F-marker page
-    AdiIndex::Page fmk{};
-    std::string fm = build_fmarker(fnums);
-    std::memcpy(fmk.data(), fm.data(), std::min(fm.size(), static_cast<std::size_t>(ADI_PAGE_SIZE - 1u)));
-    if (auto r = write_page(f, hdr_pg + 1, fmk); !r) return r;
-
-    // Empty root dense leaf
-    AdiIndex::Page root{};
-    std::uint16_t lv = char_key ? ADI_LVL_DENSE2 : ADI_LVL_DENSE;
-    set_u16_le(root.data(),     lv);
-    set_u16_le(root.data() + 2, 0);
-    set_u32_le(root.data() + 4, ADI_INVALID_PAGE);
-    set_u32_le(root.data() + 8, ADI_INVALID_PAGE);
-    if (auto r = write_page(f, hdr_pg + 2, root); !r) return r;
-
-    return {};
-}
-
-// Resolve expression (comma-separated column names) against ADT field list.
-// Returns 1-based field numbers.
-util::Result<std::vector<std::uint8_t>>
-resolve_fnums(const std::vector<AdtFieldDesc>& fields,
-              const std::string& expression) {
-    auto names = split_expr(expression);
-    if (names.empty())
-        return util::Error{7200, 0, "empty index expression", expression};
-
-    std::vector<std::uint8_t> fnums;
-    for (const auto& name : names) {
-        bool found = false;
-        for (std::uint32_t i = 0; i < fields.size(); ++i) {
-            if (ci_eq(fields[i].name, name)) {
-                fnums.push_back(static_cast<std::uint8_t>(i + 1));
-                found = true;
-                break;
-            }
-        }
-        if (!found)
-            return util::Error{7200, 0, "column not found in ADT: " + name, expression};
-    }
-    return fnums;
-}
-
-} // anonymous namespace
-
-// ── AdiIndex::create ─────────────────────────────────────────────────────────
-// Creates a new .adi file with one tag.
-
-// static
-util::Result<AdiIndex>
-AdiIndex::create(const std::string& adi_path,
-                 const std::string& adt_path,
-                 const std::string& expression,
-                 bool               unique) {
-    // Open ADT and read field descriptors
-    auto fa = platform::File::open(adt_path, platform::OpenMode::ReadOnly);
-    if (!fa) return fa.error();
-    platform::File adt_f = std::move(fa).value();
-    std::uint32_t hlen = 0, rlen = 0;
-    auto fields_r = read_adt_fields(adt_f, hlen, rlen);
-    if (!fields_r) return fields_r.error();
-    const auto& fields = fields_r.value();
-
-    // Resolve expression to field numbers
-    auto fnums_r = resolve_fnums(fields, expression);
-    if (!fnums_r) return fnums_r.error();
-    const auto& fnums = fnums_r.value();
-
-    // Determine key type from first field
-    bool char_key = (fields[fnums[0] - 1].type == ADT_TYPE_CICHAR ||
-                     fields[fnums[0] - 1].type == ADT_TYPE_CHAR);
-
-    // Create new ADI file
-    auto fi = platform::File::open(adi_path, platform::OpenMode::CreateRW);
-    if (!fi) return fi.error();
-    platform::File adi_f = std::move(fi).value();
-
-    // Pages 0-1: zeros (file header placeholder)
-    AdiIndex::Page zero{};
-    if (auto r = write_page(adi_f, 0, zero); !r) return r.error();
-    if (auto r = write_page(adi_f, 1, zero); !r) return r.error();
-
-    // Page 2: tag directory — 1 tag, xx=3 (per-tag header at page 3)
-    AdiIndex::Page tagdir{};
-    set_u16_le(tagdir.data(),     ADI_LVL_TAGDIR);   // level = 3
-    set_u16_le(tagdir.data() + 2, 1);                 // count = 1
-    set_u32_le(tagdir.data() + 4, ADI_INVALID_PAGE);  // lsib
-    set_u32_le(tagdir.data() + 8, ADI_INVALID_PAGE);  // rsib
-    tagdir[ADI_TAGDIR_ENTRY_START] = 3;               // xx = 3 → hdr at pg 3
-    if (auto r = write_page(adi_f, 2, tagdir); !r) return r.error();
-
-    // Pages 3-5: per-tag header, F-marker, empty root leaf
-    if (auto r = write_tag_pages(adi_f, 3, fnums, unique, char_key); !r)
-        return r.error();
-
-    if (auto s = adi_f.sync(); !s) return s.error();
-
-    // Build and return the AdiIndex
-    AdiIndex idx;
-    idx.mode_     = IndexOpenMode::Shared;
-    idx.adi_file_ = std::move(adi_f);
-    idx.adt_file_ = std::move(adt_f);
-    idx.adi_path_ = adi_path;
-
-    std::vector<std::uint16_t> types, offsets, lengths;
-    std::vector<std::string>   names;
-    for (const auto& fd : fields) {
-        types.push_back(fd.type);
-        offsets.push_back(fd.offset);
-        lengths.push_back(fd.length);
-        names.push_back(fd.name);
-    }
-    if (auto r = idx.apply_tag_(fnums, 5, types, offsets, lengths, names,
-                                 hlen, rlen, unique); !r)
-        return r.error();
-
-    return idx;
-}
-
-// ── AdiIndex::add_tag ────────────────────────────────────────────────────────
-// Adds a new tag to an existing .adi file.
-
-// static
-util::Result<AdiIndex>
-AdiIndex::add_tag(const std::string& adi_path,
-                  const std::string& adt_path,
-                  const std::string& expression,
-                  bool               unique) {
-    // Open ADT and read field descriptors
-    auto fa = platform::File::open(adt_path, platform::OpenMode::ReadOnly);
-    if (!fa) return fa.error();
-    platform::File adt_f = std::move(fa).value();
-    std::uint32_t hlen = 0, rlen = 0;
-    auto fields_r = read_adt_fields(adt_f, hlen, rlen);
-    if (!fields_r) return fields_r.error();
-    const auto& fields = fields_r.value();
-
-    // Resolve expression to field numbers
-    auto fnums_r = resolve_fnums(fields, expression);
-    if (!fnums_r) return fnums_r.error();
-    const auto& fnums = fnums_r.value();
-
-    bool char_key = (fields[fnums[0] - 1].type == ADT_TYPE_CICHAR ||
-                     fields[fnums[0] - 1].type == ADT_TYPE_CHAR);
-
-    // Open existing ADI file for read+write
-    auto fi = platform::File::open(adi_path, platform::OpenMode::OpenExisting);
-    if (!fi) return fi.error();
-    platform::File adi_f = std::move(fi).value();
-
-    // Read tag directory (page 2) to find current tag count
-    AdiIndex::Page tagdir{};
-    {
-        auto got = adi_f.read_at(2 * ADI_PAGE_SIZE, tagdir.data(), tagdir.size());
-        if (!got || got.value() < ADI_PAGE_SIZE)
-            return util::Error{6106, 0, "can't read ADI tag directory for add_tag", adi_path};
-    }
-    std::uint16_t cur_count = u16_le(tagdir.data() + 2);
-
-    // Each tag uses 3 pages (header, fmarker, root).  After 6 pages of
-    // prefix (pages 0-2 = 3 header + 3 for first tag), subsequent tags
-    // start at page 3 + cur_count * 3.
-    std::uint32_t new_hdr_pg = 3u + static_cast<std::uint32_t>(cur_count) * 3u;
-    std::uint32_t new_root_pg = new_hdr_pg + 2u;
-    if (new_hdr_pg > 255u)
-        return util::Error{7200, 0, "ADI tag count exceeds capacity", adi_path};
-
-    // Write new tag pages at end of file
-    if (auto r = write_tag_pages(adi_f, new_hdr_pg, fnums, unique, char_key); !r)
-        return r.error();
-
-    // Update tag directory: increment count, add entry
-    std::size_t entry_off = ADI_TAGDIR_ENTRY_START
-                          + static_cast<std::size_t>(cur_count) * ADI_TAGDIR_ENTRY_SIZE;
-    if (entry_off + 1 < ADI_PAGE_SIZE) {
-        tagdir[entry_off] = static_cast<std::uint8_t>(new_hdr_pg);
-    }
-    set_u16_le(tagdir.data() + 2, cur_count + 1);
-    {
-        auto w = adi_f.write_at(2 * ADI_PAGE_SIZE, tagdir.data(), tagdir.size());
-        if (!w) return w.error();
-    }
-
-    if (auto s = adi_f.sync(); !s) return s.error();
-
-    // Build and return the AdiIndex
-    AdiIndex idx;
-    idx.mode_     = IndexOpenMode::Shared;
-    idx.adi_file_ = std::move(adi_f);
-    idx.adt_file_ = std::move(adt_f);
-    idx.adi_path_ = adi_path;
-
-    std::vector<std::uint16_t> types, offsets, lengths;
-    std::vector<std::string>   names;
-    for (const auto& fd : fields) {
-        types.push_back(fd.type);
-        offsets.push_back(fd.offset);
-        lengths.push_back(fd.length);
-        names.push_back(fd.name);
-    }
-    if (auto r = idx.apply_tag_(fnums, new_root_pg, types, offsets, lengths, names,
-                                 hlen, rlen, unique); !r)
-        return r.error();
-
-    return idx;
-}
-
-const std::vector<std::uint32_t>& AdiIndex::ordered_recnos_cached() {
-    if (pos_cache_valid_) return pos_recnos_;
-
-    // Save cursor state.
-    const auto saved_pg   = cur_pg_;
-    const auto saved_idx  = cur_idx_;
-    const auto saved_cnt  = cur_cnt_;
-    const auto saved_lsib = cur_lsib_;
-    const auto saved_rsib = cur_rsib_;
-    const auto saved_rn   = cur_recno_;
-    const auto saved_key  = current_key_;
-    const auto saved_page = cur_page_;
-
-    pos_recnos_.clear();
-    pos_map_.clear();
-
-    // Walk from first to last, collecting recnos in key order. Drive the
-    // walk through next() so EVERY entry of every dense leaf is collected
-    // (reading only entry 0 of each leaf under-counts multi-entry leaves).
-    auto first = navigate_leftmost_();
-    if (first && first.value().positioned) {
-        std::uint32_t pos = 0;
-        for (;;) {
-            pos_recnos_.push_back(cur_recno_);
-            pos_map_[cur_recno_] = pos++;
-            auto n = next();
-            if (!n || !n.value().positioned) break;
-        }
-    }
-
-    // Restore cursor state.
-    cur_pg_    = saved_pg;
-    cur_idx_   = saved_idx;
-    cur_cnt_   = saved_cnt;
-    cur_lsib_  = saved_lsib;
-    cur_rsib_  = saved_rsib;
-    cur_recno_ = saved_rn;
-    current_key_ = saved_key;
-    cur_page_  = saved_page;
-
-    pos_cache_valid_ = true;
-    return pos_recnos_;
-}
-
-std::uint32_t AdiIndex::pos_of_recno_cached(std::uint32_t recno) {
-    (void)ordered_recnos_cached();
-    auto it = pos_map_.find(recno);
-    return it != pos_map_.end() ? it->second : 0xFFFFFFFFu;
 }
 
 } // namespace openads::drivers::adi
