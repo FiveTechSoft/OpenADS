@@ -33,6 +33,7 @@ public:
     util::Result<void> flush() override;
     util::Result<void> zap()   override;
     util::Result<bool> truncate_trailing(std::uint32_t recno) override;
+    util::Result<bool> truncate_to(std::uint32_t recno) override;
 
     util::Result<std::uint32_t>
         bump_autoinc(std::uint16_t field_index) override;
