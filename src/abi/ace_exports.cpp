@@ -1,5 +1,9 @@
 #include "openads/ace.h"
 #include "openads/error.h"
+#include "abi/lock_retry_policy.h"
+
+// Expose lock_retry_policy() at file scope so ADS_SETLOCKCYCLE etc. can use it.
+using openads::abi::lock_retry_policy;
 
 #include <atomic>
 #include <condition_variable>
@@ -11006,25 +11010,14 @@ UNSIGNED32 ENTRYPOINT AdsSetDate(ADSHANDLE hTable, UNSIGNED8* pucField,
 // policy (the hConnect arg is accepted for ABI compat but the value is
 // shared across connections in this build); the retry loop sleeps
 // `cycle_ms` between attempts and gives up after `retry_count` cycles.
+// LockPolicy and lock_retry_policy() are defined in abi/lock_retry_policy.h.
 
 namespace {
 
-struct LockPolicy {
-    UNSIGNED32 cycle_ms    = 100;   // ACE default
-    UNSIGNED16 retry_count = 10;
-};
-
-// extern "C++" silences clang's `-Wreturn-type-c-linkage` warning
-// (returning an anonymous-namespace type from inside the surrounding
-// extern "C" block isn't ABI-meaningful, but is harmless here since
-// `lock_policy` is only called from C++ code in this TU).
-extern "C++" LockPolicy& lock_policy() {
-    static LockPolicy p;
-    return p;
-}
+using openads::abi::lock_retry_policy;
 
 UNSIGNED32 lock_with_retry(std::function<openads::util::Result<void>()> fn) {
-    LockPolicy p = lock_policy();
+    auto p = openads::abi::lock_retry_policy();
     for (UNSIGNED16 i = 0; ; ++i) {
         auto r = fn();
         if (r) return openads::AE_SUCCESS;
@@ -11041,7 +11034,7 @@ UNSIGNED32 lock_with_retry(std::function<openads::util::Result<void>()> fn) {
 UNSIGNED32 ENTRYPOINT AdsSetLockCycle(ADSHANDLE /*hConnect*/, UNSIGNED32 ulCycle) {
     auto& s = state();
     std::lock_guard<std::recursive_mutex> lk(s.mu);
-    lock_policy().cycle_ms = ulCycle;
+    lock_retry_policy().cycle_ms = ulCycle;
     return ok();
 }
 
@@ -11049,14 +11042,14 @@ UNSIGNED32 ENTRYPOINT AdsGetLockCycle(ADSHANDLE /*hConnect*/, UNSIGNED32* pulCyc
     if (pulCycle == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
     auto& s = state();
     std::lock_guard<std::recursive_mutex> lk(s.mu);
-    *pulCycle = lock_policy().cycle_ms;
+    *pulCycle = lock_retry_policy().cycle_ms;
     return ok();
 }
 
 UNSIGNED32 ENTRYPOINT AdsSetLockRetryCount(ADSHANDLE /*hConnect*/, UNSIGNED16 usRetryCount) {
     auto& s = state();
     std::lock_guard<std::recursive_mutex> lk(s.mu);
-    lock_policy().retry_count = usRetryCount;
+    lock_retry_policy().retry_count = usRetryCount;
     return ok();
 }
 
@@ -11064,7 +11057,7 @@ UNSIGNED32 ENTRYPOINT AdsGetLockRetryCount(ADSHANDLE /*hConnect*/, UNSIGNED16* p
     if (pusRetryCount == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
     auto& s = state();
     std::lock_guard<std::recursive_mutex> lk(s.mu);
-    *pusRetryCount = lock_policy().retry_count;
+    *pusRetryCount = lock_retry_policy().retry_count;
     return ok();
 }
 

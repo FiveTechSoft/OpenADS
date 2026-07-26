@@ -13,6 +13,7 @@
 #include "platform/proc.h"
 #include "openads/ace.h"
 #include "openads/error.h"
+#include "abi/lock_retry_policy.h"
 #include "engine/server_fs.h"
 #include "platform/fs_sandbox.h"
 #include "platform/path.h"
@@ -1797,9 +1798,6 @@ DispatchResult Session::dispatch(const Frame& f) {
             std::uint32_t rn = read_u32_le(f.payload.data() + 4);
             // Route lock/unlock to the engine table from tbls_ so the lock
             // lands on the SAME Table instance that writes go through.
-            // Previously this used ensure_abi_handle() which opens a second
-            // Table via AdsOpenTable(abi_conn_); locks registered there are
-            // invisible to writeback_record_() which checks the original.
             auto it = tbls_.find(id);
             if (it == tbls_.end() || !sess_conn_) {
                 reply = err("Lock: bad table id"); break;
@@ -1810,9 +1808,26 @@ DispatchResult Session::dispatch(const Frame& f) {
                 session_user_.empty() ? "(anonymous)" : session_user_,
                 srv_->conn_no_for_session(sid_));
             if (f.opcode == Opcode::LockRecord) {
-                auto r = tbl->lock_record_excl(rn);
-                if (!r) { reply = err("LockRecord: failed",
-                    static_cast<UNSIGNED32>(r.error().code)); break; }
+                // Use non-blocking try + retry loop (same semantics as
+                // the ABI lock_with_retry).  Blocking lock_record_excl
+                // would freeze the entire server until the OS grants the
+                // lock — unacceptable for concurrent clients.
+                auto policy = openads::abi::lock_retry_policy();
+                bool got = false;
+                for (std::uint16_t i = 0; ; ++i) {
+                    auto r = tbl->try_lock_record_excl(rn);
+                    if (r) { got = true; break; }
+                    if (i >= policy.retry_count) break;
+                    if (policy.cycle_ms > 0) {
+                        std::this_thread::sleep_for(
+                            std::chrono::milliseconds(policy.cycle_ms));
+                    }
+                }
+                if (!got) {
+                    reply = err("LockRecord: failed",
+                        openads::AE_LOCKED);
+                    break;
+                }
             } else {
                 auto r = tbl->unlock_record(rn);
                 if (!r) { reply = err("UnlockRecord: failed",
@@ -1837,9 +1852,22 @@ DispatchResult Session::dispatch(const Frame& f) {
                 session_user_.empty() ? "(anonymous)" : session_user_,
                 srv_->conn_no_for_session(sid_));
             if (f.opcode == Opcode::LockTable) {
-                auto r = tbl->lock_table_excl();
-                if (!r) { reply = err("LockTable: failed",
-                    static_cast<UNSIGNED32>(r.error().code)); break; }
+                auto policy = openads::abi::lock_retry_policy();
+                bool got = false;
+                for (std::uint16_t i = 0; ; ++i) {
+                    auto r = tbl->try_lock_table_excl();
+                    if (r) { got = true; break; }
+                    if (i >= policy.retry_count) break;
+                    if (policy.cycle_ms > 0) {
+                        std::this_thread::sleep_for(
+                            std::chrono::milliseconds(policy.cycle_ms));
+                    }
+                }
+                if (!got) {
+                    reply = err("LockTable: failed",
+                        openads::AE_LOCKED);
+                    break;
+                }
             } else {
                 auto r = tbl->unlock_table();
                 if (!r) { reply = err("UnlockTable: failed",
