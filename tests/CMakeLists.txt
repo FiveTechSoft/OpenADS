@@ -144,6 +144,7 @@ add_executable(openads_unit_tests
     unit/abi_cdx_recreate_tag_diff_expr_test.cpp
     unit/abi_cdx_multitag_create_test.cpp
     unit/abi_cdx_estaelec_compound_test.cpp
+    unit/abi_cdx_str_val_compound_test.cpp
     unit/abi_cdx_issue131_test.cpp
     unit/abi_ordnumber_test.cpp
     unit/abi_server_info_test.cpp
