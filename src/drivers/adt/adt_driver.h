@@ -62,9 +62,31 @@ public:
         (void)refresh_record_count_();
     }
 
+    // Drop the sequential read-ahead block (the engine calls this when a peer
+    // may have changed the file under us, mirroring CdxDriver).
+    void invalidate_read_cache() noexcept override { invalidate_read_cache_(); }
+
 private:
     util::Result<void> refresh_record_count_();
+    // Refresh the header count while an appender may hold 0..399 exclusive:
+    // take the region shared (with retry) first, so the read waits instead of
+    // failing.
+    util::Result<void> refresh_record_count_shared_();
+    // Clamp rec_count_ to the records that physically fit in the file.
+    void               cap_record_count_from_size_();
     util::Result<void> rewrite_header_();
+
+    // Sequential read-ahead block cache (raw on-disk bytes). The reindex /
+    // PACK scans read every record 1..N once per tag; without this each read
+    // was a positioned syscall + heap alloc, making an ADT reindex of a large
+    // table (ESTAELEC ~441k) take minutes vs ~seconds for DBF/CDX. Mirrors
+    // CdxDriver: a miss fetches one ALIGNED block of up to kReadAheadBytes,
+    // hits are served by memcpy. Invalidated on any local write/append/zap.
+    static constexpr std::size_t kReadAheadBytes = 64u * 1024u;
+    void invalidate_read_cache_() noexcept {
+        read_cache_first_ = 0;
+        read_cache_recs_  = 0;
+    }
 
     // Translate a record buffer between ADT on-disk format and the
     // DBF-convention format exposed to the engine layer. The only
@@ -78,6 +100,12 @@ private:
     std::uint32_t         rec_count_ = 0;
     std::uint32_t         rec_len_   = 0;
     std::uint32_t         hdr_len_   = 0;
+
+    // Read-ahead block cache state (raw file bytes). read_cache_first_ == 0
+    // means empty/invalid. Records [first, first+recs) live in read_cache_.
+    std::vector<std::uint8_t> read_cache_;
+    std::uint32_t             read_cache_first_ = 0;
+    std::uint32_t             read_cache_recs_  = 0;
 };
 
 } // namespace openads::drivers::adt
