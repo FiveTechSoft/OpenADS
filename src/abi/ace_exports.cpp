@@ -3569,6 +3569,11 @@ openads::util::Result<void> ri_enforce_delete(Connection* conn, Table& parent) {
             std::vector<std::uint32_t> matches;
             ri_scan(*child, rule.parent_tag, pk_val, &matches);
             in_ri_check() = true;
+            // Lock the child table so writeback_record_() (the GoHot gate)
+            // permits the cascade/SETNULL writes.
+            if (need_write) {
+                (void)child->lock_table_excl();
+            }
             for (std::uint32_t rec : matches) {
                 if (auto gr = child->goto_record(rec); !gr) continue;
                 if (del_opt == ADS_DD_RI_CASCADE) {
@@ -4695,6 +4700,14 @@ openads::util::Result<void> ri_enforce_update(Connection* conn, Table& parent) {
             std::vector<std::uint32_t> matches;
             ri_scan(*child, rule.parent_tag, old_pk, &matches);
             in_ri_check() = true;
+            // Lock the child table so writeback_record_() (the GoHot gate)
+            // permits the cascade/SETNULL writes.  Exclusive is safe here
+            // because the RI cascade already serialises through the parent's
+            // write path; no other writer can be concurrently accessing the
+            // same child table.
+            if (need_write) {
+                (void)child->lock_table_excl();
+            }
             auto fi = child->field_index(rule.parent_tag);
             if (fi >= 0) {
                 auto fi16 = static_cast<std::uint16_t>(fi);
@@ -6066,7 +6079,8 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
         // migrated from SAP with Table_Type=ADT) failed to open remotely
         // with AE_TABLE_CORRUPTED (5103), even though the identical bare
         // name opens fine locally.
-        auto otr = rc->open_table(name);
+        auto otr = rc->open_table(name,
+            static_cast<std::uint16_t>(map_open_mode(usMode)));
         if (!otr) return fail(otr.error());
         auto& ot = otr.value();
         static std::unordered_map<Handle,
@@ -11731,6 +11745,14 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
         // (p.filename() == p) takes the same first branch and is unaffected.
         fs::path candidate = table_dir / p;
         fs::path by_name   = table_dir / p.filename();
+        // When the caller keeps indexes in a *different* folder than the
+        // table (e.g. table in Data/, index in Indexes/), the path is
+        // relative to the connection data directory, not the table dir.
+        // Also try resolving against the connection root.
+        fs::path conn_candidate;
+        if (auto* conn = t->owner()) {
+            conn_candidate = fs::path(conn->data_dir()) / p;
+        }
         auto resolve_ci = [](const fs::path& cand) -> fs::path {
             if (fs::exists(cand)) return cand;
             std::string ci = openads::platform::resolve_case_insensitive(
@@ -11742,9 +11764,19 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
             p = candidate;
         } else if (fs::exists(by_name)) {
             p = by_name;
+        } else if (!conn_candidate.empty() && fs::exists(conn_candidate)) {
+            // Index lives in a different folder; resolve against connection
+            // data directory so "MyFolder/MyTable.Z01" finds
+            // <conn_root>/MyFolder/MyTable.Z01 instead of
+            // <table_dir>/MyFolder/MyTable.Z01.
+            p = conn_candidate;
         } else {
             fs::path ci = resolve_ci(by_name);
             if (fs::exists(ci)) {
+                p = ci;
+            } else if (!conn_candidate.empty() &&
+                       (ci = resolve_ci(conn_candidate),
+                        fs::exists(ci))) {
                 p = ci;
             } else {
                 ci = resolve_ci(candidate);

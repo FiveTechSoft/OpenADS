@@ -68,6 +68,8 @@ TEST_CASE("ABI write smoke: append two rows, lock/unlock, mark deleted, read bac
     REQUIRE(AdsLockRecord(hTable, 1) == 0);
     REQUIRE(AdsUnlockRecord(hTable, 1) == 0);
 
+    // Delete + recall require an RLock in shared mode (GoHot write guard).
+    REQUIRE(AdsLockRecord(hTable, 1) == 0);
     REQUIRE(AdsDeleteRecord(hTable) == 0);
     UNSIGNED16 deleted = 0;
     REQUIRE(AdsIsRecordDeleted(hTable, &deleted) == 0);
@@ -75,6 +77,7 @@ TEST_CASE("ABI write smoke: append two rows, lock/unlock, mark deleted, read bac
     REQUIRE(AdsRecallRecord(hTable) == 0);
     REQUIRE(AdsIsRecordDeleted(hTable, &deleted) == 0);
     CHECK(deleted == 0);
+    REQUIRE(AdsUnlockRecord(hTable, 1) == 0);
 
     REQUIRE(AdsFlushFileBuffers(hTable) == 0);
     REQUIRE(AdsCloseTable(hTable) == 0);

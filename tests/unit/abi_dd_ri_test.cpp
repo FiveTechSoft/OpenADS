@@ -209,6 +209,7 @@ TEST_CASE("RI DELETE RESTRICT: blocked when child rows exist") {
 
     // Delete parent row that has a child — should be rejected.
     REQUIRE(AdsGotoRecord(hParent, 1) == 0);
+    REQUIRE(AdsLockTable(hParent) == 0);
     UNSIGNED32 rc = AdsDeleteRecord(hParent);
     CHECK(rc == openads::AE_RI_VIOLATION);
 
@@ -239,6 +240,7 @@ TEST_CASE("RI DELETE RESTRICT: allowed when no children exist") {
 
     // Delete P002 — no child references it.
     REQUIRE(AdsGotoRecord(hParent, 2) == 0);
+    REQUIRE(AdsLockTable(hParent) == 0);
     CHECK(AdsDeleteRecord(hParent) == 0);
 
     REQUIRE(AdsCloseTable(hChild)  == 0);
@@ -263,6 +265,7 @@ TEST_CASE("RI DELETE CASCADE: child rows deleted with parent") {
     REQUIRE(hChild  != 0);
 
     REQUIRE(AdsGotoRecord(hParent, 1) == 0);
+    REQUIRE(AdsLockTable(hParent) == 0);
     CHECK(AdsDeleteRecord(hParent) == 0);
 
     // Both child rows must now be marked deleted.
@@ -303,6 +306,7 @@ TEST_CASE("RI DELETE SETNULL: child FK blanked when parent deleted") {
     REQUIRE(hChild  != 0);
 
     REQUIRE(AdsGotoRecord(hParent, 1) == 0);
+    REQUIRE(AdsLockTable(hParent) == 0);
     CHECK(AdsDeleteRecord(hParent) == 0);
 
     // Child row must still be live but FK must be blank.
@@ -335,6 +339,9 @@ static UNSIGNED32 set_id_and_write(ADSHANDLE h, const char* id) {
     UNSIGNED8 fld[4] = "ID";
     UNSIGNED8 val[8] = {};
     std::memcpy(val, id, 4);
+    UNSIGNED16 locked = 0;
+    // Lock the table (file lock) — simpler than record lock for RI callers.
+    if (UNSIGNED32 rc = AdsLockTable(h); rc != 0) return rc;
     if (UNSIGNED32 rc = AdsSetString(h, fld, val, 4); rc != 0) return rc;
     return AdsWriteRecord(h);
 }

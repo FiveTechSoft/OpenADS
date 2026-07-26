@@ -282,9 +282,21 @@ util::Result<void> Table::sync_all_indexes_(
 
 util::Result<void> Table::writeback_record_() {
     if (state_ != State::Positioned) {
-        // rddads (Harbour contrib RDD) special-cases 5068 (AE_NO_CURRENT_RECORD)
-        // to return blank field values at BOF/EOF; 5026 causes a hard error.
         return util::Error{5068, 0, "no record positioned", ""};
+    }
+    // GoHot-equivalent write guard (harbour dbf1.c hb_dbfGoHot).  In shared
+    // mode the caller must hold either a file lock (FLock) or a record lock
+    // (RLock) before mutating the current row.  Newly-appended records are
+    // exempt: AdsAppendRecord auto-locks them and sets pending_append_ so
+    // immediate post-append field sets work without an explicit LockRecord
+    // (standard xBase / ACE semantics).  Exclusive and read-only opens
+    // bypass the check — they grant unrestricted access by definition.
+    if (mode_ == OpenMode::Shared && !pending_append_ && !is_table_locked()) {
+        if (recno_locks_.find(recno_) == recno_locks_.end()) {
+            return util::Error{5035, 0,
+                "write failed — record not locked (RLock or FLock required "
+                "in shared mode)", ""};
+        }
     }
     if (tx_ && tx_->active()) {
         auto cur = driver_->read_record_raw(recno_);
@@ -856,6 +868,11 @@ util::Result<void> Table::append_record() {
     record_buf_ = std::move(rec);
     recno_      = new_recno.value();
     state_      = State::Positioned;
+    // Mark the table as "pending append" so that the GoHot write guard in
+    // writeback_record_() allows the caller to set fields on the freshly-
+    // appended record without an explicit LockRecord — standard xBase / ACE
+    // semantics (AdsAppendRecord auto-locks + sets pending_append).
+    pending_append_ = true;
     if (tx_ && tx_->active()) {
         tx_->note_append(tid_, recno_);
     }

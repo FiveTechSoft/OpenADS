@@ -132,6 +132,97 @@ TEST_CASE("AdsOpenIndex: double-prefix relative path falls back to basename") {
 }
 
 // ---------------------------------------------------------------------------
+// TEST 3: index in a different folder than the table
+// ---------------------------------------------------------------------------
+//
+// Scenario (the user-reported ADSCDX/5103 bug):
+//   - Connection root:  <tmp>/
+//   - Table path:       <tmp>/data/t.dbf       -> table_dir = <tmp>/data
+//   - Index lives in:   <tmp>/indexes/t.cdx
+//   - Caller passes:    "indexes/t.cdx"        (relative to connection root)
+//   - Old code:         table_dir/indexes/t.cdx -> does not exist -> error 5103
+//   - Fixed code:       also tries conn_root/indexes/t.cdx -> finds it
+//
+// This covers ERP scenarios where indexes are kept in a dedicated folder
+// separate from the data files, and the user always passes a qualified path.
+
+TEST_CASE("AdsOpenIndex: index in different folder resolves via connection root") {
+    const fs::path base    = fs::temp_directory_path() / "openads_oi_diffdir";
+    const fs::path data    = base / "data";
+    const fs::path indexes = base / "indexes";
+
+    std::error_code ec;
+    fs::remove_all(base, ec);
+    fs::create_directories(data);
+    fs::create_directories(indexes);
+
+    // Phase 1 - create the table in data/ and the index in indexes/.
+    {
+        UNSIGNED8 srv[512]{};
+        fill_buf(srv, sizeof(srv), data.string());
+        ADSHANDLE hConn = 0;
+        REQUIRE(AdsConnect60(srv, ADS_LOCAL_SERVER,
+                             nullptr, nullptr, 0, &hConn) == 0);
+
+        // Create table in data/.
+        UNSIGNED8 tname[64]{};
+        fill_buf(tname, sizeof(tname), "t.dbf");
+        UNSIGNED8 fields[] = "ID,N,5,0;NAME,C,10,0";
+        ADSHANDLE hT = 0;
+        REQUIRE(AdsCreateTable(hConn, tname, nullptr,
+                               ADS_CDX, 0, 0, 0, 0, fields, &hT) == 0);
+
+        // Create the index explicitly in the indexes/ directory.
+        UNSIGNED8 bag[256]{};
+        fill_buf(bag, sizeof(bag), (indexes / "t.cdx").string());
+        UNSIGNED8 tag[]  = "BY_ID";
+        UNSIGNED8 expr[] = "ID";
+        ADSHANDLE hIdx = 0;
+        UNSIGNED32 rc = AdsCreateIndex61(hT, bag, tag, expr,
+                                         nullptr, nullptr, 0, 0, &hIdx);
+        REQUIRE(rc == 0);
+        AdsCloseIndex(hIdx);
+        AdsCloseTable(hT);
+        AdsDisconnect(hConn);
+    }
+
+    // Verify the files exist in their respective directories.
+    REQUIRE(fs::exists(data    / "t.dbf"));
+    REQUIRE(fs::exists(indexes / "t.cdx"));
+    // Confirm the index is NOT next to the table (ensures the test is valid).
+    REQUIRE_FALSE(fs::exists(data / "t.cdx"));
+
+    // Phase 2 - re-open and exercise the connection-root path resolution.
+    UNSIGNED8 srv[512]{};
+    fill_buf(srv, sizeof(srv), base.string());
+    ADSHANDLE hConn = 0;
+    REQUIRE(AdsConnect60(srv, ADS_LOCAL_SERVER,
+                         nullptr, nullptr, 0, &hConn) == 0);
+
+    // Open the table from the data/ subdirectory.
+    UNSIGNED8 tbl[64]{};
+    fill_buf(tbl, sizeof(tbl), "data/t.dbf");
+    ADSHANDLE hT = 0;
+    REQUIRE(AdsOpenTable(hConn, tbl, nullptr, ADS_CDX,
+                         0, 0, 0, ADS_DEFAULT, &hT) == 0);
+
+    // Call AdsOpenIndex with a path relative to the connection root.
+    // "indexes/t.cdx" must resolve to <tmp>/indexes/t.cdx, NOT
+    // <tmp>/data/indexes/t.cdx (which doesn't exist).
+    UNSIGNED8 idx_path[256]{};
+    fill_buf(idx_path, sizeof(idx_path), "indexes/t.cdx");
+    ADSHANDLE arr[8] = {0};
+    UNSIGNED16 cap = 8;
+    UNSIGNED32 rc = AdsOpenIndex(hT, idx_path, arr, &cap);
+    INFO("AdsOpenIndex(\"indexes/t.cdx\") rc=" << rc);
+    REQUIRE(rc == 0);
+    CHECK(cap >= 1u);
+
+    AdsCloseTable(hT);
+    AdsDisconnect(hConn);
+    fs::remove_all(base, ec);
+}
+// ---------------------------------------------------------------------------
 // TEST 2: clean path — basename only ("t.cdx") must still work
 // ---------------------------------------------------------------------------
 

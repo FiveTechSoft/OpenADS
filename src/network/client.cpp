@@ -223,7 +223,8 @@ void connect_pack_payload(std::vector<std::uint8_t>& payload,
     // RCB 07/15/2026: M12.25 — also advertise backward (PgUp) prefetch. This is
     // a distinct bit precisely because a server must NOT send a backward block
     // to a client that only understands forward ones (see kCapPrefetchBackward).
-    std::uint32_t caps = kCapPrefetchConsume | kCapPrefetchBackward;
+    std::uint32_t caps = kCapPrefetchConsume | kCapPrefetchBackward
+                       | kCapOpenTableMode;
     for (int i = 0; i < 4; ++i)
         payload.push_back(static_cast<std::uint8_t>((caps >> (8 * i)) & 0xFFu));
 }
@@ -279,10 +280,14 @@ void RemoteConnection::disconnect() noexcept {
 }
 
 util::Result<RemoteConnection::OpenTableResult>
-RemoteConnection::open_table(const std::string& rel) {
+RemoteConnection::open_table(const std::string& rel, std::uint16_t mode) {
     Frame req;
     req.opcode = Opcode::OpenTable;
-    req.payload.assign(rel.begin(), rel.end());
+    // Extended payload: [u16 mode][table_name_bytes]
+    // Old servers ignore the prefix and read the full payload as the table
+    // name; new servers strip the 2-byte prefix when mode is non-zero.
+    write_u16_le(mode, req.payload);
+    req.payload.insert(req.payload.end(), rel.begin(), rel.end());
     auto rep = request(req);
     if (!rep) return rep.error();
     if (rep.value().opcode != Opcode::OpenTableAck) {

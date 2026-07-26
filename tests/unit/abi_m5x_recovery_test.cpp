@@ -64,6 +64,7 @@ TEST_CASE("M5.x WAL: crash mid-tx, reopen recovers via persistent WAL replay") {
                              0, 0, 0, 0, &hTable) == 0);
         REQUIRE(AdsBeginTransaction(hConn) == 0);
         REQUIRE(AdsGotoTop(hTable) == 0);
+        REQUIRE(AdsLockTable(hTable) == 0);
         UNSIGNED8 fld[16]  = "TAG";
         UNSIGNED8 nval[16] = "WORLD";
         REQUIRE(AdsSetString(hTable, fld, nval, 5) == 0);
@@ -199,6 +200,7 @@ TEST_CASE("M5.x WAL: committed tx survives reconnect unmodified") {
                              0, 0, 0, 0, &hTable) == 0);
         REQUIRE(AdsBeginTransaction(hConn) == 0);
         REQUIRE(AdsGotoTop(hTable) == 0);
+        REQUIRE(AdsLockTable(hTable) == 0);
         UNSIGNED8 fld[16]  = "TAG";
         UNSIGNED8 nval[16] = "COMMT";
         REQUIRE(AdsSetString(hTable, fld, nval, 5) == 0);

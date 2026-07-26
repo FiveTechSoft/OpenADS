@@ -69,8 +69,11 @@ TEST_CASE("AdsGetRecord / AdsSetRecord round-trip the raw record image") {
     CHECK(std::memcmp(buf + 5, "AAAA    ", 8) == 0);       // NAME, blank-padded
 
     // Mutate NAME in the raw image and write it straight back.
+    // In shared mode, AdsSetRecord requires a lock (GoHot write guard).
+    REQUIRE(AdsLockTable(hTable) == openads::AE_SUCCESS);
     std::memcpy(buf + 5, "BBBBBBBB", 8);
     REQUIRE(AdsSetRecord(hTable, buf, len) == openads::AE_SUCCESS);
+    REQUIRE(AdsUnlockTable(hTable) == openads::AE_SUCCESS);
 
     // Field read reflects the raw write.
     UNSIGNED8 out[16];
@@ -146,6 +149,7 @@ TEST_CASE("AdsGetRecord / AdsSetRecord round-trip over tcp://") {
     CHECK(buf[0] == ' ');
     CHECK(std::memcmp(buf + 5, "AAAA    ", 8) == 0);
 
+    REQUIRE(AdsLockRecord(hTable, 1) == openads::AE_SUCCESS);
     std::memcpy(buf + 5, "WIREWIRE", 8);
     REQUIRE(AdsSetRecord(hTable, buf, len) == openads::AE_SUCCESS);
 

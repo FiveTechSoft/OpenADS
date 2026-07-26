@@ -133,6 +133,7 @@ TEST_CASE("ABI M5 smoke: BeginTransaction + update + Rollback restores the origi
     CHECK(in_tx == 1);
 
     REQUIRE(AdsGotoTop(hTable) == 0);
+    REQUIRE(AdsLockTable(hTable) == 0);
     UNSIGNED8 fld[16]   = "TAG";
     UNSIGNED8 nval[16]  = "WORLD";
     REQUIRE(AdsSetString(hTable, fld, nval, 5) == 0);
@@ -221,6 +222,7 @@ TEST_CASE("ABI M5 smoke: Commit makes changes durable") {
 
     REQUIRE(AdsBeginTransaction(hConn) == 0);
     REQUIRE(AdsGotoTop(hTable) == 0);
+    REQUIRE(AdsLockTable(hTable) == 0);
     UNSIGNED8 fld[16]  = "TAG";
     UNSIGNED8 nval[16] = "ABCDE";
     REQUIRE(AdsSetString(hTable, fld, nval, 5) == 0);

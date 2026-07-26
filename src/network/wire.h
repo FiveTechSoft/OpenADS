@@ -490,6 +490,14 @@ inline constexpr std::uint32_t kCapAggregate = 0x00000002u;
 // block to a client that did not advertise it.
 inline constexpr std::uint32_t kCapPrefetchBackward = 0x00000004u;
 
+// M12.x — OpenTable mode pass-through. When the client sets this bit, it
+// prepends a [u16 LE mode] to every OpenTable payload.  The server reads
+// that prefix and opens the table in the requested mode (Shared / Exclusive /
+// ReadOnly).  Old servers ignore the prefix because they treat the entire
+// payload as the table name and the leading null bytes make the path invalid;
+// the open_table fallback then fails with AE_TABLE_NOT_FOUND (5018).
+inline constexpr std::uint32_t kCapOpenTableMode = 0x00000008u;
+
 // RCB 07/14/2026: M12.23 — AdsCacheRecords support. Why a bare trailing field
 // and not a new opcode or a capability bit: the Skip request grew an OPTIONAL
 // trailing [u16 LE] carrying the caller's requested read-ahead depth:

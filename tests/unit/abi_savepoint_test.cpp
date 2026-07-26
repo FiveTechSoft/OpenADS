@@ -60,6 +60,8 @@ TEST_CASE("AdsCreateSavepoint + AdsRollbackTransaction80 partial rollback") {
                          0, 0, 0, 0, &hTable) == 0);
 
     REQUIRE(AdsBeginTransaction(hConn) == 0);
+    // FLock required for writes in shared mode (server always opens Shared).
+    REQUIRE(AdsLockTable(hTable) == 0);
     REQUIRE(AdsGotoTop(hTable) == 0);
 
     UNSIGNED8 fld[16] = "TAG";
@@ -123,6 +125,7 @@ TEST_CASE("AdsRollbackTransaction80 with null savepoint = full rollback") {
     REQUIRE(AdsOpenTable(hConn, leaf, nullptr, ADS_CDX,
                          0, 0, 0, 0, &hTable) == 0);
     REQUIRE(AdsBeginTransaction(hConn) == 0);
+    REQUIRE(AdsLockTable(hTable) == 0);
     REQUIRE(AdsGotoTop(hTable) == 0);
     UNSIGNED8 fld[16] = "TAG";
     UNSIGNED8 v1[8]   = "ZZZZZ";
@@ -159,6 +162,7 @@ TEST_CASE("M11.3 AdsReleaseSavepoint drops marker, keeps work") {
                          0, 0, 0, 0, &hTable) == 0);
 
     REQUIRE(AdsBeginTransaction(hConn) == 0);
+    REQUIRE(AdsLockTable(hTable) == 0);
     REQUIRE(AdsGotoTop(hTable) == 0);
     UNSIGNED8 fld[16] = "TAG";
     UNSIGNED8 v1[8]   = "BBBBB";
@@ -210,6 +214,7 @@ TEST_CASE("M11.3 nested BEGIN / COMMIT only flushes outermost") {
     REQUIRE(AdsInTransaction(hConn, &inTx) == 0);
     CHECK(inTx == 1);
 
+    REQUIRE(AdsLockTable(hTable) == 0);
     REQUIRE(AdsGotoTop(hTable) == 0);
     UNSIGNED8 fld[16] = "TAG";
     UNSIGNED8 v1[8]   = "BBBBB";
@@ -253,6 +258,7 @@ TEST_CASE("M11.3 nested BEGIN + ROLLBACK kills entire transaction") {
 
     REQUIRE(AdsBeginTransaction(hConn) == 0);            // depth = 1
     REQUIRE(AdsBeginTransaction(hConn) == 0);            // depth = 2
+    REQUIRE(AdsLockTable(hTable) == 0);
     REQUIRE(AdsGotoTop(hTable) == 0);
     UNSIGNED8 fld[16] = "TAG";
     UNSIGNED8 v1[8]   = "BBBBB";

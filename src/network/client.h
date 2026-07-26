@@ -89,7 +89,7 @@ public:
         std::uint32_t id = 0;
         std::string   prod_bag_path;  // production CDX/ADI filename (if found)
     };
-    util::Result<OpenTableResult> open_table(const std::string& rel);
+    util::Result<OpenTableResult> open_table(const std::string& rel, std::uint16_t mode = 0);
     util::Result<void>          close_table(std::uint32_t id);
     util::Result<void>          goto_top(std::uint32_t id);
     util::Result<void>          goto_top(RemoteTable* rt);

@@ -905,6 +905,9 @@ DispatchResult Session::dispatch(const Frame& f) {
                 // cannot drain a backward block (see kCapPrefetchBackward).
                 client_prefetch_back_ok_ =
                     (caps & openads::network::kCapPrefetchBackward) != 0;
+                // M12.x — client sends [u16 mode] prefix on OpenTable.
+                client_open_table_mode_ok_ =
+                    (caps & openads::network::kCapOpenTableMode) != 0;
             }
             if (srv_->require_auth()) {
                 std::lock_guard<std::mutex> clk(srv_->creds_mu_);
@@ -1021,10 +1024,21 @@ DispatchResult Session::dispatch(const Frame& f) {
             }
             // Iterator-based ctor: payload.data() may be nullptr when empty,
             // and std::string(nullptr, 0) is UB.
-            std::string rel(f.payload.begin(), f.payload.end());
+            std::string rel;
+            auto open_mode = openads::engine::OpenMode::Shared;
+            if (client_open_table_mode_ok_ && f.payload.size() >= 2) {
+                // M12.x extended payload: [u16 LE mode][table_name_bytes]
+                std::uint16_t mode_u16 =
+                    static_cast<std::uint16_t>(f.payload[0]) |
+                    (static_cast<std::uint16_t>(f.payload[1]) << 8);
+                open_mode = static_cast<openads::engine::OpenMode>(mode_u16);
+                rel.assign(f.payload.begin() + 2, f.payload.end());
+            } else {
+                rel.assign(f.payload.begin(), f.payload.end());
+            }
             auto th = sess_conn_->open_table(rel,
                 openads::engine::TableType::Cdx,
-                openads::engine::OpenMode::Shared);
+                open_mode);
             if (!th) {
                 reply = err("OpenTable: open failed",
                             static_cast<UNSIGNED32>(th.error().code));
@@ -1781,26 +1795,28 @@ DispatchResult Session::dispatch(const Frame& f) {
             if (f.payload.size() < 8) { reply = err("Lock: bad payload"); break; }
             std::uint32_t id = read_u32_le(f.payload.data());
             std::uint32_t rn = read_u32_le(f.payload.data() + 4);
-            ADSHANDLE h = 0;
-            if (auto cit = cursor_tbls_.find(id); cit != cursor_tbls_.end()) {
-                h = cit->second;
-            } else if (auto hit = tbls_h_.find(id); hit != tbls_h_.end()) {
-                h = hit->second;
-            } else {
-                h = ensure_abi_handle(id);
+            // Route lock/unlock to the engine table from tbls_ so the lock
+            // lands on the SAME Table instance that writes go through.
+            // Previously this used ensure_abi_handle() which opens a second
+            // Table via AdsOpenTable(abi_conn_); locks registered there are
+            // invisible to writeback_record_() which checks the original.
+            auto it = tbls_.find(id);
+            if (it == tbls_.end() || !sess_conn_) {
+                reply = err("Lock: bad table id"); break;
             }
-            if (h != 0) {
-                // Attribute whatever lock this call takes to this
-                // session, so the mgmt Data Locks surface can report who
-                // holds it — see mg_collector.h's LockRegistry.
-                openads::mgmt::set_current_lock_owner(
-                    session_user_.empty() ? "(anonymous)" : session_user_,
-                    srv_->conn_no_for_session(sid_));
-                if (f.opcode == Opcode::LockRecord) {
-                    AdsLockRecord(h, rn);
-                } else {
-                    AdsUnlockRecord(h, rn);
-                }
+            auto* tbl = sess_conn_->lookup_table(it->second);
+            if (!tbl) { reply = err("Lock: lookup failed"); break; }
+            openads::mgmt::set_current_lock_owner(
+                session_user_.empty() ? "(anonymous)" : session_user_,
+                srv_->conn_no_for_session(sid_));
+            if (f.opcode == Opcode::LockRecord) {
+                auto r = tbl->lock_record_excl(rn);
+                if (!r) { reply = err("LockRecord: failed",
+                    static_cast<UNSIGNED32>(r.error().code)); break; }
+            } else {
+                auto r = tbl->unlock_record(rn);
+                if (!r) { reply = err("UnlockRecord: failed",
+                    static_cast<UNSIGNED32>(r.error().code)); break; }
             }
             reply.opcode = (f.opcode == Opcode::LockRecord)
                 ? Opcode::LockRecordAck
@@ -1811,23 +1827,23 @@ DispatchResult Session::dispatch(const Frame& f) {
         case Opcode::UnlockTable: {
             if (f.payload.size() < 4) { reply = err("Lock: bad payload"); break; }
             std::uint32_t id = read_u32_le(f.payload.data());
-            ADSHANDLE h = 0;
-            if (auto cit = cursor_tbls_.find(id); cit != cursor_tbls_.end()) {
-                h = cit->second;
-            } else if (auto hit = tbls_h_.find(id); hit != tbls_h_.end()) {
-                h = hit->second;
-            } else {
-                h = ensure_abi_handle(id);
+            auto it = tbls_.find(id);
+            if (it == tbls_.end() || !sess_conn_) {
+                reply = err("LockTable: bad table id"); break;
             }
-            if (h != 0) {
-                openads::mgmt::set_current_lock_owner(
-                    session_user_.empty() ? "(anonymous)" : session_user_,
-                    srv_->conn_no_for_session(sid_));
-                if (f.opcode == Opcode::LockTable) {
-                    AdsLockTable(h);
-                } else {
-                    AdsUnlockTable(h);
-                }
+            auto* tbl = sess_conn_->lookup_table(it->second);
+            if (!tbl) { reply = err("LockTable: lookup failed"); break; }
+            openads::mgmt::set_current_lock_owner(
+                session_user_.empty() ? "(anonymous)" : session_user_,
+                srv_->conn_no_for_session(sid_));
+            if (f.opcode == Opcode::LockTable) {
+                auto r = tbl->lock_table_excl();
+                if (!r) { reply = err("LockTable: failed",
+                    static_cast<UNSIGNED32>(r.error().code)); break; }
+            } else {
+                auto r = tbl->unlock_table();
+                if (!r) { reply = err("UnlockTable: failed",
+                    static_cast<UNSIGNED32>(r.error().code)); break; }
             }
             reply.opcode = (f.opcode == Opcode::LockTable)
                 ? Opcode::LockTableAck
@@ -2759,101 +2775,47 @@ DispatchResult Session::dispatch(const Frame& f) {
                                 f.payload.data() + 6 + nlen),
                             f.payload.size() - 6 - nlen);
 
-            // Obtain engine tbl (source of truth for position / append state)
-            // and an ABI handle (for lock checks).
             auto it = tbls_.find(id);
-            openads::engine::Table* tbl = nullptr;
-            if (it != tbls_.end() && sess_conn_) {
-                tbl = sess_conn_->lookup_table(it->second);
+            if (it == tbls_.end() || !sess_conn_) {
+                reply = err("SetField: bad table id"); break;
             }
+            auto* tbl = sess_conn_->lookup_table(it->second);
+            if (!tbl) { reply = err("SetField: lookup failed"); break; }
 
-            ADSHANDLE h_abi = 0;
-            if (auto cit = cursor_tbls_.find(id); cit != cursor_tbls_.end()) {
-                h_abi = cit->second;
-            } else if (auto hit = tbls_h_.find(id); hit != tbls_h_.end()) {
-                h_abi = hit->second;
-            } else {
-                h_abi = ensure_abi_handle(id);
-            }
-
-            // Lock enforcement (engine tables): after Append the new record is
-            // writable without explicit LockRecord. For normal positioned writes
-            // on pre-existing rows we require a lock on the ABI handle.
-            if (h_abi != 0 && tbl) {
-                bool is_pending = tbl->pending_append();
-                std::uint32_t total = tbl->record_count();
-                // Treat the highest recno (typical just-appended row) leniently
-                // so Append + immediate field sets work without an explicit
-                // prior LockRecord (standard xBase/ADS semantics).
-                bool is_new_row = is_pending || (total == 0) || (tbl->recno() >= total);
-                if (!is_new_row) {
-                    UNSIGNED32 rn = tbl->recno();
-                    UNSIGNED16 locked = 0;
-                    if (AdsIsRecordLocked(h_abi, rn, &locked) == 0 && locked == 0) {
-                        reply = err("SetField: write failed", 5035);
-                        break;
-                    }
-                }
-            }
-
-            // Prefer engine tbl for mutation (same Table object after Append).
-            if (tbl) {
-                std::int32_t fi = tbl->field_index(fname);
-                if (fi < 0) { reply = err("SetField: column not found"); break; }
-                const auto& fdesc =
-                    tbl->field_descriptor(static_cast<std::uint16_t>(fi));
-                util::Result<void> r;
-                auto fi_u = static_cast<std::uint16_t>(fi);
-                switch (fdesc.type) {
-                    case drivers::DbfFieldType::Logical: {
-                        bool lv = !val.empty() &&
-                            (val[0] == '1' || val[0] == 'T' || val[0] == 't' ||
-                             val[0] == 'Y' || val[0] == 'y');
-                        r = tbl->set_field(fi_u, lv);
-                        break;
-                    }
-                    case drivers::DbfFieldType::Integer:
-                    case drivers::DbfFieldType::AutoInc:
-                    case drivers::DbfFieldType::Double:
-                    case drivers::DbfFieldType::ShortInt:
-                    case drivers::DbfFieldType::Currency:
-                    case drivers::DbfFieldType::AdtMoney:
-                    case drivers::DbfFieldType::Time:
-                    case drivers::DbfFieldType::Numeric:
-                        try {
-                            r = tbl->set_field(fi_u, std::stod(val));
-                        } catch (...) {
-                            r = tbl->set_field(fi_u, val);
-                        }
-                        break;
-                    default:
-                        r = tbl->set_field(fi_u, val);
-                        break;
-                }
-                if (!r) { reply = err("SetField: write failed", 5035); break; }
-                reply.opcode = Opcode::SetFieldAck;
-                break;
-            }
-
-            // Cursor/SQL or no-engine path: use ABI handle for the write so
-            // lock or other ACE errors are returned with their real code.
-            if (h_abi != 0) {
-                UNSIGNED8 fbuf[128] = {0};
-                auto n = std::min<std::size_t>(fname.size(), sizeof(fbuf) - 1);
-                std::memcpy(fbuf, fname.data(), n);
-                fbuf[n] = 0;
-                UNSIGNED32 rrc = AdsSetField(h_abi, fbuf,
-                    val.empty() ? nullptr : reinterpret_cast<UNSIGNED8*>(const_cast<char*>(val.data())),
-                    static_cast<UNSIGNED32>(val.size()));
-                if (rrc != 0) {
-                    reply = err("SetField: write failed", rrc);
+            std::int32_t fi = tbl->field_index(fname);
+            if (fi < 0) { reply = err("SetField: column not found"); break; }
+            const auto& fdesc =
+                tbl->field_descriptor(static_cast<std::uint16_t>(fi));
+            util::Result<void> r;
+            auto fi_u = static_cast<std::uint16_t>(fi);
+            switch (fdesc.type) {
+                case drivers::DbfFieldType::Logical: {
+                    bool lv = !val.empty() &&
+                        (val[0] == '1' || val[0] == 'T' || val[0] == 't' ||
+                         val[0] == 'Y' || val[0] == 'y');
+                    r = tbl->set_field(fi_u, lv);
                     break;
                 }
-                reply.opcode = Opcode::SetFieldAck;
-                break;
+                case drivers::DbfFieldType::Integer:
+                case drivers::DbfFieldType::AutoInc:
+                case drivers::DbfFieldType::Double:
+                case drivers::DbfFieldType::ShortInt:
+                case drivers::DbfFieldType::Currency:
+                case drivers::DbfFieldType::AdtMoney:
+                case drivers::DbfFieldType::Time:
+                case drivers::DbfFieldType::Numeric:
+                    try {
+                        r = tbl->set_field(fi_u, std::stod(val));
+                    } catch (...) {
+                        r = tbl->set_field(fi_u, val);
+                    }
+                    break;
+                default:
+                    r = tbl->set_field(fi_u, val);
+                    break;
             }
-
-            reply = err("SetField: bad table id");
+            if (!r) { reply = err("SetField: write failed", 5035); break; }
+            reply.opcode = Opcode::SetFieldAck;
             break;
         }
         case Opcode::DeleteRecord: {
