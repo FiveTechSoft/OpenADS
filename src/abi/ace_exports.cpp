@@ -7135,9 +7135,13 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
         }
     }
     // ADI auto-open: same convention for ADT tables — opening `<base>.adt`
-    // auto-binds `<base>.adi` if it exists, so every tag inside it becomes
-    // navigable without an explicit AdsOpenIndex call.
-    if (tp.extension() == ".adt" || tp.extension() == ".ADT") {
+    // (or `<base>.dat`, the Russoft ERP convention of keeping ADT data in
+    // .DAT + .ADI per ARC-CAJA) auto-binds `<base>.adi` if it exists, so every
+    // tag inside it becomes navigable without an explicit AdsOpenIndex call.
+    std::string tp_extl = tp.extension().string();
+    for (auto& ch : tp_extl)
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    if (tp_extl == ".adt" || tp_extl == ".dat") {
         fs::path adi = tp; adi.replace_extension(".adi");
         std::error_code ec;
         std::string adi_path =
