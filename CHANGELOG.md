@@ -1,4 +1,66 @@
-﻿## 1.8.30 - 2026-07-25
+﻿## 1.8.31 - 2026-07-26
+
+### Added - Write-Guard (GoHot) Enforcement
+
+Implements Harbour's hb_dbfGoHot() equivalent at the engine level.
+In Shared mode, callers must hold a Record Lock or File Lock before
+mutating a record, preventing silent data corruption with concurrent
+access.
+
+Changes:
+- `table.cpp`: Write guard in `writeback_record_()` checks `mode_ == Shared`,
+  `!pending_append_`, `!is_table_locked()`, and `recno_locks_.find(recno_)`.
+  Returns error 5035 when no lock is held.
+- `table.cpp`: `append_record()` sets `pending_append_ = true` so freshly-
+  appended records are writable without explicit LockRecord.
+- `ace_exports.cpp`: RI cascade/SETNULL in `ri_enforce_update()` and
+  `ri_enforce_delete()` lock the child table before writing.
+
+### Added - Wire Protocol: OpenTable Mode Pass-Through
+
+Client now sends the requested open mode in the OpenTable payload using
+a new capability bit (`kCapOpenTableMode = 0x00000008`).
+
+Changes:
+- `wire.h`: New `kCapOpenTableMode` constant.
+- `client.h/cpp`: `open_table()` accepts mode parameter and sends
+  `[u16 mode][table_name]`. Client advertises the capability.
+- `session.cpp`: Server reads mode prefix when capability is advertised.
+- `ace_exports.cpp`: `AdsOpenTable` maps ACE mode via `map_open_mode()`
+  before passing to `rc->open_table()`.
+
+### Fixed - Server-Side Table Identity Mismatch
+
+Lock/Unlock handlers now route to the engine table from `tbls_[id]`
+via `sess_conn_->lookup_table()` instead of `ensure_abi_handle()`.
+This fixes the bug where `ensure_abi_handle()` opened a second Table
+instance via `AdsOpenTable(abi_conn_)`, causing locks to be invisible
+to writes on the original.
+
+Changes:
+- `session.cpp`: LockRecord/UnlockRecord/LockTable/UnlockTable use
+  `sess_conn_->lookup_table(it->second)` directly.
+- `session.cpp`: SetField simplified to use `sess_conn_->lookup_table()`
+  consistently.
+
+### Fixed - Index Path Resolution for Subdirectory-Qualified Paths
+
+`AdsOpenIndex` now resolves index paths against the connection data
+directory (not just the table directory) so "ADSCDX/MyTable.Z01" finds
+`<conn_root>/ADSCDX/MyTable.Z01` instead of failing.
+
+Changes:
+- `ace_exports.cpp`: Added connection-root resolution and fallback
+  in `AdsOpenIndex` before case-insensitive scan.
+
+### Tests
+
+- 7 new engine-level write-guard tests in `engine_table_write_test.cpp`.
+- Fixed 10 existing test files with proper locking (AdsLockTable/AdsLockRecord
+  before writes).
+- New `abi_ordlistadd_path_test` for index path resolution.
+
+## 1.8.30 - 2026-07-25
 
 ### Fixed - Multi-user record count staleness: concurrent appends now visible
 
