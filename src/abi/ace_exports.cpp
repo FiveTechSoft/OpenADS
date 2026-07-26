@@ -13456,11 +13456,12 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
     // instead of record-by-record top-down insertion. Each page is encoded
     // once rather than decoded+re-encoded on every key, ~10x faster on a
     // full CREATE INDEX / REINDEX. NTX keeps the incremental path.
-    openads::drivers::cdx::CdxIndex* cdx_bulk =
-        is_cdx ? static_cast<openads::drivers::cdx::CdxIndex*>(idx_owner.get())
-               : nullptr;
+    // CDX and the v2 ADI dense leaf both override IIndex::build_bulk, so the
+    // call dispatches to the right engine; NTX falls back to the per-record
+    // default and is left on the incremental path here.
+    const bool use_bulk = is_cdx || is_adi;
     std::vector<std::pair<std::string, std::uint32_t>> bulk_keys;
-    if (cdx_bulk) bulk_keys.reserve(rec_count);
+    if (use_bulk) bulk_keys.reserve(rec_count);
     for (std::uint32_t r = 1; r <= rec_count; ++r) {
         // Use direct driver read + bulk buffer load so the driver's
         // read-ahead cache is effective for this sequential scan.
@@ -13496,14 +13497,14 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
             if (!k) return fail(k.error());
             kbytes = std::move(k).value();
         }
-        if (cdx_bulk) {
+        if (use_bulk) {
             bulk_keys.emplace_back(std::move(kbytes), r);
         } else if (auto ins = idx_owner->insert(r, kbytes); !ins) {
             return fail(ins.error());
         }
     }
-    if (cdx_bulk) {
-        if (auto b = cdx_bulk->build_bulk(std::move(bulk_keys)); !b)
+    if (use_bulk) {
+        if (auto b = idx_owner->build_bulk(std::move(bulk_keys)); !b)
             return fail(b.error());
     }
     if (auto fl = idx_owner->flush(); !fl) return fail(fl.error());
