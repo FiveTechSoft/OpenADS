@@ -28,6 +28,12 @@ $cases = [ordered]@{
 # function and returns the answer SAP's own data confirms is correct.
 "fn_PhysPos"        = "SELECT PhysPos('CKwdsBAAAAAQAAAAAB') AS v FROM system.iota";
 
+# ---- 2137 ambiguous unqualified column in a join (projection + ORDER BY);
+# ---- qualified refs and single-table columns must still succeed ----------
+"amb_proj"   = "SELECT ManagerID FROM landlords l JOIN managers m ON l.ManagerID = m.ManagerID";
+"amb_order"  = "SELECT l.LandLordID FROM landlords l JOIN managers m ON l.ManagerID = m.ManagerID ORDER BY ManagerID";
+"amb_nway"   = "SELECT LandLordID FROM properties p, leases l, landlords o WHERE p.PropertyID = l.PropertyID AND p.LandLordID = o.LandLordID";
+
 # ---- read-only / result-set procs ----------------------------------------
 # sp_GetPhysicalPath is in $shapeCases: each engine must return ITS OWN
 # sandbox's physical path, so the raw strings can never match — the shape

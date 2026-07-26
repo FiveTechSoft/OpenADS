@@ -1907,7 +1907,7 @@ util::Result<SelectStmt> parse_select(const std::string& sql) {
         bool first = true;
         for (;;) {
             OrderBy ob;
-            ob.column = c.read_identifier();
+            ob.column = c.read_identifier(&ob.column_alias);
             if (ob.column.empty()) {
                 return util::Error{7200, 0,
                     "expected column name in ORDER BY", sql};
@@ -3093,10 +3093,15 @@ void parse_union_tail(Cursor& c, SelectStmt& stmt) {
         stmt.order_by->descending = desc;
         // Additional columns
         while (c.match_char(',')) {
-            col = c.read_identifier();
+            std::string oalias;
+            col = c.read_identifier(&oalias);
             if (col.empty()) break;
             desc = c.match_keyword("DESC");
-            stmt.order_by_extra.push_back({col, desc});
+            OrderBy ob;
+            ob.column = col;
+            ob.column_alias = std::move(oalias);
+            ob.descending = desc;
+            stmt.order_by_extra.push_back(std::move(ob));
         }
     }
 

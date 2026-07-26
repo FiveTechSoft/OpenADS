@@ -87,6 +87,10 @@ struct WhereExpr {
 
 struct OrderBy {
     std::string column;
+    // ADS dialect — table alias qualifier (`ORDER BY l.state` →
+    // column="state", column_alias="l"). Empty when unqualified. Used by
+    // the join ambiguous-column check (SAP 2137).
+    std::string column_alias;
     bool        descending = false;
 };
 

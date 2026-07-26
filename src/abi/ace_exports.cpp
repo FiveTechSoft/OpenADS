@@ -22826,6 +22826,13 @@ inline std::string sql_error_envelope(std::int32_t code,
             if (msg.find("Source Data Type: <Date>") != std::string::npos)
                 loc_token = "{d";   // locate the offending {d …} literal
             break;
+        case 2137:              // ambiguous unqualified column (pre-shaped)
+            state = "S0000";
+            {
+                auto p = msg.rfind(": ");
+                if (p != std::string::npos) loc_token = msg.substr(p + 2);
+            }
+            break;
         case 5000:
             if (msg.rfind("procedure not registered", 0) == 0) {
                 native = 2198;
@@ -22863,7 +22870,16 @@ inline std::string sql_error_envelope(std::int32_t code,
     // SAP's location suffix is the 1-based character offset of the
     // offending token in the statement text.
     if (!loc_token.empty() && !sql.empty()) {
-        auto ifind = [&]() -> std::size_t {
+        auto is_ident = [](char ch) {
+            unsigned char u = static_cast<unsigned char>(ch);
+            return std::isalnum(u) != 0 || ch == '_';
+        };
+        // SAP points at the offending token's own occurrence. For an
+        // ambiguous column that means the UNQUALIFIED reference — skip
+        // occurrences that are part of a longer word or qualified by an
+        // `alias.` prefix. `require_word` off keeps the old raw-substring
+        // behaviour as a fallback when no clean word-boundary hit exists.
+        auto ifind_word = [&](bool require_word) -> std::size_t {
             if (loc_token.size() > sql.size()) return std::string::npos;
             for (std::size_t i = 0; i + loc_token.size() <= sql.size();
                  ++i) {
@@ -22874,9 +22890,22 @@ inline std::string sql_error_envelope(std::int32_t code,
                         std::toupper(static_cast<unsigned char>(
                             loc_token[j]))) { eq = false; break; }
                 }
-                if (eq) return i;
+                if (!eq) continue;
+                if (require_word) {
+                    char before = i > 0 ? sql[i - 1] : '\0';
+                    char after  = (i + loc_token.size() < sql.size())
+                                ? sql[i + loc_token.size()] : '\0';
+                    if (is_ident(before) || before == '.' ||
+                        is_ident(after))
+                        continue;
+                }
+                return i;
             }
             return std::string::npos;
+        };
+        auto ifind = [&]() -> std::size_t {
+            std::size_t w = ifind_word(true);
+            return w != std::string::npos ? w : ifind_word(false);
         };
         std::size_t at = ifind();
         if (at != std::string::npos) {
@@ -22885,6 +22914,63 @@ inline std::string sql_error_envelope(std::int32_t code,
         }
     }
     return env;
+}
+
+// SAP 2137: an UNQUALIFIED column that resolves in more than one joined
+// source table is ambiguous ("Column found in multiple tables"). Returns
+// the offending column name (original case, for the message + location)
+// or an empty string when none. `tables` are the join's source tables.
+// Qualified refs (alias set) and single-table columns are never flagged;
+// SELECT * (no select_items) references no specific column.
+inline std::string first_ambiguous_join_column(
+        const openads::sql::SelectStmt& st,
+        const std::vector<openads::engine::Table*>& tables) {
+    auto count_in = [&](const std::string& col) -> int {
+        int n = 0;
+        for (auto* t : tables)
+            if (t != nullptr && t->field_index(col) >= 0) ++n;
+        return n;
+    };
+    for (const auto& si : st.select_items) {
+        if (si.wildcard || !si.alias.empty() || si.column.empty()) continue;
+        if (count_in(si.column) > 1) return si.column;
+    }
+    auto check_ob = [&](const openads::sql::OrderBy& ob) -> std::string {
+        if (ob.column_alias.empty() && !ob.column.empty() &&
+            count_in(ob.column) > 1)
+            return ob.column;
+        return std::string();
+    };
+    if (st.order_by) {
+        auto a = check_ob(*st.order_by);
+        if (!a.empty()) return a;
+    }
+    for (const auto& ob : st.order_by_extra) {
+        auto a = check_ob(ob);
+        if (!a.empty()) return a;
+    }
+    // Residual WHERE (join keys are already lowered out / live in ON, so
+    // only genuine filter columns remain). Subqueries are not descended.
+    std::function<std::string(const openads::sql::WhereExpr*)> scan =
+        [&](const openads::sql::WhereExpr* n) -> std::string {
+        if (n == nullptr) return std::string();
+        if (n->kind == openads::sql::WhereExpr::Kind::Cmp) {
+            const auto& w = n->cmp;
+            if (w.column_alias.empty() && !w.column.empty() &&
+                count_in(w.column) > 1)
+                return w.column;
+            if (w.is_outer_ref && w.outer_column_alias.empty() &&
+                !w.outer_column.empty() && count_in(w.outer_column) > 1)
+                return w.outer_column;
+            return std::string();
+        }
+        for (const auto& ch : n->children) {
+            auto a = scan(ch.get());
+            if (!a.empty()) return a;
+        }
+        return scan(n->child.get());
+    };
+    return scan(st.where.get());
 }
 
 } // namespace scriptbridge
@@ -25995,6 +26081,19 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         "multi-table join: table open failed");
         }
 
+        // SAP 2137 — an unqualified column present in more than one joined
+        // table is ambiguous. Checked before resolution (which resolves
+        // left-first and would silently pick one).
+        {
+            std::string amb =
+                scriptbridge::first_ambiguous_join_column(st, tbls);
+            if (!amb.empty()) {
+                close_all();
+                return fail(2137,
+                    ("Column found in multiple tables: " + amb).c_str());
+            }
+        }
+
         // --- 2. Resolve a qualified column -> (table idx, field idx). ---
         auto resolve = [&](const std::string& alias, const std::string& col,
                            std::size_t& ti, std::int32_t& fi) -> bool {
@@ -26827,6 +26926,20 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         openads::engine::Table* rtbl = c->lookup_table(rh.value());
         if (ltbl == nullptr || rtbl == nullptr) {
             return fail(openads::AE_INTERNAL_ERROR, "join post-open");
+        }
+
+        // SAP 2137 — reject an unqualified column present in both joined
+        // tables (checked here, where both source schemas are still
+        // distinct; the merged cursor below would hide the ambiguity).
+        {
+            std::string amb = scriptbridge::first_ambiguous_join_column(
+                parsed.value(), {ltbl, rtbl});
+            if (!amb.empty()) {
+                c->close_table(lh.value());
+                c->close_table(rh.value());
+                return fail(2137,
+                    ("Column found in multiple tables: " + amb).c_str());
+            }
         }
 
         std::int32_t lcol = ltbl->field_index(j.left_column);
