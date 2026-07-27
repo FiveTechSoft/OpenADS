@@ -12,16 +12,20 @@ extern "C" {
 
 // SAP-shipped ace.h tags every public function with ENTRYPOINT, which
 // expands to platform-specific calling-convention + import/export
-// attributes. On x86 Windows, Harbour's contrib/rddads declares every
-// ACE API function with __stdcall (WINAPI) linkage, so ENTRYPOINT must
-// match to avoid stack corruption. On x64 (single convention) this is
-// a no-op, and on non-Windows platforms it is left empty.
+// attributes.
+//
+// __cdecl (the default on MinGW / GCC) uses plain undecorated names
+// (e.g. oads_FCreate) and lets the caller clean the stack.  This is
+// the convention Harbour's HB_FUNC glue expects when linking with
+// MinGW-built import libraries that export undecorated symbols.
+//
+// __stdcall (the original SAP / MSVC convention) decorates names on
+// x86 as _Func@N where N is the parameter byte-width.  The OpenADS
+// import libraries ship both flavours; this header defaults to
+// __cdecl so hbmk2 / MinGW projects resolve symbols without
+// @N decoration mismatches.
 #ifndef ENTRYPOINT
-#  if defined(_WIN32) && !defined(_WIN64)
-#    define ENTRYPOINT __stdcall
-#  else
-#    define ENTRYPOINT
-#  endif
+#  define ENTRYPOINT
 #endif
 
 typedef uint8_t  UNSIGNED8;

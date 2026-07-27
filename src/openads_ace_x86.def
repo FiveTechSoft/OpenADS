@@ -1,440 +1,424 @@
-; OpenADS ACE-compatible DLL exports — x86 (__stdcall) variant.
-; Reported by JONSSON RUSSI (RusSoft Ltda).
+; OpenADS ACE-compatible DLL exports — x86 variant.
 ;
-; Harbour's prebuilt contrib/rddads declares every ACE API function
-; with __stdcall (WINAPI) linkage.  On x86 this produces decorated
-; symbol names of the form _FunctionName@N where N is the total byte
-; width of the parameters on the stack.  The generic openads_ace.def
-; exports undecorated (__cdecl) names, which resolve cleanly on x64
-; (where __stdcall decoration is a no-op) but cause 211× LNK2019
-; when linking a 32-bit Harbour app against the x86 import lib.
+; All entry points use __cdecl convention (undecorated names).  This
+; matches the generic openads_ace.def and lets hbmk2 / MinGW projects
+; link without @N stdcall-decoration mismatches.
 ;
-; This file mirrors every export from openads_ace.def but applies the
-; @N decoration so the x86 import lib generated from it is directly
-; linkable by Harbour's rddads.lib.  The DLL entry points are compiled
-; with __stdcall (WINAPI) on x86, so the names decorate naturally and
-; the import lib, DLL exports, and runtime calling convention all match.
-;
-; Parameter-size calculation (x86, 4-byte pointers):
-;   UNSIGNED8* / void* / ADSHANDLE* / UNSIGNED16* / UNSIGNED32* /
-;   SIGNED32* / double* / int64_t* / UNSIGNED64* / void* = 4 bytes
-;   UNSIGNED16 / SIGNED16 = 2 bytes
-;   UNSIGNED32 / SIGNED32 = 4 bytes
-;   ADSHANDLE (uint64_t) = 8 bytes (two 4-byte stack slots)
-;   double / int64_t / UNSIGNED64 = 8 bytes
+; If you need __stdcall-decorated (@N) names for Harbour's contrib/rddads,
+; use openads_ace_x86_stdcall.def instead.
 
 LIBRARY
 EXPORTS
     ; ---- Core ACE API (alphabetical) ----
-    AdsAddCustomKey@4           = AdsAddCustomKey
-    AdsAppendRecord@4           = AdsAppendRecord
-    AdsApplicationExit@0        = AdsApplicationExit
-    AdsAtBOF@8                  = AdsAtBOF
-    AdsAtEOF@8                  = AdsAtEOF
-    AdsBeginTransaction@4       = AdsBeginTransaction
-    AdsBinaryToFile@12          = AdsBinaryToFile
-    AdsBinaryToFileW@12         = AdsBinaryToFileW
-    AdsCacheOpenCursors@2       = AdsCacheOpenCursors
-    AdsCacheOpenTables@2        = AdsCacheOpenTables
-    AdsCacheRecords@6           = AdsCacheRecords
-    AdsCancelUpdate@4           = AdsCancelUpdate
-    AdsCancelUpdate90@8         = AdsCancelUpdate90
-    AdsCheckExistence@12        = AdsCheckExistence
-    AdsClearAllScopes@4         = AdsClearAllScopes
-    AdsClearAOF@4               = AdsClearAOF
-    AdsClearCallbackFunction@0  = AdsClearCallbackFunction
-    AdsClearDefault@0           = AdsClearDefault
-    AdsClearFilter@4            = AdsClearFilter
-    AdsClearProgressCallback@0  = AdsClearProgressCallback
-    AdsClearRelation@4          = AdsClearRelation
-    AdsClearScope@8             = AdsClearScope
-    AdsClearSQLAbortFunc@0      = AdsClearSQLAbortFunc
-    AdsClearSQLParams@4         = AdsClearSQLParams
-    AdsCloneTable@8             = AdsCloneTable
-    AdsCloseAllIndexes@4        = AdsCloseAllIndexes
-    AdsCloseAllTables@0         = AdsCloseAllTables
-    AdsCloseCachedTables@4      = AdsCloseCachedTables
-    AdsCloseIndex@4             = AdsCloseIndex
-    AdsCloseSQLStatement@4      = AdsCloseSQLStatement
-    AdsCloseTable@4             = AdsCloseTable
-    AdsCommitTransaction@4      = AdsCommitTransaction
-    AdsConnect@8                = AdsConnect
-    AdsConnect26@12             = AdsConnect26
-    AdsConnect60@24             = AdsConnect60
-    AdsContinue@8               = AdsContinue
-    AdsConvertAnsiToOem@8       = AdsConvertAnsiToOem
-    AdsConvertOemToAnsi@8       = AdsConvertOemToAnsi
-    AdsConvertTable@16          = AdsConvertTable
-    AdsCopyTable@12             = AdsCopyTable
-    AdsCopyTableContent@8       = AdsCopyTableContent
-    AdsCopyTableContents@16     = AdsCopyTableContents
-    AdsCopyTableStructure@8     = AdsCopyTableStructure
-    AdsCreateFTSIndex@68        = AdsCreateFTSIndex
-    AdsCreateIndex@28           = AdsCreateIndex
-    AdsCreateIndex61@32         = AdsCreateIndex61
-    AdsCreateIndex90@36         = AdsCreateIndex90
-    AdsCreateSQLStatement@8     = AdsCreateSQLStatement
-    AdsCreateSavepoint@12       = AdsCreateSavepoint
-    AdsCreateTable@36           = AdsCreateTable
-    AdsDropTable@12             = AdsDropTable
-    AdsCreateTable71@40         = AdsCreateTable71
-    AdsCreateTable90@44         = AdsCreateTable90
-    AdsCustomizeAOF@16          = AdsCustomizeAOF
-    AdsDDAddIndexFile@16        = AdsDDAddIndexFile
-    AdsDDAddProcedure@32        = AdsDDAddProcedure
-    AdsDDAddTable@28            = AdsDDAddTable
-    AdsDDAddTable90@32          = AdsDDAddTable90
-    AdsDDAddUserToGroup@12      = AdsDDAddUserToGroup
-    AdsDDAddView@16             = AdsDDAddView
-    AdsDDCreate@16              = AdsDDCreate
-    AdsDDCreateFunction@24      = AdsDDCreateFunction
-    AdsDDCreateLink@20          = AdsDDCreateLink
-    AdsDDCreateProcedure@32     = AdsDDCreateProcedure
-    AdsDDCreateRefIntegrity@36  = AdsDDCreateRefIntegrity
-    AdsDDCreateRefIntegrity62@40 = AdsDDCreateRefIntegrity62
-    AdsDDCreateTrigger@28       = AdsDDCreateTrigger
-    AdsDDCreateUser@20          = AdsDDCreateUser
-    AdsDDCreateView@16          = AdsDDCreateView
-    AdsDDDeleteUser@8           = AdsDDDeleteUser
-    AdsDDDropFunction@8         = AdsDDDropFunction
-    AdsDDDropLink@12            = AdsDDDropLink
-    AdsDDDropProcedure@8        = AdsDDDropProcedure
-    AdsDDDropTrigger@8          = AdsDDDropTrigger
-    AdsDDDropView@8             = AdsDDDropView
-    AdsDDFindClose@8            = AdsDDFindClose
-    AdsDDFindFirstObject@24     = AdsDDFindFirstObject
-    AdsDDFindNextObject@16      = AdsDDFindNextObject
-    AdsDDGetDatabaseProperty@12 = AdsDDGetDatabaseProperty
-    AdsDDGetFieldProperty@24    = AdsDDGetFieldProperty
-    AdsDDGetFunctionProperty@20 = AdsDDGetFunctionProperty
-    AdsDDGetIndexProperty@24    = AdsDDGetIndexProperty
-    AdsDDGetPermissions@24      = AdsDDGetPermissions
-    AdsDDGetProcProperty@20     = AdsDDGetProcProperty
-    AdsDDGetProcedureProperty@20 = AdsDDGetProcedureProperty
-    AdsDDGetRefIntegrityProperty@20 = AdsDDGetRefIntegrityProperty
-    AdsDDGetTableProperty@16    = AdsDDGetTableProperty
-    AdsDDGetTriggerProperty@16  = AdsDDGetTriggerProperty
-    AdsDDGetUserProperty@16     = AdsDDGetUserProperty
-    AdsDDGetUserTableRights@16  = AdsDDGetUserTableRights
-    AdsDDGetViewProperty@16     = AdsDDGetViewProperty
-    AdsDDGrantPermission@20     = AdsDDGrantPermission
-    AdsDDModifyLink@20          = AdsDDModifyLink
-    AdsDDRemoveIndexFile@16     = AdsDDRemoveIndexFile
-    AdsDDRemoveProcedure@8      = AdsDDRemoveProcedure
-    AdsDDRemoveRefIntegrity@8   = AdsDDRemoveRefIntegrity
-    AdsDDRemoveTable@12         = AdsDDRemoveTable
-    AdsDDRemoveView@8           = AdsDDRemoveView
-    AdsDDRemoveTrigger@8        = AdsDDRemoveTrigger
-    AdsDDRemoveUserFromGroup@12 = AdsDDRemoveUserFromGroup
-    AdsDDRevokePermission@20    = AdsDDRevokePermission
-    AdsDDSetDatabaseProperty@12 = AdsDDSetDatabaseProperty
-    AdsDDSetFieldProperty@24    = AdsDDSetFieldProperty
-    AdsDDSetFunctionProperty@20 = AdsDDSetFunctionProperty
-    AdsDDSetIndexProperty@24    = AdsDDSetIndexProperty
-    AdsDDSetProcProperty@20     = AdsDDSetProcProperty
-    AdsDDSetProcedureProperty@20 = AdsDDSetProcedureProperty
-    AdsDDSetRefIntegrityProperty@20 = AdsDDSetRefIntegrityProperty
-    AdsDDSetTableProperty@16    = AdsDDSetTableProperty
-    AdsDDSetTriggerProperty@16  = AdsDDSetTriggerProperty
-    AdsDDSetUserProperty@16     = AdsDDSetUserProperty
-    AdsDDSetUserTableRights@16  = AdsDDSetUserTableRights
-    AdsDDSetViewProperty@16     = AdsDDSetViewProperty
-    AdsData@8                   = AdsData
-    AdsDecryptRecord@4          = AdsDecryptRecord
-    AdsDecryptTable@4           = AdsDecryptTable
-    AdsDeleteCustomKey@4        = AdsDeleteCustomKey
-    AdsDeleteFile@8             = AdsDeleteFile
-    AdsRenameFile@12            = AdsRenameFile
-    AdsGetFileSize@12           = AdsGetFileSize
-    AdsGetFileTime@16           = AdsGetFileTime
-    AdsGetFileDate@16           = AdsGetFileDate
-    AdsDirectory@20             = AdsDirectory
-    AdsDirExist@12              = AdsDirExist
-    AdsDirMake@8                = AdsDirMake
-    AdsDirRemove@8              = AdsDirRemove
-    AdsFOpen@16                 = AdsFOpen
-    AdsFCreate@16               = AdsFCreate
-    AdsFClose@4                 = AdsFClose
-    AdsFRead@16                 = AdsFRead
-    AdsFWrite@16                = AdsFWrite
-    AdsFSeek@16                 = AdsFSeek
-    oads_FOpen@16               = oads_FOpen
-    oads_FCreate@16             = oads_FCreate
-    oads_FClose@4               = oads_FClose
-    oads_FRead@16               = oads_FRead
-    oads_FWrite@16              = oads_FWrite
-    oads_FSeek@16               = oads_FSeek
-    oads_CheckExistence@8       = oads_CheckExistence
-    oads_DeleteFile@8           = oads_DeleteFile
-    oads_RenameFile@12          = oads_RenameFile
-    oads_GetFileSize@12         = oads_GetFileSize
-    oads_GetFileTime@16         = oads_GetFileTime
-    oads_GetFileDate@16         = oads_GetFileDate
-    oads_DirMake@8              = oads_DirMake
-    oads_DirRemove@8            = oads_DirRemove
-    oads_DirExist@12            = oads_DirExist
-    oads_Directory@20           = oads_Directory
-    AdsDeleteIndex@4            = AdsDeleteIndex
-    AdsDeleteRecord@4           = AdsDeleteRecord
-    AdsDisconnect@4             = AdsDisconnect
-    AdsDisableAutoIncEnforcement@4 = AdsDisableAutoIncEnforcement
-    AdsDisableEncryption@4      = AdsDisableEncryption
-    AdsDisableLocalConnections@0 = AdsDisableLocalConnections
-    AdsDisableRI@4              = AdsDisableRI
-    AdsDisableUniqueEnforcement@4 = AdsDisableUniqueEnforcement
-    AdsEnableAutoIncEnforcement@4 = AdsEnableAutoIncEnforcement
-    AdsEnableEncryption@8       = AdsEnableEncryption
-    AdsEnableRI@4               = AdsEnableRI
-    AdsEnableUniqueEnforcement@4 = AdsEnableUniqueEnforcement
-    AdsEncryptRecord@4          = AdsEncryptRecord
-    AdsEncryptTable@4           = AdsEncryptTable
-    AdsEvalAOF@12               = AdsEvalAOF
-    AdsEvalLogicalExpr@12       = AdsEvalLogicalExpr
-    AdsEvalNumericExpr@12       = AdsEvalNumericExpr
-    AdsEvalStringExpr@16        = AdsEvalStringExpr
-    AdsEvalTestExpr@12          = AdsEvalTestExpr
-    AdsExecuteSQL@8             = AdsExecuteSQL
-    AdsExecuteSQLDirect@12      = AdsExecuteSQLDirect
-    AdsExecuteSQLDirectW@12     = AdsExecuteSQLDirectW
-    AdsExtractKey@12            = AdsExtractKey
-    AdsFailedTransactionRecovery@4 = AdsFailedTransactionRecovery
-    AdsFileToBinary@16          = AdsFileToBinary
-    AdsFileToBinaryW@16         = AdsFileToBinaryW
-    AdsFilterOption@12          = AdsFilterOption
-    AdsFindClose@8              = AdsFindClose
-    AdsFindConnection@8         = AdsFindConnection
-    AdsFindConnection25@8       = AdsFindConnection25
-    AdsFindFirstTable@20        = AdsFindFirstTable
-    AdsFindFirstTable62@24      = AdsFindFirstTable62
-    AdsFindNextTable@16         = AdsFindNextTable
-    AdsFindNextTable62@20       = AdsFindNextTable62
-    AdsFlushFileBuffers@4       = AdsFlushFileBuffers
-    AdsSetDeferredFlush@8       = AdsSetDeferredFlush
-    AdsFTSSearch@20             = AdsFTSSearch
-    AdsGetAOF@12                = AdsGetAOF
-    AdsGetAllIndexes@12         = AdsGetAllIndexes
-    AdsGetAllLocks@12           = AdsGetAllLocks
-    AdsGetAllTables@12          = AdsGetAllTables
-    AdsGetAOFOptLevel@12        = AdsGetAOFOptLevel
-    AdsGetBinary@20             = AdsGetBinary
-    AdsGetBinaryLength@12       = AdsGetBinaryLength
-    AdsGetBookmark@8            = AdsGetBookmark
-    AdsGetBookmark60@12         = AdsGetBookmark60
-    AdsGetConnectionType@8      = AdsGetConnectionType
-    AdsGetDateFormat@8          = AdsGetDateFormat
-    AdsGetDateFormat60@12       = AdsGetDateFormat60
-    AdsGetDate@16               = AdsGetDate
-    AdsGetDefault@8             = AdsGetDefault
-    AdsGetDeleted@4             = AdsGetDeleted
-    AdsGetDouble@12             = AdsGetDouble
-    AdsGetEpoch@4               = AdsGetEpoch
-    AdsGetErrorString@12        = AdsGetErrorString
-    AdsGetExact@4               = AdsGetExact
-    AdsGetExact22@8             = AdsGetExact22
-    AdsGetField@20              = AdsGetField
-    AdsGetFieldDecimals@12      = AdsGetFieldDecimals
-    AdsGetFieldLength@12        = AdsGetFieldLength
-    AdsGetFieldLength100@16     = AdsGetFieldLength100
-    AdsGetFieldName@12          = AdsGetFieldName
-    AdsGetFieldNum@12           = AdsGetFieldNum
-    AdsGetFieldOffset@12        = AdsGetFieldOffset
-    AdsGetFieldRaw@16           = AdsGetFieldRaw
-    AdsGetFieldType@12          = AdsGetFieldType
-    AdsGetFieldW@20             = AdsGetFieldW
-    AdsGetFilter@12             = AdsGetFilter
-    AdsGetFTSIndexes@12         = AdsGetFTSIndexes
-    AdsGetHandleType@8          = AdsGetHandleType
-    AdsGetIndexCondition@12     = AdsGetIndexCondition
-    AdsGetIndexExpr@12          = AdsGetIndexExpr
-    AdsGetIndexFilename@12      = AdsGetIndexFilename
-    AdsGetIndexHandle@12        = AdsGetIndexHandle
-    AdsGetIndexHandleByOrder@12 = AdsGetIndexHandleByOrder
-    AdsGetIndexName@12          = AdsGetIndexName
-    AdsGetIndexOrderByHandle@8  = AdsGetIndexOrderByHandle
-    AdsGetJulian@12             = AdsGetJulian
-    AdsGetKeyCount@12           = AdsGetKeyCount
-    AdsGetKeyLength@8           = AdsGetKeyLength
-    AdsGetKeyNum@12             = AdsGetKeyNum
-    AdsGetKeyType@8             = AdsGetKeyType
-    AdsGetLastAutoinc@8         = AdsGetLastAutoinc
-    AdsGetLastError@12          = AdsGetLastError
-    AdsGetLastTableUpdate@12    = AdsGetLastTableUpdate
-    AdsGetLogical@12            = AdsGetLogical
-    AdsGetLong@8                = AdsGetLong
-    AdsGetLongLong@12           = AdsGetLongLong
-    AdsGetLockCycle@8           = AdsGetLockCycle
-    AdsGetLockRetryCount@8      = AdsGetLockRetryCount
-    AdsGetMemoBlockSize@8       = AdsGetMemoBlockSize
-    AdsGetMemoDataType@12       = AdsGetMemoDataType
-    AdsGetMemoLength@12         = AdsGetMemoLength
-    AdsGetMilliseconds@12       = AdsGetMilliseconds
-    AdsGetNumActiveLinks@8      = AdsGetNumActiveLinks
-    AdsGetNumFields@8           = AdsGetNumFields
-    AdsGetNumIndexes@8          = AdsGetNumIndexes
-    AdsGetNumLocks@8            = AdsGetNumLocks
-    AdsGetNumOpenTables@4       = AdsGetNumOpenTables
-    AdsGetNumParams@8           = AdsGetNumParams
-    AdsGetRecord@12             = AdsGetRecord
-    AdsGetRecordCount@12        = AdsGetRecordCount
-    AdsGetRecordCRC@12          = AdsGetRecordCRC
-    AdsGetRecordLength@8        = AdsGetRecordLength
-    AdsGetRecordNum@12          = AdsGetRecordNum
-    AdsGetRelKeyPos@8           = AdsGetRelKeyPos
-    AdsGetScope@16              = AdsGetScope
-    AdsGetSearchPath@8          = AdsGetSearchPath
-    AdsGetServerName@8          = AdsGetServerName
-    AdsGetServerTime@20         = AdsGetServerTime
-    AdsGetString@20             = AdsGetString
-    AdsGetStringW@20            = AdsGetStringW
-    AdsGetTableAlias@12         = AdsGetTableAlias
-    AdsGetTableCharType@8       = AdsGetTableCharType
-    AdsGetTableConnection@8     = AdsGetTableConnection
-    AdsGetTableConType@8        = AdsGetTableConType
-    AdsGetTableFilename@16      = AdsGetTableFilename
-    AdsGetTableHandle25@12      = AdsGetTableHandle25
-    AdsGetTableLockType@8       = AdsGetTableLockType
-    AdsGetTableOpenOptions@8    = AdsGetTableOpenOptions
-    AdsGetTableType@8           = AdsGetTableType
-    AdsGetVersion@20            = AdsGetVersion
-    AdsGotoBookmark60@12        = AdsGotoBookmark60
-    AdsGotoBottom@4             = AdsGotoBottom
-    AdsGotoRecord@8             = AdsGotoRecord
-    AdsGotoTop@4                = AdsGotoTop
-    AdsInitRawKey@4             = AdsInitRawKey
-    AdsInTransaction@8          = AdsInTransaction
-    AdsIsConnectionAlive@8      = AdsIsConnectionAlive
-    AdsIsEmpty@12               = AdsIsEmpty
-    AdsIsEncryptionEnabled@8    = AdsIsEncryptionEnabled
-    AdsIsExprValid@12           = AdsIsExprValid
-    AdsIsFound@8                = AdsIsFound
-    AdsIsIndexCustom@8          = AdsIsIndexCustom
-    AdsIsIndexDescending@8      = AdsIsIndexDescending
-    AdsIsIndexUnique@8          = AdsIsIndexUnique
-    AdsIsNull@12                = AdsIsNull
-    AdsIsNullable@12            = AdsIsNullable
-    AdsIsRecordDeleted@8        = AdsIsRecordDeleted
-    AdsIsRecordEncrypted@8      = AdsIsRecordEncrypted
-    AdsIsRecordInAOF@12         = AdsIsRecordInAOF
-    AdsIsRecordLocked@12        = AdsIsRecordLocked
-    AdsIsRecordVisible@8        = AdsIsRecordVisible
-    AdsIsServerLoaded@8         = AdsIsServerLoaded
-    AdsIsTableEncrypted@8       = AdsIsTableEncrypted
-    AdsIsTableLocked@8          = AdsIsTableLocked
-    AdsLockRecord@8             = AdsLockRecord
-    AdsLockTable@4              = AdsLockTable
-    AdsMgConnect@16             = AdsMgConnect
-    AdsMgDisconnect@4           = AdsMgDisconnect
-    AdsMgDumpInternalTables@4   = AdsMgDumpInternalTables
-    AdsMgGetActivityInfo@12     = AdsMgGetActivityInfo
-    AdsMgGetCommStats@12        = AdsMgGetCommStats
-    AdsMgGetConfigInfo@20       = AdsMgGetConfigInfo
-    AdsMgGetInstallInfo@12      = AdsMgGetInstallInfo
-    AdsMgGetLockOwner@24        = AdsMgGetLockOwner
-    AdsMgGetLocks@28            = AdsMgGetLocks
-    AdsMgGetOpenIndexes@28      = AdsMgGetOpenIndexes
-    AdsMgGetOpenTables@24       = AdsMgGetOpenTables
-    AdsMgGetOpenTables2@24      = AdsMgGetOpenTables2
-    AdsMgGetServerType@8        = AdsMgGetServerType
-    AdsMgGetThreadSql@20        = AdsMgGetThreadSql
-    AdsMgGetUserAvgCost@16      = AdsMgGetUserAvgCost
-    AdsMgGetUserNames@20        = AdsMgGetUserNames
-    AdsMgGetWorkerThreadActivity@16 = AdsMgGetWorkerThreadActivity
-    AdsMgKillUser@12            = AdsMgKillUser
-    AdsMgResetCommStats@4       = AdsMgResetCommStats
-    AdsOpenIndex@16             = AdsOpenIndex
-    AdsOpenTable@34             = AdsOpenTable
-    AdsOpenTable90@36           = AdsOpenTable90
-    AdsPackTable@4              = AdsPackTable
-    AdsPackTable120@12          = AdsPackTable120
-    AdsPrepareSQL@8             = AdsPrepareSQL
-    AdsPrepareSQLW@8            = AdsPrepareSQLW
-    AdsRecallAllRecords@4       = AdsRecallAllRecords
-    AdsRecallRecord@4           = AdsRecallRecord
-    AdsReindex@4                = AdsReindex
-    AdsReindex61@8              = AdsReindex61
-    AdsRefreshAOF@4             = AdsRefreshAOF
-    AdsRefreshRecord@4          = AdsRefreshRecord
-    AdsRegisterCallbackFunction@4 = AdsRegisterCallbackFunction
-    AdsRegisterProgressCallback@4 = AdsRegisterProgressCallback
-    AdsReleaseSavepoint@8       = AdsReleaseSavepoint
-    AdsResetConnection@4        = AdsResetConnection
-    AdsRestructureTable@36      = AdsRestructureTable
-    AdsRestructureTable90@40    = AdsRestructureTable90
-    AdsRestructureTable120@48   = AdsRestructureTable120
-    AdsRollbackTransaction@4    = AdsRollbackTransaction
-    AdsRollbackTransaction80@12 = AdsRollbackTransaction80
-    AdsSeek@20                  = AdsSeek
-    AdsSeekLast@16              = AdsSeekLast
-    AdsSetAOF@12                = AdsSetAOF
-    AdsSetBinary@28             = AdsSetBinary
-    AdsSetCollation@8           = AdsSetCollation
-    AdsSetDate@18               = AdsSetDate
-    AdsSetDateFormat@4          = AdsSetDateFormat
-    AdsSetDateFormat60@8        = AdsSetDateFormat60
-    AdsSetDecimals@2            = AdsSetDecimals
-    AdsSetDefault@4             = AdsSetDefault
-    AdsSetDouble@16             = AdsSetDouble
-    AdsSetEmpty@8               = AdsSetEmpty
-    AdsSetEncryptionPassword@8  = AdsSetEncryptionPassword
-    AdsSetEpoch@2               = AdsSetEpoch
-    AdsSetExact@2               = AdsSetExact
-    AdsSetExact22@6             = AdsSetExact22
-    AdsSetField@16              = AdsSetField
-    AdsSetFieldW@20             = AdsSetFieldW
-    AdsSetFieldRaw@16           = AdsSetFieldRaw
-    AdsSetFilter@8              = AdsSetFilter
-    AdsSetIndexDirection@6      = AdsSetIndexDirection
-    AdsSetIndexOrder@8          = AdsSetIndexOrder
-    AdsSetIndexOrderByHandle@12 = AdsSetIndexOrderByHandle
-    AdsSetJulian@12             = AdsSetJulian
-    AdsSetLogical@10            = AdsSetLogical
-    AdsSetLockCycle@8           = AdsSetLockCycle
-    AdsSetLockRetryCount@8      = AdsSetLockRetryCount
-    AdsSetLong@16               = AdsSetLong
-    AdsSetLongLong@16           = AdsSetLongLong
-    AdsSetMilliseconds@12       = AdsSetMilliseconds
-    AdsSetMoney@16              = AdsSetMoney
-    AdsSetNull@8                = AdsSetNull
-    AdsSetProperty90@16         = AdsSetProperty90
-    AdsSetRecord@12             = AdsSetRecord
-    AdsSetRelation@12           = AdsSetRelation
-    AdsSetRelKeyPos@12          = AdsSetRelKeyPos
-    AdsSetScopedRelation@16     = AdsSetScopedRelation
-    AdsSetScope@20              = AdsSetScope
-    AdsSetSearchPath@4          = AdsSetSearchPath
-    AdsSetServerType@2          = AdsSetServerType
-    AdsSetShort@12              = AdsSetShort
-    AdsSetSQLTimeout@12         = AdsSetSQLTimeout
-    AdsSetString@16             = AdsSetString
-    AdsSetStringW@16            = AdsSetStringW
-    AdsSetTime@16               = AdsSetTime
-    AdsSetTimeStamp@16          = AdsSetTimeStamp
-    AdsShowDeleted@2            = AdsShowDeleted
-    AdsShowError@4              = AdsShowError
-    AdsSkip@8                   = AdsSkip
-    AdsSkipUnique@8             = AdsSkipUnique
-    AdsStmtClearTablePasswords@4 = AdsStmtClearTablePasswords
-    AdsStmtDisableEncryption@4  = AdsStmtDisableEncryption
-    AdsStmtSetTableCharType@6   = AdsStmtSetTableCharType
-    AdsStmtSetTableCollation@8  = AdsStmtSetTableCollation
-    AdsStmtSetTableLockType@6   = AdsStmtSetTableLockType
-    AdsStmtSetTablePassword@12  = AdsStmtSetTablePassword
-    AdsStmtSetTableReadOnly@6   = AdsStmtSetTableReadOnly
-    AdsStmtSetTableRights@6     = AdsStmtSetTableRights
-    AdsStmtSetTableType@6       = AdsStmtSetTableType
-    AdsStudioPort@4             = AdsStudioPort
-    AdsStudioStart@8            = AdsStudioStart
-    AdsStudioStop@0             = AdsStudioStop
-    AdsTestLogin@16             = AdsTestLogin
-    AdsTestRecLocks@4           = AdsTestRecLocks
-    AdsThreadExit@0             = AdsThreadExit
-    AdsUnlockRecord@8           = AdsUnlockRecord
-    AdsUnlockTable@4            = AdsUnlockTable
-    AdsVerifySQL@8              = AdsVerifySQL
-    AdsVerifySQLW@8             = AdsVerifySQLW
-    AdsWriteAllRecords@0        = AdsWriteAllRecords
-    AdsWriteRecord@4            = AdsWriteRecord
-    AdsZapTable@4               = AdsZapTable
+    AdsAddCustomKey
+    AdsAppendRecord
+    AdsApplicationExit
+    AdsAtBOF
+    AdsAtEOF
+    AdsBeginTransaction
+    AdsBinaryToFile
+    AdsBinaryToFileW
+    AdsCacheOpenCursors
+    AdsCacheOpenTables
+    AdsCacheRecords
+    AdsCancelUpdate
+    AdsCancelUpdate90
+    AdsCheckExistence
+    AdsClearAllScopes
+    AdsClearAOF
+    AdsClearCallbackFunction
+    AdsClearDefault
+    AdsClearFilter
+    AdsClearProgressCallback
+    AdsClearRelation
+    AdsClearScope
+    AdsClearSQLAbortFunc
+    AdsClearSQLParams
+    AdsCloneTable
+    AdsCloseAllIndexes
+    AdsCloseAllTables
+    AdsCloseCachedTables
+    AdsCloseIndex
+    AdsCloseSQLStatement
+    AdsCloseTable
+    AdsCommitTransaction
+    AdsConnect
+    AdsConnect26
+    AdsConnect60
+    AdsContinue
+    AdsConvertAnsiToOem
+    AdsConvertOemToAnsi
+    AdsConvertTable
+    AdsCopyTable
+    AdsCopyTableContent
+    AdsCopyTableContents
+    AdsCopyTableStructure
+    AdsCreateFTSIndex
+    AdsCreateIndex
+    AdsCreateIndex61
+    AdsCreateIndex90
+    AdsCreateSQLStatement
+    AdsCreateSavepoint
+    AdsCreateTable
+    AdsDropTable
+    AdsCreateTable71
+    AdsCreateTable90
+    AdsCustomizeAOF
+    AdsDDAddIndexFile
+    AdsDDAddProcedure
+    AdsDDAddTable
+    AdsDDAddTable90
+    AdsDDAddUserToGroup
+    AdsDDAddView
+    AdsDDCreate
+    AdsDDCreateFunction
+    AdsDDCreateLink
+    AdsDDCreateProcedure
+    AdsDDCreateRefIntegrity
+    AdsDDCreateRefIntegrity62
+    AdsDDCreateTrigger
+    AdsDDCreateUser
+    AdsDDCreateView
+    AdsDDDeleteUser
+    AdsDDDropFunction
+    AdsDDDropLink
+    AdsDDDropProcedure
+    AdsDDDropTrigger
+    AdsDDDropView
+    AdsDDFindClose
+    AdsDDFindFirstObject
+    AdsDDFindNextObject
+    AdsDDGetDatabaseProperty
+    AdsDDGetFieldProperty
+    AdsDDGetFunctionProperty
+    AdsDDGetIndexProperty
+    AdsDDGetPermissions
+    AdsDDGetProcProperty
+    AdsDDGetProcedureProperty
+    AdsDDGetRefIntegrityProperty
+    AdsDDGetTableProperty
+    AdsDDGetTriggerProperty
+    AdsDDGetUserProperty
+    AdsDDGetUserTableRights
+    AdsDDGetViewProperty
+    AdsDDGrantPermission
+    AdsDDModifyLink
+    AdsDDRemoveIndexFile
+    AdsDDRemoveProcedure
+    AdsDDRemoveRefIntegrity
+    AdsDDRemoveTable
+    AdsDDRemoveView
+    AdsDDRemoveTrigger
+    AdsDDRemoveUserFromGroup
+    AdsDDRevokePermission
+    AdsDDSetDatabaseProperty
+    AdsDDSetFieldProperty
+    AdsDDSetFunctionProperty
+    AdsDDSetIndexProperty
+    AdsDDSetProcProperty
+    AdsDDSetProcedureProperty
+    AdsDDSetRefIntegrityProperty
+    AdsDDSetTableProperty
+    AdsDDSetTriggerProperty
+    AdsDDSetUserProperty
+    AdsDDSetUserTableRights
+    AdsDDSetViewProperty
+    AdsData
+    AdsDecryptRecord
+    AdsDecryptTable
+    AdsDeleteCustomKey
+    AdsDeleteFile
+    AdsRenameFile
+    AdsGetFileSize
+    AdsGetFileTime
+    AdsGetFileDate
+    AdsDirectory
+    AdsDirExist
+    AdsDirMake
+    AdsDirRemove
+    AdsFOpen
+    AdsFCreate
+    AdsFClose
+    AdsFRead
+    AdsFWrite
+    AdsFSeek
+    oads_FOpen
+    oads_FCreate
+    oads_FClose
+    oads_FRead
+    oads_FWrite
+    oads_FSeek
+    oads_CheckExistence
+    oads_DeleteFile
+    oads_RenameFile
+    oads_GetFileSize
+    oads_GetFileTime
+    oads_GetFileDate
+    oads_DirMake
+    oads_DirRemove
+    oads_DirExist
+    oads_Directory
+    AdsDeleteIndex
+    AdsDeleteRecord
+    AdsDisconnect
+    AdsDisableAutoIncEnforcement
+    AdsDisableEncryption
+    AdsDisableLocalConnections
+    AdsDisableRI
+    AdsDisableUniqueEnforcement
+    AdsEnableAutoIncEnforcement
+    AdsEnableEncryption
+    AdsEnableRI
+    AdsEnableUniqueEnforcement
+    AdsEncryptRecord
+    AdsEncryptTable
+    AdsEvalAOF
+    AdsEvalLogicalExpr
+    AdsEvalNumericExpr
+    AdsEvalStringExpr
+    AdsEvalTestExpr
+    AdsExecuteSQL
+    AdsExecuteSQLDirect
+    AdsExecuteSQLDirectW
+    AdsExtractKey
+    AdsFailedTransactionRecovery
+    AdsFileToBinary
+    AdsFileToBinaryW
+    AdsFilterOption
+    AdsFindClose
+    AdsFindConnection
+    AdsFindConnection25
+    AdsFindFirstTable
+    AdsFindFirstTable62
+    AdsFindNextTable
+    AdsFindNextTable62
+    AdsFlushFileBuffers
+    AdsSetDeferredFlush
+    AdsFTSSearch
+    AdsGetAOF
+    AdsGetAllIndexes
+    AdsGetAllLocks
+    AdsGetAllTables
+    AdsGetAOFOptLevel
+    AdsGetBinary
+    AdsGetBinaryLength
+    AdsGetBookmark
+    AdsGetBookmark60
+    AdsGetConnectionType
+    AdsGetDateFormat
+    AdsGetDateFormat60
+    AdsGetDate
+    AdsGetDefault
+    AdsGetDeleted
+    AdsGetDouble
+    AdsGetEpoch
+    AdsGetErrorString
+    AdsGetExact
+    AdsGetExact22
+    AdsGetField
+    AdsGetFieldDecimals
+    AdsGetFieldLength
+    AdsGetFieldLength100
+    AdsGetFieldName
+    AdsGetFieldNum
+    AdsGetFieldOffset
+    AdsGetFieldRaw
+    AdsGetFieldType
+    AdsGetFieldW
+    AdsGetFilter
+    AdsGetFTSIndexes
+    AdsGetHandleType
+    AdsGetIndexCondition
+    AdsGetIndexExpr
+    AdsGetIndexFilename
+    AdsGetIndexHandle
+    AdsGetIndexHandleByOrder
+    AdsGetIndexName
+    AdsGetIndexOrderByHandle
+    AdsGetJulian
+    AdsGetKeyCount
+    AdsGetKeyLength
+    AdsGetKeyNum
+    AdsGetKeyType
+    AdsGetLastAutoinc
+    AdsGetLastError
+    AdsGetLastTableUpdate
+    AdsGetLogical
+    AdsGetLong
+    AdsGetLongLong
+    AdsGetLockCycle
+    AdsGetLockRetryCount
+    AdsGetMemoBlockSize
+    AdsGetMemoDataType
+    AdsGetMemoLength
+    AdsGetMilliseconds
+    AdsGetNumActiveLinks
+    AdsGetNumFields
+    AdsGetNumIndexes
+    AdsGetNumLocks
+    AdsGetNumOpenTables
+    AdsGetNumParams
+    AdsGetRecord
+    AdsGetRecordCount
+    AdsGetRecordCRC
+    AdsGetRecordLength
+    AdsGetRecordNum
+    AdsGetRelKeyPos
+    AdsGetScope
+    AdsGetSearchPath
+    AdsGetServerName
+    AdsGetServerTime
+    AdsGetString
+    AdsGetStringW
+    AdsGetTableAlias
+    AdsGetTableCharType
+    AdsGetTableConnection
+    AdsGetTableConType
+    AdsGetTableFilename
+    AdsGetTableHandle25
+    AdsGetTableLockType
+    AdsGetTableOpenOptions
+    AdsGetTableType
+    AdsGetVersion
+    AdsGotoBookmark60
+    AdsGotoBottom
+    AdsGotoRecord
+    AdsGotoTop
+    AdsInitRawKey
+    AdsInTransaction
+    AdsIsConnectionAlive
+    AdsIsEmpty
+    AdsIsEncryptionEnabled
+    AdsIsExprValid
+    AdsIsFound
+    AdsIsIndexCustom
+    AdsIsIndexDescending
+    AdsIsIndexUnique
+    AdsIsNull
+    AdsIsNullable
+    AdsIsRecordDeleted
+    AdsIsRecordEncrypted
+    AdsIsRecordInAOF
+    AdsIsRecordLocked
+    AdsIsRecordVisible
+    AdsIsServerLoaded
+    AdsIsTableEncrypted
+    AdsIsTableLocked
+    AdsLockRecord
+    AdsLockTable
+    AdsMgConnect
+    AdsMgDisconnect
+    AdsMgDumpInternalTables
+    AdsMgGetActivityInfo
+    AdsMgGetCommStats
+    AdsMgGetConfigInfo
+    AdsMgGetInstallInfo
+    AdsMgGetLockOwner
+    AdsMgGetLocks
+    AdsMgGetOpenIndexes
+    AdsMgGetOpenTables
+    AdsMgGetOpenTables2
+    AdsMgGetServerType
+    AdsMgGetThreadSql
+    AdsMgGetUserAvgCost
+    AdsMgGetUserNames
+    AdsMgGetWorkerThreadActivity
+    AdsMgKillUser
+    AdsMgResetCommStats
+    AdsOpenIndex
+    AdsOpenTable
+    AdsOpenTable90
+    AdsPackTable
+    AdsPackTable120
+    AdsPrepareSQL
+    AdsPrepareSQLW
+    AdsRecallAllRecords
+    AdsRecallRecord
+    AdsReindex
+    AdsReindex61
+    AdsRefreshAOF
+    AdsRefreshRecord
+    AdsRegisterCallbackFunction
+    AdsRegisterProgressCallback
+    AdsReleaseSavepoint
+    AdsResetConnection
+    AdsRestructureTable
+    AdsRestructureTable90
+    AdsRestructureTable120
+    AdsRollbackTransaction
+    AdsRollbackTransaction80
+    AdsSeek
+    AdsSeekLast
+    AdsSetAOF
+    AdsSetBinary
+    AdsSetCollation
+    AdsSetDate
+    AdsSetDateFormat
+    AdsSetDateFormat60
+    AdsSetDecimals
+    AdsSetDefault
+    AdsSetDouble
+    AdsSetEmpty
+    AdsSetEncryptionPassword
+    AdsSetEpoch
+    AdsSetExact
+    AdsSetExact22
+    AdsSetField
+    AdsSetFieldW
+    AdsSetFieldRaw
+    AdsSetFilter
+    AdsSetIndexDirection
+    AdsSetIndexOrder
+    AdsSetIndexOrderByHandle
+    AdsSetJulian
+    AdsSetLogical
+    AdsSetLockCycle
+    AdsSetLockRetryCount
+    AdsSetLong
+    AdsSetLongLong
+    AdsSetMilliseconds
+    AdsSetMoney
+    AdsSetNull
+    AdsSetProperty90
+    AdsSetRecord
+    AdsSetRelation
+    AdsSetRelKeyPos
+    AdsSetScopedRelation
+    AdsSetScope
+    AdsSetSearchPath
+    AdsSetServerType
+    AdsSetShort
+    AdsSetSQLTimeout
+    AdsSetString
+    AdsSetStringW
+    AdsSetTime
+    AdsSetTimeStamp
+    AdsShowDeleted
+    AdsShowError
+    AdsSkip
+    AdsSkipUnique
+    AdsStmtClearTablePasswords
+    AdsStmtDisableEncryption
+    AdsStmtSetTableCharType
+    AdsStmtSetTableCollation
+    AdsStmtSetTableLockType
+    AdsStmtSetTablePassword
+    AdsStmtSetTableReadOnly
+    AdsStmtSetTableRights
+    AdsStmtSetTableType
+    AdsStudioPort
+    AdsStudioStart
+    AdsStudioStop
+    AdsTestLogin
+    AdsTestRecLocks
+    AdsThreadExit
+    AdsUnlockRecord
+    AdsUnlockTable
+    AdsVerifySQL
+    AdsVerifySQLW
+    AdsWriteAllRecords
+    AdsWriteRecord
+    AdsZapTable
 
     ; Legacy MSVC2013-era CRT shims — not decorated (__cdecl linkage).
     _dclass   = openads_dclass

@@ -7,9 +7,9 @@
   whenever src/openads_ace.def or src/openads_ace_x86.def changes, then
   commit the result.
 
-  x86 import libs use openads_ace_x86.def (__stdcall-decorated @N names)
-  so Harbour's contrib/rddads links cleanly. x64 uses the undecorated
-  openads_ace.def.  (Bug report: JONSSON RUSSI, RusSoft Ltda.)
+  x86 and x64 import libs both use undecorated (__cdecl) names so
+  hbmk2 / MinGW projects link without @N stdcall-decoration mismatches.
+  See openads_ace_x86.def for details.
 
   Prereqs (paths below — adjust if your install differs):
     MSVC      lib.exe   (any VS 2022 install)
