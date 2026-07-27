@@ -1,4 +1,32 @@
-﻿## 1.8.32 - 2026-07-26
+﻿## 1.8.33 - 2026-07-27
+
+### Fixed - Legacy AdsCreateIndex path resolution
+
+`AdsCreateIndex` (the legacy wrapper used by Harbour's `INDEX ON ... TO`)
+did not resolve index paths the same way as `AdsCreateIndex61`:
+
+- Empty bag name did not create a structural CDX (table-stem `.cdx`)
+- Relative paths were not resolved against the table directory
+- Missing extension fell through to NTX creation instead of auto-adding `.cdx`
+
+This caused Harbour's `INDEX ON field TO filename` to fail with or without
+a path. The fix mirrors `AdsCreateIndex61`'s path resolution logic.
+
+### Added - Create-Index Path Tests
+
+New test suite (`abi_create_index_path_test.cpp`) with 8 test cases covering
+various index path forms:
+
+- Bag name without extension → auto `.cdx`
+- Bag name with `.cdx` extension
+- Absolute path with drive letter (Windows)
+- Empty bag name → structural CDX
+- Bag in subdirectory
+- Backslash path (Windows separators)
+- Legacy `AdsCreateIndex` without extension (the fixed bug)
+- `AdsCreateIndex61` + `AdsOpenIndex` round-trip
+
+## 1.8.32 - 2026-07-26
 
 ### Added - Comprehensive Lock Test Coverage
 

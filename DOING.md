@@ -6,6 +6,43 @@
 
 ---
 
+## 2026-07-27 — Fix: Legacy AdsCreateIndex path resolution
+
+### Problema reportado por Pritpal Bedi
+
+"Can't create index no matter I provide filename with or without path."
+
+### Causa raíz
+
+`AdsCreateIndex` (wrapper legacy usado por Harbour's `INDEX ON ... TO`) NO
+resolvía paths de índice igual que `AdsCreateIndex61`:
+
+| Caso | Antes (bug) | Después (fix) |
+|------|-------------|---------------|
+| Bag vacío | No creaba CDX structural | Crea `<tabla>.cdx` |
+| Path relativo | No resolvía contra directorio de tabla | Resuelve correctamente |
+| Sin extensión | Caía a creación NTX | Auto-agrega `.cdx` |
+
+### Fix
+
+Agregado bloque de resolución de path en `AdsCreateIndex` (ace_exports.cpp)
+que replica la lógica de `AdsCreateIndex61`.
+
+### Tests nuevos
+
+| Test | Qué valida |
+|------|------------|
+| `AdsCreateIndex61: bag name without extension → auto .cdx` | Auto-add `.cdx` |
+| `AdsCreateIndex61: bag name with .cdx extension` | Works as-is |
+| `AdsCreateIndex61: absolute path with drive letter` | Windows drive paths |
+| `AdsCreateIndex61: empty bag name → structural CDX` | Table-stem CDX |
+| `AdsCreateIndex61: bag in subdirectory` | Relative subdir |
+| `AdsCreateIndex61: backslash path` | Windows separators |
+| `AdsCreateIndex (legacy): bag name without extension` | **Fixed bug** |
+| `AdsCreateIndex61 + AdsOpenIndex round-trip` | Create + reopen |
+
+---
+
 ## 2026-07-26 — Pruebas de bloqueo: cobertura comprehensiva
 
 ### Archivo nuevo: `tests/unit/abi_lock_comprehensive_test.cpp`

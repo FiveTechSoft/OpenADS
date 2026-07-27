@@ -12832,6 +12832,24 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex(ADSHANDLE hTable, UNSIGNED8* pucFile,
     }
     std::uint16_t klen = t->field_descriptor(static_cast<std::uint16_t>(fidx)).length;
 
+    // Path resolution: mirror AdsCreateIndex61 so the legacy wrapper handles
+    // empty bag names, relative paths, and missing extensions the same way.
+    namespace fs = std::filesystem;
+    {
+        fs::path p;
+        if (file.empty()) {
+            p = fs::path(t->path()).replace_extension(".cdx");
+        } else {
+            p = fs::path(file);
+            if (!p.is_absolute()) {
+                fs::path tdir = fs::path(t->path()).parent_path();
+                p = tdir / p;
+            }
+            if (!p.has_extension()) p.replace_extension(".cdx");
+        }
+        file = p.string();
+    }
+
     std::unique_ptr<openads::drivers::IIndex> idx;
     if (path_ends_with_ci(file, ".cdx")) {
         auto created = openads::drivers::cdx::CdxIndex::create(

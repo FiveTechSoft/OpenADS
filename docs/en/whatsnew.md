@@ -6,11 +6,33 @@ nav_order: 0
 permalink: /en/whatsnew/
 ---
 
-# What's New (v1.0.0-rc29 -> v1.8.32)
+# What's New (v1.0.0-rc29 -> v1.8.33)
 
 This page summarises the most notable changes since the
 v1.0.0-rc29 release. For the full commit-by-commit history see
 the [CHANGELOG](https://github.com/FiveTechSoft/OpenADS/blob/main/CHANGELOG.md).
+
+---
+
+## v1.8.33 Highlights
+
+### Fixed: Legacy `AdsCreateIndex` path resolution
+
+The legacy `AdsCreateIndex` wrapper (used by Harbour's `INDEX ON ... TO`)
+did not resolve index paths the same way as `AdsCreateIndex61`:
+
+- Empty bag name → did not create structural CDX
+- Relative paths → not resolved against table directory
+- Missing extension → fell through to NTX creation
+
+This caused Harbour's `INDEX ON field TO filename` to fail. The fix
+mirrors `AdsCreateIndex61`'s path resolution logic.
+
+### Create-Index Path Tests
+
+8 new test cases covering various index path forms: no extension,
+with extension, absolute paths, empty bag, subdirectory, backslash,
+legacy wrapper, and create+reopen round-trip.
 
 ---
 
