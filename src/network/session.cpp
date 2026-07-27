@@ -1029,9 +1029,9 @@ DispatchResult Session::dispatch(const Frame& f) {
             auto open_mode = openads::engine::OpenMode::Shared;
             if (client_open_table_mode_ok_ && f.payload.size() >= 2) {
                 // M12.x extended payload: [u16 LE mode][table_name_bytes]
-                std::uint16_t mode_u16 =
+                std::uint16_t mode_u16 = static_cast<std::uint16_t>(
                     static_cast<std::uint16_t>(f.payload[0]) |
-                    (static_cast<std::uint16_t>(f.payload[1]) << 8);
+                    (static_cast<std::uint16_t>(f.payload[1]) << 8));
                 open_mode = static_cast<openads::engine::OpenMode>(mode_u16);
                 rel.assign(f.payload.begin() + 2, f.payload.end());
             } else {

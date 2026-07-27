@@ -339,7 +339,6 @@ static UNSIGNED32 set_id_and_write(ADSHANDLE h, const char* id) {
     UNSIGNED8 fld[4] = "ID";
     UNSIGNED8 val[8] = {};
     std::memcpy(val, id, 4);
-    UNSIGNED16 locked = 0;
     // Lock the table (file lock) — simpler than record lock for RI callers.
     if (UNSIGNED32 rc = AdsLockTable(h); rc != 0) return rc;
     if (UNSIGNED32 rc = AdsSetString(h, fld, val, 4); rc != 0) return rc;
