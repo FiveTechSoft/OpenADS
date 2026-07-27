@@ -18461,7 +18461,9 @@ extract_system_table_filter_(const openads::sql::SelectStmt& st) {
         if (col == "grantee") {
             filter.grantee = cmp.literal;
             found = true;
-        } else if (col == "obj_name") {
+        } else if (col == "obj_name" || col == "name") {
+            // "name" is the SAP column name for the object in
+            // system.permissions (OpenADS renamed OBJ_NAME → Name).
             filter.object_name = cmp.literal;
             found = true;
         } else if (col == "table_name") {
@@ -18541,8 +18543,13 @@ build_memory_result(const std::string& tag,
             const auto& f = fields[ci];
             std::uint8_t* dst = rec.data() + f.record_offset;
             if (f.type == openads::drivers::DbfFieldType::Integer) {
-                std::int32_t iv = val.empty() ? 0
-                    : static_cast<std::int32_t>(std::stol(val));
+                // Guard non-numeric text (e.g. an RI rule stored as a word)
+                // — std::stol would throw across the ABI boundary and crash.
+                std::int32_t iv = 0;
+                if (!val.empty()) {
+                    try { iv = static_cast<std::int32_t>(std::stol(val)); }
+                    catch (...) { iv = 0; }
+                }
                 auto uiv = static_cast<std::uint32_t>(iv);
                 dst[0] = static_cast<std::uint8_t>( uiv        & 0xFFu);
                 dst[1] = static_cast<std::uint8_t>((uiv >>  8) & 0xFFu);
@@ -19032,20 +19039,20 @@ build_system_table(Connection* c, std::string sys_name,
         // OpenADS cannot decode.  We therefore treat the SAP sentinel as
         // granting full DML for group records.
         const std::vector<Col> cols = {
-            {"OBJ_NAME",  'C', 200, 0},
-            {"OBJ_TYPE",  'N',   3, 0},
-            {"PARENT",    'C', 200, 0},
-            {"GRANTEE",   'C', 200, 0},
-            {"SELECT",    'C',   1, 0},
-            {"UPDATE",    'C',   1, 0},
-            {"INSERT",    'C',   1, 0},
-            {"DELETE",    'C',   1, 0},
-            {"EXECUTE",   'C',   1, 0},
-            {"ACCESS",    'C',   1, 0},
-            {"INHERIT",   'C',   1, 0},
-            {"CREATE",    'C',   1, 0},
-            {"ALTER",     'C',   1, 0},
-            {"DROP",      'C',   1, 0},
+            {"Name",        'C', 200, 0},
+            {"Object_Type", 'N',   3, 0},
+            {"Parent",      'C', 200, 0},
+            {"Grantee",     'C', 200, 0},
+            {"Select",      'C',   1, 0},
+            {"Update",      'C',   1, 0},
+            {"Insert",      'C',   1, 0},
+            {"Delete",      'C',   1, 0},
+            {"Execute",     'C',   1, 0},
+            {"Access",      'C',   1, 0},
+            {"Inherit",     'C',   1, 0},
+            {"Create",      'C',   1, 0},
+            {"Alter",       'C',   1, 0},
+            {"Drop",        'C',   1, 0},
         };
 
         const uint32_t SAP_SENTINEL = 0x80000000u;
@@ -19323,15 +19330,32 @@ build_system_table(Connection* c, std::string sys_name,
         return build(cols, rows);
     }
     if (sys_name == "relations") {
+        // SAP system.relations column set + order (2026-07-26): primary
+        // (parent) table/index, then foreign (child) table/index, then the
+        // numeric update/delete rules. RI_No_PKey_Error / RI_Cascade_Error
+        // are empty (OpenADS does not track them; SAP shows them empty on
+        // pmsys). SAP has no fail-table column.
         const std::vector<Col> cols = {
-            {"RI_NAME",    'C', 200, 0},
-            {"PARENT",     'C', 200, 0},
-            {"CHILD",      'C', 200, 0},
-            {"PARENT_TAG", 'C', 200, 0},
-            {"CHILD_TAG",  'C', 200, 0},
-            {"UPDATE_OPT", 'C',  10, 0},
-            {"DELETE_OPT", 'C',  10, 0},
-            {"FAIL_TABLE", 'C', 200, 0},
+            {"Name",              'C', 200, 0},
+            {"RI_Primary_Table",  'C', 200, 0},
+            {"RI_Primary_Index",  'C', 200, 0},
+            {"RI_Foreign_Table",  'C', 200, 0},
+            {"RI_Foreign_Index",  'C', 200, 0},
+            {"RI_UpdateRule",     'N',  10, 0},
+            {"RI_DeleteRule",     'N',  10, 0},
+            {"RI_No_PKey_Error",  'C',   1, 0},
+            {"RI_Cascade_Error",  'C',   1, 0},
+        };
+        // OpenADS stores the RI rule as a word; SAP exposes the raw
+        // numeric code, which is asymmetric between update and delete
+        // (update Cascade=1, delete Cascade=2; SetNull=3 both). Restrict's
+        // code is a documented default (0) — pmsys has no Restrict RI to
+        // oracle it against.
+        auto ri_rule_code = [](const std::string& w, bool is_del)
+                            -> std::string {
+            if (w == "Cascade") return is_del ? "2" : "1";
+            if (w == "SetNull") return "3";
+            return "0";                       // Restrict / unknown
         };
         std::vector<std::vector<std::string>> rows;
         for (const auto& kv : dd->ri()) {
@@ -19340,9 +19364,10 @@ build_system_table(Connection* c, std::string sys_name,
                 !dd_can_view_object_metadata(c, e.child)) {
                 continue;
             }
-            rows.push_back({e.name, e.parent, e.child,
-                            e.parent_tag, e.child_tag,
-                            e.update_opt, e.delete_opt, e.fail_table});
+            rows.push_back({e.name, e.parent, e.parent_tag,
+                            e.child, e.child_tag,
+                            ri_rule_code(e.update_opt, false),
+                            ri_rule_code(e.delete_opt, true), "", ""});
         }
         return build(cols, rows);
     }
@@ -19383,31 +19408,24 @@ build_system_table(Connection* c, std::string sys_name,
         return build(cols, rows);
     }
     if (sys_name == "triggers") {
-        // TIMING decodes SAP binary timing byte: 1=BEFORE 2=INSTEAD OF 4=AFTER
-        // EVENT_MASK is the SAP event type byte: 1=INSERT 2=UPDATE 3=DELETE
-        auto timing_str = [](std::uint32_t t) -> std::string {
-            if (t == 1) return "BEFORE";
-            if (t == 2) return "INSTEAD OF";
-            if (t == 4) return "AFTER";
-            return "";
-        };
-        auto event_str = [](std::uint32_t ev) -> std::string {
-            if (ev == 1) return "INSERT";
-            if (ev == 2) return "UPDATE";
-            if (ev == 3) return "DELETE";
-            return "";
-        };
+        // SAP system.triggers column set (2026-07-26). Trig_Event_Type:
+        // 1=INSERT 2=UPDATE 3=DELETE. Trig_Trigger_Type (timing): 1=BEFORE
+        // 2=INSTEAD OF 4=AFTER. Trig_Container_Type is 3 for a SQL-script
+        // trigger (SAP constant, oracle-verified). Trig_Function_Name is
+        // empty for script triggers. Triggers_Disabled is the inverse of
+        // OpenADS's `enabled`.
         std::vector<std::vector<std::string>> rows;
         auto add_trigger_row = [&](const auto& e) {
             if (!dd_can_view_object_metadata(c, e.table_alias)) return;
             rows.push_back({e.name, e.table_alias,
                             std::to_string(e.event_mask),
-                            timing_str(e.timing),
-                            event_str(e.event_mask),
-                            e.container, e.procedure,
+                            std::to_string(e.timing),
+                            "3",
+                            e.container, "",
                             std::to_string(e.priority),
-                            e.enabled ? "T" : "F",
-                            std::to_string(e.options)});
+                            std::to_string(e.options),
+                            e.comment,
+                            e.enabled ? "F" : "T"});
         };
         if (filter && filter->table_name) {
             for (const auto* e : dd->triggers_for_table(*filter->table_name))
@@ -19416,71 +19434,80 @@ build_system_table(Connection* c, std::string sys_name,
             for (const auto& kv : dd->triggers())
                 add_trigger_row(kv.second);
         }
-        // RCB 07/16/2026: CONTAINER sized to content (was fixed C(4096) —
-        // enough for pmsys but silently truncates any larger trigger body).
         const std::vector<Col> cols = {
-            {"TRIG_NAME",    'C', 200, 0},
-            {"TABLE_NAME",   'C', 200, 0},
-            {"EVENT_MASK",   'N',  10, 0},
-            {"TIMING",       'C',  15, 0},
-            {"EVENT",        'C',  20, 0},
-            {"CONTAINER",    'C', fit_width(rows, 5, 4096), 0},
-            {"PROC",         'C', 200, 0},
-            {"PRIORITY",     'N',  10, 0},
-            {"ENABLED",      'L',   1, 0},
-            {"TRIG_OPTIONS", 'N',  10, 0},
+            {"Name",                'C', 200, 0},
+            {"Trig_TableName",      'C', 200, 0},
+            {"Trig_Event_Type",     'N',  10, 0},
+            {"Trig_Trigger_Type",   'N',  10, 0},
+            {"Trig_Container_Type", 'N',  10, 0},
+            {"Trig_Container",      'C', fit_width(rows, 5, 4096), 0},
+            {"Trig_Function_Name",  'C', 200, 0},
+            {"Trig_Priority",       'N',  10, 0},
+            {"Trig_Options",        'N',  10, 0},
+            {"Comment",             'C', 200, 0},
+            {"Triggers_Disabled",   'L',   1, 0},
         };
         return build(cols, rows);
     }
     if (sys_name == "storedprocedures") {
+        // SAP system.storedprocedures column set (2026-07-26). OpenADS
+        // has only script procs, so Proc_DLL_* are empty and
+        // Proc_Invoke_Option is 4 (SAP's constant for a script proc,
+        // oracle-verified across all pmsys procs).
         std::vector<std::vector<std::string>> rows;
         for (const auto& kv : dd->procs()) {
             const auto& e = kv.second;
-            rows.push_back({e.name, e.container, e.procedure,
-                            e.input_params, e.output_params});
+            rows.push_back({e.name, e.input_params, e.output_params,
+                            "", "", e.comment, "4", e.procedure});
         }
-        // RCB 07/16/2026: rows built first so the text columns can be sized
-        // to the real content — a fixed C(255) truncated multi-KB SQL bodies.
         const std::vector<Col> cols = {
-            {"PROC_NAME",  'C', 200, 0},
-            {"CONTAINER",  'C', fit_width(rows, 1, 250), 0},
-            {"PROCEDURE",  'C', fit_width(rows, 2, 255), 0},
-            {"INPUT",      'C', fit_width(rows, 3, 250), 0},
-            {"OUTPUT",     'C', fit_width(rows, 4, 250), 0},
+            {"Name",                   'C', 200, 0},
+            {"Proc_Input",             'C', fit_width(rows, 1, 250), 0},
+            {"Proc_Output",            'C', fit_width(rows, 2, 250), 0},
+            {"Proc_DLL_Name",          'C', 128, 0},
+            {"Proc_DLL_Function_Name", 'C', 128, 0},
+            {"Comment",                'C', fit_width(rows, 5, 200), 0},
+            {"Proc_Invoke_Option",     'N',  10, 0},
+            {"SQL_Script",             'C', fit_width(rows, 7, 255), 0},
         };
         return build(cols, rows);
     }
     if (sys_name == "functions") {
+        // SAP system.functions column set (2026-07-26). Package and
+        // User_Defined_Prop are empty (OpenADS does not track them).
         std::vector<std::vector<std::string>> rows;
         for (const auto& kv : dd->functions()) {
             const auto& e = kv.second;
-            rows.push_back({e.name, e.container, e.return_type,
-                            e.input_params, e.implementation, e.comment});
+            rows.push_back({e.name, "", e.return_type, e.input_params,
+                            e.implementation, e.comment, ""});
         }
-        // RCB 07/16/2026: FUNC_BODY sized to content — C(255) truncated real
-        // UDF bodies (pmsys NewSeqKey is 1517 bytes).
         const std::vector<Col> cols = {
-            {"FUNC_NAME",  'C', 200, 0},
-            {"CONTAINER",  'C', fit_width(rows, 1, 250), 0},
-            {"RET_TYPE",   'C',  50, 0},
-            {"IN_PARAMS",  'C', fit_width(rows, 3, 200), 0},
-            {"FUNC_BODY",  'C', fit_width(rows, 4, 255), 0},
-            {"COMMENT",    'C', 200, 0},
+            {"Name",              'C', 200, 0},
+            {"Package",           'C',  64, 0},
+            {"Return Type",       'C',  64, 0},
+            {"Input Parameters",  'C', fit_width(rows, 3, 200), 0},
+            {"Implementation",    'C', fit_width(rows, 4, 255), 0},
+            {"Comment",           'C', 200, 0},
+            {"User_Defined_Prop", 'C',  64, 0},
         };
         return build(cols, rows);
     }
     if (sys_name == "views") {
+        // SAP system.views column set (2026-07-26): Name, View_Stmt_Len
+        // (byte length of the statement), View_Stmt, Comment,
+        // Triggers_Disabled.
         std::vector<std::vector<std::string>> rows;
         for (const auto& kv : dd->views()) {
             const auto& e = kv.second;
-            rows.push_back({e.name, e.sql, e.comment});
+            rows.push_back({e.name, std::to_string(e.sql.size()),
+                            e.sql, e.comment, "F"});
         }
-        // RCB 07/16/2026: VIEW_SQL sized to content (same C(255)-class
-        // truncation as storedprocedures/functions).
         const std::vector<Col> cols = {
-            {"VIEW_NAME", 'C', 200, 0},
-            {"VIEW_SQL",  'C', fit_width(rows, 1, 250), 0},
-            {"COMMENT",   'C', 200, 0},
+            {"Name",              'C', 200, 0},
+            {"View_Stmt_Len",     'N',  10, 0},
+            {"View_Stmt",         'C', fit_width(rows, 2, 250), 0},
+            {"Comment",           'C', 200, 0},
+            {"Triggers_Disabled", 'L',   1, 0},
         };
         return build(cols, rows);
     }

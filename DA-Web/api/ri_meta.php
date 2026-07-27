@@ -34,14 +34,17 @@ $opts = api_ads_connect_opts($c);
 
 const JSON_FLAGS = JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE | JSON_PARTIAL_OUTPUT_ON_ERROR;
 
-function ruleLabel(string $v): string {
+// SAP system.relations exposes RI_UpdateRule / RI_DeleteRule as numeric
+// codes that are ASYMMETRIC between update and delete: update Cascade=1,
+// delete Cascade=2, SetNull=3 for both, anything else Restrict. Words are
+// still accepted for back-compat.
+function ruleLabel(string $v, bool $isDelete = false): string {
     $v = trim($v);
-    return match(true) {
-        $v === '1' || strcasecmp($v, 'Restrict') === 0 => 'Restrict',
-        $v === '2' || strcasecmp($v, 'Cascade')  === 0 => 'Cascade',
-        $v === '3' || strcasecmp($v, 'SetNull')  === 0 => 'SetNull',
-        default => $v ?: 'Restrict',
-    };
+    if ($v === '3' || strcasecmp($v, 'SetNull')  === 0) return 'SetNull';
+    if (strcasecmp($v, 'Cascade')  === 0)               return 'Cascade';
+    if (strcasecmp($v, 'Restrict') === 0)               return 'Restrict';
+    if ($isDelete) return $v === '2' ? 'Cascade' : 'Restrict';
+    return $v === '1' ? 'Cascade' : 'Restrict';
 }
 
 function safeStr(mixed $v): string {
@@ -332,16 +335,16 @@ try {
     $ri   = null;
     $stmt = $conn->query("SELECT * FROM system.relations");
     while ($row = $stmt->fetchAssoc()) {
-        if (strcasecmp(safeStr($row['RI_NAME'] ?? ''), $riName) === 0) {
+        if (strcasecmp(safeStr($row['Name'] ?? ''), $riName) === 0) {
             $ri = [
-                'name'       => safeStr($row['RI_NAME']    ?? ''),
-                'parent'     => safeStr($row['PARENT']     ?? ''),
-                'child'      => safeStr($row['CHILD']      ?? ''),
-                'parent_tag' => safeStr($row['PARENT_TAG'] ?? ''),
-                'child_tag'  => safeStr($row['CHILD_TAG']  ?? ''),
-                'update_opt' => ruleLabel(safeStr($row['UPDATE_OPT'] ?? '')),
-                'delete_opt' => ruleLabel(safeStr($row['DELETE_OPT'] ?? '')),
-                'fail_table' => safeStr($row['FAIL_TABLE'] ?? ''),
+                'name'       => safeStr($row['Name']             ?? ''),
+                'parent'     => safeStr($row['RI_Primary_Table'] ?? ''),
+                'child'      => safeStr($row['RI_Foreign_Table'] ?? ''),
+                'parent_tag' => safeStr($row['RI_Primary_Index'] ?? ''),
+                'child_tag'  => safeStr($row['RI_Foreign_Index'] ?? ''),
+                'update_opt' => ruleLabel(safeStr($row['RI_UpdateRule'] ?? ''), false),
+                'delete_opt' => ruleLabel(safeStr($row['RI_DeleteRule'] ?? ''), true),
+                'fail_table' => '',   // SAP system.relations has no fail-table column
             ];
             break;
         }

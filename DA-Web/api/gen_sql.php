@@ -26,11 +26,11 @@ $opts = api_ads_connect_opts($c);
 // ── ADS trigger helper (returns trigger list via API) ────────────────────────
 function readTriggers(AdsConnection $conn, AdsDictionary $dict2, string $table): array {
     $stmt = $conn->query(
-        "SELECT TRIG_NAME FROM system.triggers WHERE TABLE_NAME = '"
+        "SELECT Name FROM system.triggers WHERE Trig_TableName = '"
         . api_sql_quote($table) . "'"
     );
     $names = [];
-    while ($row = $stmt->fetchAssoc()) $names[] = $row['TRIG_NAME'];
+    while ($row = $stmt->fetchAssoc()) $names[] = $row['Name'];
     $stmt->close();
 
     $trigs = [];
@@ -40,7 +40,7 @@ function readTriggers(AdsConnection $conn, AdsDictionary $dict2, string $table):
         $body    = $dict2->getTriggerProperty($trigName, 1404);
         $event   = strlen($evRaw)  >= 4 ? unpack('V', substr($evRaw,  0, 4))[1] : 0;
         $timing  = strlen($timRaw) >= 4 ? unpack('V', substr($timRaw, 0, 4))[1] : 0;
-        // TRIG_NAME is "table::name" composite key; strip prefix for DDL output
+        // Name is "table::name" composite key; strip prefix for DDL output
         $dispName = strpos($trigName, '::') !== false ? substr($trigName, strpos($trigName, '::') + 2) : $trigName;
         $trigs[] = [
             'name'    => $dispName,

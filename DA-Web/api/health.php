@@ -275,8 +275,8 @@ try {
     $relations = health_rows($conn, 'SELECT * FROM system.relations');
     $riTableKeys = [];
     foreach ($relations as $row) {
-        $parent = health_value($row, ['PARENT', 'PARENT_TABLE']);
-        $child = health_value($row, ['CHILD', 'CHILD_TABLE']);
+        $parent = health_value($row, ['RI_Primary_Table', 'PARENT', 'PARENT_TABLE']);
+        $child = health_value($row, ['RI_Foreign_Table', 'CHILD', 'CHILD_TABLE']);
         if ($parent !== '') $riTableKeys[health_ci($parent)] = true;
         if ($child !== '') $riTableKeys[health_ci($child)] = true;
     }
@@ -303,19 +303,19 @@ try {
     }
     api_perf_mark($perf, 'tags');
 
-    foreach (health_rows($conn, 'SELECT VIEW_NAME FROM system.views') as $row) {
-        $name = health_value($row, ['VIEW_NAME']);
+    foreach (health_rows($conn, 'SELECT Name FROM system.views') as $row) {
+        $name = health_value($row, ['Name', 'VIEW_NAME']);
         if ($name !== '') $objects[health_ci($name)] = true;
     }
-    foreach (health_rows($conn, 'SELECT PROC_NAME FROM system.storedprocedures') as $row) {
-        $name = health_value($row, ['PROC_NAME']);
+    foreach (health_rows($conn, 'SELECT Name FROM system.storedprocedures') as $row) {
+        $name = health_value($row, ['Name', 'PROC_NAME']);
         if ($name !== '') {
             $objects[health_ci($name)] = true;
             $procNames[] = $name;
         }
     }
-    foreach (health_rows($conn, 'SELECT FUNC_NAME FROM system.functions') as $row) {
-        $name = health_value($row, ['FUNC_NAME']);
+    foreach (health_rows($conn, 'SELECT Name FROM system.functions') as $row) {
+        $name = health_value($row, ['Name', 'FUNC_NAME']);
         if ($name !== '') {
             $objects[health_ci($name)] = true;
             $funcNames[] = $name;
@@ -389,11 +389,11 @@ try {
     api_perf_mark($perf, 'files');
 
     foreach ($relations as $row) {
-        $name = health_value($row, ['RI_NAME']);
-        $parent = health_value($row, ['PARENT', 'PARENT_TABLE']);
-        $child = health_value($row, ['CHILD', 'CHILD_TABLE']);
-        $parentTag = health_value($row, ['PARENT_TAG']);
-        $childTag = health_value($row, ['CHILD_TAG']);
+        $name = health_value($row, ['Name', 'RI_NAME']);
+        $parent = health_value($row, ['RI_Primary_Table', 'PARENT', 'PARENT_TABLE']);
+        $child = health_value($row, ['RI_Foreign_Table', 'CHILD', 'CHILD_TABLE']);
+        $parentTag = health_value($row, ['RI_Primary_Index', 'PARENT_TAG']);
+        $childTag = health_value($row, ['RI_Foreign_Index', 'CHILD_TAG']);
         $parentKey = health_ci($parent);
         $childKey = health_ci($child);
         $parentFields = null;
@@ -482,8 +482,8 @@ try {
         }
     }
 
-    foreach (health_rows($conn, 'SELECT TRIG_NAME, TABLE_NAME FROM system.triggers') as $row) {
-        $name = health_value($row, ['TRIG_NAME']);
+    foreach (health_rows($conn, 'SELECT Name, Trig_TableName FROM system.triggers') as $row) {
+        $name = health_value($row, ['Name', 'TRIG_NAME']);
         $table = health_value($row, ['TABLE_NAME']);
         if ($table !== '' && !isset($tables[health_ci($table)])) {
             health_add($checks, 'error', 'Triggers', $name,

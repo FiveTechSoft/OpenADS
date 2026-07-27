@@ -37,11 +37,11 @@ try {
     $dict = AdsDictionary::fromConnection($conn);
 
     // Get trigger list filtered by table from system.triggers
-    $stmt = $conn->query("SELECT TRIG_NAME FROM system.triggers WHERE TABLE_NAME = '"
+    $stmt = $conn->query("SELECT Name FROM system.triggers WHERE Trig_TableName = '"
                           . api_sql_quote($table) . "'");
     $names = [];
     while ($row = $stmt->fetchAssoc()) {
-        $names[] = $row['TRIG_NAME'];
+        $names[] = $row['Name'];
     }
     $stmt->close();
 

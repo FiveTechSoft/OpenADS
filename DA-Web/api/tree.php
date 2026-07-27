@@ -149,9 +149,9 @@ if ($action === 'category_children') {
                 break;
 
             case 'views':
-                $stmt = $conn->query("SELECT VIEW_NAME FROM system.views ORDER BY VIEW_NAME");
+                $stmt = $conn->query("SELECT Name FROM system.views ORDER BY Name");
                 while ($row = $stmt->fetchAssoc()) {
-                    $v = $row['VIEW_NAME'];
+                    $v = $row['Name'];
                     $nodes[] = ['id' => "view_{$ddName}_{$v}", 'text' => $v,
                                 'icon' => 'jstree-icon-view', 'children' => false,
                                 'a_attr' => ['data-dd' => $ddName, 'data-type' => 'view', 'data-name' => $v]];
@@ -159,9 +159,9 @@ if ($action === 'category_children') {
                 break;
 
             case 'procs':
-                $stmt = $conn->query("SELECT PROC_NAME FROM system.storedprocedures ORDER BY PROC_NAME");
+                $stmt = $conn->query("SELECT Name FROM system.storedprocedures ORDER BY Name");
                 while ($row = $stmt->fetchAssoc()) {
-                    $p = $row['PROC_NAME'];
+                    $p = $row['Name'];
                     $nodes[] = ['id' => "proc_{$ddName}_{$p}", 'text' => $p,
                                 'icon' => 'jstree-icon-proc', 'children' => false,
                                 'a_attr' => ['data-dd' => $ddName, 'data-type' => 'proc', 'data-name' => $p]];
@@ -169,9 +169,9 @@ if ($action === 'category_children') {
                 break;
 
             case 'functions':
-                $stmt = $conn->query("SELECT FUNC_NAME FROM system.functions ORDER BY FUNC_NAME");
+                $stmt = $conn->query("SELECT Name FROM system.functions ORDER BY Name");
                 while ($row = $stmt->fetchAssoc()) {
-                    $p = $row['FUNC_NAME'];
+                    $p = $row['Name'];
                     $nodes[] = ['id' => "fn_{$ddName}_{$p}", 'text' => $p,
                                 'icon' => 'jstree-icon-proc', 'children' => false,
                                 'a_attr' => ['data-dd' => $ddName, 'data-type' => 'function', 'data-name' => $p]];
@@ -179,9 +179,9 @@ if ($action === 'category_children') {
                 break;
 
             case 'triggers':
-                $stmt = $conn->query("SELECT TRIG_NAME FROM system.triggers ORDER BY TRIG_NAME");
+                $stmt = $conn->query("SELECT Name FROM system.triggers ORDER BY Name");
                 while ($row = $stmt->fetchAssoc()) {
-                    $tr = $row['TRIG_NAME'];
+                    $tr = $row['Name'];
                     $nodes[] = ['id' => "trg_{$ddName}_{$tr}", 'text' => $tr,
                                 'icon' => 'jstree-icon-trigger', 'children' => false,
                                 'a_attr' => ['data-dd' => $ddName, 'data-type' => 'trigger', 'data-name' => $tr]];
@@ -222,9 +222,9 @@ if ($action === 'category_children') {
                 break;
 
             case 'ri':
-                $stmt = $conn->query("SELECT RI_NAME FROM system.relations ORDER BY RI_NAME");
+                $stmt = $conn->query("SELECT Name FROM system.relations ORDER BY Name");
                 while ($row = $stmt->fetchAssoc()) {
-                    $r = $row['RI_NAME'];
+                    $r = $row['Name'];
                     $nodes[] = ['id' => "ri_{$ddName}_{$r}", 'text' => $r,
                                 'icon' => 'jstree-icon-ri', 'children' => false,
                                 'a_attr' => ['data-dd' => $ddName, 'data-type' => 'ri', 'data-name' => $r]];

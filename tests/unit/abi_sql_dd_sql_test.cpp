@@ -308,7 +308,7 @@ TEST_CASE("GRANT and REVOKE SQL statements") {
     // lists EMP×alice with zero flags (legacy parity).
     CHECK(sql_count(hConn,
                     "SELECT * FROM system.permissions "
-                    "WHERE OBJ_NAME = 'EMP' AND GRANTEE = 'alice'") == 1);
+                    "WHERE Name = 'EMP' AND GRANTEE = 'alice'") == 1);
 
     REQUIRE(sql_exec(hConn, "GRANT SELECT ON EMP TO alice") == 0);
     // Now there should be an ACL entry

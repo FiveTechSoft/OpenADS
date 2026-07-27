@@ -281,7 +281,7 @@ TEST_CASE("system.storedprocedures returns >255-byte bodies untruncated") {
 
     std::vector<UNSIGNED8> val(16384, 0);
     UNSIGNED32 vlen = static_cast<UNSIGNED32>(val.size() - 1);
-    UNSIGNED8 fld[16] = "PROCEDURE";
+    UNSIGNED8 fld[16] = "SQL_Script";   // SAP column name (was PROCEDURE)
     REQUIRE(AdsGetField(hCur, fld, val.data(), &vlen, 0) == 0);
     std::string got(reinterpret_cast<char*>(val.data()), vlen);
     while (!got.empty() && got.back() == ' ') got.pop_back();

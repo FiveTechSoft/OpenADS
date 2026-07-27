@@ -53,8 +53,8 @@ try {
     $stmt = $conn->query("SELECT * FROM system.permissions WHERE GRANTEE = '$qgroup'");
     while ($row = $stmt->fetchAssoc()) {
         // OBJ_TYPE is a DBF numeric column → may be float; cast to string for keys.
-        $type   = (string)(int)($row['OBJ_TYPE'] ?? 0);
-        $name   = strtolower(trim((string)($row['OBJ_NAME']  ?? '')));
+        $type   = (string)(int)($row['Object_Type'] ?? 0);
+        $name   = strtolower(trim((string)($row['Name']  ?? '')));
         $parent = strtolower(trim((string)($row['PARENT']     ?? '')));
         if ($type === '4') {
             $key = "4\0{$parent}\0{$name}";
@@ -106,9 +106,9 @@ try {
     // OBJ_TYPE is a DBF numeric field → PHP float; cast to string before comparing.
     $fieldsByTable = [];
     foreach ($permMap as $key => $p) {
-        if ((string)($p['OBJ_TYPE'] ?? '') !== '4') continue;
+        if ((string)($p['Object_Type'] ?? '') !== '4') continue;
         $tbl = strtolower(trim((string)($p['PARENT'] ?? '')));
-        $fn  = trim((string)($p['OBJ_NAME'] ?? ''));
+        $fn  = trim((string)($p['Name'] ?? ''));
         if ($tbl !== '' && $fn !== '') $fieldsByTable[$tbl][] = $fn;
     }
 
@@ -127,27 +127,27 @@ try {
 
     // Views
     try {
-        $stmt = $conn->query('SELECT VIEW_NAME FROM system.views ORDER BY VIEW_NAME');
+        $stmt = $conn->query('SELECT Name FROM system.views ORDER BY Name');
         while ($row = $stmt->fetchAssoc()) {
-            $rows[] = $buildRow(trim($row['VIEW_NAME']), '6', '');
+            $rows[] = $buildRow(trim($row['Name']), '6', '');
         }
         $stmt->close();
     } catch (Throwable $e) {}
 
     // Stored Procedures
     try {
-        $stmt = $conn->query('SELECT PROC_NAME FROM system.storedprocedures ORDER BY PROC_NAME');
+        $stmt = $conn->query('SELECT Name FROM system.storedprocedures ORDER BY Name');
         while ($row = $stmt->fetchAssoc()) {
-            $rows[] = $buildRow(trim($row['PROC_NAME']), '10', '');
+            $rows[] = $buildRow(trim($row['Name']), '10', '');
         }
         $stmt->close();
     } catch (Throwable $e) {}
 
     // Functions
     try {
-        $stmt = $conn->query('SELECT FUNC_NAME FROM system.functions ORDER BY FUNC_NAME');
+        $stmt = $conn->query('SELECT Name FROM system.functions ORDER BY Name');
         while ($row = $stmt->fetchAssoc()) {
-            $rows[] = $buildRow(trim($row['FUNC_NAME']), '18', '');
+            $rows[] = $buildRow(trim($row['Name']), '18', '');
         }
         $stmt->close();
     } catch (Throwable $e) {}

@@ -298,7 +298,7 @@ TEST_CASE("ABI SQL smoke: system.permissions zero-row for ungranted pair") {
 
     CHECK(sql_count_smoke(hConn,
                           "SELECT * FROM system.permissions "
-                          "WHERE GRANTEE = 'u1' AND OBJ_NAME = 'B'") == 1);
+                          "WHERE GRANTEE = 'u1' AND Name = 'B'") == 1);
 
     AdsDisconnect(hConn);
     fs::remove_all(dir, ec);

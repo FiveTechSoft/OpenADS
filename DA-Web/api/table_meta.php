@@ -329,11 +329,11 @@ try {
     else {
         $dict2 = AdsDictionary::fromConnection($conn);
         $stmt2 = $conn->query(
-            "SELECT TRIG_NAME FROM system.triggers WHERE TABLE_NAME = '"
+            "SELECT Name FROM system.triggers WHERE Trig_TableName = '"
             . api_sql_quote($table) . "'"
         );
         $trigNames = [];
-        while ($trow = $stmt2->fetchAssoc()) $trigNames[] = $trow['TRIG_NAME'];
+        while ($trow = $stmt2->fetchAssoc()) $trigNames[] = $trow['Name'];
         $stmt2->close();
 
         foreach ($trigNames as $trigName2) {
@@ -344,7 +344,7 @@ try {
             $timing2 = strlen($timRaw) >= 4 ? unpack('V', substr($timRaw, 0, 4))[1] : 0;
             $timingStr2 = match($timing2) { 1=>'BEFORE', 2=>'INSTEAD OF', 4=>'AFTER', default=>'' };
             $eventStr2  = match($event2)  { 1=>'INSERT', 2=>'UPDATE', 3=>'DELETE', default=>'' };
-            // TRIG_NAME is "table::name" composite key; display just the plain name
+            // Name is "table::name" composite key; display just the plain name
             $dispName2 = strpos($trigName2, '::') !== false ? substr($trigName2, strpos($trigName2, '::') + 2) : $trigName2;
             $rows[] = [
                 'Name'     => $dispName2,

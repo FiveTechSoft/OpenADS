@@ -242,7 +242,7 @@ TEST_CASE("system.triggers lists DD triggers") {
 
     CHECK(sql_count(hConn, "SELECT * FROM system.triggers") == 1);
 
-    auto names = sql_col1(hConn, "SELECT * FROM system.triggers", "TRIG_NAME");
+    auto names = sql_col1(hConn, "SELECT * FROM system.triggers", "Name");
     REQUIRE(names.size() == 1u);
     CHECK(names[0] == "mytrig");
 
@@ -271,7 +271,7 @@ TEST_CASE("system.storedprocedures lists DD procs") {
 
     CHECK(sql_count(hConn, "SELECT * FROM system.storedprocedures") == 1);
 
-    auto names = sql_col1(hConn, "SELECT * FROM system.storedprocedures", "PROC_NAME");
+    auto names = sql_col1(hConn, "SELECT * FROM system.storedprocedures", "Name");
     REQUIRE(names.size() == 1u);
     CHECK(names[0] == "myproc");
 
@@ -283,7 +283,7 @@ TEST_CASE("system.storedprocedures lists DD procs") {
 // system.functions
 // ---------------------------------------------------------------------------
 
-TEST_CASE("system.functions returns empty result set with FUNC_NAME column") {
+TEST_CASE("system.functions returns empty result set with Name column") {
     const auto dir = fs::temp_directory_path() / "openads_systbl_func";
     std::error_code ec; fs::remove_all(dir, ec);
     fs::create_directories(dir);
@@ -427,7 +427,7 @@ TEST_CASE("system.views lists DD views") {
 
     CHECK(sql_count(hConn, "SELECT * FROM system.views") == 1);
 
-    auto names = sql_col1(hConn, "SELECT * FROM system.views", "VIEW_NAME");
+    auto names = sql_col1(hConn, "SELECT * FROM system.views", "Name");
     REQUIRE(names.size() == 1u);
     CHECK(names[0] == "vw1");
 
@@ -566,18 +566,18 @@ TEST_CASE("system.permissions emits zero-rows for ungranted grantee x object") {
 
     CHECK(sql_count(hConn,
                     "SELECT * FROM system.permissions "
-                    "WHERE GRANTEE = 'u1' AND OBJ_NAME = 'B'") == 1);
+                    "WHERE GRANTEE = 'u1' AND Name = 'B'") == 1);
 
     REQUIRE(sql_exec(hConn, "GRANT SELECT ON A TO u1") == 0);
     CHECK(sql_count(hConn,
                     "SELECT * FROM system.permissions "
-                    "WHERE GRANTEE = 'u1' AND OBJ_NAME = 'B'") == 1);
+                    "WHERE GRANTEE = 'u1' AND Name = 'B'") == 1);
     CHECK(sql_count(hConn,
                     "SELECT * FROM system.permissions "
-                    "WHERE GRANTEE = 'u1' AND OBJ_NAME = 'A'") == 1);
+                    "WHERE GRANTEE = 'u1' AND Name = 'A'") == 1);
     CHECK(sql_count(hConn,
                     "SELECT * FROM system.permissions "
-                    "WHERE GRANTEE = 'readers' AND OBJ_NAME = 'A'") == 1);
+                    "WHERE GRANTEE = 'readers' AND Name = 'A'") == 1);
 
     AdsDisconnect(hConn);
     fs::remove_all(dir, ec);
