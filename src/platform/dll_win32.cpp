@@ -40,7 +40,10 @@ void dll_close(DllHandle h) noexcept {
 std::string dll_probe_ace(const std::string& path) noexcept {
     HMODULE m = LoadLibraryA(path.c_str());
     if (!m) return {};
-    using pfnGetVer = unsigned int(__stdcall*)(
+    // OpenADS DLLs export all functions as __cdecl (undecorated names).
+    // SAP DLLs use __stdcall, but GetProcAddress("AdsGetVersion") won't
+    // find the @N-decorated symbol so fn stays null and we skip safely.
+    using pfnGetVer = unsigned int(__cdecl*)(
         unsigned int*, unsigned int*,
         unsigned char*, unsigned char*, unsigned short*);
     auto* fn = reinterpret_cast<pfnGetVer>(
