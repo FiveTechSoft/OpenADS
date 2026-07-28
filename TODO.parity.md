@@ -40,14 +40,24 @@ still needs verification against current code.
       | relations | RI_NAME,PARENT,CHILD,PARENT_TAG,CHILD_TAG,UPDATE_OPT,DELETE_OPT,FAIL_TABLE | Name,RI_Primary_Table,RI_Primary_Index,RI_Foreign_Table,RI_Foreign_Index,RI_UpdateRule,RI_DeleteRule,RI_No_PKey_Error,RI_Cascade_Error |
       | permissions | OBJ_NAME,OBJ_TYPE,PARENT,GRANTEE,SELECT..DROP | Name,Object_Type,Parent,Grantee,Select..Drop |
       NOTE: `system.indexes` was already fixed to SAP names — same fix pattern.
-- [ ] **`system.permissions` row count (zero-row matrix)** — CONFIRMED and
-      LARGER than the 53-day memory. pmsys: SAP total **7912** vs OA **2393**;
-      Grantee='General' SAP **344** vs OA **141**. SAP emits a row for every
-      grantee×object pair (zeros where no ACL); OA emits only actual ACL rows,
-      and also emits multiple/field-level rows per object. Import-time bitmask
-      VALUES are likely correct now (ACE `--sap-lib` cross-check at conversion),
-      but that needs its own clean verification pass — a bracketed value
-      compare was blocked by reserved-word/parse quirks this check. Task #5.
+- [x] **`system.permissions` row-matrix parity** — DONE 2026-07-28. Rewrote the
+      builder in `ace_exports.cpp` to emit SAP's full uniform grantee×object
+      cross product. pmsys now **7912 rows = 23 grantees × 344 objects**, exactly
+      matching SAP; per-type breakdown identical (t1=33, t4=262, t6=1, t8=9,
+      t9=16, t10=8, t11=1, t12=1, t15=1, t17=1, t18=10, t19=1). The 344 objects =
+      all tables + every column (read live from physical descriptors, like
+      system.columns) + users/groups/procs/functions + per-category root
+      singletons (`TABLE`/`VIEW`/`USER`/`USER GROUP`/`PROCEDURE`/`LINK`/
+      `PUBLICATION`/`SUBSCRIPTION`/`PACKAGE`/`Database`); grantees = real users +
+      groups + server pseudo-groups `SERVER:Admin`/`SERVER:Monitor`, adssys
+      omitted. Cells always render `0`/`1`/`2`, never blank (matches SAP). VALUES
+      verified byte-identical for the common cases — e.g. `General/landlords`
+      returns S=U=I=D=1, rest 0, exactly as SAP; procs return Execute=1. The
+      encrypted-blob ceiling only affects user-direct grants (render 0). All 10
+      permissions unit tests pass; S4 gate 40/42 (2 fails = #138 lock regression).
+      FOLLOW-UP (minor, import-casing): OA surfaces two grantees lowercased —
+      `autotasks`/`rcb` where SAP has `AutoTasks`/`RCB`. Same entities, cosmetic;
+      the importer lowercases these user names. Not a row-matrix issue.
 - [ ] **Views inside joins** — single-table view resolution was prototyped
       (then reverted with the mp10 work); a view used *within* a join is not
       resolved. Verify + decide scope. Not yet tasked.

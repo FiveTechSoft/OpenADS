@@ -19085,194 +19085,133 @@ build_system_table(Connection* c, std::string sys_name,
 
         std::vector<std::vector<std::string>> rows;
 
-        auto top_key = [](const std::string& grantee,
-                          const std::string& obj_name,
-                          const std::string& type_code) -> std::string {
-            return grantee + '\x1f' + obj_name + '\x1f' + type_code;
+        // --- Canonical SAP permission matrix -------------------------------
+        // SAP renders system.permissions as a full grantee x object cross
+        // product (uniform: every grantee lists every object).  Grantees =
+        // real users + real groups + the two server pseudo-groups
+        // (SERVER:Admin / SERVER:Monitor); the adssys admin is omitted, as SAP
+        // does.  Objects = every table and every one of its columns, plus
+        // users, groups, stored procedures, functions and links, plus a
+        // per-category "root" node SAP always lists (TABLE / VIEW / USER /
+        // USER GROUP / PROCEDURE / LINK / PUBLICATION / SUBSCRIPTION / PACKAGE
+        // and the Database singleton).  Every cell renders "0"/"1"/"2", never
+        // blank, matching SAP.
+        auto is_adssys = [](const std::string& n) {
+            return openads::engine::DataDict::ci_name(n) == "adssys";
         };
 
-        auto emit_top_row = [&](const std::string& obj_name,
-                                const std::string& type_code,
-                                const std::string& obj_type,
-                                const std::string& grantee,
-                                bool is_grp,
-                                uint32_t m) {
-            bool is_table    = (obj_type == "Table");
-            bool is_exec     = (obj_type == "StoredProc" || obj_type == "Function");
-            bool is_obj_user = (obj_type == "User"  || obj_type == "Group");
-            bool is_db       = (obj_type == "Database");
-
-            bool show_dml    = (is_table || is_db);
-            bool show_exec   = (is_exec  || is_db);
-            bool show_inherit = !is_grp && !is_obj_user;
-            auto inherit_val  = [&]() -> std::string {
-                if (!show_inherit) return "";
-                bool set = (m & SAP_SENTINEL) || (m & 0x008u);
-                return set ? "1" : "0";
-            };
-            auto alt_val = [&]() -> std::string {
-                if (is_obj_user || is_exec) return "";
-                if (m & SAP_SENTINEL) return perm_val(is_grp, is_grp);
-                return perm_val((m >> 8) & 1u, is_grp);
-            };
-            auto drop_val = [&]() -> std::string {
-                if (is_obj_user) return "";
-                if (m & SAP_SENTINEL) return perm_val(is_grp, is_grp);
-                return perm_val((m >> 9) & 1u, is_grp);
-            };
-
-            rows.push_back({
-                obj_name,
-                type_code,
-                "",
-                grantee,
-                show_dml  ? dml_col(m, is_grp, 0)  : "",
-                show_dml  ? dml_col(m, is_grp, 1)  : "",
-                show_dml  ? dml_col(m, is_grp, 4)  : "",
-                show_dml  ? dml_col(m, is_grp, 5)  : "",
-                show_exec ? exe_col(m, is_grp)      : "",
-                (is_db && is_grp) ? dml_col(m, is_grp, 6) : "",
-                inherit_val(),
-                (is_db && is_grp) ? dml_col(m, is_grp, 7) : "",
-                alt_val(),
-                drop_val(),
-            });
+        struct MtxGrantee { std::string name; bool is_group; };
+        std::vector<MtxGrantee> grantees;
+        std::unordered_set<std::string> gseen;
+        auto add_grantee = [&](const std::string& n, bool grp) {
+            if (is_adssys(n)) return;
+            if (filter && filter->grantee &&
+                openads::engine::DataDict::ci_name(n) !=
+                    openads::engine::DataDict::ci_name(*filter->grantee))
+                return;
+            if (gseen.insert(openads::engine::DataDict::ci_name(n)).second)
+                grantees.push_back({n, grp});
         };
+        for (const auto& u : dd->users())  add_grantee(u, false);
+        for (const auto& g : dd->groups()) add_grantee(g, true);
+        add_grantee("SERVER:Admin",   true);
+        add_grantee("SERVER:Monitor", true);
 
-        std::unordered_set<std::string> seen_top;
-        std::vector<const openads::engine::DataDict::PermissionEntry*> perm_src;
-        if (filter && filter->grantee && filter->object_name) {
-            auto by_grantee = dd->permissions_by_grantee(*filter->grantee);
-            perm_src.reserve(by_grantee.size());
-            const auto obj_ci = openads::engine::DataDict::ci_name(*filter->object_name);
-            for (const auto* pe : by_grantee) {
-                if (openads::engine::DataDict::ci_name(pe->object_name) == obj_ci)
-                    perm_src.push_back(pe);
-            }
-        } else if (filter && filter->grantee) {
-            auto by_grantee = dd->permissions_by_grantee(*filter->grantee);
-            perm_src.assign(by_grantee.begin(), by_grantee.end());
-        } else if (filter && filter->object_name) {
-            auto by_object = dd->permissions_by_object(*filter->object_name);
-            perm_src.assign(by_object.begin(), by_object.end());
-        } else {
-            perm_src.reserve(dd->permissions().size());
-            for (const auto& pe : dd->permissions())
-                perm_src.push_back(&pe);
-        }
-
-        for (const auto* pe_ptr : perm_src) {
-            const auto& pe = *pe_ptr;
-            const std::string type_code = std::to_string(pe.object_type_code);
-            if (!seen_top.insert(top_key(pe.grantee, pe.object_name,
-                                         type_code)).second)
-                continue;
-            emit_top_row(pe.object_name, type_code, pe.object_type,
-                         pe.grantee, pe.grantee_is_group, pe.bitmask);
-
-            // Field-level rows: OBJ_TYPE=4, PARENT=table.  Skip fields that
-            // only carry the binary-load ordinal placeholder (not registered
-            // FIELDPROP / DD field metadata).
-            if (pe.object_type == "Table") {
-                auto fp_it = dd->field_props().find(pe.object_name);
-                if (fp_it != dd->field_props().end()) {
-                    std::vector<std::string> fnames;
-                    fnames.reserve(fp_it->second.size());
-                    for (const auto& [fn, fprops] : fp_it->second) {
-                        if (fprops.size() == 1 && fprops.count("ordinal"))
-                            continue;
-                        fnames.push_back(fn);
-                    }
-                    std::sort(fnames.begin(), fnames.end());
-                    std::string fsel = dml_col(pe.bitmask, pe.grantee_is_group, 0);
-                    std::string fupd = dml_col(pe.bitmask, pe.grantee_is_group, 1);
-                    std::string fins = dml_col(pe.bitmask, pe.grantee_is_group, 4);
-                    for (const auto& fname : fnames) {
-                        rows.push_back({
-                            fname,
-                            "4",
-                            pe.object_name,
-                            pe.grantee,
-                            fsel,
-                            fupd,
-                            fins,
-                            "",
-                            "",
-                            "",
-                            "",
-                            "",
-                            "",
-                            "",
-                        });
-                    }
-                }
-            }
-        }
-
-        // Legacy parity: emit a zero-permission row for every (grantee, object)
-        // pair that has no Permission record (flag columns "0", not omitted).
-        struct SecObj {
+        struct MtxObj {
             std::string name;
-            std::string type;
-            std::string code;
+            std::string parent;   // table name for fields; "" otherwise
+            int         type;     // SAP Object_Type code
         };
-        std::vector<SecObj> objects;
-        objects.reserve(dd->tables().size() + dd->views().size() +
-                        dd->procs().size() + dd->functions().size() +
-                        dd->links().size() + 8);
-        for (const auto& [alias, _] : dd->tables())
-            objects.push_back({alias, "Table", "1"});
-        for (const auto& [name, _] : dd->views())
-            objects.push_back({name, "View", "6"});
-        for (const auto& [name, _] : dd->procs())
-            objects.push_back({name, "StoredProc", "10"});
-        for (const auto& [name, _] : dd->functions())
-            objects.push_back({name, "Function", "18"});
-        for (const auto& [alias, _] : dd->links())
-            objects.push_back({alias, "Link", "12"});
-        for (const auto& u : dd->users())
-            objects.push_back({u, "User", "8"});
-        for (const auto& g : dd->groups())
-            objects.push_back({g, "Group", "9"});
-        if (!dd->users().empty() || !dd->groups().empty())
-            objects.push_back({"Database", "Database", "11"});
+        std::vector<MtxObj> objects;
+        auto add_obj = [&](const std::string& n, const std::string& parent,
+                           int type) {
+            if (filter && filter->object_name &&
+                openads::engine::DataDict::ci_name(n) !=
+                    openads::engine::DataDict::ci_name(*filter->object_name))
+                return;
+            objects.push_back({n, parent, type});
+        };
 
-        struct Grantee { std::string name; bool is_group; };
-        std::vector<Grantee> grantees;
-        grantees.reserve(dd->users().size() + dd->groups().size());
-        for (const auto& u : dd->users()) {
-            if (filter && filter->grantee &&
-                openads::engine::DataDict::ci_name(u) !=
-                    openads::engine::DataDict::ci_name(*filter->grantee))
-                continue;
-            grantees.push_back({u, false});
-        }
-        for (const auto& g : dd->groups()) {
-            if (filter && filter->grantee &&
-                openads::engine::DataDict::ci_name(g) !=
-                    openads::engine::DataDict::ci_name(*filter->grantee))
-                continue;
-            grantees.push_back({g, true});
-        }
-
-        // RCB 06/30/2026: Direct permission existence is now checked through
-        // DataDict's indexed lookup, so compatibility zero rows do not depend
-        // on rescanning all DD Permission entries for each grantee/object pair.
-        for (const auto& gr : grantees) {
-            for (const auto& obj : objects) {
-                if (filter && filter->object_name &&
-                    openads::engine::DataDict::ci_name(obj.name) !=
-                        openads::engine::DataDict::ci_name(*filter->object_name))
-                    continue;
-                if (dd->find_permission(gr.name, obj.name,
-                                        std::stoi(obj.code)) != nullptr)
-                    continue;
-                const auto key = top_key(gr.name, obj.name, obj.code);
-                if (!seen_top.insert(key).second) continue;
-                emit_top_row(obj.name, obj.code, obj.type, gr.name, gr.is_group,
-                             0u);
+        // Tables and every column of every table (columns read live from the
+        // physical descriptors, exactly like system.columns).
+        for (const auto& kv : dd->tables()) {
+            add_obj(kv.first, "", 1);
+            auto th = c->open_table(kv.second,
+                                    openads::engine::TableType::Cdx,
+                                    openads::engine::OpenMode::Read);
+            if (th) {
+                openads::engine::Table* tbl = c->lookup_table(th.value());
+                if (tbl) {
+                    std::uint16_t nf = tbl->field_count();
+                    for (std::uint16_t i = 0; i < nf; ++i)
+                        add_obj(tbl->field_descriptor(i).name, kv.first, 4);
+                }
+                c->close_table(th.value());
             }
         }
+        add_obj("TABLE", "", 1);                        // t1 category root
+        for (const auto& kv : dd->views()) add_obj(kv.first, "", 6);
+        add_obj("VIEW", "", 6);                         // t6 category root
+        for (const auto& u : dd->users())
+            if (!is_adssys(u)) add_obj(u, "", 8);
+        add_obj("USER", "", 8);                         // t8 category root
+        for (const auto& g : dd->groups()) add_obj(g, "", 9);
+        add_obj("SERVER:Admin",   "", 9);
+        add_obj("SERVER:Monitor", "", 9);
+        add_obj("USER GROUP", "", 9);                   // t9 category root
+        for (const auto& kv : dd->procs()) add_obj(kv.first, "", 10);
+        add_obj("PROCEDURE", "", 10);                   // t10 category root
+        add_obj("Database", "", 11);                    // t11 singleton
+        for (const auto& kv : dd->links()) add_obj(kv.first, "", 12);
+        add_obj("LINK", "", 12);                        // t12 category root
+        add_obj("PUBLICATION", "", 15);                 // t15 category root
+        add_obj("SUBSCRIPTION", "", 17);                // t17 category root
+        for (const auto& kv : dd->functions()) add_obj(kv.first, "", 18);
+        add_obj("FUNCTION", "", 18);                    // t18 category root
+        add_obj("PACKAGE", "", 19);                     // t19 category root
+
+        // Decode one (grantee, object) pair into the 14 output columns.
+        // Fields inherit their parent table's grant; every other object is
+        // looked up on its own name/type.  Rights OpenADS cannot decode from
+        // SAP's encrypted permission blobs render "0".
+        auto emit_cell = [&](const MtxObj& obj, const MtxGrantee& gr) {
+            uint32_t m = 0;
+            const auto* pe = (obj.type == 4)
+                ? dd->find_permission(gr.name, obj.parent, 1)
+                : dd->find_permission(gr.name, obj.name, obj.type);
+            if (pe) m = pe->bitmask;
+            bool g = gr.is_group;
+            std::string S = "0", U = "0", I = "0", D = "0", E = "0",
+                        Ac = "0", In = "0", Cr = "0", Al = "0", Dr = "0";
+            switch (obj.type) {
+                case 1:   // Table
+                    S = dml_col(m, g, 0); U = dml_col(m, g, 1);
+                    I = dml_col(m, g, 4); D = dml_col(m, g, 5);
+                    break;
+                case 4:   // Field (inherits parent table SELECT/UPDATE/INSERT)
+                    S = dml_col(m, g, 0); U = dml_col(m, g, 1);
+                    I = dml_col(m, g, 4);
+                    break;
+                case 10:  // StoredProc
+                case 18:  // Function
+                    E = exe_col(m, g);
+                    break;
+                case 11:  // Database (all DML + execute meaningful)
+                    S = dml_col(m, g, 0); U = dml_col(m, g, 1);
+                    I = dml_col(m, g, 4); D = dml_col(m, g, 5);
+                    E = exe_col(m, g);
+                    break;
+                default:  // Views / users / groups / links / category roots
+                    break;
+            }
+            rows.push_back({obj.name, std::to_string(obj.type), obj.parent,
+                            gr.name, S, U, I, D, E, Ac, In, Cr, Al, Dr});
+        };
+
+        rows.reserve(grantees.size() * objects.size());
+        for (const auto& gr : grantees)
+            for (const auto& obj : objects)
+                emit_cell(obj, gr);
 
         return build(cols, rows);
     }
