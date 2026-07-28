@@ -226,6 +226,7 @@ add_executable(openads_unit_tests
     unit/abi_adt_scope_validation_test.cpp
     unit/abi_adi_smoke_test.cpp
     unit/abi_adt_sql_test.cpp
+    unit/abi_adt_dat_extension_sql_test.cpp
     unit/openads_sql_c_test.cpp
     unit/abi_dd_table_prop_test.cpp
     unit/abi_dd_user_prop_test.cpp
