@@ -131,6 +131,49 @@ TEST_CASE("AdsCreateTable: drive-rooted client path lands under the data dir") {
     fs::remove_all(dir, ec);
 }
 
+// Issue #142: an absolute path that already lives under data_dir_ must
+// create the file at that exact location (not fold into data_dir_/rel).
+// ERP apps name their company folder by full path; COPY TO <abs> VIA "ADS"
+// used to rewrite F:\z\BASES\T.DAT as F:\z\BASES\z\BASES\T.DAT.
+TEST_CASE("AdsCreateTable: absolute path under data_dir writes there") {
+    const auto dir = fs::temp_directory_path() / "openads_abs_under_datadir";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir / "company");
+
+    UNSIGNED8 srv[256];
+    std::memcpy(srv, dir.string().c_str(), dir.string().size() + 1);
+    ADSHANDLE hConn = 0;
+    REQUIRE(AdsConnect60(srv, ADS_LOCAL_SERVER,
+                         nullptr, nullptr, 0, &hConn) == 0);
+
+    const auto target = dir / "company" / "T.DAT";
+    const std::string abs_name = target.string();
+    UNSIGNED8 name[512];
+    std::memcpy(name, abs_name.c_str(), abs_name.size() + 1);
+    UNSIGNED8 fields[] = "ID,Numeric,4,0;NAME,Character,8";
+    ADSHANDLE hTable = 0;
+    REQUIRE(AdsCreateTable(hConn, name, nullptr, ADS_CDX, 0, 0, 0, 0,
+                           fields, &hTable) == 0);
+    REQUIRE(AdsCloseTable(hTable) == 0);
+
+    CHECK(fs::exists(target));
+    // Must not have been folded into a nested data_dir_ mirror.
+    CHECK_FALSE(fs::exists(dir / "company" / "company" / "T.DAT"));
+
+    // Reopen by the same absolute name.
+    hTable = 0;
+    REQUIRE(AdsOpenTable(hConn, name, nullptr, ADS_CDX, 0, 0, 0, 0,
+                         &hTable) == 0);
+    UNSIGNED16 nflds = 0;
+    REQUIRE(AdsGetNumFields(hTable, &nflds) == 0);
+    CHECK(nflds == 2);
+    REQUIRE(AdsCloseTable(hTable) == 0);
+
+    REQUIRE(AdsDisconnect(hConn) == 0);
+    fs::remove_all(dir, ec);
+}
+
 TEST_CASE("M12.23 AdsCreateTable with an M field stages an empty .fpt; memo writes work") {
     const auto dir = fs::temp_directory_path() / "openads_m1223_creatememo";
     std::error_code ec;

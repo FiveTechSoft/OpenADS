@@ -30909,13 +30909,6 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         return ok();
     }
 
-    // M10.46 — when this query was a derived-table outer SELECT,
-    // reuse the inner cursor's existing handle so the user-visible
-    // cursor isn't a stale alias of an already-registered Table*.
-    ADSHANDLE gh = (derived_cur != 0)
-        ? derived_cur
-        : s.registry.register_object(HandleKind::Table, tbl);
-
     // RCB 07/16/2026: column-level permission enforcement. If the connected
     // user is column-restricted on the source table, the cursor must expose
     // ONLY the columns they may SELECT — SAP grants a group table access but
@@ -30938,6 +30931,137 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
         return s;
     };
+
+    // Issue #136: single-table ORDER BY / DISTINCT / LIMIT used a live
+    // cursor over the source with a recno_sequence. An application that
+    // ran INDEX ON the result rewrote the production .cdx. Real ACE
+    // returns a static temp cursor; so do the join / CASE paths here.
+    // Materialise now (column ACL applied first so the temp only holds
+    // permitted columns), close the live source, and return a memory
+    // table with recnos 1..N in result order and its own index space.
+    // Memory tables leave no files in the customer's data directory.
+    const bool need_static =
+        derived_cur == 0 &&
+        tbl->has_recno_sequence() &&
+        (parsed.value().order_by || parsed.value().distinct ||
+         parsed.value().limit >= 0 || parsed.value().offset > 0);
+    if (need_static) {
+        std::vector<std::uint16_t> cols;
+        if (!parsed.value().projection.empty()) {
+            cols.reserve(parsed.value().projection.size());
+            for (const auto& col : parsed.value().projection) {
+                std::int32_t fidx = tbl->field_index(col);
+                if (fidx < 0) {
+                    if (table_handle != 0) c->close_table(table_handle);
+                    return fail(openads::AE_COLUMN_NOT_FOUND, col.c_str());
+                }
+                if (allowed_cols &&
+                    allowed_cols->find(col_lower(col)) ==
+                        allowed_cols->end()) {
+                    if (table_handle != 0) c->close_table(table_handle);
+                    return fail(openads::AE_ACCESS_DENIED,
+                                ("no column permission: " + col).c_str());
+                }
+                cols.push_back(static_cast<std::uint16_t>(fidx));
+            }
+        } else {
+            const std::uint16_t nf =
+                static_cast<std::uint16_t>(tbl->field_count());
+            for (std::uint16_t i = 0; i < nf; ++i) {
+                if (allowed_cols) {
+                    const std::string& fname =
+                        tbl->field_descriptor(i).name;
+                    if (allowed_cols->find(col_lower(fname)) ==
+                        allowed_cols->end())
+                        continue;
+                }
+                cols.push_back(i);
+            }
+        }
+        if (cols.empty()) {
+            if (table_handle != 0) c->close_table(table_handle);
+            return fail(openads::AE_ACCESS_DENIED,
+                        "no columns permitted for SELECT");
+        }
+
+        // SpCol::colname is const char* — keep owning strings alive until
+        // build_memory_result has copied the names into DbfField.
+        std::vector<std::string> name_storage;
+        name_storage.reserve(cols.size());
+        std::vector<SpCol> spcols;
+        spcols.reserve(cols.size());
+        for (auto fi : cols) {
+            const auto& fd = tbl->field_descriptor(fi);
+            name_storage.push_back(fd.name);
+            SpCol sc;
+            sc.colname = name_storage.back().c_str();
+            using FT = openads::drivers::DbfFieldType;
+            if (fd.type == FT::Numeric || fd.type == FT::Float ||
+                fd.type == FT::Integer || fd.type == FT::Double ||
+                fd.type == FT::Currency || fd.type == FT::ShortInt ||
+                fd.type == FT::AutoInc) {
+                sc.type = 'N';
+                sc.length = 20;
+                sc.decimals = static_cast<std::uint8_t>(fd.decimals);
+            } else if (fd.type == FT::Logical) {
+                sc.type = 'L';
+                sc.length = 1;
+                sc.decimals = 0;
+            } else {
+                sc.type = 'C';
+                sc.length = static_cast<std::uint8_t>(
+                    fd.length > 0 && fd.length <= 254 ? fd.length : 50);
+                sc.decimals = 0;
+            }
+            spcols.push_back(sc);
+        }
+
+        std::vector<std::vector<std::string>> mrows;
+        const auto& seq = tbl->recno_sequence();
+        mrows.reserve(seq.size());
+        for (std::uint32_t r : seq) {
+            if (auto g = tbl->goto_record(r); !g) continue;
+            std::vector<std::string> row;
+            row.reserve(cols.size());
+            for (auto fi : cols) {
+                auto v = tbl->read_field(fi);
+                std::string cell = v ? v.value().as_string : std::string();
+                while (!cell.empty() && cell.back() == ' ') cell.pop_back();
+                row.push_back(std::move(cell));
+            }
+            mrows.push_back(std::move(row));
+        }
+
+        auto mt = build_memory_result("sql_orderby", spcols, mrows);
+        if (!mt) {
+            if (table_handle != 0) c->close_table(table_handle);
+            return fail(mt.error());
+        }
+        auto ath = c->adopt_table(std::move(mt).value(),
+                                  "_sql_orderby_cursor");
+        if (!ath) {
+            if (table_handle != 0) c->close_table(table_handle);
+            return fail(ath.error());
+        }
+        openads::engine::Table* ctbl = c->lookup_table(ath.value());
+        if (!ctbl) {
+            if (table_handle != 0) c->close_table(table_handle);
+            return fail(openads::AE_INTERNAL_ERROR,
+                        "ORDER BY materialize post-adopt");
+        }
+        if (table_handle != 0) c->close_table(table_handle);
+        ADSHANDLE gh_static =
+            s.registry.register_object(HandleKind::Table, ctbl);
+        *phCursor = gh_static;
+        return ok();
+    }
+
+    // M10.46 — when this query was a derived-table outer SELECT,
+    // reuse the inner cursor's existing handle so the user-visible
+    // cursor isn't a stale alias of an already-registered Table*.
+    ADSHANDLE gh = (derived_cur != 0)
+        ? derived_cur
+        : s.registry.register_object(HandleKind::Table, tbl);
 
     if (!parsed.value().projection.empty()) {
         std::vector<std::uint16_t> proj;

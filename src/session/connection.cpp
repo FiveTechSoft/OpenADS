@@ -192,8 +192,14 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
     // file is honored verbatim — SAP opens free tables by full path even
     // on a data-directory connection, and folding those broke every
     // caller that opens a table it just staged at an absolute location
-    // (the DD field-property fixtures do exactly that). CREATE never
-    // takes this branch: a new table always lands under data_dir_.
+    // (the DD field-property fixtures do exactly that).
+    //
+    // CREATE exception (option 2, issue #142): honour an absolute path
+    // when its parent directory is data_dir_ or a subdirectory of it.
+    // A bare drive-root name (C:\STRAY.DBF) still folds — the root always
+    // exists but is never a deliberate destination (abi_create_table_test
+    // pins that case). Paths outside data_dir_ keep folding so DbCreate
+    // cannot write next to the application.
     fs::path rel = fs::path(effective);
     if (rel.is_absolute() || rel.has_root_directory()) {
         if (!for_create) {
@@ -228,6 +234,11 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
                     return resolved;
                 }
             }
+        } else if (path_is_inside(data_dir_, rel)) {
+            // Absolute create under the configured data directory: write
+            // exactly there. Parent must exist (we do not mkdir intermediates);
+            // ofstream failure then surfaces as a real create error.
+            return platform::resolve_case_insensitive(rel.string());
         }
         rel = rel.relative_path();
     }
