@@ -1761,22 +1761,32 @@ util::Result<SelectStmt> parse_select(const std::string& sql) {
                 "comma-join requires an equality join predicate "
                 "(cartesian products are not supported)", sql};
         }
-        if (keys.size() > 1) {
-            return util::Error{7200, 0,
-                "comma-join supports a single equality join key; "
-                "use INNER JOIN ... ON for composite keys", sql};
+        // A COMPOSITE key (more than one equality) cannot be expressed by the
+        // single-pair JoinClause. Do not lower it and do not reject it: leave
+        // inner_join unset and let the N-way executor take over -- it consumes
+        // from_tables + the WHERE equalities directly and handles any number
+        // of them, which is the route three or more tables already follow.
+        // Rejecting this was a two-table-only limit: `FROM a, b WHERE
+        // a.k1 = b.k1 AND a.k2 = b.k2` failed while the identical predicate
+        // across three tables worked.
+        //
+        // Only the single-key case is lowered, and only then is the predicate
+        // blanked out of the WHERE -- for a composite key every equality must
+        // stay in the WHERE, because that is where the N-way executor reads
+        // the join conditions from.
+        if (keys.size() == 1) {
+            WhereExpr* k = keys.front();
+            JoinClause j;
+            j.table        = comma_join_table;
+            j.left_column  = k->cmp.column;
+            j.right_column = k->cmp.outer_column;
+            stmt.inner_join = std::move(j);
+            // Blank the lifted predicate to an always-true empty-AND node.
+            k->cmp      = WhereCmp{};
+            k->kind     = WhereExpr::Kind::And;
+            k->children.clear();
+            k->child.reset();
         }
-        WhereExpr* k = keys.front();
-        JoinClause j;
-        j.table        = comma_join_table;
-        j.left_column  = k->cmp.column;
-        j.right_column = k->cmp.outer_column;
-        stmt.inner_join = std::move(j);
-        // Blank the lifted predicate to an always-true empty-AND node.
-        k->cmp      = WhereCmp{};
-        k->kind     = WhereExpr::Kind::And;
-        k->children.clear();
-        k->child.reset();
     }
 
     // M10.25 — GROUP BY <col>[, <col>...] [HAVING <agg> <op> <num>].
