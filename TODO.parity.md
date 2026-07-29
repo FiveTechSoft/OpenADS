@@ -39,12 +39,53 @@ OpenADS gap (test-case bugs already fixed). Grouped by root cause:
       returns `"0"`; date columns inside aggregates come back `"0"` from OA vs
       `"01/18/0203"` from SAP. Same family as task #1 below, now with a second
       corpus confirming it.
-- [ ] **DD catalog divergence** *(5 cases)* — users 31 vs 32 (OA adds `adssys`),
-      groups 20 vs 17, permissions 63801 vs 62450, and `Object_Type = 4`
-      255 (SAP) vs 54050 (OA) — an order-of-magnitude semantic divergence in
-      what OA classifies as a column-permission row, worth understanding before
-      the column-level enforcement work. Trigger ordering differs under
-      `ORDER BY Trig_TableName, Name`.
+- [ ] **DD catalog divergence** — fully diagnosed below. Trigger ordering also
+      differs under `ORDER BY Trig_TableName, Name`.
+
+### system.permissions divergence — DIAGNOSED 2026-07-29, and it is small
+
+The first mp run looked alarming (`Object_Type = 4`: SAP 255 vs OA 54050). That
+was **a SAP bug, not an OpenADS one**, and the real gap is three concrete items.
+
+**SAP AQE bug — `Object_Type = 4` on system.permissions.** SAP returns 255 while
+its own `GROUP BY Object_Type` reports 55131 for the same predicate; `= 1`
+(4896) and `= 8` (1632) are both correct, and the semantically identical
+`>= 4 AND <= 4` returns the correct 55131. One literal, wrong answer. The gate
+uses the range form so the case measures OpenADS; `cat_perms_type4_eq` keeps the
+buggy shape as a documented known-diff. **Do not "fix" OpenADS to match 255.**
+
+**The actual divergence reconciles exactly:**
+
+```
+SAP: 51 grantees x 1251 objects = 63801   OK
+OA : 50 grantees x 1249 objects = 62450   OK
+delta 1351 = 1 missing grantee + 2 missing objects
+```
+
+- [ ] **`DB:Debug` is not imported** — missing both as a grantee and as a
+      type-9 (USER GROUP) object; `DB:Admin`/`DB:Backup`/`DB:Public` all import
+      fine. Accounts for the missing grantee *and* one of the two objects.
+      Ref: memory `project_sap_builtin_groups.md` (per-user cipher detection).
+- [ ] **`Ver8L` link object is not imported** — type 12 (LINK): SAP has
+      `Ver8L` + the `LINK` root singleton, OA has only the root. `system.links`
+      counts 1 on both, so the link is known but not surfaced as a perm object.
+- [ ] **Importer lowercases user grantee names** — **27** mixed-case users, not
+      the "two" previously recorded (`RCB`→`rcb`, `AutoTasks`→`autotasks`,
+      `PteConfirmations`→`pteconfirmations`, …). Group names are preserved.
+      A SAP-compatible client doing `WHERE Grantee = 'RCB'` gets nothing.
+
+**Good news for column-level enforcement:** type 4 is **1081 columns on both**
+engines (55131/51 = 54050/50 = 1081), matching `system.columns`. The column
+dimension of the matrix is intact — the only shortfall is the missing grantee.
+
+- [ ] **Task #4 missed the user/group catalogs** — same class as the five
+      catalogs already fixed, three more to go. `WHERE Name = …` raises
+      "Column not found" against all three.
+      | catalog | OA columns | SAP columns |
+      |---|---|---|
+      | users | `USER_NAME` | Name, Enable_Internet, Logins_Disabled, Comment, User_Defined_Prop |
+      | usergroups | `GROUP_NAME` | Name, Comment, User_Defined_Prop |
+      | usergroupmembers | `GROUP_NAME`,`USER_NAME` | (verify against SAP) |
 
 ## A. S4 polish (cosmetic — tracked as tasks #1–3)
 - [ ] **#1 Date display format** — `AdsGetString` on date cols returns raw

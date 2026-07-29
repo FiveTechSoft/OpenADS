@@ -90,8 +90,24 @@ $cases = [ordered]@{
 "cat_users_n"           = "SELECT COUNT(*) AS n FROM system.users";
 "cat_groups_n"          = "SELECT COUNT(*) AS n FROM system.usergroups";
 "cat_perms_n"           = "SELECT COUNT(*) AS n FROM system.permissions";
-# filtering by SAP's own column names is the thing that broke before task #4
-"cat_perms_by_type"     = "SELECT COUNT(*) AS n FROM system.permissions WHERE Object_Type = 4";
+# Object_Type = 4 (columns). Use the RANGE form, not `= 4`: SAP's AQE returns
+# 255 for `Object_Type = 4` while its own GROUP BY says 55131, and `= 1` / `= 8`
+# are correct - a SAP bug on that one literal. `>= 4 AND <= 4` gets the right
+# answer out of both engines, so the case measures OpenADS instead of SAP.
+"cat_perms_type4_range" = "SELECT COUNT(*) AS n FROM system.permissions WHERE Object_Type >= 4 AND Object_Type <= 4";
+# ...and the shape that exposes the SAP bug, kept as a documented known-diff.
+"cat_perms_type4_eq"    = "SELECT COUNT(*) AS n FROM system.permissions WHERE Object_Type = 4";
+# grantee count: SAP 51, OA 50 - DB:Debug is not imported
+"cat_perms_grantees"    = "SELECT COUNT(DISTINCT Grantee) AS n FROM system.permissions";
+# the DB: built-in groups; DB:Debug is the one that goes missing
+"cat_db_groups"         = "SELECT Grantee FROM system.permissions WHERE Object_Type >= 19 AND Object_Type <= 19 AND Grantee LIKE 'DB:%' ORDER BY Grantee";
+# type 12 = LINK; SAP has the 'Ver8L' link object, OA only the LINK root
+"cat_perms_links"       = "SELECT Name FROM system.permissions WHERE Object_Type >= 12 AND Object_Type <= 12 AND Grantee = 'General' ORDER BY Name";
+# user-name casing: SAP preserves declared case, OA lowercases all 27 mixed-case users
+"cat_perms_grantee_case" = "SELECT Grantee FROM system.permissions WHERE Object_Type >= 19 AND Object_Type <= 19 AND Grantee LIKE 'RCB' ORDER BY Grantee";
+# task #4 missed the user/group catalogs: OA has USER_NAME / GROUP_NAME, SAP has Name
+"cat_users_by_name"     = "SELECT Name FROM system.users ORDER BY Name";
+"cat_groups_by_name"    = "SELECT Name FROM system.usergroups ORDER BY Name";
 "cat_rel_names"         = "SELECT Name, RI_Primary_Table, RI_Foreign_Table FROM system.relations ORDER BY Name";
 "cat_trig_names"        = "SELECT TOP 10 Name, Trig_TableName FROM system.triggers ORDER BY Trig_TableName, Name";
 
