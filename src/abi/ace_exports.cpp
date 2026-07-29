@@ -6966,7 +6966,16 @@ AdtFieldSpec adt_spec_for(const FieldOut& f) {
         case 'I': return { 7, 9,          0,     true };  // IMAGE  (9-byte ref)
         case 'N':
             if (f.dec > 0) return {10, 8, f.dec, false}; // DOUBLE
-            return              {11, 4, 0,     false};     // INTEGER
+            // INTEGER is a 4-byte int32, so it only holds up to 2,147,483,647.
+            // Mapping every decimal-less numeric to it silently destroyed any
+            // wider value: a DBF N(19,0) holding 5,000,000,000 read back as 0
+            // -- not rounded, zero, with nothing to signal it. Only take that
+            // path when the declared width cannot overflow (9 digits max out at
+            // 999,999,999); anything wider goes to DOUBLE, which is exact for
+            // integers up to 2^53 (~9.0e15) and covers every realistic value in
+            // such a field.
+            if (f.length <= 9) return {11, 4, 0, false};   // INTEGER
+            return                    {10, 8, 0, false};   // DOUBLE
         // ADT-specific sentinels from dbf_type_for:
         case 'W': return {20, static_cast<std::uint16_t>(f.length ? f.length : 10u),
                           0, false};                       // CICHARACTER
