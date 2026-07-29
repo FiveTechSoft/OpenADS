@@ -189,6 +189,7 @@ add_executable(openads_unit_tests
     unit/abi_sql_named_param_test.cpp
     unit/abi_null_semantics_test.cpp
     unit/abi_sql_orderby_test.cpp
+    unit/abi_sql_orderby_types_test.cpp
     unit/abi_sql_dml_test.cpp
     unit/abi_sql_projection_test.cpp
     unit/abi_sql_ddl_test.cpp
