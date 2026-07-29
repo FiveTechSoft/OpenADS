@@ -31,6 +31,23 @@ is rebuilt.
 
 Test: `tests/unit/abi_adi_tagdir_order_test.cpp`.
 
+### Fixed - an ADT table kept under a non-.adt extension works end to end
+
+`ExtFile='.DAT'` is a common ERP convention: every table is named `.DAT`
+whatever its format. Three places tested the extension instead of the format:
+
+- `AdsCreateTable` forced `.adt`, so `COPY TO "CONSEINV.DAT" VIA "ADS"`
+  silently produced `CONSEINV.adt` and reopened a name the caller never asked
+  for;
+- the structural index bag was chosen by extension, so a `.DAT` ADT table got a
+  `.cdx` bag its driver cannot use;
+- `AdiIndex`'s companion-data lookup only ever tried `<stem>.adt`.
+
+#143 fixed the SQL side of the same convention by sniffing the header; this is
+the navigational side.
+
+Test: `tests/unit/abi_adt_dat_extension_test.cpp`.
+
 ## 1.8.37 - 2026-07-29
 
 ERP production fix batch (RusSoft Harbour/FiveWin deployment) plus CI-blocking
