@@ -18,6 +18,17 @@ New `Table::deleted_at(recno)` reads the record through the normal read path, so
 the read-ahead block stays warm, and does not move the cursor. Same counts. Same
 reasoning as the existing `load_record_for_bulk_scan`.
 
+Keeping the read-ahead warm is only half of it: the walk arrives ordered by KEY,
+and on an index whose key does not correlate with recno consecutive reads land
+in different blocks anyway. Two copies of the same table, after the change
+above:
+
+    ADT/ADI, key order follows recno    14 ms
+    DBF/CDX, key order scattered       492 ms
+
+The count does not depend on the order, so the recnos are sorted and the records
+read in file order: 16 ms and 23 ms respectively.
+
 Test: `tests/unit/abi_keycount_deleted_scan_test.cpp`.
 
 ## 1.8.37 - 2026-07-29
