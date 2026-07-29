@@ -234,11 +234,37 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
                     return resolved;
                 }
             }
-        } else if (path_is_inside(data_dir_, rel)) {
+        } else {
             // Absolute create under the configured data directory: write
             // exactly there. Parent must exist (we do not mkdir intermediates);
             // ofstream failure then surfaces as a real create error.
-            return platform::resolve_case_insensitive(rel.string());
+            //
+            // Same treatment when the path is OUTSIDE data_dir_ but its parent
+            // directory already exists, which is what the real ACE engine does:
+            // a free-table create writes exactly the file it was given.
+            // Applications stage work tables outside the data directory all the
+            // time (the ERP that reported this builds scratch copies under the
+            // TEMP drive and reads them back by the same absolute name), and
+            // folding those produced a path whose intermediate directories
+            // nobody creates -- the create failed and the caller could never
+            // find its table.
+            //
+            // The fold below still applies when the parent does NOT exist:
+            // that is the case the guard was written for, a client passing a
+            // path from its own working directory that means nothing on the
+            // server, and re-rooting it keeps the table inside the directory
+            // the server owns. A path rooted directly at a drive
+            // ("C:\STRAY.DBF") is excluded too: the drive root always exists,
+            // but writing a table there is never a deliberate location -- it
+            // is the signature of a client that built the name from its own
+            // root, and abi_create_table_test pins that it folds.
+            std::error_code ec;
+            const fs::path parent = rel.parent_path();
+            const bool parent_is_drive_root = (parent == parent.root_path());
+            if (path_is_inside(data_dir_, rel) ||
+                (!parent_is_drive_root && fs::is_directory(parent, ec))) {
+                return platform::resolve_case_insensitive(rel.string());
+            }
         }
         rel = rel.relative_path();
     }

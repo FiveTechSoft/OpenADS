@@ -91,6 +91,7 @@ add_executable(openads_unit_tests
     unit/index_expr_sql_test.cpp
     unit/abi_m92_real_test.cpp
     unit/abi_create_table_test.cpp
+    unit/abi_create_outside_datadir_test.cpp
     unit/abi_remote_create_table_test.cpp
     unit/abi_refresh_extract_test.cpp
     unit/abi_create_index61_test.cpp
