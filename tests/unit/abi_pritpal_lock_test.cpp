@@ -192,7 +192,9 @@ TEST_CASE("Remote: write without lock returns error 5035 (GoHot guard)") {
     UNSIGNED8 buf[8] = {};
     UNSIGNED32 cap = sizeof(buf);
     REQUIRE(AdsGetField(hTbl, fld, buf, &cap, 0) == 0);
-    CHECK(std::string(reinterpret_cast<const char*>(buf), cap) == "NOPE  ");
+    // TAG is C(5) (see stage_dbf), so a 4-char value comes back space-padded
+    // to exactly 5 — not 6.
+    CHECK(std::string(reinterpret_cast<const char*>(buf), cap) == "NOPE ");
 
     // Cleanup
     REQUIRE(AdsUnlockRecord(hTbl, 1) == 0);
@@ -333,10 +335,14 @@ TEST_CASE("Remote: Exclusive open allows writes without lock") {
 
     ADSHANDLE hTbl = 0;
     UNSIGNED8 name[16] = "test";
-    // Open EXCLUSIVE — no lock needed
+    // Open EXCLUSIVE — no lock needed.
+    // The share mode is usMode, the 8th parameter — NOT usLockType (6th).
+    // Passing ADS_EXCLUSIVE as usLockType left usMode = ADS_DEFAULT, which
+    // map_open_mode() resolves to Shared, so the GoHot guard correctly
+    // rejected the unlocked write with 5035 and this test failed.
     REQUIRE(AdsOpenTable(hConn, name, nullptr, ADS_CDX,
-                         ADS_ANSI, ADS_EXCLUSIVE, ADS_COMPATIBLE_LOCKING,
-                         ADS_DEFAULT, &hTbl) == 0);
+                         ADS_ANSI, ADS_COMPATIBLE_LOCKING, ADS_IGNORERIGHTS,
+                         ADS_EXCLUSIVE, &hTbl) == 0);
 
     REQUIRE(AdsGotoRecord(hTbl, 1) == 0);
     UNSIGNED8 fld[8] = "TAG";
@@ -347,7 +353,7 @@ TEST_CASE("Remote: Exclusive open allows writes without lock") {
     UNSIGNED8 buf[8] = {};
     UNSIGNED32 cap = sizeof(buf);
     REQUIRE(AdsGetField(hTbl, fld, buf, &cap, 0) == 0);
-    CHECK(std::string(reinterpret_cast<const char*>(buf), cap) == "EXCL  ");
+    CHECK(std::string(reinterpret_cast<const char*>(buf), cap) == "EXCL ");
 
     REQUIRE(AdsCloseTable(hTbl) == 0);
     REQUIRE(AdsDisconnect(hConn) == 0);
