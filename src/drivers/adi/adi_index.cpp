@@ -65,11 +65,24 @@ platform::OpenMode map_open_mode(IndexOpenMode m) noexcept {
     return platform::OpenMode::OpenExisting;
 }
 
-// Derive .adt path from .adi path
+// Derive the companion data-file path from the .adi path.
+// Standard ADT uses a .adt data file, but an application may keep ADT data
+// under another extension (ExtFile='.DAT' is a common ERP convention), so when
+// <stem>.adt is absent fall back to <stem>.DAT / <stem>.dat. This is the safety
+// net for every path that derives the data file implicitly -- open / open_named
+// / list_tags / add_tag / create -- when the caller passed no explicit adt_path.
 std::string adt_path_for(const std::string& adi_path) {
     namespace fs = std::filesystem;
     fs::path p(adi_path);
     p.replace_extension(".adt");
+    std::error_code ec;
+    if (!fs::exists(p, ec)) {
+        for (const char* ext : {".DAT", ".dat"}) {
+            fs::path d(adi_path);
+            d.replace_extension(ext);
+            if (fs::exists(d, ec)) return d.string();
+        }
+    }
     return p.string();
 }
 

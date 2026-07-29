@@ -82,6 +82,7 @@ using openads::abi::lock_retry_policy;
 #include "drivers/dbf_common.h"
 #include "drivers/index_trait.h"
 #include "drivers/ntx/ntx_index.h"
+#include "drivers/adt/adt_driver.h"
 #include "drivers/cdx/cdx_driver.h"
 #include "drivers/cdx/cdx_index.h"
 #include "drivers/adi/adi_index.h"
@@ -7126,7 +7127,12 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
 
     if (is_adt) {
         // ── ADT creation path ───────────────────────────────────────────────
-        if (full.extension() != ".adt") full.replace_extension(".adt");
+        // Respect the file name the caller asked for -- real ACE creates
+        // exactly that file. Forcing ".adt" breaks any application that keeps
+        // ADT data under another extension (ExtFile='.DAT' is a common ERP
+        // convention): COPY TO "CONSEINV.DAT" VIA "ADS" silently produced
+        // CONSEINV.adt and the application could not find the table it had
+        // just written. An extension-less name still defaults above.
 
         std::vector<AdtFieldSpec> specs;
         specs.reserve(fields.size());
@@ -7234,7 +7240,9 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
         }
 
         // Open via the standard path so the caller gets a usable handle
-        std::string rel_adt = fs::path(rel).replace_extension(".adt").string();
+        // Reopen the file that was actually written, which is not
+        // necessarily <stem>.adt (see the ExtFile note above).
+        std::string rel_adt = full.string();
         UNSIGNED8 adt_namebuf[260] = {0};
         std::size_t adt_nb = std::min<std::size_t>(rel_adt.size(),
                                                     sizeof(adt_namebuf) - 1);
@@ -12240,7 +12248,14 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
         : std::string{};
 
     namespace fs = std::filesystem;
-    const bool is_adt_table = path_ends_with_ci(t->path(), ".adt");
+    // An ADT table is not always named .adt (ExtFile='.DAT'), so ask the
+    // driver in use as well -- an extension-only test routes those tables to
+    // .cdx and their companion .adi is never created.
+    bool is_adt_table = path_ends_with_ci(t->path(), ".adt");
+    if (!is_adt_table &&
+        dynamic_cast<openads::drivers::adt::AdtDriver*>(t->driver()) != nullptr) {
+        is_adt_table = true;
+    }
     const char* default_ext = is_adt_table ? ".adi" : ".cdx";
     fs::path p;
     if (bag.empty()) {
