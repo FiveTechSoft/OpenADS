@@ -18225,6 +18225,19 @@ openads::engine::LockingMode stmt_locking_mode(const SqlStatement& s) {
            : openads::engine::LockingMode::Compatible;
 }
 
+// SQL DML (UPDATE/DELETE/INSERT/MERGE) opens tables Shared so multiuser
+// readers can coexist, but writeback_record_() enforces a GoHot lock guard
+// in Shared mode. Without an engine-held lock every SET/DELETE hits 5035
+// "record not locked" — which broke AFTER-trigger bodies (UPDATE log SET…),
+// plain SQL DML, NewSeqKey, and the unit suite after the write-guard landed
+// (issue #138). Hold a table-exclusive lock for the life of the statement,
+// matching the RI cascade path. Navigational multiuser still requires an
+// explicit RLock/FLock; that contract is covered by engine_table_write_test.
+inline void sql_dml_hold_write_lock(openads::engine::Table* tbl) {
+    if (tbl == nullptr || tbl->is_table_locked()) return;
+    (void)tbl->try_lock_table_excl();
+}
+
 } // namespace
 
 } // extern "C++"
@@ -24617,6 +24630,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         if (!th) return fail(th.error());
         openads::engine::Table* tbl = c->lookup_table(th.value());
         if (!tbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
+        sql_dml_hold_write_lock(tbl);
 
         // Compile the ON tree with the same closure shape the UPDATE
         // branch below uses (helper extraction still deferred).
@@ -24931,6 +24945,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         if (!th) return fail(th.error());
         openads::engine::Table* tbl = c->lookup_table(th.value());
         if (!tbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
+        sql_dml_hold_write_lock(tbl);
         // Pre-resolve assignments so a typo surfaces before any write.
         struct Assn {
             std::uint16_t                   field_index;
@@ -25185,6 +25200,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         if (!th) return fail(th.error());
         openads::engine::Table* tbl = c->lookup_table(th.value());
         if (!tbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
+        sql_dml_hold_write_lock(tbl);
         // Reuse the WHERE filter machinery for SELECT: it's already
         // wired and the predicate semantics match exactly.
         if (del.value().where) {
@@ -25348,6 +25364,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         if (!th) return fail(th.error());
         openads::engine::Table* tbl = c->lookup_table(th.value());
         if (!tbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
+        sql_dml_hold_write_lock(tbl);
 
         // S4 — DD field constraints (oracle-verified): SAP rejects an
         // INSERT that leaves a non-nullable column without a value with
