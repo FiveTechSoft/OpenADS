@@ -1,3 +1,20 @@
+## Unreleased
+
+### Fixed - ADI tag ordinals follow creation order
+
+`add_tag` prepended its tag-directory entry, so ordinals came out reversed:
+after creating TCODIGO, TNOMBRE, TGRUPO the bag reported TGRUPO as ordinal 1.
+An application that navigates orders by NUMBER (`OrdSetFocus(n)` / `OrdName(n)`
+— what a browse doing click-to-sort on a column does) then activates the wrong
+order, and cannot compensate without knowing in advance how many tags the bag
+will hold. CDX gives creation order; ADI now matches.
+
+Existing bags are unaffected on read (the directory is scanned in file order
+either way); a bag written before this change keeps its old ordinals until it
+is rebuilt.
+
+Test: `tests/unit/abi_adi_tagdir_order_test.cpp`.
+
 ## 1.8.37 - 2026-07-29
 
 ERP production fix batch (RusSoft Harbour/FiveWin deployment) plus CI-blocking
