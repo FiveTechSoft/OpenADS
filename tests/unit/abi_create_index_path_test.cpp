@@ -361,3 +361,61 @@ TEST_CASE("AdsCreateIndex61 + AdsOpenIndex round-trip") {
     REQUIRE(AdsDisconnect(hConn) == 0);
     fs::remove_all(dir, ec);
 }
+
+// ===========================================================================
+// Pritpal Bedi 29/07/2026 — custom extension (".Z01") must still produce a
+// CDX-FORMAT bag: real ADS picks the index format from the compound marker,
+// not the suffix, and Harbour's DBFCDX parses every bag as CDX (it declared
+// our NTX-written ".Z01" corrupt). Reopen must sniff the content, too.
+// ===========================================================================
+TEST_CASE("AdsCreateIndex61: custom extension writes CDX format") {
+    auto dir = fs::temp_directory_path() / "openads_ci_path8";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    stage_dbf(dir, "T8.DBF", 5);
+
+    auto hConn = connect_local(dir);
+    UNSIGNED8 name[8] = "T8";
+    ADSHANDLE hTbl = 0;
+    REQUIRE(AdsOpenTable(hConn, name, name, ADS_CDX, 1, 1, 0, 1, &hTbl) == 0);
+
+    UNSIGNED8 bag[16]  = "MYIDX.Z01";
+    UNSIGNED8 tag[16]  = "BYNAME";
+    UNSIGNED8 expr[16] = "NAME";
+    ADSHANDLE hIdx = 0;
+    REQUIRE(AdsCreateIndex61(hTbl, bag, tag, expr,
+                             nullptr, nullptr, ADS_COMPOUND, 512, &hIdx) == 0);
+    REQUIRE(hIdx != 0);
+    REQUIRE(AdsCloseIndex(hIdx) == 0);
+
+    // File exists and carries the CDX signature ("RCHB" at offset 20).
+    auto bag_path = dir / "MYIDX.Z01";
+    REQUIRE(fs::exists(bag_path));
+    {
+        std::ifstream f(bag_path, std::ios::binary);
+        std::array<char, 24> hdr{};
+        f.read(hdr.data(), static_cast<std::streamsize>(hdr.size()));
+        REQUIRE(f.gcount() == static_cast<std::streamsize>(hdr.size()));
+        CHECK(std::string(hdr.data() + 20, hdr.data() + 24) == "RCHB");
+    }
+
+    // Reopen by content sniff: AdsOpenIndex must take the CDX path even
+    // though the suffix is not ".cdx".
+    UNSIGNED8 reopen[16] = "MYIDX.Z01";
+    std::array<ADSHANDLE, 8> arr{};
+    UNSIGNED16 cap = static_cast<UNSIGNED16>(arr.size());
+    REQUIRE(AdsOpenIndex(hTbl, reopen, arr.data(), &cap) == 0);
+    REQUIRE(cap >= 1u);
+
+    // Ordered walk: stage_dbf writes A00<r>, r=0..4, so ascending NAME
+    // order is the natural 1..5 — use BYNAME descending sanity instead:
+    // seek the last-written key must still find record 5.
+    REQUIRE(AdsGotoTop(arr[0]) == 0);
+    UNSIGNED32 recno = 0;
+    REQUIRE(AdsGetRecordNum(hTbl, 0, &recno) == 0);
+    CHECK(recno == 1u);  // "A000" is the smallest key
+
+    REQUIRE(AdsCloseTable(hTbl) == 0);
+    REQUIRE(AdsDisconnect(hConn) == 0);
+    fs::remove_all(dir, ec);
+}

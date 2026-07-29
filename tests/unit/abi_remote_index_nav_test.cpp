@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -1436,4 +1437,147 @@ TEST_CASE("remote natural-order walk longer than prefetch window under SET DELET
     REQUIRE(AdsDisconnect(hRC) == 0);
     fs::remove_all(dir, ec);
     server.stop();
+}
+
+// Pritpal Bedi 29/07/2026 — remote OrdCreate with a directory-qualified
+// bag name (cFolder + "/Indexes/" + name) must create the index in THAT
+// folder, not next to the .DBF. The client used to strip every bag name
+// to its basename before sending; now the path travels verbatim and the
+// server resolves it like the .DBF: bare filename -> table folder,
+// directory-qualified -> under the connection data root.
+TEST_CASE("remote AdsCreateIndex61 honors directory-qualified bag path") {
+    using openads::network::Server;
+    auto base = fs::temp_directory_path() / "openads_remote_idx_diffdir";
+    auto data = base / "data";
+    make_colonias_dbf(data);
+
+    Server srv;
+    REQUIRE(srv.start("127.0.0.1", 0).has_value());
+    const std::uint16_t port = srv.port();
+
+    ADSHANDLE hConn = remote_connect(base, port);
+    ADSHANDLE hTable = 0;
+    UNSIGNED8 tname[] = "data/CCOLONIA.DBF";
+    UNSIGNED8 alias[] = "CCOLONIA";
+    REQUIRE(AdsOpenTable(hConn, tname, alias, ADS_CDX,
+                         0, 0, 0, 0, &hTable) == 0);
+
+    // 1) Relative path with a directory component, anchored at the
+    //    connection data root. Note: "Indexes" is NOT pre-created — the
+    //    server must mkdir the intermediates.
+    {
+        ADSHANDLE hIndex = 0;
+        UNSIGNED8 bag[]  = "Indexes/CCOLONIA.CDX";
+        UNSIGNED8 tag[]  = "COLONIA";
+        UNSIGNED8 expr[] = "COLONIA";
+        REQUIRE(AdsCreateIndex61(hTable, bag, tag, expr,
+                                 nullptr, nullptr, ADS_COMPOUND, 512,
+                                 &hIndex) == 0);
+        REQUIRE(hIndex != 0);
+        REQUIRE(AdsGotoTop(hIndex) == 0);
+        REQUIRE(AdsCloseIndex(hIndex) == 0);
+
+        CHECK(fs::exists(base / "Indexes" / "CCOLONIA.CDX"));
+        CHECK_FALSE(fs::exists(data / "CCOLONIA.CDX"));
+    }
+
+    // 2) Absolute path inside the data root: honored verbatim.
+    {
+        auto abs_bag = (base / "AbsIdx" / "CC2.CDX").generic_string();
+        std::vector<UNSIGNED8> bag(abs_bag.begin(), abs_bag.end());
+        bag.push_back(0);
+        UNSIGNED8 tag[]  = "NOMBRE";
+        UNSIGNED8 expr[] = "NOMBRE";
+        ADSHANDLE hIndex = 0;
+        REQUIRE(AdsCreateIndex61(hTable, bag.data(), tag, expr,
+                                 nullptr, nullptr, ADS_COMPOUND, 512,
+                                 &hIndex) == 0);
+        REQUIRE(hIndex != 0);
+        REQUIRE(AdsCloseIndex(hIndex) == 0);
+
+        CHECK(fs::exists(base / "AbsIdx" / "CC2.CDX"));
+        CHECK_FALSE(fs::exists(data / "CC2.CDX"));
+    }
+
+    // 3) Bare filename: the historical fallback — next to the table.
+    {
+        ADSHANDLE hIndex = 0;
+        UNSIGNED8 bag[]  = "CC3.CDX";
+        UNSIGNED8 tag[]  = "CP";
+        UNSIGNED8 expr[] = "CP";
+        REQUIRE(AdsCreateIndex61(hTable, bag, tag, expr,
+                                 nullptr, nullptr, ADS_COMPOUND, 512,
+                                 &hIndex) == 0);
+        REQUIRE(hIndex != 0);
+        REQUIRE(AdsCloseIndex(hIndex) == 0);
+
+        CHECK(fs::exists(data / "CC3.CDX"));
+    }
+
+    REQUIRE(AdsCloseTable(hTable) == 0);
+    REQUIRE(AdsDisconnect(hConn) == 0);
+
+    std::error_code ec;
+    fs::remove_all(base, ec);
+    srv.stop();
+}
+
+// Pritpal Bedi 29/07/2026 — a remote compound create with a custom
+// extension (".Z01") must write a CDX-format bag (DBFCDX reads bags by
+// content and reported the old NTX-written ".Z01" corrupt), and the
+// remote reopen must take the CDX path via content sniff.
+TEST_CASE("remote AdsCreateIndex61 with custom extension writes CDX format") {
+    using openads::network::Server;
+    auto dir = fs::temp_directory_path() / "openads_remote_idx_z01";
+    make_colonias_dbf(dir);
+
+    Server srv;
+    REQUIRE(srv.start("127.0.0.1", 0).has_value());
+    const std::uint16_t port = srv.port();
+
+    ADSHANDLE hConn = remote_connect(dir, port);
+    ADSHANDLE hTable = 0;
+    UNSIGNED8 tname[] = "CCOLONIA.DBF";
+    UNSIGNED8 alias[] = "CCOLONIA";
+    REQUIRE(AdsOpenTable(hConn, tname, alias, ADS_CDX,
+                         0, 0, 0, 0, &hTable) == 0);
+
+    ADSHANDLE hIndex = 0;
+    UNSIGNED8 bag[]  = "CCOLONIA.Z01";
+    UNSIGNED8 tag[]  = "COLONIA";
+    UNSIGNED8 expr[] = "COLONIA";
+    REQUIRE(AdsCreateIndex61(hTable, bag, tag, expr,
+                             nullptr, nullptr, ADS_COMPOUND, 512,
+                             &hIndex) == 0);
+    REQUIRE(hIndex != 0);
+    REQUIRE(AdsCloseIndex(hIndex) == 0);
+
+    // On-disk format is CDX: "RCHB" signature at offset 20.
+    {
+        auto bag_path = dir / "CCOLONIA.Z01";
+        REQUIRE(fs::exists(bag_path));
+        std::ifstream f(bag_path, std::ios::binary);
+        char hdr[24] = {0};
+        f.read(hdr, sizeof(hdr));
+        REQUIRE(f.gcount() == static_cast<std::streamsize>(sizeof(hdr)));
+        CHECK(std::string(hdr + 20, hdr + 24) == "RCHB");
+    }
+
+    // Reopen over the wire and navigate: the server must sniff the bag
+    // as CDX even though the suffix is not ".cdx".
+    ADSHANDLE arr[8] = {0};
+    UNSIGNED16 cap = 8;
+    REQUIRE(AdsOpenIndex(hTable, bag, arr, &cap) == 0);
+    REQUIRE(cap >= 1u);
+    REQUIRE(AdsGotoTop(arr[0]) == 0);
+    UNSIGNED32 rec = 0;
+    REQUIRE(AdsGetRecordNum(hTable, 0, &rec) == 0);
+    CHECK(rec == 1u);   // "Centro" sorts first
+
+    REQUIRE(AdsCloseTable(hTable) == 0);
+    REQUIRE(AdsDisconnect(hConn) == 0);
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    srv.stop();
 }

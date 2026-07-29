@@ -116,6 +116,9 @@ private:
     std::optional<std::string> resolve_fs_client_path(
         const std::string& client_path) const;
 
+    // Resolve a remote CreateIndex bag path server-side (see session.cpp).
+    std::string resolve_index_bag_path(const std::string& bag) const;
+
     // ---- M12.22 read-ahead ramp -------------------------------------------
     // RCB 07/14/2026: why sequential-access detection lives on the SERVER and
     // not the client. First, it is where OS and DB read-ahead normally put it

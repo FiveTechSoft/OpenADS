@@ -11595,17 +11595,30 @@ bool path_ends_with_ci(const std::string& s, const char* suffix) {
     return true;
 }
 
+// Content sniff for bags whose extension carries no format hint (custom
+// suffixes like ".Z01"): a CDX bag has the Harbour "RCHB" signature at
+// offset 20 of the file header. Returns false on unreadable / short files
+// (caller then keeps the extension-default driver).
+bool file_has_cdx_signature(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return false;
+    char hdr[24] = {0};
+    f.read(hdr, sizeof(hdr));
+    if (f.gcount() < static_cast<std::streamsize>(sizeof(hdr))) return false;
+    return hdr[20] == 'R' && hdr[21] == 'C' && hdr[22] == 'H' &&
+           hdr[23] == 'B';
+}
+
 // Harbour/FiveWin may pass a client-native fully qualified path (for example
 // C:\\work\\table.cdx) or a relative path with subdirectories (for example
-// MyNewFolder\\table.cdx) even when the table is remote. Normalize separators
-// everywhere.  For remote callers, always strip to basename: the server
-// resolves the index path relative to the table's own directory, so sending
-// a path that already contains the table's subdirectory would cause
-// double-nesting (MyNewFolder/MyNewFolder/table.cdx).
-std::string normalize_index_path(std::string path, bool remote) {
+// Indexes\\table.cdx) even when the table is remote. Normalize separators
+// everywhere but KEEP any directory component: for remote callers the server
+// resolves the location itself (bare filename -> the table's own folder;
+// directory-qualified -> under the connection data root, the same rule the
+// .DBF gets), so stripping to basename here would silently discard the
+// folder the caller asked for (Pritpal Bedi, 29/07/2026).
+std::string normalize_index_path(std::string path) {
     std::replace(path.begin(), path.end(), '\\', '/');
-    if (remote)
-        path = std::filesystem::path(path).filename().string();
     return path;
 }
 
@@ -11826,7 +11839,16 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
     // tag, which open() reports via name().
     std::vector<std::string> tags;
     bool is_adi = path_ends_with_ci(path, ".adi");
-    if (path_ends_with_ci(path, ".cdx")) {
+    bool is_cdx = path_ends_with_ci(path, ".cdx");
+    if (!is_cdx && !is_adi &&
+        !path_ends_with_ci(path, ".ntx")) {
+        // Custom extension (".Z01"): the suffix says nothing about the
+        // on-disk format — a compound create writes a CDX bag under any
+        // name, and DBFCDX reads it back by content. Sniff the header so
+        // reopening takes the CDX path instead of misreading it as NTX.
+        is_cdx = file_has_cdx_signature(path);
+    }
+    if (is_cdx) {
         auto r = openads::drivers::cdx::CdxIndex::list_tags(path);
         if (!r) return fail(r.error());
         tags = std::move(r).value();
@@ -12190,7 +12212,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
 #endif
     if (auto* rt = get_remote_table(hTable)) {
         std::string path = openads::abi::to_internal(pucFileName, 0);
-        path = normalize_index_path(std::move(path), true);
+        path = normalize_index_path(std::move(path));
         std::string tag  = openads::abi::to_internal(pucIndexName, 0);
         std::string expr = openads::abi::to_internal(pucExpr, 0);
         std::string cond = pucCondition
@@ -12232,7 +12254,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
     std::lock_guard<std::recursive_mutex> _create_lk(state().mu);
     (void)pucKeyFilter; (void)usPageSize;
     auto bag  = normalize_index_path(
-        openads::abi::to_internal(pucFileName, 0), false);
+        openads::abi::to_internal(pucFileName, 0));
     auto tag  = openads::abi::to_internal(pucIndexName, 0);
     auto expr = openads::abi::to_internal(pucExpr, 0);
     std::string for_expr = pucCondition != nullptr
@@ -12255,9 +12277,6 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
         }
         if (!p.has_extension()) p.replace_extension(default_ext);
     }
-    bool is_cdx = path_ends_with_ci(p.string(), ".cdx");
-    bool is_adi = path_ends_with_ci(p.string(), ".adi");
-
     // ACE AdsCreateIndex* option bits. include/openads/ace.h carries the
     // SDK-standard values (ADS_UNIQUE 0x01, ADS_COMPOUND 0x02, ADS_CUSTOM
     // 0x04, ADS_DESCENDING 0x08) — but the two RDD clients we interop with
@@ -12280,6 +12299,22 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
     const bool opt_descending_bit = (ulOptions & ADS_DESCENDING) != 0; // 0x08
     bool unique  = (ulOptions & ADS_UNIQUE) != 0;
     bool descend = opt_compound_bit && opt_descending_bit;
+
+    bool is_cdx = path_ends_with_ci(p.string(), ".cdx");
+    bool is_adi = path_ends_with_ci(p.string(), ".adi");
+    if (!is_cdx && !is_adi &&
+        !path_ends_with_ci(p.string(), ".ntx") &&
+        (opt_compound_bit || opt_descending_bit)) {
+        // Custom extension (Pritpal's ".Z01", 29/07/2026): the on-disk
+        // FORMAT follows the index kind, not the suffix. Both RDD clients
+        // set their compound marker on every tag, so a compound create
+        // writes a CDX-format bag regardless of the extension — exactly
+        // what real ADS does and the only form Harbour's DBFCDX can read
+        // back (it parses every bag as CDX and reported our NTX-written
+        // ".Z01" as corrupted). An explicit ".ntx" suffix, or a create
+        // with no compound marker at all, still produces an NTX.
+        is_cdx = true;
+    }
 
     // Validate the key expression: a bare identifier that is not a column
     // is a bug in the caller's PRG (typo / renamed field). Native
@@ -12848,7 +12883,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex(ADSHANDLE hTable, UNSIGNED8* pucFile,
         return fail(openads::AE_INTERNAL_ERROR, "unknown table or null out");
     }
     auto file = normalize_index_path(
-        openads::abi::to_internal(pucFile, 0), false);
+        openads::abi::to_internal(pucFile, 0));
     auto tag  = openads::abi::to_internal(pucTag,  0);
     auto expr = openads::abi::to_internal(pucExpr, 0);
     // A FOR condition makes this a conditional index: only matching rows get
