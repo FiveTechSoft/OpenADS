@@ -13,6 +13,7 @@
 #include "drivers/ntx/ntx_driver.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <utility>
@@ -159,7 +160,17 @@ std::int32_t Table::field_index(const std::string& name) const noexcept {
         // (a proc __output column `databasepath` lands as DATABASEPA in
         // the temp free table), so a longer lookup name can only mean
         // the truncated field — retry with the storage-truncated form.
-        if (found < 0 && name.size() > 10)
+        // ONLY for a plain identifier: an index expression like
+        // `CCODIGOCON+CDOCUMETRA` starts with a 10-char field name, and
+        // truncating it would report the whole compound key as that bare
+        // field — pinning the key length to the first component's width,
+        // which collapses every later component out of the key.
+        const bool plain_ident =
+            !name.empty() &&
+            std::all_of(name.begin(), name.end(), [](char c) {
+                return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+            });
+        if (found < 0 && plain_ident && name.size() > 10)
             found = scan_for(name.substr(0, 10));
         return found;
     };
