@@ -91,7 +91,11 @@ add_executable(openads_unit_tests
     unit/index_expr_sql_test.cpp
     unit/abi_m92_real_test.cpp
     unit/abi_create_table_test.cpp
+<<<<<<< HEAD
     unit/abi_adt_dat_extension_test.cpp
+=======
+    unit/abi_create_outside_datadir_test.cpp
+>>>>>>> 949423f (fix(session): create honours an absolute path whose parent exists)
     unit/abi_remote_create_table_test.cpp
     unit/abi_refresh_extract_test.cpp
     unit/abi_create_index61_test.cpp

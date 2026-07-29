@@ -48,6 +48,21 @@ the navigational side.
 
 Test: `tests/unit/abi_adt_dat_extension_test.cpp`.
 
+### Fixed - create honours an absolute path outside data_dir when its parent exists
+
+#142 honoured an absolute create path when it sits under `data_dir_`. The other
+half is an application staging work tables elsewhere and reading them back by the
+same absolute name: those still folded, into a path whose intermediate
+directories nobody creates, so the create failed and the caller could never find
+its table. An absolute path whose parent directory already exists is now written
+where the caller asked, which is what the real ACE engine does for a free table.
+
+Unchanged: a path whose parent does not exist still folds (a client name that
+means nothing on the server), and so does a bare drive-root name — `C:\STRAY.DBF`
+— since the root always exists but is never a deliberate destination.
+
+Test: `tests/unit/abi_create_outside_datadir_test.cpp`.
+
 ## 1.8.37 - 2026-07-29
 
 ERP production fix batch (RusSoft Harbour/FiveWin deployment) plus CI-blocking
