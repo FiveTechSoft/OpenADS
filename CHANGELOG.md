@@ -1,3 +1,66 @@
+## 1.8.37 - 2026-07-29
+
+ERP production fix batch (RusSoft Harbour/FiveWin deployment) plus CI-blocking
+write-path and SQL cursor correctness. Everything since `v1.8.36`.
+
+### Fixed - Critical (data loss / crash / unusable open)
+
+- **#138 — Local navigational / SQL writes fail 5035 "record not locked"**  
+  SQL MERGE/UPDATE/DELETE/INSERT open tables Shared without a lock; after the
+  GoHot write-guard, every SET/DELETE returned 5035 — including AFTER-trigger
+  bodies (`UPDATE log SET…`), plain SQL DML, and `NewSeqKey`. SQL DML now takes
+  a table-exclusive lock for the statement (same pattern as RI cascade).
+  Navigational multiuser still requires explicit RLock/FLock.
+
+- **#139 — Blank ADT date/timestamp kills the process**  
+  Eight spaces passed `size() >= 8` and hit `std::stoi`, which threw across the
+  C ABI. Defensive parse stores the ADT empty-date marker (0).
+
+- **#141 — Free-tables connection reported as data-dictionary**  
+  `AdsGetHandleType` always returned `ADS_DATABASE_CONNECTION`, so Harbour
+  rddads opened ADT free tables with `ADS_DEFAULT` → DBF parse → garbage schema.
+  Now reports `ADS_DATABASE_CONNECTION` only when `Connection::has_dd()`.
+
+- **#144 — ADI bag loses every tag but the first past page 255**  
+  Tag-directory page numbers were stored in one byte; multi-tag bags after a
+  large reindex showed one order. Page written/read as u32 LE (legacy bags
+  with high bytes zero stay readable; already-truncated bags need reindex).
+
+- **#136 — `SELECT … ORDER BY` returned a live cursor on the source table**  
+  `INDEX ON` over the result rewrote the production `.cdx`. Single-table
+  ORDER BY / DISTINCT / LIMIT now materialises a static memory cursor
+  (recnos `1..N`, own index space); source closed; column ACL applied first.
+
+### Fixed - Indexes / ADT / SQL path
+
+- **#140** — ADT `N(n,0)` wider than int32 no longer maps to INTEGER and reads
+  back as **0**; `n <= 9` stays INTEGER, wider uses DOUBLE.
+- **#134** — Compound index expressions (`CCODIGOCON+CDOCUMETRA`) are no longer
+  truncated to a 10-char field name (wrong key length).
+- **#137** — Character keys that merely *contain* `VAL(` (e.g.
+  `cDoc+STR(VAL(cNum),3,0)`) are not treated as numeric Fox keys.
+- **#135** — Index walk after PACK skips stale entries (`recno > record_count`)
+  instead of raising ADSCDX/5000.
+- **#143** — SQL opens tables by on-disk header magic (ADT `"Advantage Table"`
+  vs DBF version byte), so `.DAT` ADT tables work without
+  `AdsStmtSetTableType` (Harbour never forwards ADS_ADT).
+- **#142** — `AdsCreateTable` with an absolute path under `data_dir_` writes
+  there (option 2); drive-root / outside-data-dir names still fold.
+
+### Notes
+
+- Known CI residual (not introduced by this batch): remote
+  `abi_pritpal_lock_test` connect failures; Linux
+  `abi_create_index_path_test` path expectations after v1.8.35 normalize.
+- #145 (FWH xbrowse ~10× slower on ADS) is upstream FiveWin; engine-side
+  O(1) NTX/ADI keypos cache shipped in **v1.8.36**.
+
+### Tests
+
+New / updated unit tests: ADI tagdir wide page, ADT wide numeric, ADT `.DAT`
+SQL, compound CDX, STR(VAL) character key, stale index walk, create absolute
+under data_dir, ORDER BY materialised recnos/data.
+
 ## 1.8.34 - 2026-07-28
 
 ### Fixed - SQL against an ADT table whose file is named .DAT
