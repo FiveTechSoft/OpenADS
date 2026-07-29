@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 project(OpenADS
-    VERSION 1.8.38
+    VERSION 1.8.39
     LANGUAGES C CXX
     DESCRIPTION "Open-source ADS-compatible engine"
 )
