@@ -1,3 +1,21 @@
+## Unreleased
+
+### Fixed - ORDER BY cursor lost the source column types (#146)
+
+The memory-table cursor introduced with #136 rebuilt the result schema through
+`build_memory_result`, which types every numeric column as a 4-byte integer and
+caps the record at 64 KB. A `SELECT * ... ORDER BY` therefore dropped the
+decimals of any `N(n,d)` column, wrapped values past 2^31, and failed outright
+on a wide table. Reported from an ERP whose article table has 187 fields and
+prices with two decimals.
+
+The cursor is materialised from the SOURCE field descriptors again (a temp table
+created from the source structure), so types round-trip. The temp is tied to the
+cursor handle and its files are removed by `AdsCloseTable`, keeping the #136
+property that a data directory does not accumulate one temp per query.
+
+Test: `tests/unit/abi_sql_orderby_types_test.cpp`.
+
 ## 1.8.37 - 2026-07-29
 
 ERP production fix batch (RusSoft Harbour/FiveWin deployment) plus CI-blocking

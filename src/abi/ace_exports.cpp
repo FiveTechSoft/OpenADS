@@ -5255,6 +5255,30 @@ connect101_option_tables() {
     return tables;
 }
 
+// Cursor handle -> on-disk stem (no extension) of the temp table a
+// materialised SELECT built for it. AdsCloseTable deletes the stem's files,
+// so a data directory doesn't accumulate one temp per query.
+std::unordered_map<ADSHANDLE, std::string>&
+materialised_cursor_temps() {
+    static std::unordered_map<ADSHANDLE, std::string> temps;
+    return temps;
+}
+
+// Delete the files of a materialised cursor's temp table: the .dbf plus any
+// memo / index companion an application created on it (the ERP runs
+// INDEX ON over the result, producing <stem>.cdx).
+void drop_materialised_cursor_temp(ADSHANDLE h) {
+    auto& m = materialised_cursor_temps();
+    auto it = m.find(h);
+    if (it == m.end()) return;
+    const std::string stem = it->second;
+    m.erase(it);
+    std::error_code ec;
+    for (const char* ext : {".dbf", ".cdx", ".fpt", ".dbt", ".ntx"}) {
+        std::filesystem::remove(std::filesystem::path(stem + ext), ec);
+    }
+}
+
 openads::util::Result<Table> build_connect101_options_table(
     const std::unordered_map<std::string, std::string>& options) {
     struct Col {
@@ -8595,6 +8619,9 @@ UNSIGNED32 ENTRYPOINT AdsCloseTable(ADSHANDLE hTable) {
     }
     cursor_projections().erase(hTable);
     s.registry.release(hTable);
+    // The table is closed and its handle released, so the temp table a
+    // materialised SELECT built for this cursor can go with it.
+    drop_materialised_cursor_temp(hTable);
     return ok();
 }
 
@@ -30997,128 +31024,135 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         return s;
     };
 
-    // Issue #136: single-table ORDER BY / DISTINCT / LIMIT used a live
-    // cursor over the source with a recno_sequence. An application that
-    // ran INDEX ON the result rewrote the production .cdx. Real ACE
-    // returns a static temp cursor; so do the join / CASE paths here.
-    // Materialise now (column ACL applied first so the temp only holds
-    // permitted columns), close the live source, and return a memory
-    // table with recnos 1..N in result order and its own index space.
-    // Memory tables leave no files in the customer's data directory.
-    const bool need_static =
-        derived_cur == 0 &&
-        tbl->has_recno_sequence() &&
-        (parsed.value().order_by || parsed.value().distinct ||
-         parsed.value().limit >= 0 || parsed.value().offset > 0);
-    if (need_static) {
-        std::vector<std::uint16_t> cols;
-        if (!parsed.value().projection.empty()) {
-            cols.reserve(parsed.value().projection.size());
-            for (const auto& col : parsed.value().projection) {
-                std::int32_t fidx = tbl->field_index(col);
-                if (fidx < 0) {
-                    if (table_handle != 0) c->close_table(table_handle);
-                    return fail(openads::AE_COLUMN_NOT_FOUND, col.c_str());
-                }
-                if (allowed_cols &&
-                    allowed_cols->find(col_lower(col)) ==
-                        allowed_cols->end()) {
-                    if (table_handle != 0) c->close_table(table_handle);
-                    return fail(openads::AE_ACCESS_DENIED,
-                                ("no column permission: " + col).c_str());
-                }
-                cols.push_back(static_cast<std::uint16_t>(fidx));
-            }
-        } else {
-            const std::uint16_t nf =
-                static_cast<std::uint16_t>(tbl->field_count());
-            for (std::uint16_t i = 0; i < nf; ++i) {
-                if (allowed_cols) {
-                    const std::string& fname =
-                        tbl->field_descriptor(i).name;
-                    if (allowed_cols->find(col_lower(fname)) ==
-                        allowed_cols->end())
+    // ADS static-cursor semantics — single-table SELECT with ORDER BY /
+    // DISTINCT / LIMIT must be a STANDALONE temp table, not the live source
+    // with a recno_sequence. Real ACE returns a static cursor (its own temp
+    // table) for these; the ERP then runs `INDEX ON ... ; DBSETORDER(n)` on
+    // the result. If the cursor were the live `<source>.dbf`, those index ops
+    // would hit the production table and REWRITE its official .cdx (the user
+    // saw "cualquier SELECT-SQL reescribio los indices originales"), and a
+    // recno_sequence over the live table makes DBSETORDER a no-op for the
+    // browse. Materialising the result into a clean temp DBF (its own recnos
+    // 1..N, its own index space) isolates it from the source: INDEX ON /
+    // DBSETORDER behave exactly like DBFCDX / ADS_CDX. Same shape the
+    // multi-table / union / aggregate / CASE paths already produce.
+    if (derived_cur == 0 && tbl->has_recno_sequence()) {
+        ADSHANDLE conn_h = 0;
+        s.registry.for_each_handle([&](Handle h, HandleKind k, void* p) {
+            if (k != HandleKind::Connection) return;
+            if (static_cast<Connection*>(p) == c) conn_h = h;
+        });
+        if (conn_h != 0) {
+            std::vector<std::uint16_t> cols;
+            bool col_err = false;
+            bool col_denied = false;
+            if (parsed.value().projection.empty()) {
+                std::uint16_t nf = tbl->field_count();
+                cols.reserve(nf);
+                for (std::uint16_t k = 0; k < nf; ++k) {
+                    // A column-restricted user must not get the hidden columns
+                    // copied into the temp table either (the projection applied
+                    // to a live cursor below can't reach a materialised one).
+                    if (allowed_cols &&
+                        allowed_cols->find(col_lower(
+                            tbl->field_descriptor(k).name)) ==
+                            allowed_cols->end()) {
                         continue;
+                    }
+                    cols.push_back(k);
                 }
-                cols.push_back(i);
-            }
-        }
-        if (cols.empty()) {
-            if (table_handle != 0) c->close_table(table_handle);
-            return fail(openads::AE_ACCESS_DENIED,
-                        "no columns permitted for SELECT");
-        }
-
-        // SpCol::colname is const char* — keep owning strings alive until
-        // build_memory_result has copied the names into DbfField.
-        std::vector<std::string> name_storage;
-        name_storage.reserve(cols.size());
-        std::vector<SpCol> spcols;
-        spcols.reserve(cols.size());
-        for (auto fi : cols) {
-            const auto& fd = tbl->field_descriptor(fi);
-            name_storage.push_back(fd.name);
-            SpCol sc;
-            sc.colname = name_storage.back().c_str();
-            using FT = openads::drivers::DbfFieldType;
-            if (fd.type == FT::Numeric || fd.type == FT::Float ||
-                fd.type == FT::Integer || fd.type == FT::Double ||
-                fd.type == FT::Currency || fd.type == FT::ShortInt ||
-                fd.type == FT::AutoInc) {
-                sc.type = 'N';
-                sc.length = 20;
-                sc.decimals = static_cast<std::uint8_t>(fd.decimals);
-            } else if (fd.type == FT::Logical) {
-                sc.type = 'L';
-                sc.length = 1;
-                sc.decimals = 0;
             } else {
-                sc.type = 'C';
-                sc.length = static_cast<std::uint8_t>(
-                    fd.length > 0 && fd.length <= 254 ? fd.length : 50);
-                sc.decimals = 0;
+                cols.reserve(parsed.value().projection.size());
+                for (const auto& cn : parsed.value().projection) {
+                    std::int32_t fi = tbl->field_index(cn);
+                    if (fi < 0) { col_err = true; break; }
+                    if (allowed_cols &&
+                        allowed_cols->find(col_lower(cn)) ==
+                            allowed_cols->end()) {
+                        col_denied = true; break;
+                    }
+                    cols.push_back(static_cast<std::uint16_t>(fi));
+                }
             }
-            spcols.push_back(sc);
-        }
-
-        std::vector<std::vector<std::string>> mrows;
-        const auto& seq = tbl->recno_sequence();
-        mrows.reserve(seq.size());
-        for (std::uint32_t r : seq) {
-            if (auto g = tbl->goto_record(r); !g) continue;
-            std::vector<std::string> row;
-            row.reserve(cols.size());
-            for (auto fi : cols) {
-                auto v = tbl->read_field(fi);
-                std::string cell = v ? v.value().as_string : std::string();
-                while (!cell.empty() && cell.back() == ' ') cell.pop_back();
-                row.push_back(std::move(cell));
+            if (col_err) return fail(openads::AE_COLUMN_NOT_FOUND, "");
+            if (col_denied) return fail(openads::AE_ACCESS_DENIED,
+                                        "no column permission");
+            auto type_name = [](char raw) -> const char* {
+                switch (raw) {
+                    case 'C': return "Character";  case 'N': return "Numeric";
+                    case 'D': return "Date";       case 'L': return "Logical";
+                    case 'M': return "Memo";       case 'F': return "Float";
+                    case 'I': return "Integer";    case 'Y': return "Currency";
+                    case 'B': return "Double";     case 'V': return "Varchar";
+                    case 'Q': return "Varbinary";
+                }
+                return "Character";
+            };
+            std::string defs;
+            for (auto cidx : cols) {
+                const auto& fd = tbl->field_descriptor(cidx);
+                if (!defs.empty()) defs.push_back(';');
+                defs += fd.name;
+                defs.push_back(',');
+                defs += type_name(static_cast<char>(fd.raw_type));
+                if (fd.length   > 0) { defs.push_back(','); defs += std::to_string(fd.length); }
+                if (fd.decimals > 0) { defs.push_back(','); defs += std::to_string(fd.decimals); }
             }
-            mrows.push_back(std::move(row));
+            char nb[64];
+            std::snprintf(nb, sizeof(nb), "_srt_%llx",
+                          static_cast<unsigned long long>(
+                              openads::platform::monotonic_nanos()));
+            std::string tmp_name = nb;
+            std::vector<UNSIGNED8> name_buf(tmp_name.size() + 1, 0);
+            std::memcpy(name_buf.data(), tmp_name.data(), tmp_name.size());
+            std::vector<UNSIGNED8> def_buf(defs.size() + 1, 0);
+            std::memcpy(def_buf.data(), defs.data(), defs.size());
+            ADSHANDLE hNew = 0;
+            UNSIGNED32 crc = AdsCreateTable(conn_h, name_buf.data(), nullptr,
+                                            ADS_CDX, 0, 0, 0, 0,
+                                            def_buf.data(), &hNew);
+            if (crc == openads::AE_SUCCESS) {
+                openads::engine::Table* tgt =
+                    s.registry.lookup<openads::engine::Table>(
+                        hNew, HandleKind::Table);
+                if (tgt != nullptr) {
+                    std::vector<std::uint32_t> seq = tbl->recno_sequence();
+                    for (std::uint32_t r : seq) {
+                        if (auto g = tbl->goto_record(r); !g) continue;
+                        if (auto ar = tgt->append_record(); !ar) break;
+                        for (std::size_t i = 0; i < cols.size(); ++i) {
+                            auto v = tbl->read_field(cols[i]);
+                            std::string sv =
+                                v ? v.value().as_string : std::string();
+                            (void)tgt->set_field(
+                                static_cast<std::uint16_t>(i), sv);
+                        }
+                    }
+                    (void)tgt->flush();
+                }
+                AdsCloseTable(hNew);
+                // Drop the live source cursor so the ERP's INDEX ON / close
+                // never touches the production table or its official .cdx.
+                if (table_handle != 0) c->close_table(table_handle);
+                auto cth = c->open_table(tmp_name,
+                                         openads::engine::TableType::Cdx,
+                                         openads::engine::OpenMode::Shared);
+                if (!cth) return fail(cth.error());
+                openads::engine::Table* ctbl = c->lookup_table(cth.value());
+                if (!ctbl) return fail(openads::AE_INTERNAL_ERROR,
+                                       "sorted temp post-open");
+                ADSHANDLE gh_srt =
+                    s.registry.register_object(HandleKind::Table, ctbl);
+                // Tie the temp table's lifetime to the cursor handle: without
+                // this, every SELECT ... ORDER BY leaves a _srt_*.dbf (and any
+                // index the caller built on it) behind in the data directory.
+                materialised_cursor_temps()[gh_srt] =
+                    (std::filesystem::path(c->data_dir()) / tmp_name).string();
+                *phCursor = gh_srt;
+                return ok();
+            }
+            // AdsCreateTable failed -> fall through to the live-cursor return.
         }
-
-        auto mt = build_memory_result("sql_orderby", spcols, mrows);
-        if (!mt) {
-            if (table_handle != 0) c->close_table(table_handle);
-            return fail(mt.error());
-        }
-        auto ath = c->adopt_table(std::move(mt).value(),
-                                  "_sql_orderby_cursor");
-        if (!ath) {
-            if (table_handle != 0) c->close_table(table_handle);
-            return fail(ath.error());
-        }
-        openads::engine::Table* ctbl = c->lookup_table(ath.value());
-        if (!ctbl) {
-            if (table_handle != 0) c->close_table(table_handle);
-            return fail(openads::AE_INTERNAL_ERROR,
-                        "ORDER BY materialize post-adopt");
-        }
-        if (table_handle != 0) c->close_table(table_handle);
-        ADSHANDLE gh_static =
-            s.registry.register_object(HandleKind::Table, ctbl);
-        *phCursor = gh_static;
-        return ok();
     }
 
     // M10.46 — when this query was a derived-table outer SELECT,
