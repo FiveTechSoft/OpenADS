@@ -31768,7 +31768,39 @@ UNSIGNED32 ENTRYPOINT AdsGetRelKeyPos(ADSHANDLE h, double* p) {
                  static_cast<double>(walk.size() - 1);
             return ok();
         }
-        // Non-CDX (NTX/ADI): legacy per-call O(n) walk.
+        // Non-CDX: O(1) via the cached ordered-recno walk (built once,
+        // reused across paints). Mirrors the CDX fast path above.
+        if (auto* ntx =
+                dynamic_cast<openads::drivers::ntx::NtxIndex*>(idx)) {
+            const auto& walk = ntx->ordered_recnos_cached();
+            if (walk.size() <= 1) { *p = 0.0; return ok(); }
+            std::uint32_t pos = ntx->pos_of_recno_cached(rn);
+            if (pos == 0xFFFFFFFFu) {
+                if (rn > rc) rn = rc;
+                *p = static_cast<double>(rn - 1) /
+                     static_cast<double>(rc - 1);
+                return ok();
+            }
+            *p = static_cast<double>(pos) /
+                 static_cast<double>(walk.size() - 1);
+            return ok();
+        }
+        if (auto* adi =
+                dynamic_cast<openads::drivers::adi::AdiIndex*>(idx)) {
+            const auto& walk = adi->ordered_recnos_cached();
+            if (walk.size() <= 1) { *p = 0.0; return ok(); }
+            std::uint32_t pos = adi->pos_of_recno_cached(rn);
+            if (pos == 0xFFFFFFFFu) {
+                if (rn > rc) rn = rc;
+                *p = static_cast<double>(rn - 1) /
+                     static_cast<double>(rc - 1);
+                return ok();
+            }
+            *p = static_cast<double>(pos) /
+                 static_cast<double>(walk.size() - 1);
+            return ok();
+        }
+        // Unknown index type: legacy per-call O(n) walk.
         idx->invalidate_cursor();
         auto first = idx->seek_first();
         if (!first) return fail(first.error());
@@ -33188,9 +33220,6 @@ UNSIGNED32 ENTRYPOINT AdsGetKeyCount(ADSHANDLE hIndex, UNSIGNED16 /*usFilter*/,
     if (ord != nullptr && ord->index() != nullptr) {
         if (auto* cdx =
                 dynamic_cast<openads::drivers::cdx::CdxIndex*>(ord->index())) {
-            // When scope is active, count only keys within [top, bottom]
-            // instead of the entire conditional index. With SET DELETED ON
-            // exclude deleted rows so xBrowse OrdKeyCount matches Skip.
             auto& sc = ord->scope();
             const bool hide_del = !t->show_deleted_records();
             const std::uint32_t saved_rn = t->recno();
@@ -33219,6 +33248,20 @@ UNSIGNED32 ENTRYPOINT AdsGetKeyCount(ADSHANDLE hIndex, UNSIGNED16 /*usFilter*/,
                     cdx->ordered_recnos_cached().size());
             }
             if (hide_del && saved_rn != 0) (void)t->goto_record(saved_rn);
+            return ok();
+        }
+        // NTX: use cached B-tree walk for correct conditional count
+        if (auto* ntx =
+                dynamic_cast<openads::drivers::ntx::NtxIndex*>(ord->index())) {
+            *pulCount = static_cast<UNSIGNED32>(
+                ntx->ordered_recnos_cached().size());
+            return ok();
+        }
+        // ADI: use cached B-tree walk for correct conditional count
+        if (auto* adi =
+                dynamic_cast<openads::drivers::adi::AdiIndex*>(ord->index())) {
+            *pulCount = static_cast<UNSIGNED32>(
+                adi->ordered_recnos_cached().size());
             return ok();
         }
     }

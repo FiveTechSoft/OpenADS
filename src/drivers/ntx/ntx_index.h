@@ -47,10 +47,21 @@ public:
     std::string current_key() const override { return current_key_; }
 
     util::Result<void> insert(std::uint32_t recno,
-                              const std::string& key) override;
+                               const std::string& key) override;
     util::Result<void> erase (std::uint32_t recno,
-                              const std::string& key) override;
+                               const std::string& key) override;
     util::Result<void> flush() override;
+
+    // Logical-position cache for O(1) scrollbar / OrdKeyNo / OrdKeyCount.
+    // Mirrors CdxIndex's pos_walk_/pos_map_ but reuses the existing cache_
+    // (NTX already walks the full tree into a flat vector).
+    const std::vector<std::uint32_t>& ordered_recnos_cached();
+    std::uint32_t pos_of_recno_cached(std::uint32_t recno);
+    void invalidate_pos_cache() {
+        pos_cache_valid_ = false;
+        pos_recnos_.clear();
+        pos_map_.clear();
+    }
 
     // Pin the key geometry to a numeric field's descriptor (width = field
     // length, dec = field decimals) so the on-disk key matches the native
@@ -156,6 +167,10 @@ private:
     std::vector<CachedKey>                         cache_;
     bool                                           cache_dirty_ = true;
     std::int64_t                                   cache_idx_   = -1;
+
+    std::vector<std::uint32_t>                       pos_recnos_;
+    std::unordered_map<std::uint32_t, std::uint32_t> pos_map_;
+    bool                                             pos_cache_valid_ = false;
 };
 
 } // namespace openads::drivers::ntx

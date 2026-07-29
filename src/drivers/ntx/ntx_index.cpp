@@ -413,6 +413,7 @@ NtxIndex::insert(std::uint32_t recno, const std::string& key) {
         return util::Error{5000, 0, "NTX opened read-only", ""};
     }
     cache_dirty_ = true;
+    invalidate_pos_cache();
     std::string padded = key;
     if (padded.size() < key_size_) padded.append(key_size_ - padded.size(), ' ');
     else if (padded.size() > key_size_) padded.resize(key_size_);
@@ -751,6 +752,7 @@ NtxIndex::erase(std::uint32_t recno, const std::string& key) {
         return util::Error{5000, 0, "NTX opened read-only", ""};
     }
     cache_dirty_ = true;
+    invalidate_pos_cache();
     std::string padded = key;
     if (padded.size() < key_size_) padded.append(key_size_ - padded.size(), ' ');
     else if (padded.size() > key_size_) padded.resize(key_size_);
@@ -919,6 +921,32 @@ NtxIndex::set_numeric_format(std::uint16_t width, std::uint16_t dec) {
     auto wrote = file_.write_at(0, hdr.data(), hdr.size());
     if (!wrote) return wrote.error();
     return file_.sync();
+}
+
+const std::vector<std::uint32_t>& NtxIndex::ordered_recnos_cached() {
+    if (pos_cache_valid_) return pos_recnos_;
+    if (cache_dirty_) {
+        if (auto r = ensure_cache_(); !r) {
+            static const std::vector<std::uint32_t> empty;
+            return empty;
+        }
+    }
+    pos_recnos_.reserve(cache_.size());
+    pos_recnos_.clear();
+    pos_map_.clear();
+    std::uint32_t pos = 0;
+    for (const auto& ck : cache_) {
+        pos_recnos_.push_back(ck.recno);
+        pos_map_[ck.recno] = pos++;
+    }
+    pos_cache_valid_ = true;
+    return pos_recnos_;
+}
+
+std::uint32_t NtxIndex::pos_of_recno_cached(std::uint32_t recno) {
+    (void)ordered_recnos_cached();
+    auto it = pos_map_.find(recno);
+    return it != pos_map_.end() ? it->second : 0xFFFFFFFFu;
 }
 
 } // namespace openads::drivers::ntx

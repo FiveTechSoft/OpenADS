@@ -6,6 +6,7 @@
 #include <array>
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace openads::drivers::adi {
@@ -110,10 +111,21 @@ public:
     std::string current_key() const override { return current_key_; }
 
     util::Result<void> insert(std::uint32_t recno,
-                              const std::string& key) override;
+                               const std::string& key) override;
     util::Result<void> erase (std::uint32_t recno,
-                              const std::string& key) override;
+                               const std::string& key) override;
     util::Result<void> flush() override;
+
+    // Logical-position cache for O(1) scrollbar / OrdKeyNo / OrdKeyCount.
+    // Walks the B-tree ONCE (lazily) into an ordered recno list + a
+    // recno->position map, reused until the index is modified.
+    const std::vector<std::uint32_t>& ordered_recnos_cached();
+    std::uint32_t pos_of_recno_cached(std::uint32_t recno);
+    void invalidate_pos_cache() {
+        pos_cache_valid_ = false;
+        pos_recnos_.clear();
+        pos_map_.clear();
+    }
 
     // Parameters for writing a fresh single-tag .adi skeleton.
     struct CreateParams {
@@ -291,6 +303,10 @@ private:
     std::uint32_t   cur_recno_ = 0;
     std::string     current_key_;
     Page            cur_page_{};
+
+    std::vector<std::uint32_t>                       pos_recnos_;
+    std::unordered_map<std::uint32_t, std::uint32_t> pos_map_;
+    bool                                             pos_cache_valid_ = false;
 };
 
 } // namespace openads::drivers::adi

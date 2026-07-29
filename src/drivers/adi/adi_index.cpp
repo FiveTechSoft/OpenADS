@@ -1151,6 +1151,7 @@ util::Result<void> AdiIndex::insert(std::uint32_t recno,
                                     const std::string& key) {
     if (mode_ == IndexOpenMode::ReadOnly)
         return util::Error{5000, 0, "ADI index is read-only", ""};
+    invalidate_pos_cache();
 
     // Normalise key.  Numeric tags always index from live ADT bytes —
     // evaluate_index_expr may supply ASCII padding that does not match
@@ -1388,6 +1389,7 @@ util::Result<void> AdiIndex::insert(std::uint32_t recno,
 util::Result<void> AdiIndex::erase(std::uint32_t recno, const std::string& key) {
     if (mode_ == IndexOpenMode::ReadOnly)
         return util::Error{5000, 0, "ADI index is read-only", ""};
+    invalidate_pos_cache();
 
     // Normalise key.
     std::string ikey = key;
@@ -2134,6 +2136,60 @@ AdiIndex::add_tag(const std::string& adi_path,
         return r.error();
 
     return idx;
+}
+
+const std::vector<std::uint32_t>& AdiIndex::ordered_recnos_cached() {
+    if (pos_cache_valid_) return pos_recnos_;
+
+    // Save cursor state.
+    const auto saved_pg   = cur_pg_;
+    const auto saved_idx  = cur_idx_;
+    const auto saved_cnt  = cur_cnt_;
+    const auto saved_lsib = cur_lsib_;
+    const auto saved_rsib = cur_rsib_;
+    const auto saved_rn   = cur_recno_;
+    const auto saved_key  = current_key_;
+    const auto saved_page = cur_page_;
+
+    pos_recnos_.clear();
+    pos_map_.clear();
+
+    // Walk from first to last, collecting recnos in key order.
+    auto first = navigate_leftmost_();
+    if (first && first.value().positioned) {
+        std::uint32_t pos = 0;
+        // Collect the first entry's recno.
+        pos_recnos_.push_back(cur_recno_);
+        pos_map_[cur_recno_] = pos++;
+        // Walk forward through the dense-leaf chain.
+        while (cur_rsib_ != ADI_INVALID_PAGE) {
+            if (auto r = load_dense_leaf_(cur_rsib_); !r) break;
+            cur_idx_ = 0;
+            if (cur_cnt_ == 0) break;
+            if (auto r2 = refresh_current_(); !r2) break;
+            pos_recnos_.push_back(cur_recno_);
+            pos_map_[cur_recno_] = pos++;
+        }
+    }
+
+    // Restore cursor state.
+    cur_pg_    = saved_pg;
+    cur_idx_   = saved_idx;
+    cur_cnt_   = saved_cnt;
+    cur_lsib_  = saved_lsib;
+    cur_rsib_  = saved_rsib;
+    cur_recno_ = saved_rn;
+    current_key_ = saved_key;
+    cur_page_  = saved_page;
+
+    pos_cache_valid_ = true;
+    return pos_recnos_;
+}
+
+std::uint32_t AdiIndex::pos_of_recno_cached(std::uint32_t recno) {
+    (void)ordered_recnos_cached();
+    auto it = pos_map_.find(recno);
+    return it != pos_map_.end() ? it->second : 0xFFFFFFFFu;
 }
 
 } // namespace openads::drivers::adi
