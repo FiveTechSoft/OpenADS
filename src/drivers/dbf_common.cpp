@@ -644,6 +644,27 @@ std::vector<std::uint8_t> make_empty_record(std::uint16_t record_length) {
     return std::vector<std::uint8_t>(record_length, ' ');
 }
 
+// True when every character is a decimal digit (an empty string is not).
+static bool all_digits_(const std::string& s) {
+    return !s.empty() &&
+           s.find_first_not_of("0123456789") == std::string::npos;
+}
+
+// "YYYYMMDD..." -> JDN, or 0 when the text is blank / not a valid date.
+// 0 is what ADT stores for an empty date field.
+static std::uint32_t parse_ymd_jdn_or_zero(const std::string& value) {
+    if (value.size() < 8) return 0;
+    const std::string sy = value.substr(0, 4);
+    const std::string sm = value.substr(4, 2);
+    const std::string sd = value.substr(6, 2);
+    if (!all_digits_(sy) || !all_digits_(sm) || !all_digits_(sd)) return 0;
+    const int y  = std::stoi(sy);
+    const int mo = std::stoi(sm);
+    const int d  = std::stoi(sd);
+    if (y == 0 || mo < 1 || mo > 12 || d < 1 || d > 31) return 0;
+    return ymd_to_jdn(y, mo, d);
+}
+
 util::Result<void> encode_field_string(const DbfField& f,
                                        std::uint8_t* rec, std::size_t rec_size,
                                        const std::string& value) {
@@ -655,10 +676,13 @@ util::Result<void> encode_field_string(const DbfField& f,
 
     // ADT binary-encoded date/timestamp: parse string and write raw LE.
     if (f.type == DbfFieldType::AdtDate && f.length >= 4 && value.size() >= 8) {
-        int y  = std::stoi(value.substr(0, 4));
-        int mo = std::stoi(value.substr(4, 2));
-        int d  = std::stoi(value.substr(6, 2));
-        std::uint32_t jdn = ymd_to_jdn(y, mo, d);
+        // An EMPTY date arrives as 8 blanks (that is what AdsSetJulian(0) and a
+        // blank DBF date field produce) and passes the size check above. Feeding
+        // that to std::stoi throws std::invalid_argument, which escapes through
+        // the C ABI and kills the caller's process — a COPY TO of any table with
+        // one blank date crashed the application. Parse defensively and store
+        // the ADT empty-date marker (0) for anything that is not a real date.
+        std::uint32_t jdn = parse_ymd_jdn_or_zero(value);
         dst[0] = static_cast<std::uint8_t>( jdn        & 0xFF);
         dst[1] = static_cast<std::uint8_t>((jdn >>  8) & 0xFF);
         dst[2] = static_cast<std::uint8_t>((jdn >> 16) & 0xFF);
@@ -666,13 +690,13 @@ util::Result<void> encode_field_string(const DbfField& f,
         return {};
     }
     if (f.type == DbfFieldType::AdtTimestamp && f.length >= 8 && value.size() >= 14) {
-        int y   = std::stoi(value.substr(0, 4));
-        int mo  = std::stoi(value.substr(4, 2));
-        int d   = std::stoi(value.substr(6, 2));
-        int hh  = std::stoi(value.substr(8, 2));
-        int mmv = std::stoi(value.substr(10, 2));
-        int ss  = std::stoi(value.substr(12, 2));
-        std::uint32_t jdn = ymd_to_jdn(y, mo, d);
+        // Same defence as the date branch above: a blank timestamp must not
+        // throw out of the C ABI.
+        std::uint32_t jdn = parse_ymd_jdn_or_zero(value);
+        int hh = 0, mmv = 0, ss = 0;
+        if (all_digits_(value.substr(8, 2)))  hh  = std::stoi(value.substr(8, 2));
+        if (all_digits_(value.substr(10, 2))) mmv = std::stoi(value.substr(10, 2));
+        if (all_digits_(value.substr(12, 2))) ss  = std::stoi(value.substr(12, 2));
         std::uint32_t ms  = static_cast<std::uint32_t>(
                                 hh * 3600000 + mmv * 60000 + ss * 1000);
         dst[0] = static_cast<std::uint8_t>( jdn        & 0xFF);
