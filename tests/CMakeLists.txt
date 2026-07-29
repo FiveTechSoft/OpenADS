@@ -230,6 +230,7 @@ add_executable(openads_unit_tests
     unit/abi_adi_multilevel_build_test.cpp
     unit/abi_adt_scope_validation_test.cpp
     unit/abi_adi_smoke_test.cpp
+    unit/abi_adi_tagdir_order_test.cpp
     unit/abi_adi_tagdir_wide_page_test.cpp
     unit/abi_adt_sql_test.cpp
     unit/abi_adt_dat_extension_sql_test.cpp
