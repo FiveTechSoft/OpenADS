@@ -256,6 +256,31 @@ void stamp_dbf_header_today(std::uint8_t* hdr) {
     hdr[3] = static_cast<std::uint8_t>(tm_utc.tm_mday);
 }
 
+// dBASE/FoxPro field-descriptor bytes 12-15 hold the field's little-endian
+// displacement within the record (record byte 0 is the deletion flag, so
+// the first field is at 1). OpenADS left them zero: its own reader and
+// tolerant ones (LibreOffice) compute offsets from the field lengths and
+// never notice, but stricter readers reject the header as corrupt and it
+// is simply not what a spec-conforming writer emits (Pritpal Bedi,
+// 29/07/2026 — DBFCDX "corruption detected" report). Stamp the running
+// displacement over a just-built descriptor block: `descriptors` points at
+// the first 32-byte descriptor, lengths come from each fd[16].
+// `first_offset` is 1 for plain DBF, 5 when a 4-byte VFP _NullFlags
+// bitmap precedes the user fields.
+void stamp_dbf_field_displacements(std::uint8_t* descriptors,
+                                   std::size_t   field_count,
+                                   std::uint32_t first_offset = 1) {
+    std::uint32_t off = first_offset;
+    for (std::size_t i = 0; i < field_count; ++i) {
+        std::uint8_t* fd = descriptors + i * 32;
+        fd[12] = static_cast<std::uint8_t>( off        & 0xFFu);
+        fd[13] = static_cast<std::uint8_t>((off >>  8) & 0xFFu);
+        fd[14] = static_cast<std::uint8_t>((off >> 16) & 0xFFu);
+        fd[15] = static_cast<std::uint8_t>((off >> 24) & 0xFFu);
+        off += fd[16];
+    }
+}
+
 UNSIGNED16 map_field_type(openads::drivers::DbfFieldType t) {
     using openads::drivers::DbfFieldType;
     // Constants verified empirically (M8.4) against
@@ -7292,6 +7317,8 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
             fd[18] = flags;
             file.insert(file.end(), fd.begin(), fd.end());
         }
+        stamp_dbf_field_displacements(file.data() + 32, fields.size(),
+                                      has_null ? 5u : 1u);
         file.push_back(0x0D);
         file.push_back(0x1A);
 
@@ -7366,6 +7393,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
         fd[17] = f.dec;
         file.insert(file.end(), fd.begin(), fd.end());
     }
+    stamp_dbf_field_displacements(file.data() + 32, fields.size());
     file.push_back(0x0D);
     file.push_back(0x1A);
 
@@ -7787,6 +7815,7 @@ UNSIGNED32 ENTRYPOINT AdsRestructureTable(ADSHANDLE   hConnect,
             fd[17] = f.dec;
             file_bytes.insert(file_bytes.end(), fd.begin(), fd.end());
         }
+        stamp_dbf_field_displacements(file_bytes.data() + 32, merged.size());
         file_bytes.push_back(0x0D);
 
         std::uint16_t old_rec_len = t.driver()->record_length();
@@ -16621,6 +16650,7 @@ UNSIGNED32 ENTRYPOINT AdsCopyTable(ADSHANDLE   hHandle,
         fd[17] = f.decimals;
         file.insert(file.end(), fd.begin(), fd.end());
     }
+    stamp_dbf_field_displacements(file.data() + 32, src_fields.size());
     file.push_back(0x0D);
 
     // Walk source records, append live ones to the buffered file.
@@ -33687,6 +33717,7 @@ UNSIGNED32 ENTRYPOINT AdsCloneTable(ADSHANDLE hTable, ADSHANDLE* phClone) {
         fd[17] = f.decimals;
         file.insert(file.end(), fd.begin(), fd.end());
     }
+    stamp_dbf_field_displacements(file.data() + 32, src_fields.size());
     file.push_back(0x0D);
 
     std::uint32_t rcount = t->driver()->record_count();
@@ -33767,6 +33798,7 @@ UNSIGNED32 ENTRYPOINT AdsCopyTableStructure(ADSHANDLE hTable, UNSIGNED8* pucFile
         fd[17] = f.decimals;
         file.insert(file.end(), fd.begin(), fd.end());
     }
+    stamp_dbf_field_displacements(file.data() + 32, src_fields.size());
     file.push_back(0x0D);
     file.push_back(0x1A);   // EOF, no records
 

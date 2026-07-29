@@ -2,6 +2,7 @@
 #include "openads/ace.h"
 
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <string>
@@ -214,5 +215,59 @@ TEST_CASE("M12.23 AdsCreateTable with an M field stages an empty .fpt; memo writ
 
     REQUIRE(AdsCloseTable(hTable) == 0);
     REQUIRE(AdsDisconnect(hConn) == 0);
+    fs::remove_all(dir, ec);
+}
+
+// Pritpal Bedi 29/07/2026 — descriptor bytes 12-15 (LE field displacement
+// within the record, first field = 1 past the deletion flag) were written
+// as zero. Tolerant readers compute offsets from the field lengths, but
+// stricter ones reject the header as corrupt. Verify the exact running
+// displacements on a freshly-created table.
+TEST_CASE("AdsCreateTable: field descriptors carry LE displacements") {
+    const auto dir = fs::temp_directory_path() / "openads_create_displ";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+
+    UNSIGNED8 srv[256];
+    std::memcpy(srv, dir.string().c_str(), dir.string().size() + 1);
+    ADSHANDLE hConn = 0;
+    REQUIRE(AdsConnect60(srv, ADS_LOCAL_SERVER,
+                         nullptr, nullptr, 0, &hConn) == 0);
+
+    UNSIGNED8 name[64]   = "displ";
+    UNSIGNED8 fields[256] =
+        "NAME,C,20,0;CITY,C,20,0;AGE,N,3,0;TS,C,23,0;THD,N,3,0;INS,N,4,0";
+    ADSHANDLE hTable = 0;
+    REQUIRE(AdsCreateTable(hConn, name, name,
+                           ADS_CDX, 0, 0, 0, 0,
+                           fields, &hTable) == 0);
+    REQUIRE(AdsCloseTable(hTable) == 0);
+    REQUIRE(AdsDisconnect(hConn) == 0);
+
+    // Read the descriptor block straight off disk.
+    const auto dbf = dir / "displ.dbf";
+    REQUIRE(fs::exists(dbf));
+    FILE* f = std::fopen(dbf.string().c_str(), "rb");
+    REQUIRE(f != nullptr);
+    std::uint8_t hdr[32] = {0};
+    REQUIRE(std::fread(hdr, 1, sizeof(hdr), f) == sizeof(hdr));
+    const std::uint16_t hlen =
+        static_cast<std::uint16_t>(hdr[8] | (hdr[9] << 8));
+    REQUIRE(hlen == 32u + 32u * 6u + 1u);
+
+    const std::uint32_t want[6] = {1, 21, 41, 44, 67, 70};
+    for (int i = 0; i < 6; ++i) {
+        std::uint8_t fd[32] = {0};
+        REQUIRE(std::fread(fd, 1, sizeof(fd), f) == sizeof(fd));
+        const std::uint32_t got =
+            static_cast<std::uint32_t>(fd[12])        |
+            (static_cast<std::uint32_t>(fd[13]) <<  8) |
+            (static_cast<std::uint32_t>(fd[14]) << 16) |
+            (static_cast<std::uint32_t>(fd[15]) << 24);
+        INFO("field ", i, " displacement");
+        CHECK(got == want[i]);
+    }
+    std::fclose(f);
     fs::remove_all(dir, ec);
 }
