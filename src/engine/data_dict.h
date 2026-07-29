@@ -136,6 +136,13 @@ public:
     // caller-provided casing from imported dictionaries or clients.
     bool has_user(const std::string& user) const noexcept;
     static std::string ci_name(const std::string& s) noexcept;
+    // Lookup stays case-insensitive (users_ holds ci_name keys), but SAP
+    // preserves the DECLARED spelling for display: system.users.Name and
+    // system.permissions.Grantee show "RCB"/"AutoTasks", not "rcb"/"autotasks".
+    // Folding for storage used to discard that, and save() then wrote the
+    // folded form back out, so the original casing was lost permanently.
+    // Returns the declared spelling, or ci_name(user) when none was recorded.
+    std::string display_user(const std::string& user) const noexcept;
     bool is_member_of(const std::string& user,
                       const std::string& group) const;
     const std::unordered_set<std::string>& groups_of(const std::string& user) const;
@@ -486,6 +493,9 @@ private:
     std::unordered_map<std::string, TableProps>  table_props_;
     std::vector<IndexEntry>                      indexes_;
     std::unordered_set<std::string>              users_;
+    // ci_name(user) -> declared spelling, for display only. Never used for
+    // lookup; users_ remains the authority on existence.
+    std::unordered_map<std::string, std::string>  user_display_;
     std::unordered_set<std::string>              groups_;
     std::unordered_map<std::string,
                        std::unordered_set<std::string>> memberships_;

@@ -19019,8 +19019,9 @@ build_system_table(Connection* c, std::string sys_name,
     if (sys_name == "users") {
         const std::vector<Col> cols = {{"USER_NAME", 'C', 200, 0}};
         std::vector<std::vector<std::string>> rows;
+        // users_ holds folded lookup keys; show the declared spelling.
         for (const auto& u : dd->users())
-            rows.push_back({u});
+            rows.push_back({dd->display_user(u)});
         return build(cols, rows);
     }
     if (sys_name == "groups") {
@@ -19301,7 +19302,9 @@ build_system_table(Connection* c, std::string sys_name,
             if (gseen.insert(openads::engine::DataDict::ci_name(n)).second)
                 grantees.push_back({n, grp});
         };
-        for (const auto& u : dd->users())  add_grantee(u, false);
+        // SAP reports Grantee with the declared spelling ("RCB", "AutoTasks").
+        // add_grantee() already dedupes/filters case-insensitively.
+        for (const auto& u : dd->users())  add_grantee(dd->display_user(u), false);
         for (const auto& g : dd->groups()) add_grantee(g, true);
         add_grantee("SERVER:Admin",   true);
         add_grantee("SERVER:Monitor", true);
@@ -19342,7 +19345,7 @@ build_system_table(Connection* c, std::string sys_name,
         for (const auto& kv : dd->views()) add_obj(kv.first, "", 6);
         add_obj("VIEW", "", 6);                         // t6 category root
         for (const auto& u : dd->users())
-            if (!is_adssys(u)) add_obj(u, "", 8);
+            if (!is_adssys(u)) add_obj(dd->display_user(u), "", 8);
         add_obj("USER", "", 8);                         // t8 category root
         for (const auto& g : dd->groups()) add_obj(g, "", 9);
         add_obj("SERVER:Admin",   "", 9);
