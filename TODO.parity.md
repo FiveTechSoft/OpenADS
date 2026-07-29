@@ -4,15 +4,47 @@ Living checklist of SAP-parity gaps. The S4 gate (`tools/qa-diff/s4_parity.ps1`)
 is **42/42** on pmsys as of 2026-07-26. This file tracks what's left and what
 still needs verification against current code.
 
-## ⚠️ Blocked on the user
-- [ ] **Find other UNENCRYPTED SAP dictionaries for data-level testing.**
-      This is on Reinaldo. mp10 (`e:\AdsData\sfi\mp.add`) is sealed by SAP's
-      proprietary table encryption — OpenADS can't read the row data
-      (COUNT works off the header; field names/data come back as ciphertext),
-      so it cannot serve as a data-level second corpus. The S4 gate is
-      pmsys-only until an unencrypted DD with real data is available. A second
-      corpus is the single biggest thing that would harden the "1:1" claim
-      against SQL shapes pmsys never exercises.
+## ✅ UNBLOCKED 2026-07-29 — mp10 is now a live second corpus
+mp10 was sealed by SAP table encryption. All 90 encrypted tables were decrypted
+in place with `tools/decrypt_dd` (SAP's own `sp_DecryptTable`), so the row data
+is readable and mp10 now serves as the data-level second corpus this file has
+been asking for. Gate: `tools/qa-diff/s4_parity_mp.ps1`.
+
+**Corpus profile** — medical billing, complementary to pmsys in every axis that
+matters: 95 tables / 1081 columns / **9.65M rows**; mixed **ADT (90) + DBF with
+NTX/CDX (5)** where pmsys is ADT-only; **63801 permission rows** (pmsys 7912);
+32 triggers; 11 RI rules; 7 script functions using MERGE / CASE / cursor loops /
+TimeStampAdd; 2 views; 3 procs.
+
+**First run: 27 identical, 18 diverged.** Every divergence below is a real
+OpenADS gap (test-case bugs already fixed). Grouped by root cause:
+
+- [ ] **Deleted-record visibility on DBF** *(new class, 2 cases)* — SAP counts
+      deleted rows (`SET DELETED OFF` default), OpenADS filters them.
+      `users.dbf` 18 physical / 8 deleted → SAP 18, OA 10; `provider.dbf`
+      20/4 → SAP 20, OA 16; `Forms.dbf` 64/0 → both 64 (control). Invisible on
+      pmsys because it is ADT-only. Affects every DBF table with deletions.
+- [ ] **SQL feature gaps** *(5 cases)* — `Length()` raises 2158 (unknown
+      function) even on a literal, though it is a documented SAP scalar;
+      `COUNT(DISTINCT col)` raises 2115; an aggregate over an *expression*
+      (`Sum(Real * UNITS)`) raises 2115 — only bare column args parse;
+      `SELECT ... FROM <view>` raises 5004 for both mp views, so plain
+      single-table view resolution is broken (not just views-inside-joins).
+- [ ] **Join column resolution + result naming** *(3 cases)* — a 2-table join on
+      `ADM_NUM` returns "Column not found: ADM_NUM"; 3-way and LEFT joins return
+      right-side columns renamed `R_UNITS` / `R_Status` and left-side names
+      lowercased, where SAP preserves the declared casing.
+- [ ] **Numeric / date string formatting** *(3 cases)* — SAP pads and formats to
+      the declared field width (`"                 0.00"`, `"  0"`) while OA
+      returns `"0"`; date columns inside aggregates come back `"0"` from OA vs
+      `"01/18/0203"` from SAP. Same family as task #1 below, now with a second
+      corpus confirming it.
+- [ ] **DD catalog divergence** *(5 cases)* — users 31 vs 32 (OA adds `adssys`),
+      groups 20 vs 17, permissions 63801 vs 62450, and `Object_Type = 4`
+      255 (SAP) vs 54050 (OA) — an order-of-magnitude semantic divergence in
+      what OA classifies as a column-permission row, worth understanding before
+      the column-level enforcement work. Trigger ordering differs under
+      `ORDER BY Trig_TableName, Name`.
 
 ## A. S4 polish (cosmetic — tracked as tasks #1–3)
 - [ ] **#1 Date display format** — `AdsGetString` on date cols returns raw
