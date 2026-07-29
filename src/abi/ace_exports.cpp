@@ -11587,16 +11587,15 @@ bool path_ends_with_ci(const std::string& s, const char* suffix) {
 }
 
 // Harbour/FiveWin may pass a client-native fully qualified path (for example
-// C:\\work\\table.cdx) even when the table is remote. Normalize separators
-// everywhere; a Windows drive path received by a POSIX server cannot refer to
-// the client's filesystem, so remote callers use its basename in the table's
-// server-side directory.
+// C:\\work\\table.cdx) or a relative path with subdirectories (for example
+// MyNewFolder\\table.cdx) even when the table is remote. Normalize separators
+// everywhere.  For remote callers, always strip to basename: the server
+// resolves the index path relative to the table's own directory, so sending
+// a path that already contains the table's subdirectory would cause
+// double-nesting (MyNewFolder/MyNewFolder/table.cdx).
 std::string normalize_index_path(std::string path, bool remote) {
     std::replace(path.begin(), path.end(), '\\', '/');
-    const bool drive_path = path.size() >= 3 &&
-        std::isalpha(static_cast<unsigned char>(path[0])) &&
-        path[1] == ':' && path[2] == '/';
-    if (remote && drive_path)
+    if (remote)
         path = std::filesystem::path(path).filename().string();
     return path;
 }
