@@ -372,10 +372,12 @@ util::Result<void> Table::goto_top() {
         // true (Clipper / DBFCDX convention for "no visible row").
         if (!openads::abi::show_deleted_for(this)) {
             while (r.value().positioned) {
-                if (auto ld = load_record_(r.value().recno); !ld) {
-                    return ld.error();
-                }
-                if (!is_deleted()) return {};
+                auto ld = load_record_(r.value().recno);
+                if (!ld && ld.error().code != 5000) return ld.error();
+                // A 5000 here is a stale index entry (recno > rec_count,
+                // e.g. a PACK left this tag unreconstructed). Native ADSCDX
+                // walks past it, so treat it like a deleted row and advance.
+                if (ld && !is_deleted()) return {};
                 r = order_->descending_traverse()
                         ? idx->prev() : idx->next();
                 if (!r) return r.error();
@@ -386,7 +388,21 @@ util::Result<void> Table::goto_top() {
             }
             state_ = State::Limbo; recno_ = 0; return {};
         }
-        return load_record_(r.value().recno);
+        // SET DELETE OFF: land on the first index entry, stepping past any
+        // stale ones (recno > rec_count after a PACK) the way native ADSCDX
+        // does instead of raising ADSCDX/5000.
+        while (r.value().positioned) {
+            auto ld = load_record_(r.value().recno);
+            if (!ld && ld.error().code != 5000) return ld.error();
+            if (ld) return {};
+            r = order_->descending_traverse() ? idx->prev() : idx->next();
+            if (!r) return r.error();
+            if (r.value().positioned &&
+                !key_in_bottom_scope_(idx->current_key())) {
+                state_ = State::Limbo; recno_ = 0; return {};
+            }
+        }
+        state_ = State::Limbo; recno_ = 0; return {};
     }
     if (driver_->record_count() == 0) {
         // GOTOP on empty re-enters Limbo (BOF+EOF both true).
@@ -440,10 +456,11 @@ util::Result<void> Table::goto_bottom() {
         }
         if (!openads::abi::show_deleted_for(this)) {
             while (r.value().positioned) {
-                if (auto ld = load_record_(r.value().recno); !ld) {
-                    return ld.error();
-                }
-                if (!is_deleted()) {
+                auto ld = load_record_(r.value().recno);
+                if (!ld && ld.error().code != 5000) return ld.error();
+                // Stale index entry (recno > rec_count after a PACK): step
+                // past it like a deleted row instead of raising 5000.
+                if (ld && !is_deleted()) {
                     return {};
                 }
                 r = idx->prev();
@@ -451,7 +468,16 @@ util::Result<void> Table::goto_bottom() {
             }
             state_ = State::Limbo; recno_ = 0; return {};
         }
-        return load_record_(r.value().recno);
+        // SET DELETE OFF: land on the last entry, stepping back past stale
+        // ones the way native ADSCDX does instead of raising 5000.
+        while (r.value().positioned) {
+            auto ld = load_record_(r.value().recno);
+            if (!ld && ld.error().code != 5000) return ld.error();
+            if (ld) return {};
+            r = idx->prev();
+            if (!r) return r.error();
+        }
+        state_ = State::Limbo; recno_ = 0; return {};
     }
     auto n = driver_->record_count();
     if (n == 0) {
@@ -653,10 +679,27 @@ util::Result<void> Table::skip(std::int32_t delta) {
             if (skip_deleted) {
                 // Probe the row's deleted flag without advancing
                 // the user-visible step count.
-                if (auto ld = load_record_(r.value().recno); !ld) {
-                    return ld.error();
+                auto ld = load_record_(r.value().recno);
+                if (!ld) {
+                    if (ld.error().code != 5000) return ld.error();
+                    // Stale index entry (recno > rec_count after a PACK):
+                    // invisible like a deleted row — skip without counting.
+                    continue;
                 }
                 if (is_deleted()) continue;
+            } else if (r.value().recno > driver_->record_count()) {
+                // SET DELETED OFF doesn't load every row (perf), so a stale
+                // entry would only surface at the final load below. Gate
+                // cheaply on the recno range — no I/O in the common case —
+                // and only when it looks past the live count confirm with a
+                // load: a genuine just-appended row (peer multiuser) loads
+                // fine and counts; a stale PACK leftover returns 5000 and is
+                // skipped without counting.
+                auto ld = load_record_(r.value().recno);
+                if (!ld) {
+                    if (ld.error().code != 5000) return ld.error();
+                    continue;
+                }
             }
             last_live = r.value().recno;
             ++taken;
