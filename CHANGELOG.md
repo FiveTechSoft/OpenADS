@@ -1,3 +1,25 @@
+## Unreleased
+
+### Fixed - counting live keys re-read the table once per record
+
+`AdsGetKeyCount` / `AdsGetRecordCount` over an order exclude deleted rows while
+SET DELETED is ON by walking the cached index and testing each recno. The test
+went through `goto_record()`, which invalidates the driver's read-ahead on every
+call, so a sequential count became one block read per record — and nothing was
+cached between calls.
+
+Measured on an ADT table of 34,595 rows:
+
+    SET DELETED OFF   OrdKeyCount     9 ms   (x5 more:    0 ms)
+    SET DELETED ON    OrdKeyCount  1381 ms   (x5 more: 6859 ms)   before
+    SET DELETED ON    OrdKeyCount    14 ms   (x5 more:   72 ms)   after
+
+New `Table::deleted_at(recno)` reads the record through the normal read path, so
+the read-ahead block stays warm, and does not move the cursor. Same counts. Same
+reasoning as the existing `load_record_for_bulk_scan`.
+
+Test: `tests/unit/abi_keycount_deleted_scan_test.cpp`.
+
 ## 1.8.37 - 2026-07-29
 
 ERP production fix batch (RusSoft Harbour/FiveWin deployment) plus CI-blocking

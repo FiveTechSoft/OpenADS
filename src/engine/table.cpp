@@ -1175,6 +1175,16 @@ bool Table::is_deleted() const noexcept {
     return drivers::record_is_deleted(record_buf_.data(), record_buf_.size());
 }
 
+util::Result<bool> Table::deleted_at(std::uint32_t recno) {
+    if (recno == 0 || recno > driver_->record_count()) {
+        return util::Error{5000, 0, "record number out of range", ""};
+    }
+    auto rec = driver_->read_record_raw(recno);
+    if (!rec) return rec.error();
+    const auto& buf = rec.value();
+    return drivers::record_is_deleted(buf.data(), buf.size());
+}
+
 util::Result<void> Table::zap() {
     if (mode_ == OpenMode::Read) {
         return util::Error{5000, 0, "table opened read-only", ""};
