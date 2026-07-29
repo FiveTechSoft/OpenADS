@@ -1,4 +1,50 @@
-﻿## 1.8.33 - 2026-07-27
+## 1.8.34 - 2026-07-28
+
+### Fixed - SQL against an ADT table whose file is named .DAT
+
+`SELECT ... FROM [articulo.dat] WHERE UPPER(a.creffacart) <> 'N'` failed
+with 7200 / "Column not found: creffacart" when `articulo.dat` was an ADT
+table, while `AdsOpenTable` on the very same file worked. Reported by
+RusSoft, whose ERP names every table `.DAT` regardless of format; the
+failure appeared as soon as a company was migrated to ADT and broke every
+SQL-backed lookup in the application (~60 call sites).
+
+Root cause, two halves:
+
+1. **Harbour cannot tell us the type.** `contrib/rddads` calls
+   `AdsStmtSetTableType` only when the requested type is `ADS_CDX` or
+   `ADS_VFP`; `ADS_ADT` and `ADS_NTX` are dropped, because on the real
+   Advantage engine a statement already defaults to ADT. So an ADT
+   statement reaches OpenADS carrying nothing.
+
+2. **Our default is CDX.** `SqlStatement::table_type = 0` maps to CDX, and
+   `resolve_table_file` only upgraded the type when the *extension* said
+   `.adt` / `.ntx`. A `.dat` name says nothing, so the ADT file was opened
+   with the CDX driver, its header parsed as a DBF one, and every
+   referenced column came back missing.
+
+Changes:
+- `session/connection.cpp`: `resolve_table_file` now sniffs the header of
+  the resolved file ("Advantage Table" magic vs the dBASE/FoxPro version
+  byte) and aligns the driver with what is actually on disk. The file's
+  own bytes outrank both the extension and the caller's guess. Skipped on
+  create, where the path names a file that need not exist yet.
+- `session/connection.cpp`: an extension-less name is now probed in the
+  order the caller's type implies -- an ADT statement looks for
+  `<name>.adt` before `<name>.dbf`, instead of always preferring `.dbf`.
+- `abi/ace_exports.cpp`: documented why `table_type` cannot be trusted for
+  anything that touches an existing file.
+
+Not changed: an extension-less `SELECT ... FROM articulo` still resolves
+`articulo.dbf` / `articulo.adt` only. A table named `.DAT` must be spelled
+with its extension in SQL -- the real Advantage engine behaves the same.
+
+Test: `tests/unit/abi_adt_dat_extension_sql_test.cpp` -- an ADT table
+renamed to `.DAT` and queried through a statement with NO table type set
+(exactly what a Harbour client can express), plus the mirror case that a
+DBF named `.DAT` keeps opening with the CDX driver.
+
+## 1.8.33 - 2026-07-27
 
 ### Fixed - Legacy AdsCreateIndex path resolution
 

@@ -15,6 +15,7 @@
 #include "openads/error.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
@@ -25,6 +26,100 @@
 #include <vector>
 
 namespace openads::session {
+
+namespace {
+
+// True when `p`'s directory is `base_dir` itself or lives under it.
+// Windows paths are case-insensitive and a caller may spell the same
+// directory with either separator, so normalise before comparing.
+bool path_is_inside(const std::string&           base_dir,
+                    const std::filesystem::path& p) {
+    namespace fs = std::filesystem;
+    if (base_dir.empty()) return false;
+    auto norm = [](const fs::path& in) {
+        std::string s = in.lexically_normal().string();
+        for (auto& ch : s) {
+            if (ch == '\\') ch = '/';
+            ch = static_cast<char>(
+                std::tolower(static_cast<unsigned char>(ch)));
+        }
+        while (!s.empty() && s.back() == '/') s.pop_back();
+        return s;
+    };
+    const std::string base = norm(fs::path(base_dir));
+    const std::string dir  = norm(p.parent_path());
+    if (base.empty() || dir.empty()) return false;
+    if (dir == base) return true;
+    return dir.size() > base.size() &&
+           dir.compare(0, base.size(), base) == 0 &&
+           dir[base.size()] == '/';
+}
+
+// Read the header magic of an existing table file and report which
+// driver family can actually read it. The bytes on disk are the only
+// authoritative answer: neither the extension nor the caller-supplied
+// table type has to agree with them.
+//
+// Why this matters (RusSoft, 2026-07-28): Harbour's contrib/rddads only
+// forwards the statement table type to AdsStmtSetTableType when it is
+// ADS_CDX or ADS_VFP -- ADS_ADT and ADS_NTX are dropped on the floor,
+// because on the real Advantage engine an SQL statement already defaults
+// to ADT. OpenADS defaults to CDX instead, so every `SELECT ... FROM
+// [tbl.dat]` against an ADT table opened the file with the CDX driver,
+// parsed the ADT header as a DBF one and reported the first referenced
+// column as "Column not found". An ERP that names its ADT tables `.DAT`
+// (extension carries no type information) had no way to say otherwise.
+//
+// Returns nullopt when the file cannot be read or the magic is unknown,
+// in which case the caller keeps whatever type it had.
+std::optional<openads::engine::TableType>
+sniff_table_type(const std::string& path) {
+    std::FILE* f = std::fopen(path.c_str(), "rb");
+    if (f == nullptr) return std::nullopt;
+    unsigned char hdr[16] = {0};
+    std::size_t n = std::fread(hdr, 1, sizeof(hdr), f);
+    std::fclose(f);
+    if (n < 1) return std::nullopt;
+
+    // ADT files open with the literal "Advantage Table".
+    static const char kAdtMagic[] = "Advantage Table";
+    if (n >= sizeof(kAdtMagic) - 1 &&
+        std::memcmp(hdr, kAdtMagic, sizeof(kAdtMagic) - 1) == 0) {
+        return openads::engine::TableType::Adt;
+    }
+
+    // DBF family: byte 0 is the dBASE/FoxPro version marker. The set
+    // below is the one the CDX/NTX drivers accept; both share the same
+    // record container and differ only in their index files, so a DBF
+    // magic never tells Cdx and Ntx apart -- report Cdx and let the
+    // caller keep an Ntx choice it made deliberately.
+    switch (hdr[0]) {
+        case 0x02: case 0x03: case 0x04: case 0x05:
+        case 0x30: case 0x31: case 0x32: case 0x43:
+        case 0x63: case 0x7B: case 0x83: case 0x8B:
+        case 0x8E: case 0xB3: case 0xCB: case 0xE5:
+        case 0xF5: case 0xFB:
+            return openads::engine::TableType::Cdx;
+        default:
+            return std::nullopt;
+    }
+}
+
+// Apply the on-disk verdict to `type`, leaving deliberate choices that
+// the magic cannot contradict alone (Cdx vs Ntx over the same DBF).
+void align_type_with_file(const std::string& path,
+                          openads::engine::TableType& type) {
+    auto sniffed = sniff_table_type(path);
+    if (!sniffed) return;
+    if (*sniffed == openads::engine::TableType::Adt) {
+        type = openads::engine::TableType::Adt;
+    } else if (type == openads::engine::TableType::Adt) {
+        // Caller asked for ADT but the file is a DBF container.
+        type = openads::engine::TableType::Cdx;
+    }
+}
+
+}  // namespace
 
 util::Result<Connection> Connection::open(const std::string& data_dir) {
     namespace fs = std::filesystem;
@@ -126,7 +221,12 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
                     type = engine::TableType::Adt;
                 else if (aext == ".ntx" && type == engine::TableType::Cdx)
                     type = engine::TableType::Ntx;
-                return platform::resolve_case_insensitive(cand.string());
+                {
+                    std::string resolved =
+                        platform::resolve_case_insensitive(cand.string());
+                    align_type_with_file(resolved, type);
+                    return resolved;
+                }
             }
         }
         rel = rel.relative_path();
@@ -137,16 +237,24 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
     // exist but .adt does, open as ADT (e.g. SQL SELECT FROM <alias>
     // against an ADT-only data directory).
     if (!full.has_extension()) {
-        full.replace_extension(".dbf");
         std::error_code ec;
-        if (!fs::exists(full, ec)) {
-            fs::path adt_cand = full;
-            adt_cand.replace_extension(".adt");
-            if (fs::exists(adt_cand, ec)) {
-                full = adt_cand;
-                type = engine::TableType::Adt;
-            }
+        // Probe in the order the caller's type implies: an ADT statement
+        // looks for <name>.adt first, everything else keeps the historical
+        // .dbf-then-.adt order. Without this an ADT connection that also
+        // holds a stale same-named .dbf would silently open the DBF.
+        const bool adt_first = (type == engine::TableType::Adt);
+        fs::path dbf_cand = full; dbf_cand.replace_extension(".dbf");
+        fs::path adt_cand = full; adt_cand.replace_extension(".adt");
+        const fs::path& first  = adt_first ? adt_cand : dbf_cand;
+        const fs::path& second = adt_first ? dbf_cand : adt_cand;
+        if (fs::exists(first, ec)) {
+            full = first;
+        } else if (fs::exists(second, ec)) {
+            full = second;
+        } else {
+            full = dbf_cand;   // report the .dbf name when nothing exists
         }
+        if (full.extension() == ".adt") type = engine::TableType::Adt;
     } else {
         // Override type from extension when the caller used the default
         // (Cdx) but the file is explicitly named with a different type's
@@ -159,7 +267,16 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
         else if (ext == ".ntx" && type == engine::TableType::Cdx)
             type = engine::TableType::Ntx;
     }
-    return platform::resolve_case_insensitive(full.string());
+    std::string resolved = platform::resolve_case_insensitive(full.string());
+    // The extension rules above only cover names that spell their type
+    // (.adt / .ntx). A table named with any other extension -- .dat is
+    // what the RusSoft ERP uses for every table, ADT or DBF alike --
+    // reaches here with whatever type the caller guessed. Let the file's
+    // own header have the last word, but never on a create: there the
+    // path names a file that does not exist yet (and if it does, the
+    // caller is deliberately overwriting it with a chosen format).
+    if (!for_create) align_type_with_file(resolved, type);
+    return resolved;
 }
 
 std::uint16_t Connection::table_cache_mode_(const std::string& relative_path) const {

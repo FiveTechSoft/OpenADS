@@ -18131,7 +18131,18 @@ struct SqlStatement {
     std::unordered_map<std::string, std::string> params;
     UNSIGNED32 sql_timeout = 0;
     // Per-statement table-open overrides set by AdsStmt* helpers.
-    UNSIGNED16  table_type   = 0;   // 0 = ADS_DEFAULT → CDX
+    // 0 = ADS_DEFAULT → CDX. NOTE (2026-07-28): this default is weaker
+    // than it looks, and callers cannot always correct it. Harbour's
+    // contrib/rddads calls AdsStmtSetTableType only when the requested
+    // type is ADS_CDX or ADS_VFP — an ADS_ADT statement never reaches
+    // us, because on the real Advantage engine a statement already
+    // defaults to ADT. So an ADT table queried through Harbour arrives
+    // here as CDX and nothing in the SQL text can say otherwise when the
+    // file name carries no type (e.g. the RusSoft ERP names every table
+    // .DAT). Connection::resolve_table_file therefore sniffs the file
+    // header and overrides this on open; keep that in place before
+    // trusting table_type for anything that touches an existing file.
+    UNSIGNED16  table_type   = 0;
     UNSIGNED16  lock_type    = 0;   // 0 = default → compatible locking
     UNSIGNED16  char_type    = 0;
     UNSIGNED16  read_only    = 0;   // non-zero → open read-only
