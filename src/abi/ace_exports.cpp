@@ -9489,13 +9489,14 @@ UNSIGNED32 ENTRYPOINT AdsGetRecordCount(ADSHANDLE hTable, UNSIGNED16 bFilterOpti
                 // handle — must honour SET DELETED ON (exclude deleted
                 // keys) or remote xBrowse allocates ghost rows / hangs.
                 const bool hide_del = !t->show_deleted_records();
-                const std::uint32_t saved_rn = t->recno();
                 std::function<bool(std::uint32_t)> live;
                 const std::function<bool(std::uint32_t)>* live_p = nullptr;
                 if (hide_del) {
+                    // deleted_at() keeps the driver's read-ahead warm and does
+                    // not move the cursor, so there is nothing to restore.
                     live = [t](std::uint32_t rn) {
-                        if (!t->goto_record(rn)) return false;
-                        return !t->is_deleted();
+                        auto del = t->deleted_at(rn);
+                        return del && !del.value();
                     };
                     live_p = &live;
                 }
@@ -9514,7 +9515,6 @@ UNSIGNED32 ENTRYPOINT AdsGetRecordCount(ADSHANDLE hTable, UNSIGNED16 bFilterOpti
                     *pulRecordCount = static_cast<UNSIGNED32>(
                         cdx->ordered_recnos_cached().size());
                 }
-                if (hide_del && saved_rn != 0) (void)t->goto_record(saved_rn);
                 return ok();
             }
             *pulRecordCount = static_cast<UNSIGNED32>(
@@ -33543,13 +33543,14 @@ UNSIGNED32 ENTRYPOINT AdsGetKeyCount(ADSHANDLE hIndex, UNSIGNED16 /*usFilter*/,
                 dynamic_cast<openads::drivers::cdx::CdxIndex*>(ord->index())) {
             auto& sc = ord->scope();
             const bool hide_del = !t->show_deleted_records();
-            const std::uint32_t saved_rn = t->recno();
             std::function<bool(std::uint32_t)> live;
             const std::function<bool(std::uint32_t)>* live_p = nullptr;
             if (hide_del) {
+                // deleted_at() keeps the driver's read-ahead warm and does not
+                // move the cursor, so there is nothing to restore.
                 live = [t](std::uint32_t rn) {
-                    if (!t->goto_record(rn)) return false;
-                    return !t->is_deleted();
+                    auto del = t->deleted_at(rn);
+                    return del && !del.value();
                 };
                 live_p = &live;
             }
@@ -33568,7 +33569,6 @@ UNSIGNED32 ENTRYPOINT AdsGetKeyCount(ADSHANDLE hIndex, UNSIGNED16 /*usFilter*/,
                 *pulCount = static_cast<UNSIGNED32>(
                     cdx->ordered_recnos_cached().size());
             }
-            if (hide_del && saved_rn != 0) (void)t->goto_record(saved_rn);
             return ok();
         }
         // NTX: use cached B-tree walk for correct conditional count

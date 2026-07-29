@@ -215,6 +215,17 @@ public:
     util::Result<void> recall_deleted();
     bool               is_deleted() const noexcept;
 
+    // Deletion flag of an ARBITRARY record, without moving the cursor and
+    // without disturbing the driver's read-ahead.
+    //
+    // Same reasoning as load_record_for_bulk_scan above: goto_record()
+    // invalidates the read cache on every call -- it must, an absolute
+    // reposition has to see what another writer just wrote -- which is right
+    // for navigation and ruinous for a sequential walk. Counting live keys
+    // through goto_record() turned into one block read per record, on every
+    // call, with no reuse between calls.
+    util::Result<bool> deleted_at(std::uint32_t recno);
+
     // True only when a concrete record is loaded (not BOF/EOF/Limbo).
     bool positioned() const noexcept { return state_ == State::Positioned; }
 
