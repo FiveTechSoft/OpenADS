@@ -112,6 +112,7 @@ add_executable(openads_unit_tests
     unit/cdx_multilevel_test.cpp
     unit/cdx_multitag_2nd_test.cpp
     unit/cdx_prefix_seek_test.cpp
+    unit/abi_prefix_seek_deleted_test.cpp
     unit/cdx_reindex_char_test.cpp
     unit/cdx_prev_empty_leaf_test.cpp
     unit/cdx_empty_tree_test.cpp

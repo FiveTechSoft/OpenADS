@@ -1597,6 +1597,21 @@ std::vector<drivers::IIndex*> Table::all_indexes() {
     return out;
 }
 
+// Clipper / DBFCDX / SAP-ACE: a seek key SHORTER than the index key matches
+// by PREFIX — `SEEK con+doc` over a `con+doc+STR(seq,6,0)` tag must report
+// Found()=.T. and land on the first entry of the group. Padding the search
+// key out to the full index key length before comparing turns every partial
+// hit into a miss, because the pad bytes never equal the stored suffix
+// (" " vs "     1"). Compare only the bytes the caller actually supplied.
+// A key LONGER than the index key keeps the historical truncation.
+static bool key_prefix_matches(const std::string& current_key,
+                               const std::string& seek_key,
+                               std::size_t index_key_len) {
+    const std::size_t n = std::min(seek_key.size(), index_key_len);
+    return current_key.size() >= n &&
+           current_key.compare(0, n, seek_key, 0, n) == 0;
+}
+
 util::Result<bool>
 Table::seek_key(const std::string& key, bool soft, bool last) {
     if (!order_ || !order_->index()) {
@@ -1622,8 +1637,6 @@ Table::seek_key(const std::string& key, bool soft, bool last) {
     // if the only matching rows are deleted, Found() is .F. and the cursor
     // sits on the next live record or Eof).
     if (!openads::abi::show_deleted_for(this)) {
-        std::string del_key = key;
-        del_key.resize(idx->key_length(), ' ');
         while (r.value().positioned) {
             if (auto ld = load_record_(r.value().recno); !ld) return ld.error();
             if (!is_deleted()) break;
@@ -1637,9 +1650,7 @@ Table::seek_key(const std::string& key, bool soft, bool last) {
             last_seek_found_ = false;
             return false;
         }
-        std::string ck = idx->current_key();
-        ck.resize(del_key.size(), ' ');
-        exact = (ck == del_key);
+        exact = key_prefix_matches(idx->current_key(), key, idx->key_length());
     }
     // DESCEND order treats the FIRST match in walk direction as
     // the LAST entry in the equal-key group when sorted ASC. Walk
@@ -1651,15 +1662,12 @@ Table::seek_key(const std::string& key, bool soft, bool last) {
     // stop on the last one. After the walk, idx's cursor is on
     // the last matching entry; load_record_ syncs the table buffer.
     if (walk_to_last && exact) {
-        std::string padded_key = key;
-        padded_key.resize(idx->key_length(), ' ');
         std::uint32_t last_recno = r.value().recno;
         while (true) {
             auto step = idx->next();
             if (!step || !step.value().positioned) break;
-            std::string ck = idx->current_key();
-            ck.resize(padded_key.size(), ' ');
-            if (ck != padded_key) {
+            if (!key_prefix_matches(idx->current_key(), key,
+                                    idx->key_length())) {
                 // Past the equal-key run — step back one to leave
                 // cursor on the last matching entry.
                 (void)idx->prev();
@@ -1679,9 +1687,8 @@ Table::seek_key(const std::string& key, bool soft, bool last) {
                     last_seek_found_ = false;
                     return false;
                 }
-                std::string ck = idx->current_key();
-                ck.resize(padded_key.size(), ' ');
-                if (ck != padded_key) {
+                if (!key_prefix_matches(idx->current_key(), key,
+                                        idx->key_length())) {
                     state_ = (driver_->record_count() == 0) ? State::Limbo
                                                             : State::Eof;
                     recno_ = 0;
