@@ -1245,9 +1245,12 @@ UNSIGNED32 remote_query_rel_key_pos(openads::network::RemoteTable* rt,
 
 } // namespace
 
-// Latch set by AdsSeekLast. AdsSeek consults this to suppress its
-// empty-key always-found quirk when called as part of rddads'
-// AdsSeekLast retry chain. AdsSkip clears it.
+// Latch set by AdsSeekLast, cleared by AdsSkip. It marks "we are inside
+// an AdsSeekLast cycle" for rddads' retry chain (soft AdsSeek +
+// AdsSkip(-1) after a hard miss). Nothing reads it today: the fLast walk
+// itself travels as a parameter to ads_seek_local, and the empty-key
+// quirk decides on the order direction instead. Kept because the retry
+// chain is the one place a future consumer would need it.
 bool& seek_last_retry_latch() {
     static thread_local bool v = false;
     return v;
@@ -16001,159 +16004,21 @@ UNSIGNED32 ENTRYPOINT AdsIsFound(ADSHANDLE hTable, UNSIGNED16* pbFound) {
     return ok();
 }
 
-UNSIGNED32 ENTRYPOINT AdsSeek(ADSHANDLE hIndex,
+// Local (DBF / ADT) tail shared by AdsSeek and AdsSeekLast. Everything up
+// to the actual positioning -- the ADS_DOUBLEKEY / date / logical / Fox-
+// numeric key conversions -- is identical for both, and only the final
+// Table::seek_key differs: fLast walks to the END of the equal-key run.
+// AdsSeekLast used to just call AdsSeek, which always seeks with
+// last = false, so it returned the FIRST record of the group. With a
+// partial key that is the first line of the document where the caller
+// asked for the last one -- a silently wrong row, not an error.
+static UNSIGNED32 ads_seek_local(ADSHANDLE hIndex,
                    UNSIGNED8* pucKey,
                    UNSIGNED16 u16KeyLen,
                    UNSIGNED16 u16KeyType,
                    UNSIGNED16 u16SeekType,
-                   UNSIGNED16* pbFound) {
-#if defined(OPENADS_WITH_SQLITE)
-    if (auto* si = get_sqlite_index(hIndex)) {
-        if (si->parent == nullptr || si->parent->conn == nullptr) {
-            return fail(openads::AE_INTERNAL_ERROR, "sqlite index orphan");
-        }
-        std::string key(reinterpret_cast<const char*>(pucKey), u16KeyLen);
-        const bool soft = (u16SeekType & 1u) != 0;
-        si->parent->row_valid = false;
-        auto r = si->parent->conn->seek_index(
-            si->parent, si->column, key, soft, /*last=*/false);
-        if (!r) return fail(r.error());
-        const bool found = r.value();
-        sql_uri_mark_index_full(si->parent);
-        si->last_seek_found = found;
-        if (pbFound) *pbFound = found ? 1 : 0;
-        (void)u16KeyType;
-        return ok();
-    }
-#endif
-#if defined(OPENADS_WITH_ODBC)
-    if (auto* si = get_odbc_index(hIndex)) {
-        if (si->parent == nullptr || si->parent->conn == nullptr) {
-            return fail(openads::AE_INTERNAL_ERROR, "odbc index orphan");
-        }
-        std::string key(reinterpret_cast<const char*>(pucKey), u16KeyLen);
-        const bool soft = (u16SeekType & 1u) != 0;
-        si->parent->row_valid = false;
-        auto r = si->parent->conn->seek_index(
-            si->parent, si->column, si->expr_kind, key, soft,
-            /*last=*/false);
-        if (!r) return fail(r.error());
-        const bool found = r.value();
-        sql_uri_mark_index_full(si->parent);
-        si->last_seek_found = found;
-        if (pbFound) *pbFound = found ? 1 : 0;
-        (void)u16KeyType;
-        return ok();
-    }
-#endif
-#if defined(OPENADS_WITH_FIREBIRD)
-    if (auto* si = get_firebird_index(hIndex)) {
-        if (si->parent == nullptr || si->parent->conn == nullptr) {
-            return fail(openads::AE_INTERNAL_ERROR, "firebird index orphan");
-        }
-        std::string key(reinterpret_cast<const char*>(pucKey), u16KeyLen);
-        const bool soft = (u16SeekType & 1u) != 0;
-        si->parent->row_valid = false;
-        auto r = si->parent->conn->seek_index(
-            si->parent, si->column, si->expr_kind, key, soft,
-            /*last=*/false);
-        if (!r) return fail(r.error());
-        const bool found = r.value();
-        sql_uri_mark_index_full(si->parent);
-        si->last_seek_found = found;
-        if (pbFound) *pbFound = found ? 1 : 0;
-        (void)u16KeyType;
-        return ok();
-    }
-#endif
-#if defined(OPENADS_WITH_MARIADB)
-    if (auto* si = get_maria_index(hIndex)) {
-        if (si->parent == nullptr || si->parent->conn == nullptr) {
-            return fail(openads::AE_INTERNAL_ERROR, "mariadb index orphan");
-        }
-        std::string key(reinterpret_cast<const char*>(pucKey), u16KeyLen);
-        const bool soft = (u16SeekType & 1u) != 0;
-        si->parent->row_valid = false;
-        auto r = si->parent->conn->seek_index(
-            si->parent, si->column, key, soft, /*last=*/false);
-        if (!r) return fail(r.error());
-        const bool found = r.value();
-        sql_uri_mark_index_full(si->parent);
-        si->last_seek_found = found;
-        if (pbFound) *pbFound = found ? 1 : 0;
-        (void)u16KeyType;
-        return ok();
-    }
-#endif
-#if defined(OPENADS_WITH_MSSQL)
-    if (auto* si = get_mssql_index(hIndex)) {
-        if (si->parent == nullptr || si->parent->conn == nullptr) {
-            return fail(openads::AE_INTERNAL_ERROR, "mssql index orphan");
-        }
-        std::string key(reinterpret_cast<const char*>(pucKey), u16KeyLen);
-        const bool soft = (u16SeekType & 1u) != 0;
-        auto r = si->parent->conn->seek_index(
-            si->parent, si->column, key, soft, /*last=*/false);
-        if (!r) return fail(r.error());
-        const bool found = r.value();
-        sql_uri_mark_index_full(si->parent);
-        si->last_seek_found = found;
-        si->parent->last_seek_found = found;
-        if (pbFound) *pbFound = found ? 1 : 0;
-        (void)u16KeyType;
-        return ok();
-    }
-#endif
-#if defined(OPENADS_WITH_POSTGRESQL)
-    if (auto* si = get_postgres_index(hIndex)) {
-        if (si->parent == nullptr || si->parent->conn == nullptr) {
-            return fail(openads::AE_INTERNAL_ERROR, "postgres index orphan");
-        }
-        std::string key(reinterpret_cast<const char*>(pucKey), u16KeyLen);
-        const bool soft = (u16SeekType & 1u) != 0;
-        si->parent->row_valid = false;
-        auto r = si->parent->conn->seek_index(
-            si->parent, si->column, key, soft, /*last=*/false);
-        if (!r) return fail(r.error());
-        const bool found = r.value();
-        sql_uri_mark_index_full(si->parent);
-        si->last_seek_found = found;
-        if (pbFound) *pbFound = found ? 1 : 0;
-        (void)u16KeyType;
-        return ok();
-    }
-#endif
-    if (auto* ri = get_remote_index(hIndex)) {
-        std::string key(reinterpret_cast<const char*>(pucKey),
-                        u16KeyLen);
-        if (ri->parent) {
-            ri->parent->row_valid = false;               // M12.17
-            // RCB 07/14/2026: BUG FIX — this path invalidated the cached row
-            // but not the lookahead queue. A seek repositions the server cursor
-            // ABSOLUTELY, so every queued row belongs to the pre-seek position
-            // and the consumed-lag counter no longer describes anything real.
-            // Left as it was, the next AdsSkip(1) popped a stale PRE-SEEK row
-            // and returned it as the current record with no wire traffic at all
-            // — nothing on the network to make it look wrong — and the wire skip
-            // after that sent (step + a lag that no longer applied).
-            ri->parent->invalidate_prefetch();
-        }
-        // RCB 07/14/2026: M12.24 — pass the parent so the SeekAck's row trailer
-        // lands straight in the row cache. Without it row_valid stays false and
-        // the caller's next AdsGetField pays a FetchCurrentRow round-trip, i.e.
-        // seek-then-read costs 2 RTTs instead of 1.
-        auto r = ri->conn->seek(ri->id, key,
-            static_cast<std::uint8_t>(u16SeekType),
-            /*last=*/0, ri->parent);
-        if (!r) return fail(r.error());
-        if (pbFound) *pbFound = r.value().hit;
-        if (ri->parent) {                            // M12.21 option C
-            ri->parent->found_cached  = true;
-            ri->parent->current_found = (r.value().hit != 0);
-        }
-        (void)u16KeyType;
-        return ok();
-    }
+                   UNSIGNED16* pbFound,
+                   bool find_last) {
     Table* t = table_for_index(hIndex);
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown index");
     std::string key;
@@ -16319,13 +16184,170 @@ UNSIGNED32 ENTRYPOINT AdsSeek(ADSHANDLE hIndex,
             return ok();
         }
     }
-    auto r = t->seek_key(key, soft);
+    auto r = t->seek_key(key, soft, find_last);
     if (!r) return fail(r.error());
     bool found = r.value();
     if (pbFound != nullptr) *pbFound = found ? 1 : 0;
     snapshot_ri_pks(t);
     apply_relations_for_table(t);
     return ok();
+}
+
+UNSIGNED32 ENTRYPOINT AdsSeek(ADSHANDLE hIndex,
+                   UNSIGNED8* pucKey,
+                   UNSIGNED16 u16KeyLen,
+                   UNSIGNED16 u16KeyType,
+                   UNSIGNED16 u16SeekType,
+                   UNSIGNED16* pbFound) {
+#if defined(OPENADS_WITH_SQLITE)
+    if (auto* si = get_sqlite_index(hIndex)) {
+        if (si->parent == nullptr || si->parent->conn == nullptr) {
+            return fail(openads::AE_INTERNAL_ERROR, "sqlite index orphan");
+        }
+        std::string key(reinterpret_cast<const char*>(pucKey), u16KeyLen);
+        const bool soft = (u16SeekType & 1u) != 0;
+        si->parent->row_valid = false;
+        auto r = si->parent->conn->seek_index(
+            si->parent, si->column, key, soft, /*last=*/false);
+        if (!r) return fail(r.error());
+        const bool found = r.value();
+        sql_uri_mark_index_full(si->parent);
+        si->last_seek_found = found;
+        if (pbFound) *pbFound = found ? 1 : 0;
+        (void)u16KeyType;
+        return ok();
+    }
+#endif
+#if defined(OPENADS_WITH_ODBC)
+    if (auto* si = get_odbc_index(hIndex)) {
+        if (si->parent == nullptr || si->parent->conn == nullptr) {
+            return fail(openads::AE_INTERNAL_ERROR, "odbc index orphan");
+        }
+        std::string key(reinterpret_cast<const char*>(pucKey), u16KeyLen);
+        const bool soft = (u16SeekType & 1u) != 0;
+        si->parent->row_valid = false;
+        auto r = si->parent->conn->seek_index(
+            si->parent, si->column, si->expr_kind, key, soft,
+            /*last=*/false);
+        if (!r) return fail(r.error());
+        const bool found = r.value();
+        sql_uri_mark_index_full(si->parent);
+        si->last_seek_found = found;
+        if (pbFound) *pbFound = found ? 1 : 0;
+        (void)u16KeyType;
+        return ok();
+    }
+#endif
+#if defined(OPENADS_WITH_FIREBIRD)
+    if (auto* si = get_firebird_index(hIndex)) {
+        if (si->parent == nullptr || si->parent->conn == nullptr) {
+            return fail(openads::AE_INTERNAL_ERROR, "firebird index orphan");
+        }
+        std::string key(reinterpret_cast<const char*>(pucKey), u16KeyLen);
+        const bool soft = (u16SeekType & 1u) != 0;
+        si->parent->row_valid = false;
+        auto r = si->parent->conn->seek_index(
+            si->parent, si->column, si->expr_kind, key, soft,
+            /*last=*/false);
+        if (!r) return fail(r.error());
+        const bool found = r.value();
+        sql_uri_mark_index_full(si->parent);
+        si->last_seek_found = found;
+        if (pbFound) *pbFound = found ? 1 : 0;
+        (void)u16KeyType;
+        return ok();
+    }
+#endif
+#if defined(OPENADS_WITH_MARIADB)
+    if (auto* si = get_maria_index(hIndex)) {
+        if (si->parent == nullptr || si->parent->conn == nullptr) {
+            return fail(openads::AE_INTERNAL_ERROR, "mariadb index orphan");
+        }
+        std::string key(reinterpret_cast<const char*>(pucKey), u16KeyLen);
+        const bool soft = (u16SeekType & 1u) != 0;
+        si->parent->row_valid = false;
+        auto r = si->parent->conn->seek_index(
+            si->parent, si->column, key, soft, /*last=*/false);
+        if (!r) return fail(r.error());
+        const bool found = r.value();
+        sql_uri_mark_index_full(si->parent);
+        si->last_seek_found = found;
+        if (pbFound) *pbFound = found ? 1 : 0;
+        (void)u16KeyType;
+        return ok();
+    }
+#endif
+#if defined(OPENADS_WITH_MSSQL)
+    if (auto* si = get_mssql_index(hIndex)) {
+        if (si->parent == nullptr || si->parent->conn == nullptr) {
+            return fail(openads::AE_INTERNAL_ERROR, "mssql index orphan");
+        }
+        std::string key(reinterpret_cast<const char*>(pucKey), u16KeyLen);
+        const bool soft = (u16SeekType & 1u) != 0;
+        auto r = si->parent->conn->seek_index(
+            si->parent, si->column, key, soft, /*last=*/false);
+        if (!r) return fail(r.error());
+        const bool found = r.value();
+        sql_uri_mark_index_full(si->parent);
+        si->last_seek_found = found;
+        si->parent->last_seek_found = found;
+        if (pbFound) *pbFound = found ? 1 : 0;
+        (void)u16KeyType;
+        return ok();
+    }
+#endif
+#if defined(OPENADS_WITH_POSTGRESQL)
+    if (auto* si = get_postgres_index(hIndex)) {
+        if (si->parent == nullptr || si->parent->conn == nullptr) {
+            return fail(openads::AE_INTERNAL_ERROR, "postgres index orphan");
+        }
+        std::string key(reinterpret_cast<const char*>(pucKey), u16KeyLen);
+        const bool soft = (u16SeekType & 1u) != 0;
+        si->parent->row_valid = false;
+        auto r = si->parent->conn->seek_index(
+            si->parent, si->column, key, soft, /*last=*/false);
+        if (!r) return fail(r.error());
+        const bool found = r.value();
+        sql_uri_mark_index_full(si->parent);
+        si->last_seek_found = found;
+        if (pbFound) *pbFound = found ? 1 : 0;
+        (void)u16KeyType;
+        return ok();
+    }
+#endif
+    if (auto* ri = get_remote_index(hIndex)) {
+        std::string key(reinterpret_cast<const char*>(pucKey),
+                        u16KeyLen);
+        if (ri->parent) {
+            ri->parent->row_valid = false;               // M12.17
+            // RCB 07/14/2026: BUG FIX — this path invalidated the cached row
+            // but not the lookahead queue. A seek repositions the server cursor
+            // ABSOLUTELY, so every queued row belongs to the pre-seek position
+            // and the consumed-lag counter no longer describes anything real.
+            // Left as it was, the next AdsSkip(1) popped a stale PRE-SEEK row
+            // and returned it as the current record with no wire traffic at all
+            // — nothing on the network to make it look wrong — and the wire skip
+            // after that sent (step + a lag that no longer applied).
+            ri->parent->invalidate_prefetch();
+        }
+        // RCB 07/14/2026: M12.24 — pass the parent so the SeekAck's row trailer
+        // lands straight in the row cache. Without it row_valid stays false and
+        // the caller's next AdsGetField pays a FetchCurrentRow round-trip, i.e.
+        // seek-then-read costs 2 RTTs instead of 1.
+        auto r = ri->conn->seek(ri->id, key,
+            static_cast<std::uint8_t>(u16SeekType),
+            /*last=*/0, ri->parent);
+        if (!r) return fail(r.error());
+        if (pbFound) *pbFound = r.value().hit;
+        if (ri->parent) {                            // M12.21 option C
+            ri->parent->found_cached  = true;
+            ri->parent->current_found = (r.value().hit != 0);
+        }
+        (void)u16KeyType;
+        return ok();
+    }
+    return ads_seek_local(hIndex, pucKey, u16KeyLen, u16KeyType,
+                          u16SeekType, pbFound, /*find_last=*/false);
 }
 
 UNSIGNED32 ENTRYPOINT AdsSeekLast(ADSHANDLE hIndex,
@@ -16464,14 +16486,13 @@ UNSIGNED32 ENTRYPOINT AdsSeekLast(ADSHANDLE hIndex,
         (void)u16KeyType;
         return ok();
     }
-    // Latch the "we're inside an AdsSeekLast cycle" flag. rddads'
-    // adsSeek retries via AdsSeek soft + AdsSkip(-1) when this hard
-    // seek misses; AdsSeek consults the latch to suppress its
-    // empty-key always-found quirk. AdsSkip clears the latch.
+    // Mark the AdsSeekLast cycle for rddads' retry chain (see the latch
+    // definition). The fLast walk itself does NOT ride on the latch --
+    // it is passed explicitly, because a latch left set by an early
+    // return would turn the next plain AdsSeek into a seek-last.
     seek_last_retry_latch() = true;
-    auto rc = AdsSeek(hIndex, pucKey, u16KeyLen, u16KeyType,
-                      /*soft*/ 0, pbFound);
-    return rc;
+    return ads_seek_local(hIndex, pucKey, u16KeyLen, u16KeyType,
+                          /*soft*/ 0, pbFound, /*find_last=*/true);
 }
 
 // SAP / rddads signature: 5 args.
