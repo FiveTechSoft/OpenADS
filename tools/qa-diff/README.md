@@ -45,7 +45,14 @@ view resolution). See `TODO.parity.md`.
 mp10's tables were SAP-encrypted; `tools/decrypt_dd` decrypted them in place,
 which is what made this corpus possible at all.
 
+The dictionary password is never stored in this repo — it is public. Supply it
+per run; both gates read `OPENADS_PARITY_PW` (or take `-Password`).
+
 ```powershell
+$env:OPENADS_PARITY_PW = Read-Host 'DD password' -AsSecureString `
+    | ForEach-Object { [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+        [Runtime.InteropServices.Marshal]::SecureStringToBSTR($_)) }
+
 # 1. SAP side - copy the data dir, skipping backups and the transaction log.
 #    ~67 GB / 300 files. Most of it is .adm memo blobs; copy them anyway so a
 #    missing memo never gets mistaken for an engine bug.
@@ -59,7 +66,7 @@ robocopy "F:\tmp\parity\sap_data_mp" "F:\tmp\parity\oa_data_mp" /E /MT:16 /R:1 /
 F:\OpenADS\build\ninja-clang-local\tools\import_dd\openads_import_dd.exe `
     --source F:\tmp\parity\sap_data_mp\mp.add `
     --dest   F:\tmp\parity\oa_data_mp\mp_OpenADS.add `
-    --user adssys --password mp10 --sap-lib F:\ads11\ace64.dll
+    --user adssys --password $env:OPENADS_PARITY_PW --sap-lib F:\ads11\ace64.dll
 
 # 4. Run the gate.
 cd F:\OpenADS\tools\qa-diff; .\s4_parity_mp.ps1
