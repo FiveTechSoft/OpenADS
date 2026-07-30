@@ -823,6 +823,13 @@ void Session::sync_engine_cursor(std::uint32_t id) {
     if (auto hit = tbls_h_.find(id); hit != tbls_h_.end()) {
         h = hit->second;
     } else { return; }
+    // Appends / writes often go through the parallel ABI handle (where
+    // CreateIndex / OpenIndex bound the bag). Re-read the header so the
+    // engine Table sees the new record_count before GotoRecord.
+    if (auto* drv = tbl->driver()) {
+        drv->refresh_record_count_from_disk();
+        drv->invalidate_read_cache();
+    }
     UNSIGNED32 rn = 0;
     AdsGetRecordNum(h, 0, &rn);
     if (rn == 0) return;
@@ -2783,9 +2790,25 @@ DispatchResult Session::dispatch(const Frame& f) {
             }
             auto* tbl = sess_conn_->lookup_table(it->second);
             if (!tbl) { reply = err("AppendBlank: lookup failed"); break; }
-            auto r = tbl->append_record();
-            if (!r) { reply = err("AppendBlank: append_record failed"); break; }
-            tbl->set_pending_append(true);
+            // M12.16 dual-handle: CreateIndex/OpenIndex bind bags on the
+            // parallel ABI Table (tbls_h_), not on the engine Table used by
+            // the historical write path. Writing only through the engine
+            // left production CDX bags empty after remote APPEND (Pritpal
+            // TestIndex: 36 rows / 0 keys). Prefer the ABI handle when it
+            // exists so sync_all_indexes_ updates every bound tag.
+            if (auto hit = tbls_h_.find(id); hit != tbls_h_.end()) {
+                UNSIGNED32 rrc = AdsAppendRecord(hit->second);
+                if (rrc != 0) { reply = err("AppendBlank", rrc); break; }
+                // Persist dirty index pages so a later reopen of the bag
+                // (or another station) sees the new keys.
+                (void)AdsFlushFileBuffers(hit->second);
+                sync_engine_cursor(id);
+                tbl->set_pending_append(true);
+            } else {
+                auto r = tbl->append_record();
+                if (!r) { reply = err("AppendBlank: append_record failed"); break; }
+                tbl->set_pending_append(true);
+            }
             reply.opcode = Opcode::AppendBlankAck;
             break;
         }
@@ -2812,6 +2835,28 @@ DispatchResult Session::dispatch(const Frame& f) {
             }
             auto* tbl = sess_conn_->lookup_table(it->second);
             if (!tbl) { reply = err("SetField: lookup failed"); break; }
+
+            // When indexes live on the parallel ABI handle, write through
+            // AdsSetString so the bag is maintained (see AppendBlank).
+            if (auto hit = tbls_h_.find(id); hit != tbls_h_.end()) {
+                std::vector<UNSIGNED8> fn(fname.begin(), fname.end());
+                fn.push_back(0);
+                std::vector<UNSIGNED8> vv(val.begin(), val.end());
+                // AdsSetString takes length; do not require NUL in value.
+                UNSIGNED32 rrc = AdsSetString(
+                    hit->second, fn.data(),
+                    vv.empty() ? reinterpret_cast<UNSIGNED8*>(const_cast<char*>(""))
+                               : vv.data(),
+                    static_cast<UNSIGNED32>(val.size()));
+                if (rrc != 0) {
+                    reply = err("SetField: write failed", rrc);
+                    break;
+                }
+                (void)AdsFlushFileBuffers(hit->second);
+                sync_engine_cursor(id);
+                reply.opcode = Opcode::SetFieldAck;
+                break;
+            }
 
             std::int32_t fi = tbl->field_index(fname);
             if (fi < 0) { reply = err("SetField: column not found"); break; }
@@ -2858,8 +2903,14 @@ DispatchResult Session::dispatch(const Frame& f) {
             }
             auto* tbl = sess_conn_->lookup_table(it->second);
             if (!tbl) { reply = err("DeleteRecord: lookup failed"); break; }
-            auto r = tbl->mark_deleted();
-            if (!r) { reply = err("DeleteRecord: mark_deleted failed"); break; }
+            if (auto hit = tbls_h_.find(id); hit != tbls_h_.end()) {
+                UNSIGNED32 rrc = AdsDeleteRecord(hit->second);
+                if (rrc != 0) { reply = err("DeleteRecord", rrc); break; }
+                sync_engine_cursor(id);
+            } else {
+                auto r = tbl->mark_deleted();
+                if (!r) { reply = err("DeleteRecord: mark_deleted failed"); break; }
+            }
             reply.opcode = Opcode::DeleteRecordAck;
             break;
         }
@@ -2911,6 +2962,10 @@ DispatchResult Session::dispatch(const Frame& f) {
             }
             auto* tbl = sess_conn_->lookup_table(it->second);
             if (!tbl) { reply = err("FlushTable: lookup failed"); break; }
+            // Flush the ABI twin first (holds open index bags), then engine.
+            if (auto hit = tbls_h_.find(id); hit != tbls_h_.end()) {
+                (void)AdsFlushFileBuffers(hit->second);
+            }
             auto r = tbl->flush();
             if (!r) { reply = err("FlushTable: flush failed"); break; }
             reply.opcode = Opcode::FlushTableAck;

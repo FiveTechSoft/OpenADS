@@ -1,3 +1,42 @@
+## 1.8.41 - 2026-07-30
+
+Remote CDX index maintenance fix reported by Pritpal Bedi, plus regression
+tests that pin the empty-order semantics (local + remote). Everything since
+**v1.8.40**.
+
+### Fixed - remote APPEND did not update open CDX bags (Pritpal Bedi)
+
+`AdsCreateIndex` / `AdsOpenIndex` over `tcp://` bind tags on a **parallel ABI
+table handle** (M12.16 `ensure_abi_handle` / `tbls_h_`). `AppendBlank` and
+`SetField` wrote only through the **engine** `Table`, which never held those
+index bindings, so `sync_all_indexes_` was a no-op.
+
+Symptom: after remote `INDEX ON` (even empty) and subsequent `APPEND`, the
+production `.cdx` stayed at `root_page=0` / `OrdKeyCount=0` while the DBF had
+rows. ADSCDX then did GoTop on an empty order - BOF+EOF, blank `FieldGet` /
+Browse with **no error**. HbDBU/DBFCDX could report the companion bag as
+corrupt. Verified against a live iMac `openads_serverd` on the LAN.
+
+Fix in `session.cpp`: when the ABI twin exists, route Append / SetField /
+Delete through it, flush dirty index pages, and refresh the engine cursor
+(`record_count` + invalidate read cache) so the dual handles stay aligned.
+
+### Tests
+
+- `abi_pritpal_empty_index_test.cpp` - local: empty INDEX ON, non-structural
+  bag without open, production auto-open maintenance, data-first INDEX ON,
+  append with order open.
+- `abi_remote_pritpal_empty_index_test.cpp` - same scenarios over an embedded
+  `openads_serverd` (loopback).
+
+### Compatibility notes
+
+- Requires updating **both** client (`ace64`/`ace32`) and `openads_serverd`
+  for the remote index-maintenance fix (server-side write path).
+- Empty bags created under unfixed servers remain empty on disk; delete the
+  `.cdx` and recreate after data exists, or re-run `INDEX ON` / `REINDEX` once
+  on a fixed server with the table populated.
+
 ## 1.8.40 - 2026-07-30
 
 RusSoft ERP production batch integrated from open PRs #148–#155, plus the CI
