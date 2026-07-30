@@ -15,7 +15,7 @@ shape of the fix, so none of them gets lost. Ordered by value.
 | # | Item | Where | Verified |
 |---|---|---|---|
 | 1 | **Column-level permission ENFORCEMENT** | `get_effective_ops()` / query projection | analysed, not started |
-| 2 | **`sp_` `__output` truncates column names to 10 chars** | `run_dd_procedure()` | ✅ re-confirmed 2026-07-30 |
+| 2 | ~~`sp_` `__output` truncates column names to 10 chars~~ | `run_dd_procedure()` | ✅ **FIXED 2026-07-30** |
 | 3 | **`AdsSetString` into an ADT DOUBLE stores text verbatim** | ADT write path | ✅ hit while writing a fixture |
 | 4 | **`DB:Debug` group not imported** | `import_dd` | ✅ mp gate `cat_db_groups` |
 | 5 | **`Ver8L` link not surfaced as a permission object** | permissions matrix builder | ✅ mp gate `cat_perms_links` |
@@ -40,29 +40,33 @@ columns on both engines for mp (55131/51 = 54050/50 = 1081, matching
 Work: import column grants → per-column model → enforce at query time
 (projection masking / deny). Detail in `todo.local.md`.
 
-### 2. `sp_` `__output` still truncates to 10 chars — NOT fixed by the v1.8.40 work
+### 2. ✅ FIXED 2026-07-30 — `sp_` `__output` no longer truncates to 10 chars
 
-Re-confirmed on mp 2026-07-30:
+Was: `EXECUTE PROCEDURE sp_GetPhysicalPath()` returned `databasepa` where SAP
+returns `databasepath`. Capping every stored-procedure result column at 10
+characters limited the SQL engine for no reason — procedures read ADT tables and
+declare outputs mirroring SAP catalog columns, whose names run to 18.
 
-```
-EXECUTE PROCEDURE sp_GetPhysicalPath()
-  SAP : {"databasepath": ...}     12 chars
-  OA  : {"databasepa":   ...}     truncated
-```
+The earlier v1.8.40 fix covered only the **static-cursor** path (`_srt_`);
+procedure output is a separate site. `run_dd_procedure()` builds `_spout_*`
+through `CREATE TABLE … AS FREE TABLE`, which takes its format from the
+statement's table type and defaults to CDX (DBF). It now pins `ADS_ADT` across
+that one DDL and restores the caller's setting afterwards, so a procedure body
+running its own `CREATE TABLE` does not inherit the choice.
 
-The 2026-07-30 fix covered only the **static-cursor** path
-(`ORDER BY`/`DISTINCT`/`TOP`, the `_srt_` temp). Procedure output is a separate
-site: `run_dd_procedure()` in `src/abi/ace_exports.cpp` builds `_spout_*` with
-`") AS FREE TABLE"`, which yields a **DBF** — 10-char field names.
+Also lifted `sql_type_of()`'s `CHAR` clamp from 254 (DBF's character maximum) —
+ADT carries the length in a uint16, and an over-long *record* is now rejected by
+`AdsCreateTable` rather than silently shortened. SAP procs routinely declare
+`CICHAR(255)` and wider.
 
-Fix mirrors the one already made: materialise as **ADT**, and map decimal
-numerics to `AsciiNumeric` (ADT type 2) so the declared scale survives too.
-**Read `docs/materialised-cursor-temps.md` first** — it explains why those two
-requirements conflict and which format satisfies both. Needs a way to ask the
-SQL `CREATE TABLE` path for ADT; `AS FREE TABLE` currently means DBF.
+Guarded by `abi_script_proc_test.cpp` *"script proc: `__output` keeps column
+names longer than 10 chars"*, verified to fail with the fix reverted. mp gate
+`sp_GetPhysicalPath` now passes on the column name, not just the path.
 
-The same truncation remains in the **join / union / aggregate** materialisers
-(joins additionally rename right-side columns `R_*`). Same fix, same doc.
+**Still open — the same truncation remains in the join / union / aggregate
+materialisers** (joins additionally rename right-side columns `R_*`, itself a
+consequence of squeezing `R_` + the source name into 10 bytes). Same root cause,
+same fix, same doc: `docs/materialised-cursor-temps.md`.
 
 ### 3. `AdsSetString` into an ADT DOUBLE stores the text verbatim
 

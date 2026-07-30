@@ -4,6 +4,14 @@
 #
 # Usage: .\s4_parity.ps1  (expects F:\tmp\parity\{sap_data,oa_data} set up
 #        and pmsys_OpenADS.add already converted in oa_data)
+#
+# PSAvoidUsingPlainTextForPassword is suppressed deliberately: dd_meta_dump.exe
+# takes --password as a command-line argument, so the value has to be plaintext
+# at the point of use. A SecureString here would only be decoded a few lines
+# later and would add ceremony without adding protection. What matters is that
+# the value is never *stored* in the repo — hence the env-var default below.
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+    'PSAvoidUsingPlainTextForPassword', 'Password')]
 param(
     [string]$SapLib = "F:\ads11\ace64.dll",
     [string]$SapDb  = "F:\tmp\parity\sap_data\pmsys.add",

@@ -22383,11 +22383,18 @@ struct ProcBridge final : openads::script::SqlBridge {
 };
 
 // SQL column type for a declared output parameter (temp __output table).
+//
+// The __output temp is an ADT (see run_dd_procedure below), so DBF's limits do
+// not apply here. The old 254 cap was DBF's character-field maximum and it
+// silently shortened any wider declared output — SAP procs routinely declare
+// CICHAR(255) and wider. ADT carries the length in a uint16 field descriptor;
+// an over-long *record* is rejected by AdsCreateTable ("ADT record too long")
+// rather than silently truncated, which is the behaviour we want.
 inline std::string sql_type_of(const openads::script::Param& p) {
     switch (p.type) {
         case Type::Char: {
             std::size_t n = p.char_limit ? p.char_limit : 254;
-            if (n > 254) n = 254;
+            if (n > 0xFFFFu) n = 0xFFFFu;
             return "CHAR(" + std::to_string(n) + ")";
         }
         case Type::Integer:   return "INTEGER";
@@ -22427,7 +22434,36 @@ inline openads::util::Result<std::string> run_dd_procedure(
             ddl += "[" + p.name + "] " + sql_type_of(p);
         }
         ddl += ") AS FREE TABLE";
+
+        // >>> The __output temp MUST be ADT. Read
+        // >>> docs/materialised-cursor-temps.md before changing this.
+        //
+        // A DBF field descriptor allots the column name 11 bytes, so a DBF
+        // temp truncates every declared output column to 10 characters:
+        // sp_GetPhysicalPath's `databasepath` came back as `databasepa`. That
+        // is not cosmetic — the procedure may be reading ADT tables or
+        // declaring outputs that mirror SAP catalog columns, whose names run
+        // well past 10 (Trig_Function_Name is 18), and a caller that then
+        // references the column by name simply cannot find it. Capping every
+        // stored-procedure result column at 10 chars limits the SQL engine for
+        // no reason: ADT carries full-length names and costs nothing here.
+        //
+        // Plain CREATE TABLE takes its format from the statement's table type
+        // and defaults to CDX (i.e. DBF), so pin ADT across this one DDL and
+        // restore the caller's setting afterwards — the procedure body may run
+        // its own CREATE TABLE and must not inherit our choice.
+        //
+        // This mirrors the fix already made to the SELECT static-cursor path
+        // (the `_srt_` temp in exec_sql_direct_impl). Both had the same root
+        // cause; fixing only one leaves the other silently truncating.
+        UNSIGNED16 saved_tt = 0;
+        SqlStatement* st_out = stmt_lookup(hStmt);
+        if (st_out != nullptr) {
+            saved_tt = st_out->table_type;
+            st_out->table_type = ADS_ADT;
+        }
         auto cr = bridge.inner.exec(ddl);
+        if (st_out != nullptr) st_out->table_type = saved_tt;
         if (!cr) return cr.error();
         bridge.out_table = nb;
     }

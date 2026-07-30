@@ -15,6 +15,14 @@
 #   F:\tmp\parity\oa_data_mp\mp_OpenADS.add   <- same copy, run through import_dd
 #
 # Usage: .\s4_parity_mp.ps1
+#
+# PSAvoidUsingPlainTextForPassword is suppressed deliberately: dd_meta_dump.exe
+# takes --password as a command-line argument, so the value has to be plaintext
+# at the point of use. A SecureString here would only be decoded a few lines
+# later and would add ceremony without adding protection. What matters is that
+# the value is never *stored* in the repo — hence the env-var default below.
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+    'PSAvoidUsingPlainTextForPassword', 'Password')]
 param(
     [string]$SapLib = "F:\ads11\ace64.dll",
     [string]$SapDb  = "F:\tmp\parity\sap_data_mp\mp.add",
@@ -148,7 +156,7 @@ $shapeCases = [ordered]@{
 # only because the old regex checked the path and ignored the column name.
 "sp_GetPhysicalPath" = @(
     "EXECUTE PROCEDURE sp_GetPhysicalPath()",
-    '"databasepath":"F:\\\\\\\\tmp\\\\\\\\parity\\\\\\\\(sap|oa)_data_mp'
+    '"databasepath":"F:\\\\tmp\\\\parity\\\\(sap|oa)_data_mp'
 );
 }
 
@@ -168,8 +176,10 @@ $rcCases = [ordered]@{
 "rc_bad_func_arg"    = "SELECT DaysInMonth('x','y') AS v FROM system.iota";
 }
 
-# Buckets kept for symmetry with s4_parity.ps1 (none needed yet on mp).
-$oaCorrectCases = [ordered]@{}
+# Note: s4_parity.ps1 also has an $oaCorrectCases bucket (SAP's own pmsys DD
+# stores some UDF bodies truncated, so SAP fails where OpenADS is right). mp has
+# no such case, so that bucket and its loop are omitted here rather than left
+# declared-and-unused.
 
 $pass = 0; $fail = 0
 

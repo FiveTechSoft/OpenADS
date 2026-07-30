@@ -10,16 +10,25 @@ scenario breaks, and both have already been regressed once.
 first.** The relevant code is `exec_sql_direct_impl()` in
 `src/abi/ace_exports.cpp` (search for `_srt_`).
 
-## Which queries materialise
+## What materialises, and where
 
-Single-table `SELECT` with any of `ORDER BY`, `DISTINCT`, `LIMIT`/`TOP`.
-A plain `SELECT ... [WHERE ...]` does **not** — it stays a live cursor. That
-asymmetry is why a bug here often looks like "the query works until I add
-ORDER BY".
+| Path | Temp | Site | Format |
+|---|---|---|---|
+| Single-table `SELECT` with `ORDER BY` / `DISTINCT` / `LIMIT` / `TOP` | `_srt_*` | `exec_sql_direct_impl()` | **ADT** ✅ |
+| `EXECUTE PROCEDURE` declared outputs (`__output`) | `_spout_*` | `run_dd_procedure()` | **ADT** ✅ |
+| Joins (2-table and N-way), unions, aggregates | various | same file | **DBF** ⚠️ still truncates |
 
-Joins, unions, aggregates and `EXECUTE PROCEDURE` result sets have their own
-materialisers elsewhere in the same file; they are **not** covered by this note
-and still carry the DBF constraints described below.
+A plain `SELECT ... [WHERE ...]` does **not** materialise — it stays a live
+cursor. That asymmetry is why a bug here often looks like "the query works until
+I add ORDER BY".
+
+**The two fixed paths were fixed separately, months apart, for the same root
+cause.** Fixing one and assuming the other was covered is exactly how the
+`__output` truncation survived: `sp_GetPhysicalPath` was still returning
+`databasepa` after the `_srt_` path was corrected. The join/union/aggregate
+materialisers are still on DBF — same constraint matrix applies when you get to
+them (joins additionally rename right-side columns `R_*`, itself a consequence
+of squeezing `R_` + the source name into 10 bytes).
 
 ## The three constraints, and the format they force
 
@@ -68,14 +77,37 @@ closes. Its extension list must cover every format a materialiser can emit
 older build are still removed). Anything missing leaks one file per query into
 the customer's data directory.
 
+## A note on `__output` specifically
+
+Procedure outputs have no declared scale — `openads::script::Type` is
+Char/Integer/Double/Logical/Date/Timestamp — so constraint 3 does not bite
+there and no `AsciiNumeric` mapping is needed. Constraint 2 very much does: a
+procedure may be reading ADT tables or declaring outputs that mirror SAP catalog
+columns, and those names run past 10 characters routinely.
+
+`run_dd_procedure()` builds the temp through `CREATE TABLE … AS FREE TABLE`,
+which takes its format from the **statement's** table type and defaults to CDX
+(i.e. DBF). It therefore pins `ADS_ADT` across that one DDL and **restores the
+caller's setting afterwards** — the procedure body may run its own
+`CREATE TABLE` and must not silently inherit our choice.
+
+Because the temp is ADT, `sql_type_of()` no longer clamps `CHAR` to 254 (DBF's
+character maximum). An over-long *record* is now rejected by `AdsCreateTable`
+("ADT record too long") instead of being silently shortened.
+
 ## Regression tests
 
 - `tests/unit/abi_sql_orderby_test.cpp` —
   *"materialised cursors keep column names longer than 10 chars"* covers
   constraints 2 and 3 together, across `ORDER BY`, `DISTINCT` and `TOP`.
 - `tests/unit/abi_sql_orderby_types_test.cpp` — numeric scale (#146).
+- `tests/unit/abi_script_proc_test.cpp` —
+  *"script proc: `__output` keeps column names longer than 10 chars"* covers the
+  procedure path, and also asserts the value is reachable **by** the full name,
+  which is what a truncated descriptor actually breaks for callers.
 
-If either fails with a truncated name or a re-rendered number, a materialising
+Each was verified to fail with its fix reverted — they guard, they do not merely
+pass. If one fails with a truncated name or a re-rendered number, a materialising
 path has gone back to a format that cannot carry both. Do not adjust the
 expectations.
 
