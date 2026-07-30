@@ -69,6 +69,10 @@ public:
         cur_index_ = -1;
     }
 
+    // Drop clean page-cache entries when a peer has rewritten the bag
+    // (sub-tag counter / root_page changed). See IIndex::refresh_from_disk.
+    void refresh_from_disk() override;
+
     // Reset this sub-tag's B+tree to empty (drop the existing
     // root) so a CREATE-INDEX-with-existing-tag can rebuild from
     // scratch on top of an old layout. Old leaves stay on disk
@@ -176,6 +180,8 @@ public:
 private:
     util::Result<Page*> get_page_(std::uint32_t offset);
     util::Result<void>  flush_page_(std::uint32_t offset);
+    // Internal: compare on-disk sub-tag header to in-memory root/counter.
+    util::Result<void>  reload_header_if_changed_();
 
     // Reclaim every page of the (sub-)tree rooted at `off` onto the free
     // list so a subsequent rebuild reuses them instead of leaking. Used

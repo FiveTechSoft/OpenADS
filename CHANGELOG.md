@@ -1,3 +1,27 @@
+## 1.8.42 - 2026-07-30
+
+Multiuser browse visibility: stations saw the same LastRec after a peer
+append, but Skip / Browse only walked the rows present when the workarea
+was opened. Reported by Pritpal Bedi. Everything since **v1.8.41**.
+
+### Fixed - peer-appended rows invisible to open browsers
+
+- **Natural order:** `CdxDriver` cached `rec_count_` at open. Local
+  `AdsGetRecordCount`, `GoTop` / `GoBottom` / `Skip` / `GotoRecord`
+  used that fence as EOF, so a Shared workarea never reached rows another
+  station had just written. Refresh the on-disk DBF header before those
+  operations (server `GetRecordCount` already did).
+- **Ordered browse:** each station kept a private CDX page cache. Leaf-only
+  inserts did not bump the on-disk sub-tag counter, so peers never dropped
+  stale pages. Every insert now rewrites the tag header (counter++), and
+  `refresh_from_disk()` reloads root/counter and clears clean page cache
+  before navigation and key-count walks.
+
+### Tests
+
+- `abi_multiuser_nav_visibility_test.cpp` — two Shared connections:
+  natural-order walk and production-CDX ordered walk after peer append.
+
 ## 1.8.41 - 2026-07-30
 
 Remote CDX index maintenance fix reported by Pritpal Bedi, plus regression

@@ -9615,6 +9615,10 @@ UNSIGNED32 ENTRYPOINT AdsGetRecordCount(ADSHANDLE hTable, UNSIGNED16 bFilterOpti
         t->goto_record(saved);
         *pulRecordCount = live;
     } else {
+        // Multiuser: peer appends bump the on-disk header; re-read so
+        // LastRec() / RecCount() match the other stations (and so the
+        // browser's EOF fence is not stuck at open-time count).
+        t->refresh_record_count_from_disk();
         *pulRecordCount = t->record_count();
     }
     return ok();

@@ -354,6 +354,11 @@ util::Result<void> Table::goto_top() {
     // Absolute reposition: drop any read-ahead block so we observe
     // writes made through another handle and start the scan fresh.
     driver_->invalidate_read_cache();
+    // Multiuser: peer appends update the on-disk header; re-read so
+    // natural-order navigation reaches the new LastRec (Pritpal Bedi:
+    // browse only walked rows present at open while RecCount was current).
+    driver_->refresh_record_count_from_disk();
+    if (order_ && order_->index()) order_->index()->refresh_from_disk();
     // Empty table → Limbo regardless of active order / sequence.
     if (driver_->record_count() == 0) {
         state_ = State::Limbo; recno_ = 0; return {};
@@ -444,6 +449,8 @@ util::Result<void> Table::goto_top() {
 util::Result<void> Table::goto_bottom() {
     // Absolute reposition: drop any read-ahead block (see goto_top).
     driver_->invalidate_read_cache();
+    driver_->refresh_record_count_from_disk();
+    if (order_ && order_->index()) order_->index()->refresh_from_disk();
     // Empty table → Limbo regardless of active order / sequence.
     if (driver_->record_count() == 0) {
         state_ = State::Limbo; recno_ = 0; return {};
@@ -517,6 +524,10 @@ util::Result<void> Table::goto_record(std::uint32_t recno) {
     // so the (re)read hits disk — this is how a workarea sees an edit
     // made through another handle, and how RefreshRecord re-reads.
     driver_->invalidate_read_cache();
+    // Multiuser: a peer may have appended since we last read the header.
+    // Without this, GO <new_recno> and "past end" decisions use a stale
+    // LastRec and the browse never reaches peer-appended rows.
+    driver_->refresh_record_count_from_disk();
     // Harbour / SAP-ACE / Clipper convention: GO 0 is the phantom
     // position. On empty table → Limbo (BOF+EOF). Otherwise → Eof,
     // unless we were already sitting in Limbo (e.g. after a
@@ -619,6 +630,14 @@ util::Result<void> Table::refresh_record_buffer() {
 }
 
 util::Result<void> Table::skip(std::int32_t delta) {
+    // Multiuser: see goto_top. Skip uses record_count() as the EOF fence
+    // and the active order's B+tree; both must observe peer writers.
+    // SQL materialised sequences (DISTINCT / ORDER BY cursor) are a
+    // frozen snapshot — do not refresh under them.
+    if (recno_sequence_.empty()) {
+        driver_->refresh_record_count_from_disk();
+        if (order_ && order_->index()) order_->index()->refresh_from_disk();
+    }
     if (!recno_sequence_.empty()) {
         if (delta == 0) {
             if (state_ == State::Bof) sequence_idx_ = -1;

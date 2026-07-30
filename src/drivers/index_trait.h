@@ -63,6 +63,11 @@ public:
     // Default no-op; CdxIndex overrides to clear its CurState.
     virtual void invalidate_cursor() {}
 
+    // Multiuser: re-read the on-disk bag header so peer appends / reindex
+    // become visible. Default no-op; CdxIndex drops clean page-cache pages
+    // when the sub-tag counter / root changes. Call before navigation.
+    virtual void refresh_from_disk() {}
+
     virtual std::string current_key() const = 0;
 
     // On-disk key encoding for this index. Default Text; CdxIndex returns
