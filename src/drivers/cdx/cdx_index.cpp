@@ -1538,10 +1538,14 @@ std::uint32_t CdxIndex::count_scoped_keys(
         auto cur = r.value();
         while (cur.positioned) {
             std::string key = current_key();
-            // If bottom scope is set and we've passed it, stop.
-            if (!bottom.empty() && compare_keys_(key.data(), bottom.data(),
-                                                  key_size_) > 0) {
-                break;
+            // If bottom scope is set and we've passed it, stop. A bound
+            // SHORTER than the index key bounds by prefix (Clipper/DBFCDX),
+            // so compare only the bytes the bound supplies — comparing the
+            // full key_size_ would also read past a short bound's buffer.
+            if (!bottom.empty()) {
+                const std::size_t bn =
+                    std::min<std::size_t>(bottom.size(), key_size_);
+                if (compare_keys_(key.data(), bottom.data(), bn) > 0) break;
             }
             // SET DELETED ON: skip index keys that point at deleted rows so
             // OrdKeyCount / xBrowse match the navigable walk (1.8.18 fix).

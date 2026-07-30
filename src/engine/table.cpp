@@ -321,14 +321,28 @@ util::Result<void> Table::writeback_record_() {
                                      record_buf_.size());
 }
 
+// Clipper / DBFCDX: a scope bound SHORTER than the index key bounds by PREFIX —
+// every key that begins with it is inside the scope. Comparing a full-width key
+// against a short bound puts all of them PAST the bottom ("2B 22563     1" is
+// lexicographically greater than "2B 22563"), which empties the scope. Compare
+// only as many bytes as the bound supplies.
+// The top bound needs no such care mathematically (any extension of a prefix is
+// >= the prefix), but it is written symmetrically so the two read alike and a
+// future edit cannot break one without the other.
 bool Table::key_in_top_scope_(const std::string& key) const {
     if (!order_ || !order_->scope().top.has_value()) return true;
-    return key >= *order_->scope().top;
+    const std::string& top = *order_->scope().top;
+    if (key.size() > top.size())
+        return key.compare(0, top.size(), top) >= 0;
+    return key >= top;
 }
 
 bool Table::key_in_bottom_scope_(const std::string& key) const {
     if (!order_ || !order_->scope().bottom.has_value()) return true;
-    return key <= *order_->scope().bottom;
+    const std::string& bottom = *order_->scope().bottom;
+    if (key.size() > bottom.size())
+        return key.compare(0, bottom.size(), bottom) <= 0;
+    return key <= bottom;
 }
 
 void Table::set_recno_sequence(std::vector<std::uint32_t> seq) {

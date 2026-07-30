@@ -16467,12 +16467,18 @@ UNSIGNED32 ENTRYPOINT AdsSeekLast(ADSHANDLE hIndex,
 //               ADS_DOUBLEKEY -> ASCII-padded conversion so a scope
 //               set with a double compares apples-to-apples against
 //               the index's stored key bytes.
-static void pad_scope_key_to_index(Table* t, std::string& key) {
+// A scope bound longer than the index key is meaningless — trim it. Bounds
+// SHORTER than the key are NOT padded: they bound by prefix, and the engine
+// compares only the bytes the caller supplied (Table::key_in_*_scope_).
+// Padding them to key_length used to be done here to make an unpadded bound
+// on a single-field tag work, but it broke the partial-key case it shares the
+// path with: a 10-byte CON+DOC bound on a CON+DOC+STR(SEQ,6,0) tag became
+// "CON+DOC" + 6 spaces, which every real key sorts after, emptying the scope.
+static void trim_scope_key_to_index(Table* t, std::string& key) {
     if (t == nullptr || key.empty()) return;
     if (t->order() == nullptr || t->order()->index() == nullptr) return;
     const std::uint16_t klen = t->order()->index()->key_length();
-    if (key.size() < klen) key.append(klen - key.size(), ' ');
-    else if (key.size() > klen) key.resize(klen);
+    if (key.size() > klen) key.resize(klen);
 }
 
 UNSIGNED32 ENTRYPOINT AdsSetScope(ADSHANDLE hIndex, UNSIGNED16 usScope,
@@ -16558,11 +16564,10 @@ UNSIGNED32 ENTRYPOINT AdsSetScope(ADSHANDLE hIndex, UNSIGNED16 usScope,
     } else {
         key = pucScope
             ? openads::abi::to_internal(pucScope, usLen) : std::string();
-        // rddads passes hb_itemGetCLen() — the trimmed string length.
-        // Index keys and scope bounds are space-padded to key_length;
-        // storing an unpadded scope (e.g. OrdScope on a C(10) work-order
-        // field) makes key <= bottom fail for every matching row.
-        pad_scope_key_to_index(t, key);
+        // rddads passes hb_itemGetCLen() — the trimmed string length. That
+        // shorter-than-the-key bound is handled by prefix comparison in the
+        // engine, so it is stored as sent; only an over-long bound is trimmed.
+        trim_scope_key_to_index(t, key);
     }
     auto r = t->set_scope(usScope == ADS_TOP, key);
     if (!r) return fail(r.error());
