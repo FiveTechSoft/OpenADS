@@ -1,4 +1,7 @@
-## Unreleased
+## 1.8.40 - 2026-07-30
+
+RusSoft ERP production batch integrated from open PRs #148–#155, plus the CI
+unblock that kept every PR red. Everything since **v1.8.39**.
 
 ### Fixed - ORDER BY cursor lost the source column types (#146)
 
@@ -93,6 +96,39 @@ The count does not depend on the order, so the recnos are sorted and the records
 read in file order: 16 ms and 23 ms respectively.
 
 Test: `tests/unit/abi_keycount_deleted_scan_test.cpp`.
+
+
+### Fixed - partial SEEK keeps Found() true when deleted rows are hidden
+
+Table::seek_key re-derived the exact flag under SET DELETED ON by padding the
+search key out to the full index key width with spaces. A partial (prefix) key
+can never satisfy that comparison, so for a tag like CON+DOC+STR(SEQ,6,0) a
+10-byte CON+DOC seek landed on the right record but AdsIsFound reported 0.
+Clipper / Harbour DBFCDX / SAP ACE all treat a shorter seek key as a prefix
+match. The fix compares only the bytes the caller supplied.
+
+Test: 	ests/unit/abi_prefix_seek_deleted_test.cpp.
+
+### Fixed - ordScope bound shorter than the index key bounds by prefix
+
+Clipper / DBFCDX treat a scope bound shorter than the index key as a prefix:
+every key beginning with it is inside the scope. Three places assumed the bound
+was always full width (key_in_bottom_scope_ full-width compare, AdsSetScope
+padding to key_length, CDX scope walk), which emptied the scope for a CON+DOC
+bound on a CON+DOC+STR(SEQ,6,0) tag. Bounds are now compared as prefixes and
+AdsSetScope no longer pads.
+
+Test: 	ests/unit/abi_scope_partial_key_test.cpp.
+
+### Fixed - CI unit-test blockers (remote lock fixture + index path case)
+
+bi_pritpal_lock_test pointed every remote connection at //Temp, which is
+not a real directory on GitHub runners, so AdsConnect60 failed and the whole
+suite went red on every PR. The URI now targets the staged fixture directory.
+bi_create_index_path_test asserted uppercase .CDX after production appends
+lowercase .cdx — fine on Windows, red on Linux/macOS. Path checks are now
+case-insensitive.
+
 
 ## 1.8.37 - 2026-07-29
 
