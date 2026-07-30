@@ -1,8 +1,98 @@
 # OpenADS ↔ SAP Parity — Open Items & Verification Backlog
 
-Living checklist of SAP-parity gaps. The S4 gate (`tools/qa-diff/s4_parity.ps1`)
-is **42/42** on pmsys as of 2026-07-26. This file tracks what's left and what
-still needs verification against current code.
+Living checklist of SAP-parity gaps. Two S4 gates now run:
+`tools/qa-diff/s4_parity.ps1` (pmsys, 41/1 — the 1 is sandbox counter drift, not
+a defect) and `tools/qa-diff/s4_parity_mp.ps1` (mp, 29/26). This file tracks
+what's left and what still needs verification against current code.
+
+---
+
+## 🔖 TRACKED BACKLOG — verified open, ready to pick up (2026-07-30)
+
+Five items confirmed against current `main`, each with the exact site and the
+shape of the fix, so none of them gets lost. Ordered by value.
+
+| # | Item | Where | Verified |
+|---|---|---|---|
+| 1 | **Column-level permission ENFORCEMENT** | `get_effective_ops()` / query projection | analysed, not started |
+| 2 | **`sp_` `__output` truncates column names to 10 chars** | `run_dd_procedure()` | ✅ re-confirmed 2026-07-30 |
+| 3 | **`AdsSetString` into an ADT DOUBLE stores text verbatim** | ADT write path | ✅ hit while writing a fixture |
+| 4 | **`DB:Debug` group not imported** | `import_dd` | ✅ mp gate `cat_db_groups` |
+| 5 | **`Ver8L` link not surfaced as a permission object** | permissions matrix builder | ✅ mp gate `cat_perms_links` |
+
+### 1. Column-level permission enforcement — the security item
+
+The **catalog half is done** (`system.permissions` renders SAP's full
+grantee×object matrix incl. the column rows). **Enforcement is not.** OpenADS
+imports table grants *without* the per-column restrictions and enforces
+table-level only, so it hands over columns SAP hides.
+
+Verified on pmsys: SAP grants the `General` group table access AND restricts it
+to specific columns on 32 tables (`leases`: 23 columns); OpenADS gives the whole
+table. 12/12 sampled tables were under-restrictive. 310 of 389 real grants are
+column-level and never imported — `import_dd` only probes
+Tables/Views/Procs/Functions, never columns.
+
+Reassuring for scoping: the column *dimension* is intact — type 4 is 1081
+columns on both engines for mp (55131/51 = 54050/50 = 1081, matching
+`system.columns`). The matrix is right; only the enforcement is missing.
+
+Work: import column grants → per-column model → enforce at query time
+(projection masking / deny). Detail in `todo.local.md`.
+
+### 2. `sp_` `__output` still truncates to 10 chars — NOT fixed by the v1.8.40 work
+
+Re-confirmed on mp 2026-07-30:
+
+```
+EXECUTE PROCEDURE sp_GetPhysicalPath()
+  SAP : {"databasepath": ...}     12 chars
+  OA  : {"databasepa":   ...}     truncated
+```
+
+The 2026-07-30 fix covered only the **static-cursor** path
+(`ORDER BY`/`DISTINCT`/`TOP`, the `_srt_` temp). Procedure output is a separate
+site: `run_dd_procedure()` in `src/abi/ace_exports.cpp` builds `_spout_*` with
+`") AS FREE TABLE"`, which yields a **DBF** — 10-char field names.
+
+Fix mirrors the one already made: materialise as **ADT**, and map decimal
+numerics to `AsciiNumeric` (ADT type 2) so the declared scale survives too.
+**Read `docs/materialised-cursor-temps.md` first** — it explains why those two
+requirements conflict and which format satisfies both. Needs a way to ask the
+SQL `CREATE TABLE` path for ADT; `AS FREE TABLE` currently means DBF.
+
+The same truncation remains in the **join / union / aggregate** materialisers
+(joins additionally rename right-side columns `R_*`). Same fix, same doc.
+
+### 3. `AdsSetString` into an ADT DOUBLE stores the text verbatim
+
+Does not parse the string, so the value reads back as garbage:
+`"10.50"` → ~`6.01e-154`. Reachable by creating an ADT table with
+`Numeric,12,2` — which `adt_spec_for()` maps to DOUBLE — and writing via
+`AdsSetString`. DBF is unaffected (it stores numerics as ASCII, so the same
+write round-trips). Found while building a test fixture, which had to be
+rewritten to dodge it.
+
+### 4. `DB:Debug` is not imported
+
+Missing both as a grantee and as a type-9 (USER GROUP) object;
+`DB:Admin`/`DB:Backup`/`DB:Public` all import fine. It is one of the two items
+behind mp's 63801 vs 62450 permission-row gap, and also part of
+`system.usergroups` 20 vs 17. Ref: memory `project_sap_builtin_groups.md`
+(per-user cipher detection).
+
+### 5. `Ver8L` link is not surfaced as a permission object
+
+Type 12 (LINK): SAP has `Ver8L` plus the `LINK` root singleton, OpenADS has only
+the root. `system.links` counts 1 on both, so the DD knows the link — it just
+is not projected into the permissions matrix. Second of the two items behind the
+row-count gap above.
+
+**Also open, smaller:** `system.usergroups` omits `SERVER:Admin`/`SERVER:Monitor`
+that the permissions builder already synthesises (2 of the 3-group shortfall);
+`adssys` appears in OpenADS's user catalogs where SAP omits it.
+
+---
 
 ## ✅ UNBLOCKED 2026-07-29 — mp10 is now a live second corpus
 mp10 was sealed by SAP table encryption. All 90 encrypted tables were decrypted
@@ -62,17 +152,19 @@ OA : 50 grantees x 1249 objects = 62450   OK
 delta 1351 = 1 missing grantee + 2 missing objects
 ```
 
-- [ ] **`DB:Debug` is not imported** — missing both as a grantee and as a
-      type-9 (USER GROUP) object; `DB:Admin`/`DB:Backup`/`DB:Public` all import
-      fine. Accounts for the missing grantee *and* one of the two objects.
-      Ref: memory `project_sap_builtin_groups.md` (per-user cipher detection).
-- [ ] **`Ver8L` link object is not imported** — type 12 (LINK): SAP has
-      `Ver8L` + the `LINK` root singleton, OA has only the root. `system.links`
-      counts 1 on both, so the link is known but not surfaced as a perm object.
-- [ ] **Importer lowercases user grantee names** — **27** mixed-case users, not
-      the "two" previously recorded (`RCB`→`rcb`, `AutoTasks`→`autotasks`,
-      `PteConfirmations`→`pteconfirmations`, …). Group names are preserved.
-      A SAP-compatible client doing `WHERE Grantee = 'RCB'` gets nothing.
+- [ ] **`DB:Debug` is not imported** → **backlog item 4** (top of file).
+      Missing both as a grantee and as a type-9 (USER GROUP) object;
+      `DB:Admin`/`DB:Backup`/`DB:Public` all import fine. Accounts for the
+      missing grantee *and* one of the two objects.
+- [ ] **`Ver8L` link object is not imported** → **backlog item 5** (top of file).
+      Type 12 (LINK); `system.links` counts 1 on both, so the link is known but
+      not surfaced as a perm object.
+- [x] **Importer lowercased user grantee names — FIXED 2026-07-30** (commit
+      `e4f3c055`). 27 mixed-case users, not the "two" previously recorded.
+      `users_` keeps folded lookup keys; `user_display_` carries the declared
+      spelling and `save()` persists it. Case mismatches vs SAP: 27 → 0, and
+      `WHERE Grantee = 'RCB'` returns rows again. Note existing converted DDs
+      hold the folded spelling on disk and need a re-import to recover it.
 
 **Good news for column-level enforcement:** type 4 is **1081 columns on both**
 engines (55131/51 = 54050/50 = 1081), matching `system.columns`. The column
@@ -125,15 +217,12 @@ CONTRIBUTING.md and from the code at the decision site. Regression test:
 
 Found while doing it, **not fixed**:
 
-- [ ] **`AdsSetString` into an ADT DOUBLE stores the text verbatim** instead of
-      parsing it, so the value reads back as garbage (`"10.50"` → ~6.01e-154).
-      Reachable by creating an ADT table with `Numeric,12,2` — which
-      `adt_spec_for()` maps to DOUBLE — and writing through `AdsSetString`.
-      Only ADT is affected; DBF stores numerics as ASCII so the same write
-      round-trips there.
+- [ ] **`AdsSetString` into an ADT DOUBLE stores the text verbatim**
+      → **backlog item 3** (top of file).
 - [ ] **The other materialisers still truncate to 10 chars** — joins (which also
       rename right-side columns `R_*`), unions, aggregates and the `sp_`
-      `__output` path each build their own DBF temp. Task #2 proper.
+      `__output` path each build their own DBF temp.
+      → tracked as **backlog item 2** at the top of this file.
 
 Original report, kept for context:
 
@@ -169,9 +258,13 @@ Fix is the one task #2 already prescribes — materialise into an **ADT** temp
       Highest-value but riskiest (touches every string-read path). FIRST do a
       DA-Web/OpenERP impact check — do those apps depend on raw `YYYYMMDD`?
       Ref: memory `project_oa_date_string_gap.md`.
-- [ ] **#2 `_spout_` >10-char output column names** — proc `__output` temp is a
-      DBF free table, so `databasepath` → `databasepa`. Fix: make `__output`
-      an ADT-typed temp (long field names). Low risk.
+- [ ] **#2 `_spout_` >10-char output column names** — see **backlog item 2** at
+      the top of this file. Re-confirmed open 2026-07-30; the v1.8.40 truncation
+      fix covered only the static-cursor path, not procedure output. No longer
+      "low risk / cosmetic": the same DBF-temp root cause silently undoes the
+      SAP catalog column names whenever a materialising path is involved, and it
+      trades against numeric scale — read `docs/materialised-cursor-temps.md`
+      before touching it.
 - [ ] **#3 EXPR_n numbering, mixed aliased/unaliased aggregates** — verify
       `SELECT COUNT(*), SUM(x) AS s, MIN(y)` column naming matches SAP.
 

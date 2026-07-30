@@ -141,9 +141,14 @@ $cases = [ordered]@{
 $shapeCases = [ordered]@{
 # mp's sp_GetPhysicalPath takes NO arguments (pmsys's takes a table name) -
 # check system.storedprocedures.Proc_Input before copying a case across corpora.
+# The path itself is legitimately per-sandbox, hence a shape case; the COLUMN
+# NAME is not, so the regex pins it. OpenADS returns `databasepa` because the
+# proc __output temp is a DBF (10-char field names) - TODO.parity.md backlog
+# item 2. This case is EXPECTED TO DIFF until that is fixed; it used to pass
+# only because the old regex checked the path and ignored the column name.
 "sp_GetPhysicalPath" = @(
     "EXECUTE PROCEDURE sp_GetPhysicalPath()",
-    'parity\\\\(sap|oa)_data_mp'
+    '"databasepath":"F:\\\\\\\\tmp\\\\\\\\parity\\\\\\\\(sap|oa)_data_mp'
 );
 }
 
