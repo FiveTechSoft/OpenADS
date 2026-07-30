@@ -4710,8 +4710,9 @@ openads::util::Result<void> ri_enforce_update(Connection* conn, Table& parent) {
             bool any = ri_scan(*child, rule.parent_tag, old_pk, nullptr);
             if (opened_here) conn->close_table(ch_handle);
             if (any) {
-                // Restore parent's old PK to disk. set_field wrote the new
-                // value immediately (writeback_record_), so we must undo it.
+                // Restore parent's old PK in the dirty buffer (and any prior
+                // immediate write). set_field encodes into the buffer; the
+                // failed WriteRecord path never commits, so disk stays old.
                 auto rfi = parent.field_index(rule.parent_tag);
                 if (rfi >= 0) {
                     auto rfi16 = static_cast<std::uint16_t>(rfi);
@@ -10298,7 +10299,12 @@ UNSIGNED32 ENTRYPOINT AdsWriteRecord(ADSHANDLE hTable) {
         }
     }
 
-    if (!t->deferred_flush()) {
+    // Always settle the dirty record buffer (field replaces coalesce until
+    // here). deferred_flush only skips OS FlushFileBuffers / index fsync.
+    if (t->deferred_flush()) {
+        auto r = t->commit_dirty_record();
+        if (!r) return fail(r.error());
+    } else {
         auto r = t->flush();
         if (!r) return fail(r.error());
     }

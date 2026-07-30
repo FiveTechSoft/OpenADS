@@ -1,3 +1,34 @@
+## 1.8.43 - 2026-07-30
+
+Dirty-record write coalescing for append/replace/commit speed. Field
+setters encode into the current record buffer; one writeback + index sync
+runs on WriteRecord, flush, navigation, or unlock (GoCold). Everything
+since **v1.8.42**.
+
+### Changed - dirty record buffer (GoHot / GoCold)
+
+- **`set_field` / `set_field_null` / `set_record_raw`:** update `record_buf_`
+  only; snapshot bound index keys once on the first mutation of the row.
+- **`commit_dirty_record`:** single `writeback_record_` + `sync_all_indexes_`.
+  Invoked from `AdsWriteRecord`, `flush` / `AdsFlushFileBuffers`, Skip /
+  GoTop / GoBottom / Goto / Seek, Append (previous row), Close, delete/recall.
+- **Unlock GoCold:** `unlock_record` and `unlock_table` settle the dirty
+  buffer while the RLock/FLock is still held, so Shared
+  `RLock → REPLACE → Unlock` without an explicit WriteRecord remains durable
+  (5035 avoided; peers see the final row).
+- **Refresh:** `refresh_record_buffer` discards uncommitted edits (does not
+  write).
+- **Deferred flush:** still skips OS `FlushFileBuffers`; dirty settle always
+  runs on WriteRecord.
+
+Does not remove per-row commit/`FlushFileBuffers` cost when the app commits
+every record; it removes N disk+index updates for N field replaces on one row.
+
+### Tests
+
+- Dirty unlock commit + multi-field coalesce until flush
+  (`engine_table_write_test.cpp`).
+
 ## 1.8.42 - 2026-07-30
 
 Multiuser browse visibility: stations saw the same LastRec after a peer

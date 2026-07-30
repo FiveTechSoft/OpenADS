@@ -198,6 +198,10 @@ std::uint32_t Table::record_count() const noexcept {
 }
 
 util::Result<void> Table::load_record_(std::uint32_t recno) {
+    // GoCold before replacing the buffer (navigation / absolute goto).
+    if (record_dirty_) {
+        if (auto r = commit_dirty_record(); !r) return r.error();
+    }
     auto buf = driver_->read_record_raw(recno);
     if (!buf) return buf.error();
     record_buf_ = std::move(buf).value();
@@ -291,7 +295,7 @@ util::Result<void> Table::sync_all_indexes_(
     return {};
 }
 
-util::Result<void> Table::writeback_record_() {
+util::Result<void> Table::ensure_writable_() {
     if (state_ != State::Positioned) {
         return util::Error{5068, 0, "no record positioned", ""};
     }
@@ -309,6 +313,35 @@ util::Result<void> Table::writeback_record_() {
                 "in shared mode)", ""};
         }
     }
+    return {};
+}
+
+util::Result<void> Table::begin_dirty_edit_() {
+    if (auto w = ensure_writable_(); !w) return w.error();
+    // Snapshot index keys once, before the first mutation of this row.
+    if (!record_dirty_) {
+        index_snap_   = snapshot_index_keys_();
+        record_dirty_ = true;
+    }
+    return {};
+}
+
+void Table::discard_dirty_() noexcept {
+    record_dirty_ = false;
+    index_snap_.clear();
+}
+
+util::Result<void> Table::commit_dirty_record() {
+    if (!record_dirty_) return {};
+    if (auto wb = writeback_record_(); !wb) return wb.error();
+    auto snap = std::move(index_snap_);
+    record_dirty_ = false;
+    index_snap_.clear();
+    return sync_all_indexes_(snap);
+}
+
+util::Result<void> Table::writeback_record_() {
+    if (auto w = ensure_writable_(); !w) return w.error();
     if (tx_ && tx_->active()) {
         auto cur = driver_->read_record_raw(recno_);
         if (cur) {
@@ -351,6 +384,9 @@ void Table::set_recno_sequence(std::vector<std::uint32_t> seq) {
 }
 
 util::Result<void> Table::goto_top() {
+    // Settle any pending field edits before leaving the current row
+    // (empty-table paths never call load_record_).
+    if (auto r = commit_dirty_record(); !r) return r.error();
     // Absolute reposition: drop any read-ahead block so we observe
     // writes made through another handle and start the scan fresh.
     driver_->invalidate_read_cache();
@@ -447,6 +483,7 @@ util::Result<void> Table::goto_top() {
 }
 
 util::Result<void> Table::goto_bottom() {
+    if (auto r = commit_dirty_record(); !r) return r.error();
     // Absolute reposition: drop any read-ahead block (see goto_top).
     driver_->invalidate_read_cache();
     driver_->refresh_record_count_from_disk();
@@ -520,6 +557,7 @@ util::Result<void> Table::goto_bottom() {
 }
 
 util::Result<void> Table::goto_record(std::uint32_t recno) {
+    if (auto r = commit_dirty_record(); !r) return r.error();
     // Absolute reposition / AdsRefreshRecord: drop any read-ahead block
     // so the (re)read hits disk — this is how a workarea sees an edit
     // made through another handle, and how RefreshRecord re-reads.
@@ -585,6 +623,10 @@ util::Result<void> Table::goto_record(std::uint32_t recno) {
 
 void Table::load_record_for_bulk_scan(std::vector<std::uint8_t> buf,
                                       std::uint32_t recno) {
+    // Bulk reindex / key-collect replaces the buffer deliberately; any
+    // pending edit on another row should already have been settled by
+    // the caller. Drop dirty state so we don't later GoCold a stale snap.
+    discard_dirty_();
     record_buf_ = std::move(buf);
     recno_      = recno;
     state_      = State::Positioned;
@@ -626,10 +668,16 @@ Table::collect_keys_for_multiple_expressions(
 
 util::Result<void> Table::refresh_record_buffer() {
     if (state_ != State::Positioned || recno_ == 0) return {};
+    // AdsRefreshRecord discards uncommitted buffer edits and reloads
+    // the on-disk image (do not GoCold first).
+    discard_dirty_();
     return load_record_(recno_);
 }
 
 util::Result<void> Table::skip(std::int32_t delta) {
+    // Settle dirty buffer before cursor motion (GoCold). load_record_
+    // also commits, but EOF/BOF exits never load.
+    if (auto r = commit_dirty_record(); !r) return r.error();
     // Multiuser visibility vs browse speed:
     //   - GoTop / GoBottom / GetRecordCount always re-read the header.
     //   - Per-Skip full refresh was correct but ~header-I/O per keystroke
@@ -911,6 +959,8 @@ util::Result<void> Table::append_record() {
     if (mode_ == OpenMode::Read) {
         return util::Error{5000, 0, "table opened read-only", ""};
     }
+    // GoCold the previous row before starting a new append.
+    if (auto r = commit_dirty_record(); !r) return r.error();
     auto rec = drivers::make_empty_record(driver_->record_length());
 
     // M13 — make_empty_record fills the buffer with spaces, which is only
@@ -994,7 +1044,9 @@ util::Result<void> Table::set_field(std::uint16_t idx, const std::string& v) {
     }
     const auto& f = driver_->fields().at(idx);
 
-    auto snap = snapshot_index_keys_();
+    // Encode into the in-memory record buffer; writeback + index sync
+    // are deferred to commit_dirty_record() (WriteRecord / flush / skip).
+    if (auto d = begin_dirty_edit_(); !d) return d.error();
 
     // Memo/Binary fields write to the memo store, then store the
     // resulting block number in the record. ADT uses a 9-byte binary
@@ -1023,16 +1075,14 @@ util::Result<void> Table::set_field(std::uint16_t idx, const std::string& v) {
             std::memcpy(dst, buf, f.length);
         }
         clear_field_null_(idx);
-        if (auto wb = writeback_record_(); !wb) return wb.error();
-        return sync_all_indexes_(snap);
+        return {};
     }
 
     auto r = drivers::encode_field_string(f, record_buf_.data(),
                                           record_buf_.size(), v);
     if (!r) return r.error();
     clear_field_null_(idx);
-    if (auto wb = writeback_record_(); !wb) return wb.error();
-    return sync_all_indexes_(snap);
+    return {};
 }
 
 util::Result<void> Table::set_field(std::uint16_t idx, double v) {
@@ -1044,14 +1094,13 @@ util::Result<void> Table::set_field(std::uint16_t idx, double v) {
     if (idx >= driver_->fields().size()) {
         return util::Error{5063, 0, "field index out of range", ""};
     }
-    auto snap = snapshot_index_keys_();
+    if (auto d = begin_dirty_edit_(); !d) return d.error();
     auto r = drivers::encode_field_double(driver_->fields().at(idx),
                                           record_buf_.data(),
                                           record_buf_.size(), v);
     if (!r) return r.error();
     clear_field_null_(idx);
-    if (auto wb = writeback_record_(); !wb) return wb.error();
-    return sync_all_indexes_(snap);
+    return {};
 }
 
 util::Result<void> Table::set_field(std::uint16_t idx, bool v) {
@@ -1063,14 +1112,13 @@ util::Result<void> Table::set_field(std::uint16_t idx, bool v) {
     if (idx >= driver_->fields().size()) {
         return util::Error{5063, 0, "field index out of range", ""};
     }
-    auto snap = snapshot_index_keys_();
+    if (auto d = begin_dirty_edit_(); !d) return d.error();
     auto r = drivers::encode_field_logical(driver_->fields().at(idx),
                                            record_buf_.data(),
                                            record_buf_.size(), v);
     if (!r) return r.error();
     clear_field_null_(idx);
-    if (auto wb = writeback_record_(); !wb) return wb.error();
-    return sync_all_indexes_(snap);
+    return {};
 }
 
 util::Result<void>
@@ -1092,7 +1140,7 @@ Table::set_field_binary(std::uint16_t idx, const std::string& payload,
     if (!memo_) {
         return util::Error{5004, 0, "memo store not attached", ""};
     }
-    auto snap = snapshot_index_keys_();
+    if (auto d = begin_dirty_edit_(); !d) return d.error();
     auto wm = memo_->write_typed(payload, type);
     if (!wm) return wm.error();
     std::uint8_t* dst = record_buf_.data() + f.record_offset;
@@ -1110,8 +1158,7 @@ Table::set_field_binary(std::uint16_t idx, const std::string& payload,
         std::memcpy(dst, buf, f.length);
     }
     clear_field_null_(idx);
-    if (auto wb = writeback_record_(); !wb) return wb.error();
-    return sync_all_indexes_(snap);
+    return {};
 }
 
 util::Result<drivers::MemoBlockType>
@@ -1174,12 +1221,13 @@ util::Result<void> Table::set_record_raw(const std::uint8_t* bytes,
     if (bytes == nullptr) {
         return util::Error{5000, 0, "null record buffer", ""};
     }
-    auto snap = snapshot_index_keys_();
+    // Whole-record replace: fold into the dirty buffer (reuse existing
+    // pre-edit snap if fields were already dirty on this row).
+    if (auto d = begin_dirty_edit_(); !d) return d.error();
     const std::size_t rl = driver_->record_length();
     const std::size_t n  = (len < rl) ? len : rl;
     std::memcpy(record_buf_.data(), bytes, n);
-    if (auto wb = writeback_record_(); !wb) return wb.error();
-    return sync_all_indexes_(snap);
+    return {};
 }
 
 util::Result<void> Table::apply_tx_rollback_append(std::uint32_t recno) {
@@ -1202,10 +1250,11 @@ util::Result<void> Table::mark_deleted() {
         // to return blank field values at BOF/EOF; 5026 causes a hard error.
         return util::Error{5068, 0, "no record positioned", ""};
     }
-    auto snap = snapshot_index_keys_();
+    // Deletion is a structural change: fold into dirty (with any pending
+    // field edits) and settle immediately so SET DELETE ON walks see it.
+    if (auto d = begin_dirty_edit_(); !d) return d.error();
     drivers::set_record_deleted(record_buf_.data(), record_buf_.size(), true);
-    if (auto wb = writeback_record_(); !wb) return wb.error();
-    return sync_all_indexes_(snap);
+    return commit_dirty_record();
 }
 
 util::Result<void> Table::recall_deleted() {
@@ -1214,10 +1263,9 @@ util::Result<void> Table::recall_deleted() {
         // to return blank field values at BOF/EOF; 5026 causes a hard error.
         return util::Error{5068, 0, "no record positioned", ""};
     }
-    auto snap = snapshot_index_keys_();
+    if (auto d = begin_dirty_edit_(); !d) return d.error();
     drivers::set_record_deleted(record_buf_.data(), record_buf_.size(), false);
-    if (auto wb = writeback_record_(); !wb) return wb.error();
-    return sync_all_indexes_(snap);
+    return commit_dirty_record();
 }
 
 bool Table::is_deleted() const noexcept {
@@ -1485,6 +1533,9 @@ util::Result<void> Table::reindex() {
 }
 
 util::Result<void> Table::flush() {
+    // Settle the dirty record buffer before OS-level fsync so
+    // AdsWriteRecord / AdsFlushFileBuffers persist field edits.
+    if (auto r = commit_dirty_record(); !r) return r.error();
     if (auto r = driver_->flush(); !r) return r.error();
     if (order_ && order_->index()) {
         if (auto r = order_->index()->flush(); !r) return r.error();
@@ -1558,6 +1609,13 @@ util::Result<void> Table::try_lock_record_excl(std::uint32_t recno) {
 }
 
 util::Result<void> Table::unlock_record(std::uint32_t recno) {
+    // GoCold while the RLock is still held. Shared-mode writeback needs the
+    // lock (5035 otherwise); apps that RLock → REPLACE → Unlock without an
+    // explicit WriteRecord still must land field edits + index keys on disk
+    // (xBase / ACE cold-on-unlock semantics).
+    if (record_dirty_ && (recno == 0 || recno == recno_)) {
+        if (auto r = commit_dirty_record(); !r) return r.error();
+    }
     auto it = recno_locks_.find(recno);
     if (it != recno_locks_.end()) {
         if (locks_.unlock_record(driver_->file(), to_lock_type_(), locking_,
@@ -1599,6 +1657,10 @@ util::Result<void> Table::try_lock_table_excl() {
 }
 
 util::Result<void> Table::unlock_table() {
+    // GoCold under FLock before releasing the table lock.
+    if (record_dirty_) {
+        if (auto r = commit_dirty_record(); !r) return r.error();
+    }
     if (table_lock_) {
         if (locks_.unlock_table(driver_->file(), to_lock_type_(), locking_)) {
             table_lock_->release();
@@ -1677,6 +1739,8 @@ Table::seek_key(const std::string& key, bool soft, bool last) {
     if (!order_ || !order_->index()) {
         return util::Error{6105, 0, "no active index for seek", ""};
     }
+    // GoCold before repositioning via the index.
+    if (auto cr = commit_dirty_record(); !cr) return cr.error();
     auto* idx = order_->index();
     auto r = idx->seek_key(key, soft);
     if (!r) return r.error();
@@ -1872,7 +1936,7 @@ util::Result<void> Table::set_field_null(std::uint16_t field_idx) {
         return util::Error{5063, 0, "field index out of range", ""};
     }
     const auto& f = fields[field_idx];
-    auto snap = snapshot_index_keys_();
+    if (auto d = begin_dirty_edit_(); !d) return d.error();
 
     if (f.adt) {
         auto r = drivers::encode_field_null(f, record_buf_.data(),
@@ -1909,8 +1973,7 @@ util::Result<void> Table::set_field_null(std::uint16_t field_idx) {
         std::memset(record_buf_.data() + f.record_offset, ' ', f.length);
     }
 
-    if (auto wb = writeback_record_(); !wb) return wb.error();
-    return sync_all_indexes_(snap);
+    return {};
 }
 
 void Table::clear_field_null_(std::uint16_t field_idx) {
