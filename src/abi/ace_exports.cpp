@@ -82,6 +82,7 @@ using openads::abi::lock_retry_policy;
 #include "drivers/dbf_common.h"
 #include "drivers/index_trait.h"
 #include "drivers/ntx/ntx_index.h"
+#include "drivers/adt/adt_driver.h"
 #include "drivers/cdx/cdx_driver.h"
 #include "drivers/cdx/cdx_index.h"
 #include "drivers/adi/adi_index.h"
@@ -5255,6 +5256,30 @@ connect101_option_tables() {
     return tables;
 }
 
+// Cursor handle -> on-disk stem (no extension) of the temp table a
+// materialised SELECT built for it. AdsCloseTable deletes the stem's files,
+// so a data directory doesn't accumulate one temp per query.
+std::unordered_map<ADSHANDLE, std::string>&
+materialised_cursor_temps() {
+    static std::unordered_map<ADSHANDLE, std::string> temps;
+    return temps;
+}
+
+// Delete the files of a materialised cursor's temp table: the .dbf plus any
+// memo / index companion an application created on it (the ERP runs
+// INDEX ON over the result, producing <stem>.cdx).
+void drop_materialised_cursor_temp(ADSHANDLE h) {
+    auto& m = materialised_cursor_temps();
+    auto it = m.find(h);
+    if (it == m.end()) return;
+    const std::string stem = it->second;
+    m.erase(it);
+    std::error_code ec;
+    for (const char* ext : {".dbf", ".cdx", ".fpt", ".dbt", ".ntx"}) {
+        std::filesystem::remove(std::filesystem::path(stem + ext), ec);
+    }
+}
+
 openads::util::Result<Table> build_connect101_options_table(
     const std::unordered_map<std::string, std::string>& options) {
     struct Col {
@@ -7151,7 +7176,12 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
 
     if (is_adt) {
         // ── ADT creation path ───────────────────────────────────────────────
-        if (full.extension() != ".adt") full.replace_extension(".adt");
+        // Respect the file name the caller asked for -- real ACE creates
+        // exactly that file. Forcing ".adt" breaks any application that keeps
+        // ADT data under another extension (ExtFile='.DAT' is a common ERP
+        // convention): COPY TO "CONSEINV.DAT" VIA "ADS" silently produced
+        // CONSEINV.adt and the application could not find the table it had
+        // just written. An extension-less name still defaults above.
 
         std::vector<AdtFieldSpec> specs;
         specs.reserve(fields.size());
@@ -7259,7 +7289,9 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
         }
 
         // Open via the standard path so the caller gets a usable handle
-        std::string rel_adt = fs::path(rel).replace_extension(".adt").string();
+        // Reopen the file that was actually written, which is not
+        // necessarily <stem>.adt (see the ExtFile note above).
+        std::string rel_adt = full.string();
         UNSIGNED8 adt_namebuf[260] = {0};
         std::size_t adt_nb = std::min<std::size_t>(rel_adt.size(),
                                                     sizeof(adt_namebuf) - 1);
@@ -8595,6 +8627,9 @@ UNSIGNED32 ENTRYPOINT AdsCloseTable(ADSHANDLE hTable) {
     }
     cursor_projections().erase(hTable);
     s.registry.release(hTable);
+    // The table is closed and its handle released, so the temp table a
+    // materialised SELECT built for this cursor can go with it.
+    drop_materialised_cursor_temp(hTable);
     return ok();
 }
 
@@ -9312,6 +9347,27 @@ SIGNED32 to_julian(int y, int m, int d) {
       + d32 - 32075);
 }
 
+// Count the live (non-deleted) recnos of an index walk.
+//
+// Reads in RECNO order, not key order. The walk arrives ordered by key, and on
+// an index whose key does not correlate with recno that makes consecutive reads
+// land in different read-ahead blocks -- every record then costs a fresh 64 KB
+// block fetch and the driver's read-ahead buys nothing. Measured on two copies
+// of the same 34,595-row table: 14 ms where key order happened to follow recno,
+// 492 ms where it did not. The count does not depend on the order, so read the
+// records in the order the file stores them.
+std::uint32_t count_live_recnos(openads::engine::Table* t,
+                                const std::vector<std::uint32_t>& walk) {
+    std::vector<std::uint32_t> by_recno(walk);
+    std::sort(by_recno.begin(), by_recno.end());
+    std::uint32_t n = 0;
+    for (std::uint32_t rn : by_recno) {
+        auto del = t->deleted_at(rn);
+        if (del && !del.value()) ++n;
+    }
+    return n;
+}
+
 } // namespace
 
 UNSIGNED32 ENTRYPOINT AdsGetJulian(ADSHANDLE hTable, UNSIGNED8* pucField, SIGNED32* plDate) {
@@ -9454,13 +9510,14 @@ UNSIGNED32 ENTRYPOINT AdsGetRecordCount(ADSHANDLE hTable, UNSIGNED16 bFilterOpti
                 // handle — must honour SET DELETED ON (exclude deleted
                 // keys) or remote xBrowse allocates ghost rows / hangs.
                 const bool hide_del = !t->show_deleted_records();
-                const std::uint32_t saved_rn = t->recno();
                 std::function<bool(std::uint32_t)> live;
                 const std::function<bool(std::uint32_t)>* live_p = nullptr;
                 if (hide_del) {
+                    // deleted_at() keeps the driver's read-ahead warm and does
+                    // not move the cursor, so there is nothing to restore.
                     live = [t](std::uint32_t rn) {
-                        if (!t->goto_record(rn)) return false;
-                        return !t->is_deleted();
+                        auto del = t->deleted_at(rn);
+                        return del && !del.value();
                     };
                     live_p = &live;
                 }
@@ -9470,16 +9527,12 @@ UNSIGNED32 ENTRYPOINT AdsGetRecordCount(ADSHANDLE hTable, UNSIGNED16 bFilterOpti
                         sc.bottom.value_or(""),
                         live_p);
                 } else if (hide_del) {
-                    std::uint32_t n = 0;
-                    for (std::uint32_t rn : cdx->ordered_recnos_cached()) {
-                        if (live(rn)) ++n;
-                    }
-                    *pulRecordCount = n;
+                    *pulRecordCount = count_live_recnos(
+                        t, cdx->ordered_recnos_cached());
                 } else {
                     *pulRecordCount = static_cast<UNSIGNED32>(
                         cdx->ordered_recnos_cached().size());
                 }
-                if (hide_del && saved_rn != 0) (void)t->goto_record(saved_rn);
                 return ok();
             }
             *pulRecordCount = static_cast<UNSIGNED32>(
@@ -12291,7 +12344,14 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
         : std::string{};
 
     namespace fs = std::filesystem;
-    const bool is_adt_table = path_ends_with_ci(t->path(), ".adt");
+    // An ADT table is not always named .adt (ExtFile='.DAT'), so ask the
+    // driver in use as well -- an extension-only test routes those tables to
+    // .cdx and their companion .adi is never created.
+    bool is_adt_table = path_ends_with_ci(t->path(), ".adt");
+    if (!is_adt_table &&
+        dynamic_cast<openads::drivers::adt::AdtDriver*>(t->driver()) != nullptr) {
+        is_adt_table = true;
+    }
     const char* default_ext = is_adt_table ? ".adi" : ".cdx";
     fs::path p;
     if (bag.empty()) {
@@ -16425,12 +16485,18 @@ UNSIGNED32 ENTRYPOINT AdsSeekLast(ADSHANDLE hIndex,
 //               ADS_DOUBLEKEY -> ASCII-padded conversion so a scope
 //               set with a double compares apples-to-apples against
 //               the index's stored key bytes.
-static void pad_scope_key_to_index(Table* t, std::string& key) {
+// A scope bound longer than the index key is meaningless — trim it. Bounds
+// SHORTER than the key are NOT padded: they bound by prefix, and the engine
+// compares only the bytes the caller supplied (Table::key_in_*_scope_).
+// Padding them to key_length used to be done here to make an unpadded bound
+// on a single-field tag work, but it broke the partial-key case it shares the
+// path with: a 10-byte CON+DOC bound on a CON+DOC+STR(SEQ,6,0) tag became
+// "CON+DOC" + 6 spaces, which every real key sorts after, emptying the scope.
+static void trim_scope_key_to_index(Table* t, std::string& key) {
     if (t == nullptr || key.empty()) return;
     if (t->order() == nullptr || t->order()->index() == nullptr) return;
     const std::uint16_t klen = t->order()->index()->key_length();
-    if (key.size() < klen) key.append(klen - key.size(), ' ');
-    else if (key.size() > klen) key.resize(klen);
+    if (key.size() > klen) key.resize(klen);
 }
 
 UNSIGNED32 ENTRYPOINT AdsSetScope(ADSHANDLE hIndex, UNSIGNED16 usScope,
@@ -16516,11 +16582,10 @@ UNSIGNED32 ENTRYPOINT AdsSetScope(ADSHANDLE hIndex, UNSIGNED16 usScope,
     } else {
         key = pucScope
             ? openads::abi::to_internal(pucScope, usLen) : std::string();
-        // rddads passes hb_itemGetCLen() — the trimmed string length.
-        // Index keys and scope bounds are space-padded to key_length;
-        // storing an unpadded scope (e.g. OrdScope on a C(10) work-order
-        // field) makes key <= bottom fail for every matching row.
-        pad_scope_key_to_index(t, key);
+        // rddads passes hb_itemGetCLen() — the trimmed string length. That
+        // shorter-than-the-key bound is handled by prefix comparison in the
+        // engine, so it is stored as sent; only an over-long bound is trimmed.
+        trim_scope_key_to_index(t, key);
     }
     auto r = t->set_scope(usScope == ADS_TOP, key);
     if (!r) return fail(r.error());
@@ -30997,128 +31062,135 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         return s;
     };
 
-    // Issue #136: single-table ORDER BY / DISTINCT / LIMIT used a live
-    // cursor over the source with a recno_sequence. An application that
-    // ran INDEX ON the result rewrote the production .cdx. Real ACE
-    // returns a static temp cursor; so do the join / CASE paths here.
-    // Materialise now (column ACL applied first so the temp only holds
-    // permitted columns), close the live source, and return a memory
-    // table with recnos 1..N in result order and its own index space.
-    // Memory tables leave no files in the customer's data directory.
-    const bool need_static =
-        derived_cur == 0 &&
-        tbl->has_recno_sequence() &&
-        (parsed.value().order_by || parsed.value().distinct ||
-         parsed.value().limit >= 0 || parsed.value().offset > 0);
-    if (need_static) {
-        std::vector<std::uint16_t> cols;
-        if (!parsed.value().projection.empty()) {
-            cols.reserve(parsed.value().projection.size());
-            for (const auto& col : parsed.value().projection) {
-                std::int32_t fidx = tbl->field_index(col);
-                if (fidx < 0) {
-                    if (table_handle != 0) c->close_table(table_handle);
-                    return fail(openads::AE_COLUMN_NOT_FOUND, col.c_str());
-                }
-                if (allowed_cols &&
-                    allowed_cols->find(col_lower(col)) ==
-                        allowed_cols->end()) {
-                    if (table_handle != 0) c->close_table(table_handle);
-                    return fail(openads::AE_ACCESS_DENIED,
-                                ("no column permission: " + col).c_str());
-                }
-                cols.push_back(static_cast<std::uint16_t>(fidx));
-            }
-        } else {
-            const std::uint16_t nf =
-                static_cast<std::uint16_t>(tbl->field_count());
-            for (std::uint16_t i = 0; i < nf; ++i) {
-                if (allowed_cols) {
-                    const std::string& fname =
-                        tbl->field_descriptor(i).name;
-                    if (allowed_cols->find(col_lower(fname)) ==
-                        allowed_cols->end())
+    // ADS static-cursor semantics — single-table SELECT with ORDER BY /
+    // DISTINCT / LIMIT must be a STANDALONE temp table, not the live source
+    // with a recno_sequence. Real ACE returns a static cursor (its own temp
+    // table) for these; the ERP then runs `INDEX ON ... ; DBSETORDER(n)` on
+    // the result. If the cursor were the live `<source>.dbf`, those index ops
+    // would hit the production table and REWRITE its official .cdx (the user
+    // saw "cualquier SELECT-SQL reescribio los indices originales"), and a
+    // recno_sequence over the live table makes DBSETORDER a no-op for the
+    // browse. Materialising the result into a clean temp DBF (its own recnos
+    // 1..N, its own index space) isolates it from the source: INDEX ON /
+    // DBSETORDER behave exactly like DBFCDX / ADS_CDX. Same shape the
+    // multi-table / union / aggregate / CASE paths already produce.
+    if (derived_cur == 0 && tbl->has_recno_sequence()) {
+        ADSHANDLE conn_h = 0;
+        s.registry.for_each_handle([&](Handle h, HandleKind k, void* p) {
+            if (k != HandleKind::Connection) return;
+            if (static_cast<Connection*>(p) == c) conn_h = h;
+        });
+        if (conn_h != 0) {
+            std::vector<std::uint16_t> cols;
+            bool col_err = false;
+            bool col_denied = false;
+            if (parsed.value().projection.empty()) {
+                std::uint16_t nf = tbl->field_count();
+                cols.reserve(nf);
+                for (std::uint16_t k = 0; k < nf; ++k) {
+                    // A column-restricted user must not get the hidden columns
+                    // copied into the temp table either (the projection applied
+                    // to a live cursor below can't reach a materialised one).
+                    if (allowed_cols &&
+                        allowed_cols->find(col_lower(
+                            tbl->field_descriptor(k).name)) ==
+                            allowed_cols->end()) {
                         continue;
+                    }
+                    cols.push_back(k);
                 }
-                cols.push_back(i);
-            }
-        }
-        if (cols.empty()) {
-            if (table_handle != 0) c->close_table(table_handle);
-            return fail(openads::AE_ACCESS_DENIED,
-                        "no columns permitted for SELECT");
-        }
-
-        // SpCol::colname is const char* — keep owning strings alive until
-        // build_memory_result has copied the names into DbfField.
-        std::vector<std::string> name_storage;
-        name_storage.reserve(cols.size());
-        std::vector<SpCol> spcols;
-        spcols.reserve(cols.size());
-        for (auto fi : cols) {
-            const auto& fd = tbl->field_descriptor(fi);
-            name_storage.push_back(fd.name);
-            SpCol sc;
-            sc.colname = name_storage.back().c_str();
-            using FT = openads::drivers::DbfFieldType;
-            if (fd.type == FT::Numeric || fd.type == FT::Float ||
-                fd.type == FT::Integer || fd.type == FT::Double ||
-                fd.type == FT::Currency || fd.type == FT::ShortInt ||
-                fd.type == FT::AutoInc) {
-                sc.type = 'N';
-                sc.length = 20;
-                sc.decimals = static_cast<std::uint8_t>(fd.decimals);
-            } else if (fd.type == FT::Logical) {
-                sc.type = 'L';
-                sc.length = 1;
-                sc.decimals = 0;
             } else {
-                sc.type = 'C';
-                sc.length = static_cast<std::uint8_t>(
-                    fd.length > 0 && fd.length <= 254 ? fd.length : 50);
-                sc.decimals = 0;
+                cols.reserve(parsed.value().projection.size());
+                for (const auto& cn : parsed.value().projection) {
+                    std::int32_t fi = tbl->field_index(cn);
+                    if (fi < 0) { col_err = true; break; }
+                    if (allowed_cols &&
+                        allowed_cols->find(col_lower(cn)) ==
+                            allowed_cols->end()) {
+                        col_denied = true; break;
+                    }
+                    cols.push_back(static_cast<std::uint16_t>(fi));
+                }
             }
-            spcols.push_back(sc);
-        }
-
-        std::vector<std::vector<std::string>> mrows;
-        const auto& seq = tbl->recno_sequence();
-        mrows.reserve(seq.size());
-        for (std::uint32_t r : seq) {
-            if (auto g = tbl->goto_record(r); !g) continue;
-            std::vector<std::string> row;
-            row.reserve(cols.size());
-            for (auto fi : cols) {
-                auto v = tbl->read_field(fi);
-                std::string cell = v ? v.value().as_string : std::string();
-                while (!cell.empty() && cell.back() == ' ') cell.pop_back();
-                row.push_back(std::move(cell));
+            if (col_err) return fail(openads::AE_COLUMN_NOT_FOUND, "");
+            if (col_denied) return fail(openads::AE_ACCESS_DENIED,
+                                        "no column permission");
+            auto type_name = [](char raw) -> const char* {
+                switch (raw) {
+                    case 'C': return "Character";  case 'N': return "Numeric";
+                    case 'D': return "Date";       case 'L': return "Logical";
+                    case 'M': return "Memo";       case 'F': return "Float";
+                    case 'I': return "Integer";    case 'Y': return "Currency";
+                    case 'B': return "Double";     case 'V': return "Varchar";
+                    case 'Q': return "Varbinary";
+                }
+                return "Character";
+            };
+            std::string defs;
+            for (auto cidx : cols) {
+                const auto& fd = tbl->field_descriptor(cidx);
+                if (!defs.empty()) defs.push_back(';');
+                defs += fd.name;
+                defs.push_back(',');
+                defs += type_name(static_cast<char>(fd.raw_type));
+                if (fd.length   > 0) { defs.push_back(','); defs += std::to_string(fd.length); }
+                if (fd.decimals > 0) { defs.push_back(','); defs += std::to_string(fd.decimals); }
             }
-            mrows.push_back(std::move(row));
+            char nb[64];
+            std::snprintf(nb, sizeof(nb), "_srt_%llx",
+                          static_cast<unsigned long long>(
+                              openads::platform::monotonic_nanos()));
+            std::string tmp_name = nb;
+            std::vector<UNSIGNED8> name_buf(tmp_name.size() + 1, 0);
+            std::memcpy(name_buf.data(), tmp_name.data(), tmp_name.size());
+            std::vector<UNSIGNED8> def_buf(defs.size() + 1, 0);
+            std::memcpy(def_buf.data(), defs.data(), defs.size());
+            ADSHANDLE hNew = 0;
+            UNSIGNED32 crc = AdsCreateTable(conn_h, name_buf.data(), nullptr,
+                                            ADS_CDX, 0, 0, 0, 0,
+                                            def_buf.data(), &hNew);
+            if (crc == openads::AE_SUCCESS) {
+                openads::engine::Table* tgt =
+                    s.registry.lookup<openads::engine::Table>(
+                        hNew, HandleKind::Table);
+                if (tgt != nullptr) {
+                    std::vector<std::uint32_t> seq = tbl->recno_sequence();
+                    for (std::uint32_t r : seq) {
+                        if (auto g = tbl->goto_record(r); !g) continue;
+                        if (auto ar = tgt->append_record(); !ar) break;
+                        for (std::size_t i = 0; i < cols.size(); ++i) {
+                            auto v = tbl->read_field(cols[i]);
+                            std::string sv =
+                                v ? v.value().as_string : std::string();
+                            (void)tgt->set_field(
+                                static_cast<std::uint16_t>(i), sv);
+                        }
+                    }
+                    (void)tgt->flush();
+                }
+                AdsCloseTable(hNew);
+                // Drop the live source cursor so the ERP's INDEX ON / close
+                // never touches the production table or its official .cdx.
+                if (table_handle != 0) c->close_table(table_handle);
+                auto cth = c->open_table(tmp_name,
+                                         openads::engine::TableType::Cdx,
+                                         openads::engine::OpenMode::Shared);
+                if (!cth) return fail(cth.error());
+                openads::engine::Table* ctbl = c->lookup_table(cth.value());
+                if (!ctbl) return fail(openads::AE_INTERNAL_ERROR,
+                                       "sorted temp post-open");
+                ADSHANDLE gh_srt =
+                    s.registry.register_object(HandleKind::Table, ctbl);
+                // Tie the temp table's lifetime to the cursor handle: without
+                // this, every SELECT ... ORDER BY leaves a _srt_*.dbf (and any
+                // index the caller built on it) behind in the data directory.
+                materialised_cursor_temps()[gh_srt] =
+                    (std::filesystem::path(c->data_dir()) / tmp_name).string();
+                *phCursor = gh_srt;
+                return ok();
+            }
+            // AdsCreateTable failed -> fall through to the live-cursor return.
         }
-
-        auto mt = build_memory_result("sql_orderby", spcols, mrows);
-        if (!mt) {
-            if (table_handle != 0) c->close_table(table_handle);
-            return fail(mt.error());
-        }
-        auto ath = c->adopt_table(std::move(mt).value(),
-                                  "_sql_orderby_cursor");
-        if (!ath) {
-            if (table_handle != 0) c->close_table(table_handle);
-            return fail(ath.error());
-        }
-        openads::engine::Table* ctbl = c->lookup_table(ath.value());
-        if (!ctbl) {
-            if (table_handle != 0) c->close_table(table_handle);
-            return fail(openads::AE_INTERNAL_ERROR,
-                        "ORDER BY materialize post-adopt");
-        }
-        if (table_handle != 0) c->close_table(table_handle);
-        ADSHANDLE gh_static =
-            s.registry.register_object(HandleKind::Table, ctbl);
-        *phCursor = gh_static;
-        return ok();
     }
 
     // M10.46 — when this query was a derived-table outer SELECT,
@@ -33489,13 +33561,14 @@ UNSIGNED32 ENTRYPOINT AdsGetKeyCount(ADSHANDLE hIndex, UNSIGNED16 /*usFilter*/,
                 dynamic_cast<openads::drivers::cdx::CdxIndex*>(ord->index())) {
             auto& sc = ord->scope();
             const bool hide_del = !t->show_deleted_records();
-            const std::uint32_t saved_rn = t->recno();
             std::function<bool(std::uint32_t)> live;
             const std::function<bool(std::uint32_t)>* live_p = nullptr;
             if (hide_del) {
+                // deleted_at() keeps the driver's read-ahead warm and does not
+                // move the cursor, so there is nothing to restore.
                 live = [t](std::uint32_t rn) {
-                    if (!t->goto_record(rn)) return false;
-                    return !t->is_deleted();
+                    auto del = t->deleted_at(rn);
+                    return del && !del.value();
                 };
                 live_p = &live;
             }
@@ -33505,16 +33578,11 @@ UNSIGNED32 ENTRYPOINT AdsGetKeyCount(ADSHANDLE hIndex, UNSIGNED16 /*usFilter*/,
                     sc.bottom.value_or(""),
                     live_p);
             } else if (hide_del) {
-                std::uint32_t n = 0;
-                for (std::uint32_t rn : cdx->ordered_recnos_cached()) {
-                    if (live(rn)) ++n;
-                }
-                *pulCount = n;
+                *pulCount = count_live_recnos(t, cdx->ordered_recnos_cached());
             } else {
                 *pulCount = static_cast<UNSIGNED32>(
                     cdx->ordered_recnos_cached().size());
             }
-            if (hide_del && saved_rn != 0) (void)t->goto_record(saved_rn);
             return ok();
         }
         // NTX: use cached B-tree walk for correct conditional count

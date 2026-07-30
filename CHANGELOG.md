@@ -1,3 +1,99 @@
+## Unreleased
+
+### Fixed - ORDER BY cursor lost the source column types (#146)
+
+The memory-table cursor introduced with #136 rebuilt the result schema through
+`build_memory_result`, which types every numeric column as a 4-byte integer and
+caps the record at 64 KB. A `SELECT * ... ORDER BY` therefore dropped the
+decimals of any `N(n,d)` column, wrapped values past 2^31, and failed outright
+on a wide table. Reported from an ERP whose article table has 187 fields and
+prices with two decimals.
+
+The cursor is materialised from the SOURCE field descriptors again (a temp table
+created from the source structure), so types round-trip. The temp is tied to the
+cursor handle and its files are removed by `AdsCloseTable`, keeping the #136
+property that a data directory does not accumulate one temp per query.
+
+Test: `tests/unit/abi_sql_orderby_types_test.cpp`.
+
+### Fixed - ADI tag ordinals follow creation order
+
+`add_tag` prepended its tag-directory entry, so ordinals came out reversed:
+after creating TCODIGO, TNOMBRE, TGRUPO the bag reported TGRUPO as ordinal 1.
+An application that navigates orders by NUMBER (`OrdSetFocus(n)` / `OrdName(n)`
+— what a browse doing click-to-sort on a column does) then activates the wrong
+order, and cannot compensate without knowing in advance how many tags the bag
+will hold. CDX gives creation order; ADI now matches.
+
+Existing bags are unaffected on read (the directory is scanned in file order
+either way); a bag written before this change keeps its old ordinals until it
+is rebuilt.
+
+Test: `tests/unit/abi_adi_tagdir_order_test.cpp`.
+
+### Fixed - an ADT table kept under a non-.adt extension works end to end
+
+`ExtFile='.DAT'` is a common ERP convention: every table is named `.DAT`
+whatever its format. Three places tested the extension instead of the format:
+
+- `AdsCreateTable` forced `.adt`, so `COPY TO "CONSEINV.DAT" VIA "ADS"`
+  silently produced `CONSEINV.adt` and reopened a name the caller never asked
+  for;
+- the structural index bag was chosen by extension, so a `.DAT` ADT table got a
+  `.cdx` bag its driver cannot use;
+- `AdiIndex`'s companion-data lookup only ever tried `<stem>.adt`.
+
+#143 fixed the SQL side of the same convention by sniffing the header; this is
+the navigational side.
+
+Test: `tests/unit/abi_adt_dat_extension_test.cpp`.
+
+### Fixed - create honours an absolute path outside data_dir when its parent exists
+
+#142 honoured an absolute create path when it sits under `data_dir_`. The other
+half is an application staging work tables elsewhere and reading them back by the
+same absolute name: those still folded, into a path whose intermediate
+directories nobody creates, so the create failed and the caller could never find
+its table. An absolute path whose parent directory already exists is now written
+where the caller asked, which is what the real ACE engine does for a free table.
+
+Unchanged: a path whose parent does not exist still folds (a client name that
+means nothing on the server), and so does a bare drive-root name — `C:\STRAY.DBF`
+— since the root always exists but is never a deliberate destination.
+
+Test: `tests/unit/abi_create_outside_datadir_test.cpp`.
+
+### Fixed - counting live keys re-read the table once per record
+
+`AdsGetKeyCount` / `AdsGetRecordCount` over an order exclude deleted rows while
+SET DELETED is ON by walking the cached index and testing each recno. The test
+went through `goto_record()`, which invalidates the driver's read-ahead on every
+call, so a sequential count became one block read per record — and nothing was
+cached between calls.
+
+Measured on an ADT table of 34,595 rows:
+
+    SET DELETED OFF   OrdKeyCount     9 ms   (x5 more:    0 ms)
+    SET DELETED ON    OrdKeyCount  1381 ms   (x5 more: 6859 ms)   before
+    SET DELETED ON    OrdKeyCount    14 ms   (x5 more:   72 ms)   after
+
+New `Table::deleted_at(recno)` reads the record through the normal read path, so
+the read-ahead block stays warm, and does not move the cursor. Same counts. Same
+reasoning as the existing `load_record_for_bulk_scan`.
+
+Keeping the read-ahead warm is only half of it: the walk arrives ordered by KEY,
+and on an index whose key does not correlate with recno consecutive reads land
+in different blocks anyway. Two copies of the same table, after the change
+above:
+
+    ADT/ADI, key order follows recno    14 ms
+    DBF/CDX, key order scattered       492 ms
+
+The count does not depend on the order, so the recnos are sorted and the records
+read in file order: 16 ms and 23 ms respectively.
+
+Test: `tests/unit/abi_keycount_deleted_scan_test.cpp`.
+
 ## 1.8.37 - 2026-07-29
 
 ERP production fix batch (RusSoft Harbour/FiveWin deployment) plus CI-blocking

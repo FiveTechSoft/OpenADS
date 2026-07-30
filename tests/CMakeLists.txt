@@ -91,6 +91,8 @@ add_executable(openads_unit_tests
     unit/index_expr_sql_test.cpp
     unit/abi_m92_real_test.cpp
     unit/abi_create_table_test.cpp
+    unit/abi_adt_dat_extension_test.cpp
+    unit/abi_create_outside_datadir_test.cpp
     unit/abi_remote_create_table_test.cpp
     unit/abi_refresh_extract_test.cpp
     unit/abi_create_index61_test.cpp
@@ -112,6 +114,8 @@ add_executable(openads_unit_tests
     unit/cdx_multilevel_test.cpp
     unit/cdx_multitag_2nd_test.cpp
     unit/cdx_prefix_seek_test.cpp
+    unit/abi_scope_partial_key_test.cpp
+    unit/abi_prefix_seek_deleted_test.cpp
     unit/cdx_reindex_char_test.cpp
     unit/cdx_prev_empty_leaf_test.cpp
     unit/cdx_empty_tree_test.cpp
@@ -129,6 +133,7 @@ add_executable(openads_unit_tests
     unit/engine_navigation_empty_test.cpp
     unit/abi_deleted_records_test.cpp
     unit/abi_scoped_deleted_keycount_test.cpp
+    unit/abi_keycount_deleted_scan_test.cpp
     unit/abi_index_key_count_test.cpp
     unit/abi_key_type_test.cpp
     unit/abi_pl852_reopen_seek_test.cpp
@@ -189,6 +194,7 @@ add_executable(openads_unit_tests
     unit/abi_sql_named_param_test.cpp
     unit/abi_null_semantics_test.cpp
     unit/abi_sql_orderby_test.cpp
+    unit/abi_sql_orderby_types_test.cpp
     unit/abi_sql_dml_test.cpp
     unit/abi_sql_projection_test.cpp
     unit/abi_sql_ddl_test.cpp
@@ -229,6 +235,7 @@ add_executable(openads_unit_tests
     unit/abi_adi_multilevel_build_test.cpp
     unit/abi_adt_scope_validation_test.cpp
     unit/abi_adi_smoke_test.cpp
+    unit/abi_adi_tagdir_order_test.cpp
     unit/abi_adi_tagdir_wide_page_test.cpp
     unit/abi_adt_sql_test.cpp
     unit/abi_adt_dat_extension_sql_test.cpp

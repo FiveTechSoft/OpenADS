@@ -65,11 +65,24 @@ platform::OpenMode map_open_mode(IndexOpenMode m) noexcept {
     return platform::OpenMode::OpenExisting;
 }
 
-// Derive .adt path from .adi path
+// Derive the companion data-file path from the .adi path.
+// Standard ADT uses a .adt data file, but an application may keep ADT data
+// under another extension (ExtFile='.DAT' is a common ERP convention), so when
+// <stem>.adt is absent fall back to <stem>.DAT / <stem>.dat. This is the safety
+// net for every path that derives the data file implicitly -- open / open_named
+// / list_tags / add_tag / create -- when the caller passed no explicit adt_path.
 std::string adt_path_for(const std::string& adi_path) {
     namespace fs = std::filesystem;
     fs::path p(adi_path);
     p.replace_extension(".adt");
+    std::error_code ec;
+    if (!fs::exists(p, ec)) {
+        for (const char* ext : {".DAT", ".dat"}) {
+            fs::path d(adi_path);
+            d.replace_extension(ext);
+            if (fs::exists(d, ec)) return d.string();
+        }
+    }
     return p.string();
 }
 
@@ -1791,21 +1804,21 @@ util::Result<AdiIndex> AdiIndex::add_tag(const std::string& adi_path,
         return util::Error{5000, 0, "ADI add_tag: short dense leaf write", ""};
     }
 
-    // Prepend tag-directory entry (legacy dual-tag layout).
-    for (std::int32_t i = static_cast<std::int32_t>(count) - 1; i >= 0; --i) {
-        std::size_t src = ADI_TAGDIR_ENTRY_START
-                        + static_cast<std::size_t>(i) * ADI_TAGDIR_ENTRY_SIZE;
-        std::size_t dst = src + ADI_TAGDIR_ENTRY_SIZE;
-        std::memmove(pg2.data() + dst, pg2.data() + src, ADI_TAGDIR_ENTRY_SIZE);
-    }
+    // APPEND the tag-directory entry so tag ORDINALS follow creation order,
+    // as CDX does. Prepending reverses them: DBSETORDER(1) then selects the
+    // LAST tag created, and an application that navigates orders by NUMBER --
+    // OrdSetFocus(n) / OrdName(n), which is what a browse doing click-to-sort
+    // on a column does -- lands on the wrong order. Callers cannot compensate
+    // without knowing how many tags the bag will end up holding.
+    std::size_t new_off = ADI_TAGDIR_ENTRY_START
+                        + static_cast<std::size_t>(count) * ADI_TAGDIR_ENTRY_SIZE;
     // u32 LE: hdr_pg is a page number in a bag that is already several MB
     // by the time the second tag is added, so a one-byte store silently
     // lost it (see scan_tagdir). Entry bytes 1..3 were unused zeros, so
     // widening the field keeps every existing bag readable.
-    set_u32_le( pg2.data() + ADI_TAGDIR_ENTRY_START, hdr_pg );
+    set_u32_le( pg2.data() + new_off, hdr_pg );
     if (!params.field_name.empty()) {
-        pg2[ADI_TAGDIR_ENTRY_START + 5] =
-            static_cast<std::uint8_t>(params.field_name[0]);
+        pg2[new_off + 5] = static_cast<std::uint8_t>(params.field_name[0]);
     }
     set_u16_le(pg2.data() + 2, count + 1);
 
