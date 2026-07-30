@@ -108,6 +108,13 @@ $cases = [ordered]@{
 # task #4 missed the user/group catalogs: OA has USER_NAME / GROUP_NAME, SAP has Name
 "cat_users_by_name"     = "SELECT Name FROM system.users ORDER BY Name";
 "cat_groups_by_name"    = "SELECT Name FROM system.usergroups ORDER BY Name";
+# Full SAP column set + order on the three catalogs task #4 had missed. These
+# resolve on both engines now; adssys is excluded because OpenADS's importer
+# adds it and SAP omits it from these catalogs (tracked by cat_users_n), and
+# it sorts first so it would shift every TOP-N window.
+"cat_users_shape"       = "SELECT TOP 1 Name, Enable_Internet, Logins_Disabled, Comment, User_Defined_Prop, Require_Old_Password FROM system.users WHERE Name <> 'adssys' ORDER BY Name";
+"cat_groups_shape"      = "SELECT Name, Comment FROM system.usergroups ORDER BY Name";
+"cat_members_shape"     = "SELECT TOP 10 User_Name, Group_Name FROM system.usergroupmembers WHERE User_Name <> 'adssys' ORDER BY User_Name, Group_Name";
 "cat_rel_names"         = "SELECT Name, RI_Primary_Table, RI_Foreign_Table FROM system.relations ORDER BY Name";
 "cat_trig_names"        = "SELECT TOP 10 Name, Trig_TableName FROM system.triggers ORDER BY Trig_TableName, Name";
 

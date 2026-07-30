@@ -19017,11 +19017,44 @@ build_system_table(Connection* c, std::string sys_name,
         return build(cols, rows);
     }
     if (sys_name == "users") {
-        const std::vector<Col> cols = {{"USER_NAME", 'C', 200, 0}};
+        // SAP system.users column set + order (2026-07-29). Task #4 converted
+        // five catalogs to SAP's exact names but missed this one, so a client
+        // filtering `WHERE Name = ...` got "Column not found" from OpenADS.
+        // Logins_Disabled and Require_Old_Password are per-user in SAP but
+        // OpenADS only tracks logins-disabled at the DATABASE level
+        // (ADS_DD_LOGINS_DISABLED / prop_16), so they render as SAP's defaults
+        // rather than being invented per user.
+        const std::vector<Col> cols = {
+            {"Name",                 'C', 200, 0},
+            {"Enable_Internet",      'L',   1, 0},
+            {"Logins_Disabled",      'L',   1, 0},
+            {"Comment",              'C', 200, 0},
+            {"User_Defined_Prop",    'C', 4096, 0},
+            {"Require_Old_Password", 'L',   1, 0},
+        };
+        // DD boolean props arrive in several encodings depending on who wrote
+        // them (SAP export, sp_ModifyUserProperty, a raw 2-byte UNSIGNED16).
+        auto prop_is_true = [](const std::string& v) {
+            if (v.empty()) return false;
+            if (v.size() == 2 && v[1] == '\0')            // raw UNSIGNED16
+                return v[0] != '\0';
+            const char c = static_cast<char>(
+                std::toupper(static_cast<unsigned char>(v[0])));
+            return c == 'T' || c == 'Y' || c == '1';
+        };
         std::vector<std::vector<std::string>> rows;
         // users_ holds folded lookup keys; show the declared spelling.
-        for (const auto& u : dd->users())
-            rows.push_back({dd->display_user(u)});
+        for (const auto& u : dd->users()) {
+            const auto internet = dd->get_user_property(u, "prop_1104");
+            rows.push_back({
+                dd->display_user(u),
+                prop_is_true(internet) ? "T" : "F",
+                "F",                                   // not tracked per user
+                dd->get_user_property(u, "prop_1"),    // COMMENT
+                dd->get_user_property(u, "prop_3"),    // ADS_DD_USER_DEFINED_PROP
+                "T",                                   // SAP default
+            });
+        }
         return build(cols, rows);
     }
     if (sys_name == "groups") {
@@ -19035,7 +19068,14 @@ build_system_table(Connection* c, std::string sys_name,
         // Lists all defined groups (SAP: system.usergroups = group catalogue).
         // Include both explicit group records AND groups referenced in memberships,
         // so text-format DDs that only have MEMBER entries still list their groups.
-        const std::vector<Col> cols = {{"GROUP_NAME", 'C', 200, 0}};
+        // SAP system.usergroups column set + order (2026-07-29): Name, Comment,
+        // User_Defined_Prop. Group props share the user_props_ map (see
+        // sp_ModifyGroupProperty), so prop_1 / prop_3 apply here too.
+        const std::vector<Col> cols = {
+            {"Name",              'C', 200, 0},
+            {"Comment",           'C', 200, 0},
+            {"User_Defined_Prop", 'C', 4096, 0},
+        };
         std::unordered_set<std::string> seen;
         std::vector<std::vector<std::string>> rows;
         auto add_group_row = [&](const std::string& g) {
@@ -19043,7 +19083,10 @@ build_system_table(Connection* c, std::string sys_name,
                 openads::engine::DataDict::ci_name(g) !=
                     openads::engine::DataDict::ci_name(*filter->group_name))
                 return;
-            if (seen.insert(g).second) rows.push_back({g});
+            if (seen.insert(g).second)
+                rows.push_back({g,
+                                dd->get_user_property(g, "prop_1"),
+                                dd->get_user_property(g, "prop_3")});
         };
         for (const auto& g : dd->groups())
             add_group_row(g);
@@ -19054,9 +19097,13 @@ build_system_table(Connection* c, std::string sys_name,
     }
     if (sys_name == "usergroupmembers") {
         // Lists which users belong to which group.
+        // SAP column set + order (2026-07-29) is User_Name THEN Group_Name —
+        // the reverse of the GROUP_NAME/USER_NAME pair OpenADS used to emit, so
+        // positional readers saw the two values swapped as well as misnamed.
+        // User_Name carries the declared spelling, matching system.users.Name.
         const std::vector<Col> cols = {
-            {"GROUP_NAME", 'C', 200, 0},
-            {"USER_NAME",  'C', 200, 0},
+            {"User_Name",  'C', 200, 0},
+            {"Group_Name", 'C', 200, 0},
         };
         std::vector<std::vector<std::string>> rows;
         if (filter && filter->group_name) {
@@ -19064,14 +19111,14 @@ build_system_table(Connection* c, std::string sys_name,
                 if (!filter->user_name ||
                     openads::engine::DataDict::ci_name(user) ==
                         openads::engine::DataDict::ci_name(*filter->user_name))
-                    rows.push_back({*filter->group_name, user});
+                    rows.push_back({dd->display_user(user), *filter->group_name});
         } else if (filter && filter->user_name) {
             for (const auto& grp : dd->groups_of(*filter->user_name))
-                rows.push_back({grp, openads::engine::DataDict::ci_name(*filter->user_name)});
+                rows.push_back({dd->display_user(*filter->user_name), grp});
         } else {
             for (const auto& kv : dd->memberships())
                 for (const auto& grp : kv.second)
-                    rows.push_back({grp, kv.first});   // group, user
+                    rows.push_back({dd->display_user(kv.first), grp});
         }
         return build(cols, rows);
     }

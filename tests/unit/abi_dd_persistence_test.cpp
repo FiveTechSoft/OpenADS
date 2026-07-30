@@ -127,7 +127,7 @@ TEST_CASE("system.* materialization uses memory table instead of temp ADT") {
     ADSHANDLE hStmt = 0;
     REQUIRE(AdsCreateSQLStatement(hConn, &hStmt) == 0);
 
-    UNSIGNED8 sql[] = "SELECT USER_NAME FROM system.users";
+    UNSIGNED8 sql[] = "SELECT Name FROM system.users";
     ADSHANDLE hCur = 0;
     REQUIRE(AdsExecuteSQLDirect(hStmt, sql, &hCur) == 0);
     REQUIRE(hCur != 0);

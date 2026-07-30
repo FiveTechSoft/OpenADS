@@ -78,14 +78,34 @@ delta 1351 = 1 missing grantee + 2 missing objects
 engines (55131/51 = 54050/50 = 1081), matching `system.columns`. The column
 dimension of the matrix is intact — the only shortfall is the missing grantee.
 
-- [ ] **Task #4 missed the user/group catalogs** — same class as the five
-      catalogs already fixed, three more to go. `WHERE Name = …` raises
-      "Column not found" against all three.
-      | catalog | OA columns | SAP columns |
-      |---|---|---|
-      | users | `USER_NAME` | Name, Enable_Internet, Logins_Disabled, Comment, User_Defined_Prop |
-      | usergroups | `GROUP_NAME` | Name, Comment, User_Defined_Prop |
-      | usergroupmembers | `GROUP_NAME`,`USER_NAME` | (verify against SAP) |
+- [x] **Task #4's three missing catalogs — DONE 2026-07-29.** `system.users`,
+      `system.usergroups` and `system.usergroupmembers` now emit SAP's exact
+      column names, order and types, so `WHERE Name = …` works. Note
+      usergroupmembers was `User_Name` THEN `Group_Name` in SAP — the reverse of
+      the pair OpenADS emitted, so positional readers had the values swapped as
+      well as misnamed. Both backends updated (native DD + the SQL-URI/sqlite
+      ACL projection in `sql_acl_store.cpp`, which had its own copy) plus the
+      DA-Web queries that named the old columns explicitly.
+
+**Newly visible now that those columns exist** — the shapes match, the values
+don't:
+
+- [ ] **import_dd does not capture user/group `Comment` or `User_Defined_Prop`**
+      — SAP has `AM` → "Amneris Maldonado" and `AdjustmentAuthUsers` →
+      "Authorize adjustments to claims"; OpenADS returns empty for every user
+      and group. Same for the `User_Defined_Prop` XML blob (SAP stores an
+      `<EMAIL>` element per user). The DD can hold these (`prop_1` / `prop_3`
+      via `set_user_property`) — the importer just never reads them from SAP.
+- [ ] **`system.usergroups` omits `SERVER:Admin` / `SERVER:Monitor`** — SAP
+      lists both (that is 2 of the 3-group shortfall, 20 vs 17; `DB:Debug`
+      above is the third). Inconsistent *within* OpenADS: the
+      `system.permissions` builder already synthesises both pseudo-groups, the
+      usergroups builder does not. Cheap fix, but it will surface them in
+      DA-Web's group tree, so decide that deliberately.
+- [ ] **`adssys` appears in OpenADS's user catalogs, SAP omits it** — the
+      importer creates it ("adssys created (SAP built-in, not in export)") and
+      it sorts first, shifting every ordered comparison. Accounts for users
+      31 (SAP) vs 32 (OA).
 
 ## A. S4 polish (cosmetic — tracked as tasks #1–3)
 - [ ] **#1 Date display format** — `AdsGetString` on date cols returns raw

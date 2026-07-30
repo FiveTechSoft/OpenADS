@@ -184,7 +184,8 @@ TEST_CASE("system.users lists DD users") {
 
     CHECK(sql_count(hConn, "SELECT * FROM system.users") == 2);
 
-    auto names = sql_col1(hConn, "SELECT * FROM system.users", "USER_NAME");
+    // SAP's column name is Name (task #4 parity), not the old OpenADS USER_NAME.
+    auto names = sql_col1(hConn, "SELECT * FROM system.users", "Name");
     bool has_alice = false, has_bob = false;
     for (const auto& n : names) {
         if (n == "alice") has_alice = true;

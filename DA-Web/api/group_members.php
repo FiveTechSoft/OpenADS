@@ -44,9 +44,11 @@ try {
     sort($members);
 
     $allUsers = [];
-    $stmt = $conn->query('SELECT USER_NAME FROM system.users ORDER BY USER_NAME');
+    // system.users.Name is SAP's column name and now OpenADS's too; the old
+    // OpenADS-only USER_NAME is kept as a read fallback for older engine builds.
+    $stmt = $conn->query('SELECT Name FROM system.users ORDER BY Name');
     while ($row = $stmt->fetchAssoc()) {
-        $u = trim((string)($row['USER_NAME'] ?? ''));
+        $u = trim((string)($row['Name'] ?? $row['USER_NAME'] ?? ''));
         if ($u !== '') $allUsers[] = $u;
     }
     $stmt->close();
