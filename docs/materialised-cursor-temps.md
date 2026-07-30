@@ -95,6 +95,43 @@ Because the temp is ADT, `sql_type_of()` no longer clamps `CHAR` to 254 (DBF's
 character maximum). An over-long *record* is now rejected by `AdsCreateTable`
 ("ADT record too long") instead of being silently shortened.
 
+## Numeric presentation — what a materialised cell must look like
+
+A materialised path re-renders values instead of passing the stored bytes
+through, so it has to reproduce the source's *presentation*, not just its
+magnitude. Two rules, both oracle-probed against SAP on the mp corpus
+(2026-07-30) and both encoded in helpers so the five materialisers cannot drift:
+
+**1. Copied columns keep the source's width and scale, right-justified.**
+`join_cell_text()` formats `%*.*f` into the declared width. It was `%-*.*f`
+(left-justified) on the theory that leading spaces "leak" into string reads —
+they are not a leak, they are the declared presentation, and SAP emits them. A
+join must not render a column differently from a plain read of that column:
+
+```
+service.charges  N(11,2)   plain "      0.00"   join "      0.00"
+```
+
+**2. Aggregates have their own declared width** — `agg_result_width()`:
+
+| aggregate | result width | note |
+|---|---|---|
+| `SUM` | source + 10 | a sum can carry far past the source's range |
+| `AVG` / `MIN` / `MAX` | source width | cannot exceed the source |
+| `COUNT` / `COUNT(*)` | integral, **not padded** | SAP returns `852033`, not `     852033` |
+
+`agg_cell_text()` owns both the width and the justification, including the COUNT
+exception, for exactly this reason.
+
+> **Prerequisite: the ADT decimal count lives at byte 139, not 137.**
+> `adt_driver.cpp` used to read 137 and got 0 for every SAP-written table. This
+> hid for a long time because ADT type 2 stores numerics as ASCII text — a plain
+> read returns the stored characters and never consults `decimals`. Only a path
+> that re-formats from `as_double` needs the scale, so the first symptom was
+> joins rendering money as `"0"` while the same column read correctly on its
+> own. If a re-formatting path is dropping decimals, check the descriptor before
+> suspecting the formatter.
+
 ## Regression tests
 
 - `tests/unit/abi_sql_orderby_test.cpp` —

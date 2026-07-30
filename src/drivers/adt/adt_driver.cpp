@@ -139,7 +139,39 @@ AdtDriver::open(const std::string& path, DriverOpenMode mode) {
         f.type          = classify_adt_field(raw_type);
         f.record_offset = read_u16_le(fd + 131);
         f.length        = read_u16_le(fd + 135);
-        f.decimals      = static_cast<std::uint8_t>(read_u16_le(fd + 137));
+
+        // Decimal count lives at byte 139, NOT 137.
+        //
+        // Verified against tables written by the real SAP engine (mp corpus,
+        // service.adt): a type-2 numeric declared N(10,2) carries
+        //     …135:10  136:0  137:0  138:0  139:2  140:0
+        // i.e. 137 stays zero and the scale sits at 139. Reading 137 returned
+        // 0 for every SAP-written table.
+        //
+        // This hid for a long time because ADT type 2 stores the value as
+        // ASCII text: a plain read hands back the stored characters verbatim
+        // ("      0.00") and never consults `decimals`. Only a path that
+        // RE-FORMATS the value from as_double needs the scale — which is why
+        // it first surfaced as joins rendering money columns as "0" while the
+        // same column read correctly on its own.
+        //
+        // Fall back to 137 so ADT tables written by older OpenADS builds (which
+        // stamped the scale there) still read back with their decimals.
+        //
+        // Restricted to type 2 on purpose: for an AUTOINC field (type 15)
+        // bytes 139-143 are the auto-increment COUNTER, so reading 139 as a
+        // scale there would turn a populated counter into nonsense decimals.
+        // Type 2 is the only ADT type that carries a meaningful declared
+        // scale — DOUBLE (10) stores none at all (stamping one makes the real
+        // engine report the table corrupt, 7016) and MONEY (18) is implicitly
+        // 4-digit.
+        std::uint16_t dec = read_u16_le(fd + 137);
+        if (raw_type == 2u) {
+            const std::uint16_t dec_139 = read_u16_le(fd + 139);
+            if (dec_139 != 0) dec = dec_139;
+        }
+        if (dec > 18u) dec = 0;   // guard against a stray value
+        f.decimals = static_cast<std::uint8_t>(dec);
 
         // byte 128: flags (bit 1 = nullable, same convention as VFP).
         std::uint8_t flags = fd[128];

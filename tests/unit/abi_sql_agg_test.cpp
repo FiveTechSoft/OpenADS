@@ -364,3 +364,96 @@ TEST_CASE("M10.25 GROUP BY + HAVING filters groups") {
     REQUIRE(AdsDisconnect(hConn) == 0);
     fs::remove_all(dir, ec);
 }
+
+// ---------------------------------------------------------------------------
+// Aggregate results must carry SAP's declared PRESENTATION, not just the right
+// number. Oracle-probed against SAP on the mp corpus (2026-07-30):
+//
+//     SUM            -> source width + 10, right-justified, source decimals
+//     AVG/MIN/MAX    -> source width,      right-justified, source decimals
+//     COUNT/COUNT(*) -> integral, NOT padded ("4", never "         4")
+//
+// All five aggregate materialisers used a hardcoded width of 20 and formatted
+// left-justified, so every aggregate disagreed with SAP and with a plain read
+// of the same column. agg_result_width() / agg_cell_text() own these rules now;
+// if this test fails, one of the five paths has drifted from them.
+// See docs/materialised-cursor-temps.md.
+// ---------------------------------------------------------------------------
+TEST_CASE("aggregate results use SAP's declared width and justification") {
+    auto dir = fs::temp_directory_path() / "openads_agg_width";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+
+    UNSIGNED8 srv[512]{};
+    const auto ds = dir.string();
+    std::memcpy(srv, ds.c_str(), ds.size() + 1);
+    ADSHANDLE hConn = 0;
+    REQUIRE(AdsConnect60(srv, ADS_LOCAL_SERVER, nullptr, nullptr, 0,
+                         &hConn) == 0);
+
+    // AsciiNumeric (ADT type 2) so the declared scale is carried on disk;
+    // plain "Numeric" with decimals becomes an ADT DOUBLE, which stores none.
+    UNSIGNED8 tname[32] = "money";
+    UNSIGNED8 defs[96]  = "AMT,AsciiNumeric,10,2";
+    ADSHANDLE hNew = 0;
+    REQUIRE(AdsCreateTable(hConn, tname, nullptr, ADS_ADT, 0, 0, 0, 0,
+                           defs, &hNew) == 0);
+    {
+        UNSIGNED8 fld[8] = "AMT";
+        for (const char* v : {"10.50", "20.25", "1.25"}) {
+            REQUIRE(AdsAppendRecord(hNew) == 0);
+            UNSIGNED8 b[16]{};
+            std::memcpy(b, v, std::strlen(v));
+            REQUIRE(AdsSetString(hNew, fld, b,
+                        static_cast<UNSIGNED32>(std::strlen(v))) == 0);
+            REQUIRE(AdsWriteRecord(hNew) == 0);
+        }
+    }
+    REQUIRE(AdsCloseTable(hNew) == 0);
+
+    ADSHANDLE hStmt = 0;
+    REQUIRE(AdsCreateSQLStatement(hConn, &hStmt) == 0);
+
+    auto raw = [&](const char* sql, const char* col) {
+        UNSIGNED8 sb[160]{};
+        std::memcpy(sb, sql, std::strlen(sql) + 1);
+        ADSHANDLE hc = 0;
+        REQUIRE(AdsExecuteSQLDirect(hStmt, sb, &hc) == 0);
+        REQUIRE(AdsGotoTop(hc) == 0);
+        UNSIGNED8 f[32]{};
+        std::memcpy(f, col, std::strlen(col) + 1);
+        UNSIGNED8 buf[128]{};
+        UNSIGNED32 cap = sizeof(buf);
+        REQUIRE(AdsGetField(hc, f, buf, &cap, 0) == 0);
+        std::string s(reinterpret_cast<const char*>(buf), cap);
+        AdsCloseTable(hc);
+        return s;
+    };
+
+    // AMT is N(10,2): SUM widens by 10 -> 20; AVG/MIN/MAX keep 10.
+    const auto sum = raw("SELECT SUM(AMT) FROM money", "EXPR");
+    CAPTURE(sum);
+    CHECK(sum.size() == 20);
+    CHECK(sum == "               32.00");
+
+    const auto mn = raw("SELECT MIN(AMT) FROM money", "EXPR");
+    CAPTURE(mn);
+    CHECK(mn.size() == 10);
+    CHECK(mn == "      1.25");
+
+    const auto mx = raw("SELECT MAX(AMT) FROM money", "EXPR");
+    CAPTURE(mx);
+    CHECK(mx == "     20.25");
+
+    // COUNT is integral and must NOT be padded — SAP returns "3".
+    auto cnt = raw("SELECT COUNT(*) FROM money", "EXPR");
+    while (!cnt.empty() && cnt.back() == ' ') cnt.pop_back();
+    CAPTURE(cnt);
+    CHECK(cnt == "3");
+    CHECK(cnt.front() != ' ');
+
+    REQUIRE(AdsCloseSQLStatement(hStmt) == 0);
+    REQUIRE(AdsDisconnect(hConn) == 0);
+    fs::remove_all(dir, ec);
+}

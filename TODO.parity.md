@@ -68,6 +68,46 @@ materialisers** (joins additionally rename right-side columns `R_*`, itself a
 consequence of squeezing `R_` + the source name into 10 bytes). Same root cause,
 same fix, same doc: `docs/materialised-cursor-temps.md`.
 
+### ✅ Numeric presentation in joins + aggregates — FIXED 2026-07-30
+
+Separate defect from the truncation, found while starting on the materialisers.
+Values are now byte-identical to SAP.
+
+- [x] **ADT decimal count read from the wrong byte.** `adt_driver.cpp` read the
+      scale at 137; SAP writes it at **139**. Verified byte-for-byte against
+      `service.adt`: an N(11,2) column reads `…137:0 138:0 139:2`. Every
+      SAP-written ADT table reported `Field_Decimal = 0`. Hidden because ADT
+      type 2 stores numerics as ASCII — a plain read passes the stored text
+      through and never consults `decimals`, so only re-formatting paths broke.
+      Reader now prefers 139 (type-2 only, so an AUTOINC counter at 139 is never
+      mistaken for a scale) and falls back to 137 for tables written by older
+      OpenADS builds; the writer emits both.
+- [x] **Join cells were left-justified.** `join_cell_text()` now right-justifies
+      to the declared width, so a joined column renders exactly as a plain read
+      of it (`"      0.00"`, not `"0.00"`).
+- [x] **Aggregate widths were hardcoded to 20** across all five materialisers.
+      SAP's rule, oracle-probed: `SUM` → source + 10; `AVG`/`MIN`/`MAX` → source
+      width; `COUNT` → integral and **unpadded**. Now in `agg_result_width()` /
+      `agg_cell_text()` so the five paths share one definition.
+
+mp gate 29 → 30; `agg_sum_payfile` now passes and `agg_mixed_aggs`'s COUNT and
+SUM are byte-identical to SAP.
+
+Still open in this area, each a *different* defect from the formatting:
+
+- [ ] **`MIN`/`MAX` over a DATE column return `"0"`** — the aggregate machinery
+      accumulates everything as a double, so a date min/max collapses to zero.
+      SAP: `MIN(PAY_DATE)` → `01/18/0203`, `MAX` → `03/20/2017`; OpenADS returns
+      `"   0"` for both. Last remaining piece of `agg_mixed_aggs`.
+- [ ] **Aggregate over an *expression*** — `Sum([real] * units)` raises 2115;
+      only a bare column parses (`agg_inline_sumbyclaim`).
+- [ ] **`COUNT(DISTINCT col)`** raises 2115 (`agg_distinct_ins`).
+- [ ] **Join naming** — the `R_` prefix and the select-list-spelling rule (SAP:
+      output name is the identifier as written, duplicates get `_1`, `_2`…).
+      Verified against SAP with three probes; see backlog item 2.
+- [ ] **`ntx_provider`** — `DOCT_NO` reads `"0"` vs SAP `"  0"` on a *plain* DBF
+      read (no join, no aggregate), so a separate path from everything above.
+
 ### 3. `AdsSetString` into an ADT DOUBLE stores the text verbatim
 
 Does not parse the string, so the value reads back as garbage:

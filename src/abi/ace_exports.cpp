@@ -7367,12 +7367,26 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
             // engine reject the whole table as corrupt (error 7016). The value
             // is full-precision binary, so dropping the descriptor "decimals"
             // is loss-free and matches the ADT on-disk layout a conforming
-            // reader expects. fd[139] is the AUTOINC counter slot anyway,
-            // never a DOUBLE field.
+            // reader expects.
+            //
+            // For NUMERIC (type 2) the scale goes at byte 139, not 137 — that
+            // is where the real engine puts it. Verified byte-for-byte against
+            // SAP-written tables (mp corpus, service.adt): an N(10,2) column
+            // reads …135:10 136:0 137:0 138:0 139:2 140:0. We keep writing 137
+            // as well so a table written here stays readable by older OpenADS
+            // builds, which only looked at 137; SAP ignores it.
+            //
+            // 139 is also the AUTOINC counter slot, but only for type 15, and
+            // an autoinc field has no scale — so the two uses never collide.
+            // The reader in adt_driver.cpp mirrors this and only consults 139
+            // for type 2, precisely so a populated counter is never mistaken
+            // for a decimal count.
             if (sp.adt_type != 10u)
                 fd[137] = sp.adt_dec;
-            // AUTOINC tail (bytes 139-143) stays zero on disk; counter is
-            // seeded from existing data when the table is opened.
+            if (sp.adt_type == 2u)
+                fd[139] = sp.adt_dec;
+            // AUTOINC tail (bytes 139-143) stays zero on disk for type 15;
+            // the counter is seeded from existing data when the table opens.
             fld_off = static_cast<std::uint16_t>(fld_off + sp.adt_length);
         }
 
@@ -23280,6 +23294,57 @@ inline double avg_truncate(double v, int dp) {
 // Format one decoded cell (from the POSITIONED row of `t`) for the
 // mapped output descriptor. NULL / read failure yields an empty string
 // (blank cell); the caller pads to out.length.
+// SAP's declared width for an aggregate result column, oracle-probed against
+// the mp corpus 2026-07-30 (see TODO.parity.md). Widths were measured through
+// AdsGetString, which preserves the padding — the PHP binding trims, so it
+// cannot be used to check this:
+//
+//   SUM(payfile.CHARGES)    N(11,2) -> 21   source + 10
+//   SUM(service.ins_charge) N(11,2) -> 21   source + 10
+//   SUM(prclines.PRICE)     N(10,2) -> 20   source + 10
+//   SUM(prclines.UNITS)     N(6,0)  -> 16   source + 10
+//   AVG/MIN/MAX(CHARGES)    N(11,2) -> 11   source width
+//   COUNT(*)                        -> "852033", unpadded
+//
+// SUM widens by 10 digits because a sum over many rows can carry far past the
+// source column's range; AVG/MIN/MAX cannot exceed it, so they keep it.
+// COUNT is an integer and is not padded at all.
+//
+// All four aggregate materialisers below used a hardcoded width of 20, which
+// matched none of these.
+inline std::uint16_t agg_result_width(openads::sql::AggregateKind k,
+                                      std::uint16_t src_len) {
+    using K = openads::sql::AggregateKind;
+    switch (k) {
+        case K::CountStar:
+        case K::Count:
+            return 11;                     // integer count; never padded wider
+        case K::Sum:
+            return static_cast<std::uint16_t>(
+                std::min<int>(src_len + 10, 0xFF));
+        default:                           // Avg / Min / Max
+            return src_len ? src_len : 20;
+    }
+}
+
+// Formats one aggregate cell to SAP's presentation. COUNT is integral and
+// SAP does not pad it ("852033"), so it is left-justified and the trailing
+// blanks trim away on read; every other aggregate is right-justified to the
+// declared width. Keeping both rules here means the five aggregate
+// materialisers cannot drift apart again.
+inline std::string agg_cell_text(openads::sql::AggregateKind k,
+                                 std::uint16_t w, int dec, double v) {
+    using K = openads::sql::AggregateKind;
+    char b[80];
+    if (k == K::Count || k == K::CountStar)
+        std::snprintf(b, sizeof(b), "%-*.0f", static_cast<int>(w), v);
+    else
+        std::snprintf(b, sizeof(b), "%*.*f", static_cast<int>(w), dec, v);
+    std::string out(b);
+    out.resize(w, ' ');
+    return out;
+}
+
 inline std::string join_cell_text(openads::engine::Table& t,
                                   std::uint16_t fi,
                                   const openads::drivers::DbfField& out) {
@@ -23288,11 +23353,19 @@ inline std::string join_cell_text(openads::engine::Table& t,
     std::string s;
     switch (out.raw_type) {
         case 'N': {
-            // Left-justified: right-justified N cells leak their leading
-            // spaces into string reads of the temp cursor (same lesson as
-            // the aggregate temp cells).
-            char cell[32];
-            std::snprintf(cell, sizeof(cell), "%-*.*f",
+            // RIGHT-justified, matching both the xBase numeric convention and
+            // SAP: reading a numeric column as a string returns it padded to
+            // the declared width, e.g. N(10,2) holding 0 reads back as
+            // "      0.00" — not "0.00". A join must not reformat a value
+            // differently from a plain read of the same column.
+            //
+            // This was left-justified ("%-*.*f") on the theory that leading
+            // spaces "leak" into string reads of the temp cursor. They are not
+            // a leak — they are the value's declared presentation, and SAP
+            // emits them. Left-justifying made every joined numeric disagree
+            // with the same column read directly.
+            char cell[64];
+            std::snprintf(cell, sizeof(cell), "%*.*f",
                           static_cast<int>(out.length),
                           static_cast<int>(out.decimals),
                           v.value().as_double);
@@ -26841,6 +26914,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             std::size_t   ti = 0;
             std::int32_t  fi = -1;      // -1 for COUNT(*)
             std::uint8_t  dec = 0;      // source decimals (money: 4)
+            std::uint16_t src_len = 0;  // source-field width
         };
         struct NKeyCol {
             std::size_t   ti = 0;
@@ -26866,6 +26940,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     slot.dec = (sfd.type == FT::AdtMoney ||
                                 sfd.type == FT::Currency)
                              ? 4 : sfd.decimals;
+                    slot.src_len = sfd.length;
                 }
                 nslots.push_back(std::move(slot));
             }
@@ -27240,7 +27315,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                             ++unal;
                         }
                         o.name = nm;
-                        o.type = 'N'; o.len = 20;
+                        o.type = 'N';
+                        o.len  = scriptbridge::agg_result_width(
+                            nslots[o.idx].def.kind, nslots[o.idx].src_len);
                         o.dec  = static_cast<std::uint8_t>(ndp(o.idx));
                     } else {
                         std::int32_t gi = -1;
@@ -27376,11 +27453,10 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 file.push_back(' ');
                 for (const auto& o : nouts) {
                     if (o.is_agg) {
-                        char nbuf[48] = {0};
-                        std::snprintf(nbuf, sizeof(nbuf), "%-20.*f",
-                                      static_cast<int>(o.dec),
-                                      agg_at(acc, o.idx));
-                        file.insert(file.end(), nbuf, nbuf + 20);
+                        const auto cell = scriptbridge::agg_cell_text(
+                            nslots[o.idx].def.kind, o.len,
+                            static_cast<int>(o.dec), agg_at(acc, o.idx));
+                        file.insert(file.end(), cell.begin(), cell.end());
                     } else {
                         std::string kp = o.idx < acc.key_parts.size()
                             ? acc.key_parts[o.idx] : std::string();
@@ -28004,6 +28080,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 openads::sql::Aggregate def;
                 std::int32_t            field_index = -1;
                 std::uint8_t            decimals    = 0;  // source-field dp
+                std::uint16_t           src_len     = 0;  // source-field width
             };
             std::vector<AggSlot> slots;
             slots.reserve(parsed.value().aggregates.size());
@@ -28024,6 +28101,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         slot.decimals = (sfd.type == FT::AdtMoney ||
                                          sfd.type == FT::Currency)
                                       ? 4 : sfd.decimals;  // money: 4 implied
+                        slot.src_len = sfd.length;
                     }
                 }
                 slots.push_back(std::move(slot));
@@ -28235,10 +28313,15 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     default: return static_cast<int>(slots[i].decimals);
                 }
             };
+            // SAP's declared width per aggregate (see agg_result_width).
+            auto jg_w = [&](std::size_t i) -> std::uint16_t {
+                return scriptbridge::agg_result_width(slots[i].def.kind,
+                                                      slots[i].src_len);
+            };
             std::uint16_t jg_hlen = static_cast<std::uint16_t>(
                 32 + 32 * slots.size() + 1);
-            std::uint32_t jg_rlen =
-                1 + 20u * static_cast<std::uint32_t>(slots.size());
+            std::uint32_t jg_rlen = 1;
+            for (std::size_t i = 0; i < slots.size(); ++i) jg_rlen += jg_w(i);
             jg_hdr[8]  = static_cast<std::uint8_t>( jg_hlen       & 0xFFu);
             jg_hdr[9]  = static_cast<std::uint8_t>((jg_hlen >> 8) & 0xFFu);
             jg_hdr[10] = static_cast<std::uint8_t>( jg_rlen       & 0xFFu);
@@ -28256,7 +28339,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     }
                     std::memcpy(fd.data(), nm.data(),
                                 std::min(nm.size(), std::size_t{11}));
-                    fd[11] = 'N'; fd[16] = 20;
+                    fd[11] = 'N';
+                    fd[16] = static_cast<std::uint8_t>(jg_w(i));
                     fd[17] = static_cast<std::uint8_t>(jg_dp(i));
                     jg_file.insert(jg_file.end(), fd.begin(), fd.end());
                 }
@@ -28272,10 +28356,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 }
                 jg_file.push_back(' ');
                 for (std::size_t i = 0; i < slots.size(); ++i) {
-                    char buf[48] = {0};
-                    std::snprintf(buf, sizeof(buf), "%-20.*f", jg_dp(i),
-                                  agg_at(acc, i));
-                    jg_file.insert(jg_file.end(), buf, buf + 20);
+                    const auto cell = scriptbridge::agg_cell_text(
+                        slots[i].def.kind, jg_w(i), jg_dp(i), agg_at(acc, i));
+                    jg_file.insert(jg_file.end(), cell.begin(), cell.end());
                 }
                 ++jg_emitted;
             }
@@ -28311,6 +28394,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 openads::sql::Aggregate def;
                 std::int32_t            field_index = -1;
                 std::uint8_t            decimals    = 0;  // source-field dp
+                std::uint16_t           src_len     = 0;  // source-field width
             };
             std::vector<AggSlot> slots;
             slots.reserve(parsed.value().aggregates.size());
@@ -28330,6 +28414,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         slot.decimals = (sfd.type == FT::AdtMoney ||
                                          sfd.type == FT::Currency)
                                       ? 4 : sfd.decimals;  // money: 4 implied
+                        slot.src_len = sfd.length;
                     }
                 }
                 slots.push_back(std::move(slot));
@@ -28388,8 +28473,14 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     default: return static_cast<int>(slots[i].decimals);
                 }
             };
-            std::uint16_t agg_rlen = static_cast<std::uint16_t>(
-                1 + 20 * slots.size());
+            // SAP's declared width per aggregate (see agg_result_width).
+            auto jagg_w = [&](std::size_t i) -> std::uint16_t {
+                return scriptbridge::agg_result_width(slots[i].def.kind,
+                                                      slots[i].src_len);
+            };
+            std::uint16_t agg_rlen = 1;
+            for (std::size_t i = 0; i < slots.size(); ++i)
+                agg_rlen = static_cast<std::uint16_t>(agg_rlen + jagg_w(i));
             agg_hdr[8]  = static_cast<std::uint8_t>( agg_hlen       & 0xFFu);
             agg_hdr[9]  = static_cast<std::uint8_t>((agg_hlen >> 8) & 0xFFu);
             agg_hdr[10] = static_cast<std::uint8_t>( agg_rlen       & 0xFFu);
@@ -28407,7 +28498,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     }
                     std::memcpy(fd.data(), nm.data(),
                                 std::min(nm.size(), std::size_t{11}));
-                    fd[11] = 'N'; fd[16] = 20;
+                    fd[11] = 'N';
+                    fd[16] = static_cast<std::uint8_t>(jagg_w(i));
                     fd[17] = static_cast<std::uint8_t>(jagg_dp(i));
                     agg_file.insert(agg_file.end(), fd.begin(), fd.end());
                 }
@@ -28436,9 +28528,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     case K::Max:
                         v = count[i] ? maxv[i] : 0.0; break;
                 }
-                char buf[48] = {0};
-                std::snprintf(buf, sizeof(buf), "%-20.*f", jagg_dp(i), v);
-                agg_file.insert(agg_file.end(), buf, buf + 20);
+                const auto cell = scriptbridge::agg_cell_text(
+                    slots[i].def.kind, jagg_w(i), jagg_dp(i), v);
+                agg_file.insert(agg_file.end(), cell.begin(), cell.end());
             }
             agg_file.push_back(0x1A);
             {
@@ -28592,6 +28684,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             openads::sql::Aggregate def;
             std::int32_t            field_index = -1;   // -1 for COUNT(*)
             std::uint8_t            decimals    = 0;    // source-field dp
+            std::uint16_t           src_len     = 0;    // source-field width
         };
         std::vector<AggSlot> slots;
         slots.reserve(parsed.value().aggregates.size());
@@ -28611,6 +28704,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     slot.decimals = (sfd.type == FT::AdtMoney ||
                                      sfd.type == FT::Currency)
                                   ? 4 : sfd.decimals;      // money: 4 implied
+                    slot.src_len = sfd.length;
                 }
             }
             slots.push_back(std::move(slot));
@@ -28958,7 +29052,10 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                             ++unaliased;
                         }
                         o.name = nm;
-                        o.type = 'N'; o.len = 20;
+                        o.type = 'N';
+                        o.len = static_cast<std::uint8_t>(
+                            scriptbridge::agg_result_width(
+                                slots[o.idx].def.kind, slots[o.idx].src_len));
                         o.dec = static_cast<std::uint8_t>(grp_dp(o.idx));
                     } else {
                         std::int32_t gi = -1;
@@ -28994,7 +29091,10 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                                ? (i == 0 ? "EXPR"
                                          : "EXPR_" + std::to_string(i))
                                : slots[i].def.alias;
-                        o.type = 'N'; o.len = 20;
+                        o.type = 'N';
+                        o.len = static_cast<std::uint8_t>(
+                            scriptbridge::agg_result_width(
+                                slots[i].def.kind, slots[i].src_len));
                         o.dec = static_cast<std::uint8_t>(grp_dp(i));
                         gouts.push_back(std::move(o));
                     }
@@ -29062,11 +29162,10 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 file.push_back(' ');
                 for (const auto& o : gouts) {
                     if (o.is_agg) {
-                        char buf[48] = {0};
-                        std::snprintf(buf, sizeof(buf), "%-20.*f",
-                                      static_cast<int>(o.dec),
-                                      agg_at(acc, o.idx));
-                        file.insert(file.end(), buf, buf + 20);
+                        const auto cell = scriptbridge::agg_cell_text(
+                            slots[o.idx].def.kind, o.len,
+                            static_cast<int>(o.dec), agg_at(acc, o.idx));
+                        file.insert(file.end(), cell.begin(), cell.end());
                     } else {
                         // Group-key column: the stored key part, already
                         // padded to gbs[idx].length at accumulation time.
@@ -29316,8 +29415,14 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 default: return static_cast<int>(slots[i].decimals);
             }
         };
-        std::uint16_t rec_len = static_cast<std::uint16_t>(
-            1 + 20 * slots.size());
+        // SAP's declared width per aggregate (see agg_result_width).
+        auto agg_w = [&](std::size_t i) -> std::uint16_t {
+            return scriptbridge::agg_result_width(slots[i].def.kind,
+                                                  slots[i].src_len);
+        };
+        std::uint16_t rec_len = 1;
+        for (std::size_t i = 0; i < slots.size(); ++i)
+            rec_len = static_cast<std::uint16_t>(rec_len + agg_w(i));
         hdr[8]  = static_cast<std::uint8_t>( header_len       & 0xFFu);
         hdr[9]  = static_cast<std::uint8_t>((header_len >> 8) & 0xFFu);
         hdr[10] = static_cast<std::uint8_t>( rec_len          & 0xFFu);
@@ -29335,7 +29440,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 }
                 std::memcpy(fd.data(), nm.data(),
                             std::min(nm.size(), std::size_t{11}));
-                fd[11] = 'N'; fd[16] = 20;
+                fd[11] = 'N';
+                fd[16] = static_cast<std::uint8_t>(agg_w(i));
                 fd[17] = static_cast<std::uint8_t>(agg_dp(i));
                 file.insert(file.end(), fd.begin(), fd.end());
             }
@@ -29380,10 +29486,17 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                                        maxv[i]);
                     break;
             }
-            std::array<std::uint8_t, 20> cell{};
-            std::memset(cell.data(), ' ', cell.size());
-            std::size_t n = std::min<std::size_t>(std::strlen(buf), 20);
-            std::memcpy(cell.data(), buf, n);
+            // Right-justified to the declared width, except COUNT which SAP
+            // leaves unpadded — agg_cell_text owns both rules. `buf` above is
+            // already the formatted digits; re-pad it here rather than
+            // re-deriving, since Count(*) has no source value to pass.
+            const std::size_t w = agg_w(i);
+            const bool is_count =
+                slots[i].def.kind == openads::sql::AggregateKind::Count ||
+                slots[i].def.kind == openads::sql::AggregateKind::CountStar;
+            std::vector<std::uint8_t> cell(w, ' ');
+            std::size_t n = std::min<std::size_t>(std::strlen(buf), w);
+            std::memcpy(cell.data() + (is_count ? 0 : (w - n)), buf, n);
             file.insert(file.end(), cell.begin(), cell.end());
         }
         file.push_back(0x1A);
