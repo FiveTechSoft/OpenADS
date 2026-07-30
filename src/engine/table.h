@@ -312,9 +312,20 @@ public:
     void set_recno_sequence(std::vector<std::uint32_t> seq);
     void clear_recno_sequence() noexcept {
         recno_sequence_.clear(); sequence_idx_ = -1;
+        recno_sequence_active_ = false;
     }
     bool has_recno_sequence() const noexcept {
         return !recno_sequence_.empty();
+    }
+    // Whether a sequence was INSTALLED, as opposed to merely non-empty.
+    // The two differ exactly when the installed set is empty — an AOF that
+    // matches no record, or a SQL result with no rows. Navigation must gate
+    // on this: gating on `!empty()` made "nothing visible" indistinguishable
+    // from "no sequence at all", so goto_top/goto_bottom/skip fell through to
+    // the active-index walk, which does not consult filter_ — and the caller
+    // got the WHOLE table back for a filter that selects nothing.
+    bool recno_sequence_active() const noexcept {
+        return recno_sequence_active_;
     }
     // M10.31 / M10.32 — read-only access so DISTINCT / LIMIT / OFFSET
     // can post-process an ORDER-BY-installed sequence.
@@ -544,6 +555,7 @@ private:
 
     // M10.6 recno-sequence cursor — empty means "natural order".
     std::vector<std::uint32_t>                    recno_sequence_;
+    bool                                          recno_sequence_active_ = false;
     std::int64_t                                  sequence_idx_ = -1;
 };
 
