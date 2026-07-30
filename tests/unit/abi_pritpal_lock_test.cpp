@@ -2,6 +2,7 @@
 #include "openads/ace.h"
 #include "network/server.h"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -25,13 +26,21 @@ namespace fs = std::filesystem;
 
 namespace {
 
+// Build a remote URI that points at the real directory where the fixture
+// DBF was staged. The previous hard-coded "//Temp" never existed on CI
+// runners (Linux has /tmp, not /Temp; Windows rarely has C:\Temp), so
+// Connection::open rejected the connect with "data directory not found"
+// and every case failed at AdsConnect60. Mirror the pattern used by the
+// other remote unit tests (abi_get_set_record_test, abi_fetch_where_test).
 struct ServerGuard {
     openads::network::Server srv;
     std::string uri;
     bool ok = false;
-    ServerGuard() {
+    explicit ServerGuard(const fs::path& data_dir) {
         if (auto v = srv.start("127.0.0.1", 0)) {
-            uri = "tcp://127.0.0.1:" + std::to_string(srv.port()) + "//Temp";
+            std::string path = data_dir.string();
+            std::replace(path.begin(), path.end(), '\\', '/');
+            uri = "tcp://127.0.0.1:" + std::to_string(srv.port()) + "/" + path;
             ok = true;
         }
     }
@@ -75,13 +84,13 @@ fs::path stage_dbf(const fs::path& dir, const char* name = "test.dbf",
 //          Not raise error but just return FALSE — do not stay there waiting.")
 // ===========================================================================
 TEST_CASE("Remote: record lock contention — B's lock fails, does not hang") {
-    ServerGuard sg;
-    REQUIRE(sg.ok);
-
     const auto dir = fs::temp_directory_path() / "openads_pritpal_rlock";
     std::error_code ec;
     fs::remove_all(dir, ec);
     stage_dbf(dir);
+
+    ServerGuard sg(dir);
+    REQUIRE(sg.ok);
 
     // Connect A
     ADSHANDLE hConnA = 0;
@@ -144,13 +153,13 @@ TEST_CASE("Remote: record lock contention — B's lock fails, does not hang") {
 //          REQUIRED RTE.")
 // ===========================================================================
 TEST_CASE("Remote: write without lock returns error 5035 (GoHot guard)") {
-    ServerGuard sg;
-    REQUIRE(sg.ok);
-
     const auto dir = fs::temp_directory_path() / "openads_pritpal_nolock";
     std::error_code ec;
     fs::remove_all(dir, ec);
     stage_dbf(dir);
+
+    ServerGuard sg(dir);
+    REQUIRE(sg.ok);
 
     ADSHANDLE hConn = 0;
     UNSIGNED8 uri[512]{};
@@ -197,13 +206,13 @@ TEST_CASE("Remote: write without lock returns error 5035 (GoHot guard)") {
 //         (User tests FLock in multi-instance scenario)
 // ===========================================================================
 TEST_CASE("Remote: FLock contention — B's FLock fails after retries") {
-    ServerGuard sg;
-    REQUIRE(sg.ok);
-
     const auto dir = fs::temp_directory_path() / "openads_pritpal_flock";
     std::error_code ec;
     fs::remove_all(dir, ec);
     stage_dbf(dir);
+
+    ServerGuard sg(dir);
+    REQUIRE(sg.ok);
 
     // Connect A
     ADSHANDLE hConnA = 0;
@@ -262,13 +271,13 @@ TEST_CASE("Remote: FLock contention — B's FLock fails after retries") {
 //         (User: "After FLock, writes should succeed without per-record lock")
 // ===========================================================================
 TEST_CASE("Remote: write with FLock succeeds without record lock") {
-    ServerGuard sg;
-    REQUIRE(sg.ok);
-
     const auto dir = fs::temp_directory_path() / "openads_pritpal_flock_write";
     std::error_code ec;
     fs::remove_all(dir, ec);
     stage_dbf(dir);
+
+    ServerGuard sg(dir);
+    REQUIRE(sg.ok);
 
     ADSHANDLE hConn = 0;
     UNSIGNED8 uri[512]{};
@@ -309,13 +318,13 @@ TEST_CASE("Remote: write with FLock succeeds without record lock") {
 //         (User's implicit test: ADS_EXCLUSIVE should bypass lock checks)
 // ===========================================================================
 TEST_CASE("Remote: Exclusive open allows writes without lock") {
-    ServerGuard sg;
-    REQUIRE(sg.ok);
-
     const auto dir = fs::temp_directory_path() / "openads_pritpal_excl";
     std::error_code ec;
     fs::remove_all(dir, ec);
     stage_dbf(dir);
+
+    ServerGuard sg(dir);
+    REQUIRE(sg.ok);
 
     ADSHANDLE hConn = 0;
     UNSIGNED8 uri[512]{};
@@ -350,13 +359,13 @@ TEST_CASE("Remote: Exclusive open allows writes without lock") {
 //         (Standard xBase/ACE: AdsAppendRecord auto-locks)
 // ===========================================================================
 TEST_CASE("Remote: freshly-appended record writable without explicit lock") {
-    ServerGuard sg;
-    REQUIRE(sg.ok);
-
     const auto dir = fs::temp_directory_path() / "openads_pritpal_append";
     std::error_code ec;
     fs::remove_all(dir, ec);
     stage_dbf(dir);
+
+    ServerGuard sg(dir);
+    REQUIRE(sg.ok);
 
     ADSHANDLE hConn = 0;
     UNSIGNED8 uri[512]{};

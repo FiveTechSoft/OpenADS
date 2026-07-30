@@ -6,15 +6,38 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <string>
 #include <vector>
 
 namespace fs = std::filesystem;
 
 namespace {
+
+// Production auto-appends ".cdx" (lowercase). Linux/macOS filesystems are
+// case-sensitive, so fs::exists("MYIDX.CDX") misses the on-disk "MYIDX.cdx"
+// that Windows hid. Match by case-insensitive filename under the parent.
+bool exists_ci(const fs::path& expected) {
+    std::error_code ec;
+    if (fs::exists(expected, ec)) return true;
+    const auto parent = expected.parent_path();
+    if (!fs::is_directory(parent, ec)) return false;
+    std::string want = expected.filename().string();
+    for (auto& ch : want)
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    for (const auto& ent : fs::directory_iterator(parent, ec)) {
+        if (ec) break;
+        std::string n = ent.path().filename().string();
+        for (auto& ch : n)
+            ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        if (n == want) return true;
+    }
+    return false;
+}
 
 fs::path stage_dbf(const fs::path& dir, const char* name, int nrecs) {
     std::error_code ec;
@@ -84,8 +107,8 @@ TEST_CASE("AdsCreateIndex61: bag name without extension → auto .cdx") {
         INFO("Error: ", reinterpret_cast<const char*>(msg));
     }
 
-    // Verify the CDX file was created.
-    CHECK(fs::exists(dir / "MYIDX.CDX"));
+    // Verify the CDX file was created (extension may be .cdx or .CDX).
+    CHECK(exists_ci(dir / "MYIDX.CDX"));
 
     // Verify the tag works.
     if (hIdx != 0) {
@@ -128,7 +151,7 @@ TEST_CASE("AdsCreateIndex61: bag name with .cdx extension") {
         AdsGetLastError(&rc, msg, &msglen);
         INFO("Error: ", reinterpret_cast<const char*>(msg));
     }
-    CHECK(fs::exists(dir / "MYIDX.CDX"));
+    CHECK(exists_ci(dir / "MYIDX.CDX"));
 
     if (hIdx) AdsCloseIndex(hIdx);
     REQUIRE(AdsCloseTable(hTbl) == 0);
@@ -167,7 +190,7 @@ TEST_CASE("AdsCreateIndex61: absolute path with drive letter") {
         AdsGetLastError(&rc, msg, &msglen);
         INFO("Error: ", reinterpret_cast<const char*>(msg));
     }
-    CHECK(fs::exists(dir / "MYIDX.CDX"));
+    CHECK(exists_ci(dir / "MYIDX.CDX"));
 
     if (hIdx) AdsCloseIndex(hIdx);
     REQUIRE(AdsCloseTable(hTbl) == 0);
@@ -202,7 +225,7 @@ TEST_CASE("AdsCreateIndex61: empty bag name → structural CDX") {
         AdsGetLastError(&rc, msg, &msglen);
         INFO("Error: ", reinterpret_cast<const char*>(msg));
     }
-    CHECK(fs::exists(dir / "T4.CDX"));
+    CHECK(exists_ci(dir / "T4.CDX"));
 
     if (hIdx) AdsCloseIndex(hIdx);
     REQUIRE(AdsCloseTable(hTbl) == 0);
@@ -239,7 +262,7 @@ TEST_CASE("AdsCreateIndex61: bag in subdirectory") {
         AdsGetLastError(&rc, msg, &msglen);
         INFO("Error: ", reinterpret_cast<const char*>(msg));
     }
-    CHECK(fs::exists(subdir / "MYIDX.CDX"));
+    CHECK(exists_ci(subdir / "MYIDX.CDX"));
 
     if (hIdx) AdsCloseIndex(hIdx);
     REQUIRE(AdsCloseTable(hTbl) == 0);
@@ -313,7 +336,7 @@ TEST_CASE("AdsCreateIndex (legacy): bag name without extension") {
         AdsGetLastError(&rc, msg, &msglen);
         INFO("Error: ", reinterpret_cast<const char*>(msg));
     }
-    CHECK(fs::exists(dir / "MYIDX.CDX"));
+    CHECK(exists_ci(dir / "MYIDX.CDX"));
 
     if (hIdx) AdsCloseIndex(hIdx);
     REQUIRE(AdsCloseTable(hTbl) == 0);
