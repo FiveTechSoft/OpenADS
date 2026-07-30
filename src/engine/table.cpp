@@ -630,14 +630,13 @@ util::Result<void> Table::refresh_record_buffer() {
 }
 
 util::Result<void> Table::skip(std::int32_t delta) {
-    // Multiuser: see goto_top. Skip uses record_count() as the EOF fence
-    // and the active order's B+tree; both must observe peer writers.
-    // SQL materialised sequences (DISTINCT / ORDER BY cursor) are a
-    // frozen snapshot — do not refresh under them.
-    if (recno_sequence_.empty()) {
-        driver_->refresh_record_count_from_disk();
-        if (order_ && order_->index()) order_->index()->refresh_from_disk();
-    }
+    // Multiuser visibility vs browse speed:
+    //   - GoTop / GoBottom / GetRecordCount always re-read the header.
+    //   - Per-Skip full refresh was correct but ~header-I/O per keystroke
+    //     and crushed xBrowse (Pritpal). Instead we refresh only when the
+    //     cached EOF fence is about to fire (natural order) or when the
+    //     index walk runs off the end (peer may have grown the bag).
+    // SQL materialised sequences stay a frozen snapshot.
     if (!recno_sequence_.empty()) {
         if (delta == 0) {
             if (state_ == State::Bof) sequence_idx_ = -1;
@@ -681,6 +680,9 @@ util::Result<void> Table::skip(std::int32_t delta) {
             r = effective_forward ? idx->next() : idx->prev();
             if (!r) return r.error();
             if (!r.value().positioned) {
+                // Index walk end: do not re-read the bag on every Skip
+                // (browse hot path). GoTop/GoBottom already refresh the
+                // CDX header so a full re-paint sees peer keys.
                 if (delta > 0) {
                     state_ = State::Eof; recno_ = 0;
                 } else {
@@ -741,6 +743,11 @@ util::Result<void> Table::skip(std::int32_t delta) {
     }
     auto n = driver_->record_count();
     if (n == 0) {
+        // Empty may be stale: a peer could have just written the first row.
+        driver_->refresh_record_count_from_disk();
+        n = driver_->record_count();
+    }
+    if (n == 0) {
         // Skip on empty:
         //   delta == 0  -> preserve current state (Limbo / Bof / Eof
         //                  per Clipper SKIP-zero "refresh, don't move").
@@ -761,6 +768,14 @@ util::Result<void> Table::skip(std::int32_t delta) {
         if (filter_ && !filter_(*this)) return true;
         return false;
     };
+    // Lazy multiuser refresh of the EOF fence: only re-read the header
+    // when a step would land past the cached LastRec (or before 1).
+    auto refresh_n_if_needed = [&](std::int64_t pos) {
+        if (pos < 1) return;
+        if (pos <= static_cast<std::int64_t>(n)) return;
+        driver_->refresh_record_count_from_disk();
+        n = driver_->record_count();
+    };
     if ((skip_deleted || filter_) && delta != 0) {
         // M12.33 — count VISIBLE rows, like the index-order path above.
         // The old recno + delta jump (then slide only while sitting on a
@@ -776,6 +791,7 @@ util::Result<void> Table::skip(std::int32_t delta) {
         while (taken < want) {
             pos += stepdir;
             if (pos < 1) { state_ = State::Bof; recno_ = 0; return {}; }
+            refresh_n_if_needed(pos);
             if (pos > static_cast<std::int64_t>(n)) {
                 state_ = State::Eof; recno_ = n + 1; return {};
             }
@@ -790,6 +806,7 @@ util::Result<void> Table::skip(std::int32_t delta) {
     std::int64_t target = static_cast<std::int64_t>(recno_) + delta;
     if (state_ == State::Bof && delta > 0) target = delta;
     if (target < 1) { state_ = State::Bof; recno_ = 0; return {}; }
+    refresh_n_if_needed(target);
     if (target > static_cast<std::int64_t>(n)) {
         state_ = State::Eof; recno_ = n + 1; return {};
     }
