@@ -107,6 +107,39 @@ don't:
       it sorts first, shifting every ordered comparison. Accounts for users
       31 (SAP) vs 32 (OA).
 
+## ⚠️ REGRESSION on main (found 2026-07-30 rebasing onto v1.8.40)
+
+**`TOP` / `ORDER BY` / `DISTINCT` / `LIMIT` truncate every column name to 10
+characters.** This is task #2's root cause (the materialisation temp is a **DBF**
+free table, and DBF caps field names at 10) but the blast radius is far wider
+than the `sp_` `__output` case that task describes — it is no longer cosmetic.
+
+```
+SELECT Name, RI_Primary_Table, RI_Foreign_Table FROM system.relations
+   -> RI_Primary_Table   (correct)
+... the same query + ORDER BY Name
+   -> RI_Primary         (truncated)
+
+SELECT TOP 1 AccidentDate, LengthOfNeed FROM admit   -> AccidentDa, LengthOfNe
+SELECT DISTINCT AccidentDate FROM admit              -> AccidentDa
+```
+
+Affects **user tables**, not just catalogs, so it hits real applications. It also
+silently breaks the SAP-parity column names from tasks #4 and the users/groups
+work, because SAP's catalog names are routinely longer than 10 chars
+(`RI_Primary_Table` 16, `Enable_Internet` 15, `User_Defined_Prop` 17,
+`Trig_Function_Name` 18).
+
+Origin: **#136** materialises single-table ORDER BY / DISTINCT / LIMIT through
+`build_memory_result()`, a helper written for `system.*` and `sp_*` result sets.
+**#146** (91f0ea49) fixed that helper's numeric typing and 64 KB record cap but
+not the field-name length. Confirmed as a regression: the `cat_rel_names` mp gate
+case passed before the rebase and fails after it.
+
+Fix is the one task #2 already prescribes — materialise into an **ADT** temp
+(long field names) instead of a DBF — but it should now be scoped to
+`build_memory_result()` generally, not just the proc `__output` path.
+
 ## A. S4 polish (cosmetic — tracked as tasks #1–3)
 - [ ] **#1 Date display format** — `AdsGetString` on date cols returns raw
       `YYYYMMDD`; SAP formats per connection date format (default `MM/DD/YYYY`).
