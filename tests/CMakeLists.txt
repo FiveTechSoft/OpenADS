@@ -91,11 +91,8 @@ add_executable(openads_unit_tests
     unit/index_expr_sql_test.cpp
     unit/abi_m92_real_test.cpp
     unit/abi_create_table_test.cpp
-<<<<<<< HEAD
     unit/abi_adt_dat_extension_test.cpp
-=======
     unit/abi_create_outside_datadir_test.cpp
->>>>>>> 949423f (fix(session): create honours an absolute path whose parent exists)
     unit/abi_remote_create_table_test.cpp
     unit/abi_refresh_extract_test.cpp
     unit/abi_create_index61_test.cpp
@@ -117,11 +114,8 @@ add_executable(openads_unit_tests
     unit/cdx_multilevel_test.cpp
     unit/cdx_multitag_2nd_test.cpp
     unit/cdx_prefix_seek_test.cpp
-<<<<<<< HEAD
     unit/abi_scope_partial_key_test.cpp
-=======
     unit/abi_prefix_seek_deleted_test.cpp
->>>>>>> 0dd105c (fix(engine): partial SEEK keeps Found() true when deleted rows are hidden)
     unit/cdx_reindex_char_test.cpp
     unit/cdx_prev_empty_leaf_test.cpp
     unit/cdx_empty_tree_test.cpp
