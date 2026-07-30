@@ -5265,9 +5265,16 @@ materialised_cursor_temps() {
     return temps;
 }
 
-// Delete the files of a materialised cursor's temp table: the .dbf plus any
-// memo / index companion an application created on it (the ERP runs
-// INDEX ON over the result, producing <stem>.cdx).
+// Delete the files of a materialised cursor's temp table: the table itself plus
+// any memo / index companion an application created on it (the ERP runs
+// INDEX ON over the result, producing <stem>.cdx or <stem>.adi).
+//
+// The materialising path builds ADT temps (see the ADS_ADT call in
+// exec_sql_direct_impl — DBF would truncate column names to 10 chars), so .adt
+// and its .adm/.adi companions must be listed here. The DBF-era extensions stay
+// so temps written by an older build are still cleaned up. If a new
+// materialising path introduces another on-disk format, add its extensions here
+// too — anything missing leaks one file per query into the data directory.
 void drop_materialised_cursor_temp(ADSHANDLE h) {
     auto& m = materialised_cursor_temps();
     auto it = m.find(h);
@@ -5275,7 +5282,8 @@ void drop_materialised_cursor_temp(ADSHANDLE h) {
     const std::string stem = it->second;
     m.erase(it);
     std::error_code ec;
-    for (const char* ext : {".dbf", ".cdx", ".fpt", ".dbt", ".ntx"}) {
+    for (const char* ext : {".adt", ".adm", ".adi",
+                            ".dbf", ".cdx", ".fpt", ".dbt", ".ntx"}) {
         std::filesystem::remove(std::filesystem::path(stem + ext), ec);
     }
 }
@@ -6879,7 +6887,34 @@ DbfTypeSpec dbf_type_for(const std::string& name) {
         return {'A', 4, 0, false};    // ADT type 15: 4-byte uint32 auto-increment
     if (eq("Time"))
         return {'Z', 4, 0, false};    // ADT type 13: 4-byte ms since midnight
+    // ADT type 2 — numeric stored as ASCII digits, so the declared scale is
+    // part of the value ("10.50" stays "10.50"). Plain "Numeric" with decimals
+    // maps to ADT DOUBLE (type 10) instead, and a conforming ADT DOUBLE
+    // descriptor carries NO decimal count (see the fd[137] comment in the ADT
+    // writer — stamping one makes the real ADS engine report the table corrupt,
+    // 7016), so a DOUBLE round-trips the value but not its formatting. Used by
+    // the SELECT materialisation path, which needs full-length column names
+    // (ADT) *and* the source's numeric scale.
+    if (eq("AsciiNumeric"))
+        return {'#', 0, 0, false};
     return {'C', 0, 0, false};        // unknown -> Character
+}
+
+// Map a parsed field-type char to the byte a DBF field descriptor can carry.
+// The ADT sentinels above ('W', 'S', '$', 'P', 'A', 'Z', '#') are internal
+// markers, not DBF type codes — writing one into fd[11] would produce a table
+// no reader can classify. Collapse each to its closest DBF equivalent.
+char dbf_descriptor_type_char(char t) {
+    switch (t) {
+        case 'W': return 'C';   // CICHARACTER -> Character
+        case 'S': return 'N';   // SHORTINT    -> Numeric
+        case '$': return 'Y';   // MONEY       -> Currency
+        case 'P': return 'T';   // TIMESTAMP   -> DateTime
+        case 'A': return 'N';   // AUTOINC     -> Numeric
+        case 'Z': return 'C';   // TIME        -> Character
+        case '#': return 'N';   // ASCII numeric is exactly DBF's 'N'
+        default:  return t;
+    }
 }
 
 // Trim leading/trailing whitespace.
@@ -7034,6 +7069,8 @@ AdtFieldSpec adt_spec_for(const FieldOut& f) {
         case 'P': return {14, 8,          0,     false};  // TIMESTAMP (JDN+ms)
         case 'A': return {15, 4,          0,     false};  // AUTOINC
         case 'Z': return {13, 4,          0,     false};  // TIME (ms since midnight)
+        case '#': return { 2, static_cast<std::uint16_t>(f.length ? f.length : 10u),
+                          f.dec, false};                  // NUMERIC as ASCII digits
         case 'C':
         default:
             return { 4, static_cast<std::uint16_t>(f.length ? f.length : 10u),
@@ -7336,7 +7373,8 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
             std::vector<std::uint8_t> fd(32, 0);
             std::size_t n = std::min<std::size_t>(f.name.size(), 10);
             std::memcpy(fd.data(), f.name.data(), n);
-            fd[11] = static_cast<std::uint8_t>(f.type);
+            fd[11] = static_cast<std::uint8_t>(
+                dbf_descriptor_type_char(f.type));
             fd[16] = f.length;
             fd[17] = f.dec;
             std::uint8_t flags = 0;
@@ -7420,7 +7458,8 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
         std::vector<std::uint8_t> fd(32, 0);
         std::size_t n = std::min<std::size_t>(f.name.size(), 10);
         std::memcpy(fd.data(), f.name.data(), n);
-        fd[11] = static_cast<std::uint8_t>(f.type);
+        fd[11] = static_cast<std::uint8_t>(
+            dbf_descriptor_type_char(f.type));
         fd[16] = f.length;
         fd[17] = f.dec;
         file.insert(file.end(), fd.begin(), fd.end());
@@ -7842,7 +7881,8 @@ UNSIGNED32 ENTRYPOINT AdsRestructureTable(ADSHANDLE   hConnect,
             std::vector<std::uint8_t> fd(32, 0);
             std::size_t n = std::min<std::size_t>(f.name.size(), 10);
             std::memcpy(fd.data(), f.name.data(), n);
-            fd[11] = static_cast<std::uint8_t>(f.type);
+            fd[11] = static_cast<std::uint8_t>(
+                dbf_descriptor_type_char(f.type));
             fd[16] = f.length;
             fd[17] = f.dec;
             file_bytes.insert(file_bytes.end(), fd.begin(), fd.end());
@@ -31165,11 +31205,18 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             if (col_err) return fail(openads::AE_COLUMN_NOT_FOUND, "");
             if (col_denied) return fail(openads::AE_ACCESS_DENIED,
                                         "no column permission");
-            auto type_name = [](char raw) -> const char* {
+            // `dec` decides how a numeric is spelled for the ADT temp below.
+            // "Numeric" with decimals becomes an ADT DOUBLE, which cannot carry
+            // a decimal count on disk, so N(12,2) would come back "10.5" instead
+            // of "10.50" and undo issue #146. "AsciiNumeric" pins ADT type 2
+            // (digits stored as text), which keeps the declared scale.
+            auto type_name = [](char raw, std::uint8_t dec) -> const char* {
                 switch (raw) {
-                    case 'C': return "Character";  case 'N': return "Numeric";
+                    case 'C': return "Character";
+                    case 'N': return dec > 0 ? "AsciiNumeric" : "Numeric";
                     case 'D': return "Date";       case 'L': return "Logical";
-                    case 'M': return "Memo";       case 'F': return "Float";
+                    case 'M': return "Memo";
+                    case 'F': return dec > 0 ? "AsciiNumeric" : "Numeric";
                     case 'I': return "Integer";    case 'Y': return "Currency";
                     case 'B': return "Double";     case 'V': return "Varchar";
                     case 'Q': return "Varbinary";
@@ -31182,7 +31229,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 if (!defs.empty()) defs.push_back(';');
                 defs += fd.name;
                 defs.push_back(',');
-                defs += type_name(static_cast<char>(fd.raw_type));
+                defs += type_name(static_cast<char>(fd.raw_type), fd.decimals);
                 if (fd.length   > 0) { defs.push_back(','); defs += std::to_string(fd.length); }
                 if (fd.decimals > 0) { defs.push_back(','); defs += std::to_string(fd.decimals); }
             }
@@ -31196,8 +31243,32 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             std::vector<UNSIGNED8> def_buf(defs.size() + 1, 0);
             std::memcpy(def_buf.data(), defs.data(), defs.size());
             ADSHANDLE hNew = 0;
+            // >>> Before changing this format, read
+            // >>> docs/materialised-cursor-temps.md. Three constraints pin it
+            // >>> and two of them are invisible until a specific customer
+            // >>> scenario breaks; both have already been regressed once.
+            //
+            // ADS_ADT, not ADS_CDX — the temp must preserve full column names.
+            //
+            // A DBF field descriptor allots 11 bytes to the name, so a DBF temp
+            // silently truncates every column to 10 characters. That is not
+            // cosmetic: SAP's own catalog names are routinely longer
+            // (RI_Primary_Table 16, Enable_Internet 15, User_Defined_Prop 17,
+            // Trig_Function_Name 18), so a DBF temp turned
+            //     SELECT Name, RI_Primary_Table FROM system.relations ORDER BY Name
+            // into a result whose second column was called RI_Primary — undoing
+            // the SAP column-name parity work and breaking any client that then
+            // referenced the column by name. User tables with long columns were
+            // mangled the same way. ADT carries full-length names.
+            //
+            // ADT also keeps what #146 came here for: this is still a standalone
+            // temp with its own recnos and its own index space, so an
+            // application running INDEX ON / DBSETORDER over the result cannot
+            // touch the source table's production index. Only the on-disk
+            // format changed (index companion is .adi rather than .cdx), which
+            // is transparent through the cursor handle.
             UNSIGNED32 crc = AdsCreateTable(conn_h, name_buf.data(), nullptr,
-                                            ADS_CDX, 0, 0, 0, 0,
+                                            ADS_ADT, 0, 0, 0, 0,
                                             def_buf.data(), &hNew);
             if (crc == openads::AE_SUCCESS) {
                 openads::engine::Table* tgt =
@@ -31210,10 +31281,40 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         if (auto ar = tgt->append_record(); !ar) break;
                         for (std::size_t i = 0; i < cols.size(); ++i) {
                             auto v = tbl->read_field(cols[i]);
-                            std::string sv =
-                                v ? v.value().as_string : std::string();
-                            (void)tgt->set_field(
-                                static_cast<std::uint16_t>(i), sv);
+                            if (!v) continue;
+                            const auto ti = static_cast<std::uint16_t>(i);
+                            // Copy through the setter that matches how the
+                            // TARGET field is stored, not always the string one.
+                            //
+                            // Numeric/Float are ASCII in both DBF and ADT (see
+                            // decode_field), so as_string carries the declared
+                            // scale exactly — "10.50" stays "10.50". Writing a
+                            // double there would re-render it as "10.5" and lose
+                            // the N(12,2) formatting that #146 exists to protect.
+                            //
+                            // The genuinely BINARY numerics below are the ones a
+                            // string write corrupts: on ADT they are raw little
+                            // endian values, so pushing text into them made
+                            // "10.50" read back as ~6e-154. That never showed on
+                            // the old DBF temp because DBF stores numerics as
+                            // ASCII, so the string write round-tripped by
+                            // accident.
+                            switch (tgt->field_descriptor(ti).type) {
+                                case openads::drivers::DbfFieldType::Integer:
+                                case openads::drivers::DbfFieldType::Double:
+                                case openads::drivers::DbfFieldType::Currency:
+                                case openads::drivers::DbfFieldType::ShortInt:
+                                case openads::drivers::DbfFieldType::AutoInc:
+                                case openads::drivers::DbfFieldType::AdtMoney:
+                                    (void)tgt->set_field(ti, v.value().as_double);
+                                    break;
+                                case openads::drivers::DbfFieldType::Logical:
+                                    (void)tgt->set_field(ti, v.value().as_bool);
+                                    break;
+                                default:
+                                    (void)tgt->set_field(ti, v.value().as_string);
+                                    break;
+                            }
                         }
                     }
                     (void)tgt->flush();
@@ -31222,8 +31323,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 // Drop the live source cursor so the ERP's INDEX ON / close
                 // never touches the production table or its official .cdx.
                 if (table_handle != 0) c->close_table(table_handle);
+                // Must match the type the temp was CREATED as (ADT, above).
                 auto cth = c->open_table(tmp_name,
-                                         openads::engine::TableType::Cdx,
+                                         openads::engine::TableType::Adt,
                                          openads::engine::OpenMode::Shared);
                 if (!cth) return fail(cth.error());
                 openads::engine::Table* ctbl = c->lookup_table(cth.value());

@@ -107,12 +107,35 @@ don't:
       it sorts first, shifting every ordered comparison. Accounts for users
       31 (SAP) vs 32 (OA).
 
-## ⚠️ REGRESSION on main (found 2026-07-30 rebasing onto v1.8.40)
+## ✅ FIXED 2026-07-30 — the 10-char truncation regression on v1.8.40
 
-**`TOP` / `ORDER BY` / `DISTINCT` / `LIMIT` truncate every column name to 10
-characters.** This is task #2's root cause (the materialisation temp is a **DBF**
-free table, and DBF caps field names at 10) but the blast radius is far wider
-than the `sp_` `__output` case that task describes — it is no longer cosmetic.
+**`TOP` / `ORDER BY` / `DISTINCT` / `LIMIT` truncated every column name to 10
+characters.** Same root cause as task #2 (the materialisation temp was a **DBF**
+free table, and DBF caps field names at 10) but a far wider blast radius than
+the `sp_` `__output` case that task describes — it was not cosmetic.
+
+**Fix:** the temp is now ADT, and its decimal numerics use ADT type 2 (ASCII
+digits) via the new `AsciiNumeric` field-type name, so full-length names and the
+declared numeric scale survive together. Three constraints pin that format and
+two of them only surface in specific customer scenarios — the reasoning is
+written up in **`docs/materialised-cursor-temps.md`**, linked from
+CONTRIBUTING.md and from the code at the decision site. Regression test:
+`abi_sql_orderby_test.cpp` *"materialised cursors keep column names longer than
+10 chars"*, which asserts names and scale in the same pass.
+
+Found while doing it, **not fixed**:
+
+- [ ] **`AdsSetString` into an ADT DOUBLE stores the text verbatim** instead of
+      parsing it, so the value reads back as garbage (`"10.50"` → ~6.01e-154).
+      Reachable by creating an ADT table with `Numeric,12,2` — which
+      `adt_spec_for()` maps to DOUBLE — and writing through `AdsSetString`.
+      Only ADT is affected; DBF stores numerics as ASCII so the same write
+      round-trips there.
+- [ ] **The other materialisers still truncate to 10 chars** — joins (which also
+      rename right-side columns `R_*`), unions, aggregates and the `sp_`
+      `__output` path each build their own DBF temp. Task #2 proper.
+
+Original report, kept for context:
 
 ```
 SELECT Name, RI_Primary_Table, RI_Foreign_Table FROM system.relations
