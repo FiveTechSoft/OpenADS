@@ -158,3 +158,48 @@ TEST_CASE("CDX set_expression rejects an over-long expression instead of truncat
 
     fs::remove(p, ec);
 }
+
+// Pritpal Bedi 31/07/2026 — Harbour's DbfCdx never persists the FIELD->
+// qualifier in the tag's stored key expression: `INDEX ON FIELD->name`
+// saves key "name". AdsCreateIndex61 must strip the qualifier before
+// writing the bag header so AdsGetIndexExpr reports the bare field and a
+// native Harbour reader never sees "FIELD->name" (which errors unless the
+// app pre-declares every field as FIELD).
+TEST_CASE("CDX create strips FIELD-> qualifier from the stored key expression") {
+    auto dir = fs::temp_directory_path() / "openads_cdx_fieldqual_strip";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+
+    const std::string dir_str = dir.string();
+    std::vector<UNSIGNED8> srv(dir_str.begin(), dir_str.end());
+    srv.push_back(0);
+    ADSHANDLE hConn = 0;
+    REQUIRE(AdsConnect60(srv.data(), ADS_LOCAL_SERVER,
+                         nullptr, nullptr, 0, &hConn) == 0);
+
+    UNSIGNED8 def[]   = "NAME,C,8,0";
+    UNSIGNED8 tname[] = "fldqual";
+    ADSHANDLE hT = 0;
+    REQUIRE(AdsCreateTable(hConn, tname, nullptr, ADS_CDX,
+                           0, 0, 0, 0, def, &hT) == 0);
+    REQUIRE(AdsAppendRecord(hT) == 0);
+    set8(hT, "NAME", "alpha");
+
+    UNSIGNED8 bag[]  = "fldqual.cdx";
+    UNSIGNED8 tag[]  = "TAG01";
+    UNSIGNED8 expr[] = "FIELD->NAME";
+    ADSHANDLE hI = 0;
+    REQUIRE(AdsCreateIndex61(hT, bag, tag, expr,
+                             nullptr, nullptr, 0, 0, &hI) == 0);
+
+    // The stored expression is the bare field name, exactly as DbfCdx saves it.
+    CHECK(index_expr(hT, "TAG01") == "NAME");
+
+    // And the tag still works: seek by the indexed field finds the record.
+    CHECK(walk(hT) == std::vector<UNSIGNED32>{1});
+
+    AdsCloseTable(hT);
+    AdsDisconnect(hConn);
+    fs::remove_all(dir, ec);
+}

@@ -1,3 +1,37 @@
+## 1.8.44 - 2026-07-31
+
+Remote record-lock routing (the "~10 s to commit 9 records" stall), CDX key
+expressions no longer persist the `FIELD->` qualifier, and `AdsGetVersion`
+reports the real build version. Reported by Pritpal Bedi. Everything since
+**v1.8.43**.
+
+### Fixed - remote RLock after APPEND BLANK burned ~1 s per record
+
+- The server keeps two Table instances per remote table (engine + parallel
+  ABI handle, M12.16). Appends go through the ABI handle and
+  `AdsAppendRecord` auto-locks the new record there — but the
+  `LockRecord` / `UnlockRecord` opcodes were routed to the *engine* Table,
+  a different OS file handle, so every client `RLock()` after an append
+  conflicted with the server's own auto-lock and burned the full lock-retry
+  budget (10 x 100 ms ≈ 1 s per record; 9 records ≈ 10 s). Matching
+  unlocks never released the ABI-side lock, stalling other stations.
+  Lock/unlock opcodes now route through the same ABI handle whenever it
+  exists; unlock also clears any stale engine-side lock.
+
+### Fixed - FIELD-> qualifier persisted in the stored CDX key expression
+
+- `INDEX ON FIELD->name TAG t` saved `FIELD->name` in the bag header.
+  Harbour's DbfCdx strips the qualifier (key is stored as `name`) and a
+  native reader errors on the leaked alias. `AdsCreateIndex61` and legacy
+  `AdsCreateIndex` now strip `ALIAS->` before the expression is written;
+  evaluation was already qualifier-agnostic.
+
+### Changed - AdsGetVersion reports the real version
+
+- Major/minor come from `OPENADS_VERSION_STR` (CMake project version)
+  instead of hardcoded 0.0; the description string reads
+  `OpenADS <version> ACE-compatible engine`.
+
 ## 1.8.43 - 2026-07-30
 
 Dirty-record write coalescing for append/replace/commit speed. Field

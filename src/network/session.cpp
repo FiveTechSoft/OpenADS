@@ -1794,17 +1794,15 @@ DispatchResult Session::dispatch(const Frame& f) {
             write_u32_le(packed, reply.payload);
             break;
         }
-        // Locking is currently no-op at the engine level for
-        // our LocalServer fallback path; the cursor branch
-        // routes through real ABI locks. Both ack with success
-        // so rddads' shared-mode opens don't fail mid-flight.
+        // Record locks route through the parallel ABI handle when one
+        // exists (M12.16 dual-handle) so they land on the same Table
+        // instance that appends/writes go through; otherwise they use
+        // the engine table from tbls_ with a non-blocking retry loop.
         case Opcode::LockRecord:
         case Opcode::UnlockRecord: {
             if (f.payload.size() < 8) { reply = err("Lock: bad payload"); break; }
             std::uint32_t id = read_u32_le(f.payload.data());
             std::uint32_t rn = read_u32_le(f.payload.data() + 4);
-            // Route lock/unlock to the engine table from tbls_ so the lock
-            // lands on the SAME Table instance that writes go through.
             auto it = tbls_.find(id);
             if (it == tbls_.end() || !sess_conn_) {
                 reply = err("Lock: bad table id"); break;
@@ -1814,7 +1812,27 @@ DispatchResult Session::dispatch(const Frame& f) {
             openads::mgmt::set_current_lock_owner(
                 session_user_.empty() ? "(anonymous)" : session_user_,
                 srv_->conn_no_for_session(sid_));
-            if (f.opcode == Opcode::LockRecord) {
+            // M12.16 dual-handle: appends go through the parallel ABI
+            // handle (see AppendBlank), and AdsAppendRecord auto-locks the
+            // new record on THAT Table instance. Routing the client's
+            // RLock() to the engine Table made every lock after APPEND
+            // BLANK burn the full lock-retry budget (~1 s per record —
+            // Pritpal's "9 records in 10 seconds", 31/07/2026) and the
+            // matching UNLOCK never released the ABI-side auto-lock,
+            // leaking it until session cleanup and stalling other
+            // stations. Route lock/unlock through the same ABI handle
+            // whenever it exists.
+            if (auto hit = tbls_h_.find(id); hit != tbls_h_.end()) {
+                UNSIGNED32 rrc = (f.opcode == Opcode::LockRecord)
+                    ? AdsLockRecord(hit->second, rn)
+                    : AdsUnlockRecord(hit->second, rn);
+                // Also release any stale engine-side lock taken before
+                // the ABI handle existed (best-effort; not holding the
+                // lock is fine).
+                if (f.opcode == Opcode::UnlockRecord)
+                    (void)tbl->unlock_record(rn);
+                if (rrc != 0) { reply = err("Lock: failed", rrc); break; }
+            } else if (f.opcode == Opcode::LockRecord) {
                 // Use non-blocking try + retry loop (same semantics as
                 // the ABI lock_with_retry).  Blocking lock_record_excl
                 // would freeze the entire server until the OS grants the

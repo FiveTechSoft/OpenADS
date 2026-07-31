@@ -9710,13 +9710,33 @@ UNSIGNED32 ENTRYPOINT AdsGetLastError(UNSIGNED32* pulCode, UNSIGNED8* pucBuf,
 // pucDesc / pusDescLen : caller-allocated description buffer +
 //             in/out length. We write the OpenADS version string
 //             and truncate to the caller's capacity.
+//
+// Major/minor come from OPENADS_VERSION_STR (CMake project version, e.g.
+// "1.8.43" or "1.8.43-5-gdeadbee") so a client can display the server
+// build programmatically; the description carries the full string.
 UNSIGNED32 ENTRYPOINT AdsGetVersion(UNSIGNED32* pulMajor, UNSIGNED32* pulMinor,
                          UNSIGNED8*  pucLetter, UNSIGNED8* pucDesc,
                          UNSIGNED16* pusDescLen) {
-    if (pulMajor  != nullptr) *pulMajor  = 0;
-    if (pulMinor  != nullptr) *pulMinor  = 0;
+#ifndef OPENADS_VERSION_STR
+#  define OPENADS_VERSION_STR "0.0"
+#endif
+    UNSIGNED32 maj = 0, min = 0;
+    {
+        const char* v = OPENADS_VERSION_STR;
+        char* end = nullptr;
+        unsigned long a = std::strtoul(v, &end, 10);
+        unsigned long b = 0;
+        if (end != nullptr && *end == '.') {
+            b = std::strtoul(end + 1, nullptr, 10);
+        }
+        maj = static_cast<UNSIGNED32>(a);
+        min = static_cast<UNSIGNED32>(b);
+    }
+    if (pulMajor  != nullptr) *pulMajor  = maj;
+    if (pulMinor  != nullptr) *pulMinor  = min;
     if (pucLetter != nullptr) *pucLetter = 'a';
-    static const char kDesc[] = "OpenADS ACE-compatible engine";
+    static const char kDesc[] = "OpenADS " OPENADS_VERSION_STR
+        " ACE-compatible engine";
     if (pucDesc != nullptr && pusDescLen != nullptr) {
         UNSIGNED16 cap = *pusDescLen;
         UNSIGNED16 n = static_cast<UNSIGNED16>(
@@ -12389,6 +12409,12 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
         openads::abi::to_internal(pucFileName, 0));
     auto tag  = openads::abi::to_internal(pucIndexName, 0);
     auto expr = openads::abi::to_internal(pucExpr, 0);
+    // Never persist the FIELD->/ALIAS-> qualifier in the stored key
+    // expression: native DbfCdx strips it ("INDEX ON FIELD->name" saves
+    // key "name"), and Harbour errors on a bare field reference when the
+    // qualifier leaks into the bag header. The evaluator is qualifier-
+    // agnostic (strip_alias_qualifiers), so building/seeking is unchanged.
+    expr = openads::engine::strip_alias_qualifiers(expr);
     std::string for_expr = pucCondition != nullptr
         ? openads::abi::to_internal(pucCondition, 0)
         : std::string{};
@@ -13025,6 +13051,9 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex(ADSHANDLE hTable, UNSIGNED8* pucFile,
         openads::abi::to_internal(pucFile, 0));
     auto tag  = openads::abi::to_internal(pucTag,  0);
     auto expr = openads::abi::to_internal(pucExpr, 0);
+    // Never persist the FIELD->/ALIAS-> qualifier in the stored key
+    // expression (mirrors AdsCreateIndex61 and native DbfCdx).
+    expr = openads::engine::strip_alias_qualifiers(expr);
     // A FOR condition makes this a conditional index: only matching rows get
     // a key entry (mirrors AdsCreateIndex61's build loop). Ignoring pucCondition
     // built a full index over every row, so AdsGetKeyCount, OrdKeyNo, SKIP and
