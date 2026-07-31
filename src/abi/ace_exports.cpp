@@ -1009,6 +1009,31 @@ void remote_ensure_rec_count(openads::network::RemoteTable* rt) {
     }
 }
 
+// Scoped key count of the active order — the server computes it scope +
+// SET DELETED aware, so it matches what OrdKeyCount reports. Falls back
+// to the physical record count in natural order. The remote keyno
+// machinery (GoBottom, KeyGoto, RelKeyPos, skip clamp) must use THIS,
+// not cached_rec_count: with a scope of 1 live row in a 36-row table,
+// clamping to 36 made GoBottom report KeyNo=36 and sent KeyGoto/rel-pos
+// walks 35 rows past the scope end — the phantom/duplicate rows in Tim
+// Stone's scoped remote xBrowse (31/07/2026).
+std::uint32_t remote_ensure_key_count(openads::network::RemoteTable* rt) {
+    if (rt == nullptr) return 0;
+    if (rt->active_index_id == 0) {
+        // Natural record order (or no order installed yet): key position
+        // tracks recno, so the count is the physical record count.
+        remote_ensure_rec_count(rt);
+        return rt->rec_count_cached ? rt->cached_rec_count : 0u;
+    }
+    if (!rt->key_count_cached) {
+        if (auto r = rt->conn->key_count(rt->id)) {
+            rt->cached_key_count = r.value();
+            rt->key_count_cached = true;
+        }
+    }
+    return rt->key_count_cached ? rt->cached_key_count : 0u;
+}
+
 void remote_update_nav_boundaries(openads::network::RemoteTable* rt,
                                   std::int32_t step,
                                   std::uint32_t rec_before,
@@ -1051,13 +1076,10 @@ void remote_sync_keyno_gotobottom(openads::network::RemoteTable* rt) {
     if (rt == nullptr) return;
     remote_clear_nav_boundaries(rt);
     if (remote_table_has_index(rt)) {
-        if (!rt->rec_count_cached) {
-            if (auto r = rt->conn->record_count(rt->id)) {
-                rt->cached_rec_count   = r.value();
-                rt->rec_count_cached   = true;
-            }
-        }
-        rt->current_keyno = rt->rec_count_cached ? rt->cached_rec_count : 1u;
+        // Bottom of the ORDER, not of the file: with a scope active the
+        // last key is key #scoped_key_count, not #physical_rec_count.
+        const std::uint32_t kc = remote_ensure_key_count(rt);
+        rt->current_keyno = kc > 0 ? kc : 1u;
         rt->keyno_valid   = true;
     } else if (rt->row_valid) {
         rt->current_keyno = rt->current_recno;
@@ -1075,12 +1097,22 @@ void remote_sync_keyno_skip(openads::network::RemoteTable* rt,
         // then DbGoto(bookmark). AdsGotoRecord invalidates keyno; do not
         // invent a position here or KeyNo/CalcRowSelPos drift.
         if (!rt->keyno_valid) return;
+        if (!rt->row_valid) {
+            // Landed at EOF. The phantom key number is key_count + 1, so
+            // a Skip(-1) back lands exactly on the last scoped key. Fetch
+            // the scoped count ONLY here (it is then cached): fetching on
+            // the per-skip hot path would add a wire RTT to every browse
+            // step (broke the zero-packet prefetch guarantee, M12.24).
+            if (step > 0) {
+                const std::uint32_t kc = remote_ensure_key_count(rt);
+                if (kc > 0) rt->current_keyno = kc + 1;
+            }
+            return;
+        }
+        // On a valid row the counter is exact by construction (seeded by
+        // GoTop/GoBottom/measure); no clamp, no wire traffic.
         std::int64_t k = static_cast<std::int64_t>(rt->current_keyno) + step;
         if (k < 1) k = 1;
-        if (rt->rec_count_cached &&
-            k > static_cast<std::int64_t>(rt->cached_rec_count)) {
-            k = static_cast<std::int64_t>(rt->cached_rec_count);
-        }
         rt->current_keyno = static_cast<std::uint32_t>(k);
         return;
     }
@@ -1137,6 +1169,13 @@ UNSIGNED32 remote_query_key_num(openads::network::RemoteTable* rt,
         auto act = openads::network::remote_activate_index(ri);
         if (!act) return fail(act.error());
     }
+    // At the EOF phantom there is no key under the cursor: the local
+    // engine reports 0 here (recno past end is not in the index walk),
+    // and xBrowse depends on that to stop painting rows.
+    if (rt->nav_at_eof && !rt->row_valid) {
+        *pulKeyNum = 0;
+        return ok();
+    }
     const bool has_index = rt->active_index_id != 0 ||
                            !rt->index_by_tag.empty();
     if (!has_index) {
@@ -1170,8 +1209,14 @@ UNSIGNED32 remote_goto_key_num(openads::network::RemoteTable* rt,
         if (!act) return fail(act.error());
     }
     remote_ensure_rec_count(rt);
-    if (rt->rec_count_cached && keyno > rt->cached_rec_count) {
-        keyno = rt->cached_rec_count;
+    // Clamp to the scoped key count when an order is active — a KeyGoto
+    // past the scope end must land on the last scoped key, not on a
+    // physical record outside the scope.
+    const std::uint32_t kmax = remote_table_has_index(rt)
+        ? remote_ensure_key_count(rt)
+        : (rt->rec_count_cached ? rt->cached_rec_count : 0u);
+    if (kmax > 0 && keyno > kmax) {
+        keyno = kmax;
     }
     if (!remote_table_has_index(rt)) {
         rt->found_cached      = true;
@@ -1208,8 +1253,12 @@ UNSIGNED32 remote_query_rel_key_pos(openads::network::RemoteTable* rt,
         if (!act) return fail(act.error());
     }
     remote_ensure_rec_count(rt);
-    const std::uint32_t rc =
-        rt->rec_count_cached ? rt->cached_rec_count : 0u;
+    // Relative position is within the active order's key walk, so the
+    // denominator is the scoped key count when an order is active —
+    // not the physical record count.
+    const std::uint32_t rc = remote_table_has_index(rt)
+        ? remote_ensure_key_count(rt)
+        : (rt->rec_count_cached ? rt->cached_rec_count : 0u);
     if (rc <= 1u) {
         *p = 0.0;
         return ok();
@@ -8019,7 +8068,8 @@ UNSIGNED32 ENTRYPOINT AdsRefreshRecord(ADSHANDLE hTable) {
     if (auto* rt = get_remote_table(hTable)) {
         remote_settle_cursor(rt);                   // M12.21 option C
         rt->row_valid = false;                      // M12.17 cache invalidation
-        rt->rec_count_cached = false;               // force fresh record count from server
+        rt->rec_count_cached = false;
+        rt->key_count_cached = false;               // force fresh record count from server
         auto r = rt->conn->refresh_record(rt->id);
         if (!r) return fail(r.error());
         return ok();
@@ -10045,7 +10095,8 @@ UNSIGNED32 ENTRYPOINT AdsAppendRecord(ADSHANDLE hTable) {
     if (auto* rt = get_remote_table(hTable)) {
         remote_settle_cursor(rt);                   // M12.21 option C
         rt->row_valid        = false;               // M12.17
-        rt->rec_count_cached = false;               // M12.19
+        rt->rec_count_cached = false;
+        rt->key_count_cached = false;               // M12.19
         auto r = rt->conn->append_blank(rt->id);
         if (!r) return fail(r.error());
         return ok();
@@ -10349,7 +10400,8 @@ UNSIGNED32 ENTRYPOINT AdsDeleteRecord(ADSHANDLE hTable) {
     if (auto* rt = get_remote_table(hTable)) {
         remote_settle_cursor(rt);                   // M12.21 option C
         rt->row_valid        = false;               // M12.17
-        rt->rec_count_cached = false;               // M12.19 (Pack drops the row)
+        rt->rec_count_cached = false;
+        rt->key_count_cached = false;               // M12.19 (Pack drops the row)
         auto r = rt->conn->delete_record(rt->id);
         if (!r) return fail(r.error());
         return ok();
@@ -10511,7 +10563,8 @@ UNSIGNED32 ENTRYPOINT AdsRecallRecord(ADSHANDLE hTable) {
     if (auto* rt = get_remote_table(hTable)) {
         remote_settle_cursor(rt);                   // M12.21 option C
         rt->row_valid        = false;               // M12.17
-        rt->rec_count_cached = false;               // M12.19
+        rt->rec_count_cached = false;
+        rt->key_count_cached = false;               // M12.19
         auto r = rt->conn->recall_record(rt->id);
         if (!r) return fail(r.error());
         return ok();
@@ -13489,6 +13542,7 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrder(ADSHANDLE hTable, UNSIGNED8* pucName) {
         // traffic to make it look suspicious.
         rt->row_valid = false;
         rt->invalidate_prefetch();
+        rt->key_count_cached = false;
         // RCB 07/14/2026: the server now orders by whatever `name` resolved to
         // on ITS side. Mirror that into server_order_id when we can map the tag
         // locally; when we can't, deliberately leave it "unknown" so the next
@@ -13647,6 +13701,7 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrderByHandle(ADSHANDLE hTable, ADSHANDLE hInde
             rt->active_index_id = 0;
             rt->keyno_valid     = false;
             rt->row_valid       = false;
+            rt->key_count_cached = false;
             rt->invalidate_prefetch();
             // RCB 07/14/2026: heads-up for whoever reads this next — this
             // branch (hIndex == 0 == "back to natural order") sends NO frame,
@@ -13665,6 +13720,7 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrderByHandle(ADSHANDLE hTable, ADSHANDLE hInde
             rt->active_index_id = ri->id;
             rt->server_order_id = ri->id;
             rt->keyno_valid     = false;
+            rt->key_count_cached = false;
             // RCB 07/14/2026: BUG FIX — order changed, so the cached row and
             // the queued lookahead rows are in the wrong order. Drop them.
             // (Same stale-queue family as AdsSeek / AdsSetIndexOrder.)
@@ -16587,6 +16643,14 @@ UNSIGNED32 ENTRYPOINT AdsSetScope(ADSHANDLE hIndex, UNSIGNED16 usScope,
         auto r = ri->conn->set_scope(ri->id, usScope, key,
                                      usDataType);
         if (!r) return fail(r.error());
+        // The scoped key count and every keyno/rel-pos value derived
+        // from it just changed; recompute lazily on next use. Also drop
+        // read-ahead rows — they were read under the old scope.
+        if (ri->parent != nullptr) {
+            ri->parent->key_count_cached = false;
+            ri->parent->keyno_valid      = false;
+            ri->parent->invalidate_prefetch();
+        }
         return ok();
     }
     Table* t = table_for_index(hIndex);
@@ -16675,6 +16739,11 @@ UNSIGNED32 ENTRYPOINT AdsClearScope(ADSHANDLE hIndex, UNSIGNED16 usScope) {
     if (auto* ri = get_remote_index(hIndex)) {
         auto r = ri->conn->clear_scope(ri->id, usScope);
         if (!r) return fail(r.error());
+        if (ri->parent != nullptr) {
+            ri->parent->key_count_cached = false;
+            ri->parent->keyno_valid      = false;
+            ri->parent->invalidate_prefetch();
+        }
         return ok();
     }
     Table* t = table_for_index(hIndex);
@@ -16711,6 +16780,7 @@ UNSIGNED32 ENTRYPOINT AdsPackTable(ADSHANDLE hTable) {
     if (auto* rt = get_remote_table(hTable)) {
         rt->row_valid        = false;               // M12.17/19
         rt->rec_count_cached = false;
+        rt->key_count_cached = false;
         auto r = rt->conn->pack_table(rt->id);
         if (!r) return fail(r.error());
         return ok();
@@ -16735,6 +16805,7 @@ UNSIGNED32 ENTRYPOINT AdsZapTable(ADSHANDLE hTable) {
     if (auto* rt = get_remote_table(hTable)) {
         rt->row_valid        = false;               // M12.17/19
         rt->rec_count_cached = false;
+        rt->key_count_cached = false;
         auto r = rt->conn->zap_table(rt->id);
         if (!r) return fail(r.error());
         return ok();
@@ -32894,6 +32965,10 @@ UNSIGNED32 ENTRYPOINT AdsShowDeleted(UNSIGNED16 us) {
             if (rt == nullptr) return;
             rt->row_valid = false;
             rt->invalidate_prefetch();
+            // Which keys are visible just changed, so the scoped key
+            // count and any cached keyno are stale too.
+            rt->key_count_cached = false;
+            rt->keyno_valid      = false;
         });
     }
     // Release s.mu before the wire round-trips — the in-process test

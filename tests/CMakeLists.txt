@@ -187,6 +187,7 @@ add_executable(openads_unit_tests
     unit/abi_record_crc_aof_test.cpp
     unit/abi_settings_refreshaof_test.cpp
     unit/abi_dd_persistence_test.cpp
+    unit/abi_remote_timscope_test.cpp
     unit/dbf_vfp_test.cpp
     unit/abi_sql_or_test.cpp
     unit/abi_index_direction_test.cpp

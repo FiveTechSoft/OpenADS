@@ -1,3 +1,36 @@
+## 1.8.45 - 2026-07-31
+
+Scoped-key-count fix for the remote KeyNo / scrollbar machinery — the
+"phantom rows" (correct row, blank row, duplicate) in scoped remote
+xBrowse screens. Reported by Tim Stone with a REMTEST repro. Everything
+since **v1.8.44**.
+
+### Fixed - remote KeyNo/RelKeyPos used the physical record count under a scope
+
+- With a top/bottom scope active (e.g. 1 live row in a 36-row table),
+  `GoBottom` reported `KeyNo=36` instead of `1`, and `AdsSetRelKeyPos` /
+  KeyGoto clamped against the physical record count, walking the cursor
+  tens of rows past the scope end. FiveWin xBrowse positions rows through
+  `ADSKEYNO` / `ADSGETRELKEYPOS` / `ADSSETRELKEYPOS`, so scoped browses
+  painted phantom rows — "OpenADS REMOTE does not know how to cut off at
+  only 1 record".
+- The remote keyno machinery now clamps to the server-computed, scope +
+  SET DELETED aware key count (`remote_ensure_key_count`), and
+  `AdsGetKeyNum` reports 0 at the EOF phantom, matching the local engine.
+  Client-side fix in ace64/ace32; the server needs no update for this one
+  (v1.8.44 server is fine).
+- The scoped count is fetched only when a skip lands at EOF (then cached),
+  preserving the zero-round-trip prefetch guarantee on the skip hot path.
+- Cache invalidated on scope set/clear, order change, SET DELETED flip,
+  and every write path.
+
+### Tests
+
+- `abi_remote_timscope_test.cpp`: replays Tim's exact REMTEST.DBF
+  (1 live + 5 deleted in the scoped group) over the wire — scoped walk,
+  KeyNo at top/bottom/EOF, skip-back from EOF, RelKeyPos/SetRelKeyPos
+  clamp.
+
 ## 1.8.44 - 2026-07-31
 
 Remote record-lock routing (the "~10 s to commit 9 records" stall), CDX key
