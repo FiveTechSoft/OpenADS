@@ -163,6 +163,30 @@ TEST_CASE("Tim Stone REMOTE scoped browse: 1 live + 5 deleted shows exactly 1 ro
     CHECK(rn == 1);
     CHECK(keyno(hROrd) == 1);
 
+    // Phantom-duplicate root cause (v1.8.47): a backward skip at the
+    // scope TOP must report BOF on the FIRST try — even right after
+    // AdsRefreshRecord, which invalidates the client's row cache. The
+    // server used to pack the current row at BOF (has_row=1), and the
+    // client's boundary detection then needed a pristine row_valid_before
+    // that RefreshRecord had just destroyed: the first skip(-1) at the
+    // top answered Bof()=.F., xBrowse counted one extra row above, and
+    // the single scoped record painted twice.
+    REQUIRE(AdsGotoTop(hROrd) == 0);
+    REQUIRE(AdsRefreshRecord(hRT) == 0);
+    REQUIRE(AdsSkip(hROrd, -1) == 0);
+    UNSIGNED16 bof = 0;
+    REQUIRE(AdsAtBOF(hRT, &bof) == 0);
+    CHECK(bof == 1);                     // was 0 on the first backward skip
+    // From the top the downward walk serves the single row exactly once.
+    REQUIRE(AdsGotoTop(hROrd) == 0);
+    UNSIGNED16 eof2 = 0;
+    REQUIRE(AdsAtEOF(hRT, &eof2) == 0);
+    CHECK(eof2 == 0);
+    CHECK(keyno(hROrd) == 1);
+    REQUIRE(AdsSkip(hROrd, 1) == 0);
+    REQUIRE(AdsAtEOF(hRT, &eof2) == 0);
+    CHECK(eof2 == 1);
+
     REQUIRE(AdsCloseTable(hRT) == 0);
     REQUIRE(AdsDisconnect(hRC) == 0);
     server.stop();

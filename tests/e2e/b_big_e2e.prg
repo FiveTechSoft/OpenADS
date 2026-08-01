@@ -238,6 +238,25 @@ PROCEDURE Main( cMode, cTarget )
    dbGoBottom()
    Section( "GoBottom KeyNo == scoped KeyCount", OrdKeyNo() == OrdKeyCount(), ;
             "KeyNo=" + LTrim( Str( OrdKeyNo() ) ) )
+
+   // 5b. The phantom-duplicate scenario (v1.8.47): a backward skip at the
+   // scope TOP must report BOF on the FIRST try, even right after
+   // dbRefresh() (which invalidates the remote row cache). With the bug,
+   // the first skip(-1) answered Bof()=.F. and xBrowse counted one extra
+   // row above -> the single scoped record painted twice.
+   dbGoTop()
+   AdsRefreshRecord()
+   dbSkip( -1 )
+   Section( "first skip(-1) at scope top -> BOF", Bof(), ;
+            "Bof()=" + iif( Bof(), "T", "F" ) )
+   dbGoTop()
+   dbSkip()
+   Section( "one more skip -> EOF (no duplicate row)", Eof(), ;
+            "Eof()=" + iif( Eof(), "T", "F" ) )
+   // NOTE: dbSkip() forward out of BOF currently lands on the group's
+   // last physical recno instead of the first scoped key (engine-side
+   // CDX boundary walk, local AND remote, pre-existing) — tracked
+   // separately, do not gate on it here.
    USE
    SET DELETED OFF
 

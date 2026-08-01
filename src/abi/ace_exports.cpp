@@ -1,3 +1,4 @@
+#include <cstdarg>
 #include "openads/ace.h"
 #include "openads/error.h"
 #include "abi/lock_retry_policy.h"
@@ -999,6 +1000,21 @@ bool remote_table_has_index(const openads::network::RemoteTable* rt) {
            (rt->active_index_id != 0 || !rt->index_by_tag.empty());
 }
 
+static void cli_trace(const char* fmt, ...) {
+    static const bool on = std::getenv("OPENADS_WIRE_TRACE") != nullptr;
+    if (!on) return;
+    FILE* hf = std::fopen("C:/tmp/cli_trace.log", "a");
+    if (hf == nullptr) return;
+    char buf[512];
+    va_list ap; va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf) - 1, fmt, ap);
+    va_end(ap);
+    buf[sizeof(buf) - 1] = 0;
+    std::fwrite(buf, 1, std::strlen(buf), hf);
+    std::fwrite("\n", 1, 1, hf);
+    std::fclose(hf);
+}
+
 void remote_clear_nav_boundaries(openads::network::RemoteTable* rt) {
     if (rt == nullptr) return;
     rt->nav_at_bof = false;
@@ -1219,6 +1235,7 @@ UNSIGNED32 remote_goto_key_num(openads::network::RemoteTable* rt,
     const std::uint32_t kmax = remote_table_has_index(rt)
         ? remote_ensure_key_count(rt)
         : (rt->rec_count_cached ? rt->cached_rec_count : 0u);
+    cli_trace("[cli] goto_key_num: want=%u kmax=%u", keyno, kmax);
     if (kmax > 0 && keyno > kmax) {
         keyno = kmax;
     }
@@ -8733,6 +8750,10 @@ UNSIGNED32 ENTRYPOINT AdsGotoTop(ADSHANDLE hTable) {
         auto r = openads::network::remote_index_goto_top(ri);
         if (!r) return fail(r.error());
         remote_sync_keyno_gototop(ri->parent);
+        cli_trace("[cli] AdsGotoTop(idx): row_valid=%d recno=%u keyno=%u eof=%d bof=%d",
+                  (int)ri->parent->row_valid, ri->parent->current_recno,
+                  ri->parent->current_keyno, (int)ri->parent->nav_at_eof,
+                  (int)ri->parent->nav_at_bof);
         if (Handle th = handle_for_remote_table(ri->parent))
             apply_relations_for_handle(to_ads_handle(th));
         return ok();
@@ -8769,6 +8790,10 @@ UNSIGNED32 ENTRYPOINT AdsGotoBottom(ADSHANDLE hTable) {
         auto r = openads::network::remote_index_goto_bottom(ri);
         if (!r) return fail(r.error());
         remote_sync_keyno_gotobottom(ri->parent);
+        cli_trace("[cli] AdsGotoBottom(idx): row_valid=%d recno=%u keyno=%u eof=%d bof=%d",
+                  (int)ri->parent->row_valid, ri->parent->current_recno,
+                  ri->parent->current_keyno, (int)ri->parent->nav_at_eof,
+                  (int)ri->parent->nav_at_bof);
         if (Handle th = handle_for_remote_table(ri->parent))
             apply_relations_for_handle(to_ads_handle(th));
         return ok();
@@ -8800,6 +8825,7 @@ UNSIGNED32 ENTRYPOINT AdsGotoBottom(ADSHANDLE hTable) {
 UNSIGNED32 ENTRYPOINT AdsSkip(ADSHANDLE hTable, SIGNED32 lRows) {
     seek_last_retry_latch() = false;
     if (auto* ri = get_remote_index(hTable)) {
+        cli_trace("[cli] AdsSkip(idx) rows=%d", (int)lRows);
         openads::network::RemoteTable* rt = ri->parent;
         const std::uint32_t rec_before =
             (rt != nullptr && rt->row_valid) ? rt->current_recno : 0u;
@@ -8808,6 +8834,9 @@ UNSIGNED32 ENTRYPOINT AdsSkip(ADSHANDLE hTable, SIGNED32 lRows) {
         if (!r) return fail(r.error());
         remote_sync_keyno_skip(rt, lRows);
         remote_update_nav_boundaries(rt, lRows, rec_before, row_valid_before);
+        cli_trace("[cli] AdsSkip(idx) done: row_valid=%d recno=%u keyno=%u eof=%d bof=%d",
+                  (int)rt->row_valid, rt->current_recno, rt->current_keyno,
+                  (int)rt->nav_at_eof, (int)rt->nav_at_bof);
         if (Handle th = handle_for_remote_table(rt))
             apply_relations_for_handle(to_ads_handle(th));
         return ok();
@@ -8872,6 +8901,8 @@ UNSIGNED32 ENTRYPOINT AdsSkip(ADSHANDLE hTable, SIGNED32 lRows) {
 UNSIGNED32 ENTRYPOINT AdsAtEOF(ADSHANDLE hTable, UNSIGNED16* pbAtEnd) {
     if (auto* rt = get_remote_table(hTable)) {
         if (pbAtEnd == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+        cli_trace("[cli] AdsAtEOF: nav_eof=%d row_valid=%d",
+                  (int)rt->nav_at_eof, (int)rt->row_valid);
         if (rt->nav_at_eof) { *pbAtEnd = 1; return ok(); }
         // M12.21 option C — a valid cached current row (including one
         // served locally from the prefetch queue) means the cursor is
@@ -8895,6 +8926,8 @@ UNSIGNED32 ENTRYPOINT AdsAtEOF(ADSHANDLE hTable, UNSIGNED16* pbAtEnd) {
 UNSIGNED32 ENTRYPOINT AdsAtBOF(ADSHANDLE hTable, UNSIGNED16* pbAtBegin) {
     if (pbAtBegin == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
     if (auto* rt = get_remote_table(hTable)) {
+        cli_trace("[cli] AdsAtBOF: nav_bof=%d row_valid=%d",
+                  (int)rt->nav_at_bof, (int)rt->row_valid);
         if (rt->nav_at_bof) { *pbAtBegin = 1; return ok(); }
         // M12.21 option C — a valid cached current row means the cursor
         // is on a record, so it cannot be at BOF: answer with no round

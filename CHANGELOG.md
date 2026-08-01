@@ -1,3 +1,53 @@
+## 1.8.47 - 2026-08-01
+
+The last of Tim Stone's remote phantom rows: a scoped xBrowse with exactly
+one record no longer paints it twice. Two server-side boundary bugs, found
+by tracing every wire op his REMOTETEST64 makes and comparing client-side
+navigation state local vs remote. Everything since **v1.8.46**.
+
+### Fixed - remote AtBOF/AtEOF answered from the wrong cursor
+
+- For ordered tables the server's AtBOF/AtEOF handlers answered from the
+  mirrored engine cursor, which can sit with bof+eof both set after a
+  scope-end sync (the ABI twin does the real navigation; the engine
+  cursor is only a recno mirror). rddads' DBOI_POSITION (OrdKeyGoto past
+  the scoped key count) read Bof()=.T. from that. Both handlers now answer
+  from the ABI twin, like GotoTop/Skip already did.
+
+### Fixed - row trailer carried a row at BOF -> first backward skip at the top reported Bof()=.F.
+
+- `pack_row_trailer` packed the current row when the cursor was at BOF
+  (it only checked EOF), so a skip(-1) at the scope top ack'd has_row=1.
+  The client's boundary detection then needed a pristine row_valid_before
+  — which AdsRefreshRecord (called by xBrowse between skips) invalidates
+  — and the FIRST backward skip at the top reported Bof()=.F. instead of
+  .T. xBrowse counted one extra row above and painted the single scoped
+  record twice: the phantom duplicate row (Tim Stone, REMTEST 100011).
+  BOF now reports has_row=0, symmetric with EOF; field reads at BOF still
+  work (cache miss costs one round trip).
+- Verified end-to-end with Tim's own REMOTETEST64.exe against the fixed
+  server: exactly one row, pointer on it; tab 2 (4 rows) unchanged.
+
+### Diagnostics
+
+- `OPENADS_WIRE_TRACE=1` now enables wire-op tracing in openads_serverd
+  (stderr) and in the client DLL (C:/tmp/cli_trace.log): opcodes, skip
+  steps, twin boundary states, and client nav state per ACE call.
+
+### Tests
+
+- `abi_remote_timscope_test.cpp`: extended with the BOF-at-top scenario
+  (skip(-1) at scope top after AdsRefreshRecord must report BOF at once).
+- `b_big_e2e.prg`: two new sections for the same scenario — 23/23 PASS on
+  x64+x86, local+remote.
+
+### Known issue (pre-existing, tracked)
+
+- dbSkip() forward out of BOF lands on the group's last physical recno
+  instead of the first scoped key (engine-side CDX boundary walk, local
+  AND remote). Harmless for the browse paths fixed here; queued for a
+  later engine pass.
+
 ## 1.8.46 - 2026-08-01
 
 DbSetOrder(0) restores natural order again (local and remote), and the

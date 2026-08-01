@@ -35,6 +35,12 @@ void set_connection_show_deleted(ADSHANDLE hConnect, bool visible);
 
 namespace openads::network {
 
+static bool wire_trace_on() {
+    static const bool on = std::getenv("OPENADS_WIRE_TRACE") != nullptr;
+    return on;
+}
+#define WTRACE(...) do { if (wire_trace_on()) std::fprintf(stderr, __VA_ARGS__); } while (0)
+
 namespace {
 
 inline std::uint16_t read_u16_le(const std::uint8_t* p) {
@@ -584,6 +590,10 @@ void Session::pack_row_trailer(Frame& reply, std::uint32_t id,
         reply.payload.push_back(0);
         return;
     }
+    if (h_abi != 0) {
+        UNSIGNED16 _b = 9, _e = 9; AdsAtBOF(h_abi, &_b); AdsAtEOF(h_abi, &_e);
+        WTRACE("[wire] pack enter id=%u twin bof=%u eof=%u\n", id, (unsigned)_b, (unsigned)_e);
+    }
     // Pack the current row.
     bool current_packed = false;
     if (eng_tbl) {
@@ -599,9 +609,19 @@ void Session::pack_row_trailer(Frame& reply, std::uint32_t id,
             }
         }
     } else {
-        UNSIGNED16 atend = 0;
+        // BOF must report has_row=0 just like EOF: with a row on the
+        // trailer the client treats the BOF landing as a valid position,
+        // and its boundary detection (which relies on a pristine
+        // row_valid_before) then reports Bof()=.F. on the first backward
+        // skip at the top — xBrowse counts one extra row above and paints
+        // a phantom duplicate (Tim Stone, 1-record scope). It also lets
+        // the lookahead walk run at BOF, whose restore step clears the
+        // twin's BOF flag. Field reads at BOF still work: they miss the
+        // cache and cost one round trip, exactly like EOF.
+        UNSIGNED16 atend = 0, atbeg = 0;
         AdsAtEOF(h_abi, &atend);
-        if (atend) {
+        AdsAtBOF(h_abi, &atbeg);
+        if (atend || atbeg) {
             reply.payload.push_back(0);
         } else {
             reply.payload.push_back(1);
@@ -814,6 +834,7 @@ bool break_key_is_index_id(Opcode op) {
 // cursor after an index op that moves it (Seek / SeekLast).
 // No-op when the table is a cursor or has no engine handle.
 void Session::sync_engine_cursor(std::uint32_t id) {
+    WTRACE("[wire] sync_engine_cursor id=%u enter\n", id);
     if (cursor_tbls_.count(id)) return;
     auto eit = tbls_.find(id);
     if (eit == tbls_.end() || !sess_conn_) return;
@@ -838,6 +859,18 @@ void Session::sync_engine_cursor(std::uint32_t id) {
 
 DispatchResult Session::dispatch(const Frame& f) {
     Frame reply;
+    WTRACE("[wire] op=%u\n", (unsigned)f.opcode);
+    if (wire_trace_on() && f.payload.size() >= 4) {
+        std::uint32_t tid0 = read_u32_le(f.payload.data());
+        if (ordered_tables_.count(tid0)) {
+            if (auto hit0 = tbls_h_.find(tid0); hit0 != tbls_h_.end()) {
+                UNSIGNED16 b0 = 9, e0 = 9;
+                AdsAtBOF(hit0->second, &b0); AdsAtEOF(hit0->second, &e0);
+                WTRACE("[wire] op=%u id=%u twin-in(bof=%u eof=%u)\n",
+                       (unsigned)f.opcode, tid0, (unsigned)b0, (unsigned)e0);
+            }
+        }
+    }
     // M12.22 — break the read-ahead run before the handler runs, in one place
     // instead of a reset call in each of ~20 handlers.
     //
@@ -1182,6 +1215,7 @@ DispatchResult Session::dispatch(const Frame& f) {
             // reads from. Natural order: engine table directly.
             ADSHANDLE hord =
                 ordered_tables_.count(id) ? ensure_abi_handle(id) : 0;
+            WTRACE("[wire] GotoTop id=%u hord=%llu\n", id, (unsigned long long)hord);
             if (hord != 0) {
                 (void)AdsGotoTop(hord);
             } else {
@@ -1253,6 +1287,7 @@ DispatchResult Session::dispatch(const Frame& f) {
             // needs kCapPrefetchBackward, because a forward-only client would
             // mis-drain a backward block. step == 0 (a settle) gets no block.
             const std::int8_t dir = (step >= 1) ? 1 : (step <= -1) ? -1 : 0;
+            WTRACE("[wire] Skip id=%u step=%d\n", id, (int)step);
             const bool want_lookahead =
                 (dir == 1 && client_prefetch_ok_) ||
                 (dir == -1 && client_prefetch_ok_ && client_prefetch_back_ok_);
@@ -1281,6 +1316,8 @@ DispatchResult Session::dispatch(const Frame& f) {
                 ordered_tables_.count(id) ? ensure_abi_handle(id) : 0;
             if (hord != 0) {
                 (void)AdsSkip(hord, step);
+                { UNSIGNED16 _b = 9, _e = 9; AdsAtBOF(hord, &_b); AdsAtEOF(hord, &_e);
+                  WTRACE("[wire] Skip twin hord bof=%u eof=%u\n", (unsigned)_b, (unsigned)_e); }
                 reply.opcode = Opcode::SkipAck;
                 pack_row_trailer(reply, id, lookahead, dir);
                 // RCB 07/14/2026: sync AFTER packing, not before (this call
@@ -1290,6 +1327,8 @@ DispatchResult Session::dispatch(const Frame& f) {
                 // cursor FINALLY lands. Syncing first would anchor it to a
                 // position the pack is about to move away from.
                 sync_engine_cursor(id);
+                { UNSIGNED16 _b = 9, _e = 9; AdsAtBOF(hord, &_b); AdsAtEOF(hord, &_e);
+                  WTRACE("[wire] Skip end id=%u twin bof=%u eof=%u\n", id, (unsigned)_b, (unsigned)_e); }
                 break;
             }
             (void)tbl->skip(step);
@@ -1412,6 +1451,7 @@ DispatchResult Session::dispatch(const Frame& f) {
             if (auto cit = cursor_tbls_.find(id); cit != cursor_tbls_.end()) {
                 UNSIGNED16 v = 0;
                 AdsAtEOF(cit->second, &v);
+                WTRACE("[wire] AtEOF id=%u via twin -> %u\n", id, (unsigned)v);
                 reply.opcode = Opcode::AtEOFAck;
                 reply.payload.push_back(v != 0 ? 1 : 0);
                 break;
@@ -1422,6 +1462,18 @@ DispatchResult Session::dispatch(const Frame& f) {
             }
             auto* tbl = sess_conn_->lookup_table(it->second);
             if (!tbl) { reply = err("AtEOF: lookup failed"); break; }
+            // See AtBOF: ordered tables must answer from the ABI twin.
+            ADSHANDLE hord_eof =
+                ordered_tables_.count(id) ? ensure_abi_handle(id) : 0;
+            if (hord_eof != 0) {
+                UNSIGNED16 v = 0;
+                AdsAtEOF(hord_eof, &v);
+                WTRACE("[wire] AtEOF id=%u via ordered twin -> %u\n", id, (unsigned)v);
+                reply.opcode = Opcode::AtEOFAck;
+                reply.payload.push_back(v != 0 ? 1 : 0);
+                break;
+            }
+            WTRACE("[wire] AtEOF id=%u engine eof=%d bof=%d\n", id, (int)tbl->eof(), (int)tbl->bof());
             reply.opcode = Opcode::AtEOFAck;
             reply.payload.push_back(tbl->eof() ? 1 : 0);
             break;
@@ -1533,9 +1585,11 @@ DispatchResult Session::dispatch(const Frame& f) {
         case Opcode::AtBOF: {
             if (f.payload.size() < 4) { reply = err("AtBOF: bad payload"); break; }
             std::uint32_t id = read_u32_le(f.payload.data());
+            WTRACE("[wire] AtBOF id=%u\n", id);
             if (auto cit = cursor_tbls_.find(id); cit != cursor_tbls_.end()) {
                 UNSIGNED16 v = 0;
                 AdsAtBOF(cit->second, &v);
+                WTRACE("[wire] AtBOF id=%u via twin -> %u\n", id, (unsigned)v);
                 reply.opcode = Opcode::AtBOFAck;
                 reply.payload.push_back(v != 0 ? 1 : 0);
                 break;
@@ -1546,6 +1600,25 @@ DispatchResult Session::dispatch(const Frame& f) {
             }
             auto* tbl = sess_conn_->lookup_table(it->second);
             if (!tbl) { reply = err("AtBOF: lookup failed"); break; }
+            // Ordered tables navigate on the ABI twin (it carries the order
+            // and any scope); the engine cursor is only a mirrored recno and
+            // can sit with bof+eof both set after a scope-end sync — answer
+            // from the twin, like the GotoTop/Skip handlers do. Fixes the
+            // BOF+EOF-both-true answer that made rddads' DBOI_POSITION
+            // (OrdKeyGoto past the scoped key count) report Bof()=.T. and
+            // xBrowse paint a phantom duplicate row (Tim Stone, 1-record
+            // scope).
+            ADSHANDLE hord_bof =
+                ordered_tables_.count(id) ? ensure_abi_handle(id) : 0;
+            if (hord_bof != 0) {
+                UNSIGNED16 v = 0;
+                AdsAtBOF(hord_bof, &v);
+                WTRACE("[wire] AtBOF id=%u via ordered twin -> %u\n", id, (unsigned)v);
+                reply.opcode = Opcode::AtBOFAck;
+                reply.payload.push_back(v != 0 ? 1 : 0);
+                break;
+            }
+            WTRACE("[wire] AtBOF id=%u engine bof=%d eof=%d\n", id, (int)tbl->bof(), (int)tbl->eof());
             reply.opcode = Opcode::AtBOFAck;
             reply.payload.push_back(tbl->bof() ? 1 : 0);
             break;
