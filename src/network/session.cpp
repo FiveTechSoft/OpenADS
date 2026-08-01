@@ -35,6 +35,12 @@ void set_connection_show_deleted(ADSHANDLE hConnect, bool visible);
 
 namespace openads::network {
 
+static bool wire_trace_on() {
+    static const bool on = std::getenv("OPENADS_WIRE_TRACE") != nullptr;
+    return on;
+}
+#define WTRACE(...) do { if (wire_trace_on()) std::fprintf(stderr, __VA_ARGS__); } while (0)
+
 namespace {
 
 inline std::uint16_t read_u16_le(const std::uint8_t* p) {
@@ -584,6 +590,10 @@ void Session::pack_row_trailer(Frame& reply, std::uint32_t id,
         reply.payload.push_back(0);
         return;
     }
+    if (h_abi != 0) {
+        UNSIGNED16 _b = 9, _e = 9; AdsAtBOF(h_abi, &_b); AdsAtEOF(h_abi, &_e);
+        WTRACE("[wire] pack enter id=%u twin bof=%u eof=%u\n", id, (unsigned)_b, (unsigned)_e);
+    }
     // Pack the current row.
     bool current_packed = false;
     if (eng_tbl) {
@@ -599,9 +609,19 @@ void Session::pack_row_trailer(Frame& reply, std::uint32_t id,
             }
         }
     } else {
-        UNSIGNED16 atend = 0;
+        // BOF must report has_row=0 just like EOF: with a row on the
+        // trailer the client treats the BOF landing as a valid position,
+        // and its boundary detection (which relies on a pristine
+        // row_valid_before) then reports Bof()=.F. on the first backward
+        // skip at the top — xBrowse counts one extra row above and paints
+        // a phantom duplicate (Tim Stone, 1-record scope). It also lets
+        // the lookahead walk run at BOF, whose restore step clears the
+        // twin's BOF flag. Field reads at BOF still work: they miss the
+        // cache and cost one round trip, exactly like EOF.
+        UNSIGNED16 atend = 0, atbeg = 0;
         AdsAtEOF(h_abi, &atend);
-        if (atend) {
+        AdsAtBOF(h_abi, &atbeg);
+        if (atend || atbeg) {
             reply.payload.push_back(0);
         } else {
             reply.payload.push_back(1);
@@ -814,6 +834,7 @@ bool break_key_is_index_id(Opcode op) {
 // cursor after an index op that moves it (Seek / SeekLast).
 // No-op when the table is a cursor or has no engine handle.
 void Session::sync_engine_cursor(std::uint32_t id) {
+    WTRACE("[wire] sync_engine_cursor id=%u enter\n", id);
     if (cursor_tbls_.count(id)) return;
     auto eit = tbls_.find(id);
     if (eit == tbls_.end() || !sess_conn_) return;
@@ -823,6 +844,13 @@ void Session::sync_engine_cursor(std::uint32_t id) {
     if (auto hit = tbls_h_.find(id); hit != tbls_h_.end()) {
         h = hit->second;
     } else { return; }
+    // Appends / writes often go through the parallel ABI handle (where
+    // CreateIndex / OpenIndex bound the bag). Re-read the header so the
+    // engine Table sees the new record_count before GotoRecord.
+    if (auto* drv = tbl->driver()) {
+        drv->refresh_record_count_from_disk();
+        drv->invalidate_read_cache();
+    }
     UNSIGNED32 rn = 0;
     AdsGetRecordNum(h, 0, &rn);
     if (rn == 0) return;
@@ -831,6 +859,18 @@ void Session::sync_engine_cursor(std::uint32_t id) {
 
 DispatchResult Session::dispatch(const Frame& f) {
     Frame reply;
+    WTRACE("[wire] op=%u\n", (unsigned)f.opcode);
+    if (wire_trace_on() && f.payload.size() >= 4) {
+        std::uint32_t tid0 = read_u32_le(f.payload.data());
+        if (ordered_tables_.count(tid0)) {
+            if (auto hit0 = tbls_h_.find(tid0); hit0 != tbls_h_.end()) {
+                UNSIGNED16 b0 = 9, e0 = 9;
+                AdsAtBOF(hit0->second, &b0); AdsAtEOF(hit0->second, &e0);
+                WTRACE("[wire] op=%u id=%u twin-in(bof=%u eof=%u)\n",
+                       (unsigned)f.opcode, tid0, (unsigned)b0, (unsigned)e0);
+            }
+        }
+    }
     // M12.22 — break the read-ahead run before the handler runs, in one place
     // instead of a reset call in each of ~20 handlers.
     //
@@ -1175,6 +1215,7 @@ DispatchResult Session::dispatch(const Frame& f) {
             // reads from. Natural order: engine table directly.
             ADSHANDLE hord =
                 ordered_tables_.count(id) ? ensure_abi_handle(id) : 0;
+            WTRACE("[wire] GotoTop id=%u hord=%llu\n", id, (unsigned long long)hord);
             if (hord != 0) {
                 (void)AdsGotoTop(hord);
             } else {
@@ -1246,6 +1287,7 @@ DispatchResult Session::dispatch(const Frame& f) {
             // needs kCapPrefetchBackward, because a forward-only client would
             // mis-drain a backward block. step == 0 (a settle) gets no block.
             const std::int8_t dir = (step >= 1) ? 1 : (step <= -1) ? -1 : 0;
+            WTRACE("[wire] Skip id=%u step=%d\n", id, (int)step);
             const bool want_lookahead =
                 (dir == 1 && client_prefetch_ok_) ||
                 (dir == -1 && client_prefetch_ok_ && client_prefetch_back_ok_);
@@ -1274,6 +1316,8 @@ DispatchResult Session::dispatch(const Frame& f) {
                 ordered_tables_.count(id) ? ensure_abi_handle(id) : 0;
             if (hord != 0) {
                 (void)AdsSkip(hord, step);
+                { UNSIGNED16 _b = 9, _e = 9; AdsAtBOF(hord, &_b); AdsAtEOF(hord, &_e);
+                  WTRACE("[wire] Skip twin hord bof=%u eof=%u\n", (unsigned)_b, (unsigned)_e); }
                 reply.opcode = Opcode::SkipAck;
                 pack_row_trailer(reply, id, lookahead, dir);
                 // RCB 07/14/2026: sync AFTER packing, not before (this call
@@ -1283,6 +1327,8 @@ DispatchResult Session::dispatch(const Frame& f) {
                 // cursor FINALLY lands. Syncing first would anchor it to a
                 // position the pack is about to move away from.
                 sync_engine_cursor(id);
+                { UNSIGNED16 _b = 9, _e = 9; AdsAtBOF(hord, &_b); AdsAtEOF(hord, &_e);
+                  WTRACE("[wire] Skip end id=%u twin bof=%u eof=%u\n", id, (unsigned)_b, (unsigned)_e); }
                 break;
             }
             (void)tbl->skip(step);
@@ -1405,6 +1451,7 @@ DispatchResult Session::dispatch(const Frame& f) {
             if (auto cit = cursor_tbls_.find(id); cit != cursor_tbls_.end()) {
                 UNSIGNED16 v = 0;
                 AdsAtEOF(cit->second, &v);
+                WTRACE("[wire] AtEOF id=%u via twin -> %u\n", id, (unsigned)v);
                 reply.opcode = Opcode::AtEOFAck;
                 reply.payload.push_back(v != 0 ? 1 : 0);
                 break;
@@ -1415,6 +1462,18 @@ DispatchResult Session::dispatch(const Frame& f) {
             }
             auto* tbl = sess_conn_->lookup_table(it->second);
             if (!tbl) { reply = err("AtEOF: lookup failed"); break; }
+            // See AtBOF: ordered tables must answer from the ABI twin.
+            ADSHANDLE hord_eof =
+                ordered_tables_.count(id) ? ensure_abi_handle(id) : 0;
+            if (hord_eof != 0) {
+                UNSIGNED16 v = 0;
+                AdsAtEOF(hord_eof, &v);
+                WTRACE("[wire] AtEOF id=%u via ordered twin -> %u\n", id, (unsigned)v);
+                reply.opcode = Opcode::AtEOFAck;
+                reply.payload.push_back(v != 0 ? 1 : 0);
+                break;
+            }
+            WTRACE("[wire] AtEOF id=%u engine eof=%d bof=%d\n", id, (int)tbl->eof(), (int)tbl->bof());
             reply.opcode = Opcode::AtEOFAck;
             reply.payload.push_back(tbl->eof() ? 1 : 0);
             break;
@@ -1526,9 +1585,11 @@ DispatchResult Session::dispatch(const Frame& f) {
         case Opcode::AtBOF: {
             if (f.payload.size() < 4) { reply = err("AtBOF: bad payload"); break; }
             std::uint32_t id = read_u32_le(f.payload.data());
+            WTRACE("[wire] AtBOF id=%u\n", id);
             if (auto cit = cursor_tbls_.find(id); cit != cursor_tbls_.end()) {
                 UNSIGNED16 v = 0;
                 AdsAtBOF(cit->second, &v);
+                WTRACE("[wire] AtBOF id=%u via twin -> %u\n", id, (unsigned)v);
                 reply.opcode = Opcode::AtBOFAck;
                 reply.payload.push_back(v != 0 ? 1 : 0);
                 break;
@@ -1539,6 +1600,25 @@ DispatchResult Session::dispatch(const Frame& f) {
             }
             auto* tbl = sess_conn_->lookup_table(it->second);
             if (!tbl) { reply = err("AtBOF: lookup failed"); break; }
+            // Ordered tables navigate on the ABI twin (it carries the order
+            // and any scope); the engine cursor is only a mirrored recno and
+            // can sit with bof+eof both set after a scope-end sync — answer
+            // from the twin, like the GotoTop/Skip handlers do. Fixes the
+            // BOF+EOF-both-true answer that made rddads' DBOI_POSITION
+            // (OrdKeyGoto past the scoped key count) report Bof()=.T. and
+            // xBrowse paint a phantom duplicate row (Tim Stone, 1-record
+            // scope).
+            ADSHANDLE hord_bof =
+                ordered_tables_.count(id) ? ensure_abi_handle(id) : 0;
+            if (hord_bof != 0) {
+                UNSIGNED16 v = 0;
+                AdsAtBOF(hord_bof, &v);
+                WTRACE("[wire] AtBOF id=%u via ordered twin -> %u\n", id, (unsigned)v);
+                reply.opcode = Opcode::AtBOFAck;
+                reply.payload.push_back(v != 0 ? 1 : 0);
+                break;
+            }
+            WTRACE("[wire] AtBOF id=%u engine bof=%d eof=%d\n", id, (int)tbl->bof(), (int)tbl->eof());
             reply.opcode = Opcode::AtBOFAck;
             reply.payload.push_back(tbl->bof() ? 1 : 0);
             break;
@@ -1787,17 +1867,15 @@ DispatchResult Session::dispatch(const Frame& f) {
             write_u32_le(packed, reply.payload);
             break;
         }
-        // Locking is currently no-op at the engine level for
-        // our LocalServer fallback path; the cursor branch
-        // routes through real ABI locks. Both ack with success
-        // so rddads' shared-mode opens don't fail mid-flight.
+        // Record locks route through the parallel ABI handle when one
+        // exists (M12.16 dual-handle) so they land on the same Table
+        // instance that appends/writes go through; otherwise they use
+        // the engine table from tbls_ with a non-blocking retry loop.
         case Opcode::LockRecord:
         case Opcode::UnlockRecord: {
             if (f.payload.size() < 8) { reply = err("Lock: bad payload"); break; }
             std::uint32_t id = read_u32_le(f.payload.data());
             std::uint32_t rn = read_u32_le(f.payload.data() + 4);
-            // Route lock/unlock to the engine table from tbls_ so the lock
-            // lands on the SAME Table instance that writes go through.
             auto it = tbls_.find(id);
             if (it == tbls_.end() || !sess_conn_) {
                 reply = err("Lock: bad table id"); break;
@@ -1807,7 +1885,27 @@ DispatchResult Session::dispatch(const Frame& f) {
             openads::mgmt::set_current_lock_owner(
                 session_user_.empty() ? "(anonymous)" : session_user_,
                 srv_->conn_no_for_session(sid_));
-            if (f.opcode == Opcode::LockRecord) {
+            // M12.16 dual-handle: appends go through the parallel ABI
+            // handle (see AppendBlank), and AdsAppendRecord auto-locks the
+            // new record on THAT Table instance. Routing the client's
+            // RLock() to the engine Table made every lock after APPEND
+            // BLANK burn the full lock-retry budget (~1 s per record —
+            // Pritpal's "9 records in 10 seconds", 31/07/2026) and the
+            // matching UNLOCK never released the ABI-side auto-lock,
+            // leaking it until session cleanup and stalling other
+            // stations. Route lock/unlock through the same ABI handle
+            // whenever it exists.
+            if (auto hit = tbls_h_.find(id); hit != tbls_h_.end()) {
+                UNSIGNED32 rrc = (f.opcode == Opcode::LockRecord)
+                    ? AdsLockRecord(hit->second, rn)
+                    : AdsUnlockRecord(hit->second, rn);
+                // Also release any stale engine-side lock taken before
+                // the ABI handle existed (best-effort; not holding the
+                // lock is fine).
+                if (f.opcode == Opcode::UnlockRecord)
+                    (void)tbl->unlock_record(rn);
+                if (rrc != 0) { reply = err("Lock: failed", rrc); break; }
+            } else if (f.opcode == Opcode::LockRecord) {
                 // Use non-blocking try + retry loop (same semantics as
                 // the ABI lock_with_retry).  Blocking lock_record_excl
                 // would freeze the entire server until the OS grants the
@@ -2783,9 +2881,25 @@ DispatchResult Session::dispatch(const Frame& f) {
             }
             auto* tbl = sess_conn_->lookup_table(it->second);
             if (!tbl) { reply = err("AppendBlank: lookup failed"); break; }
-            auto r = tbl->append_record();
-            if (!r) { reply = err("AppendBlank: append_record failed"); break; }
-            tbl->set_pending_append(true);
+            // M12.16 dual-handle: CreateIndex/OpenIndex bind bags on the
+            // parallel ABI Table (tbls_h_), not on the engine Table used by
+            // the historical write path. Writing only through the engine
+            // left production CDX bags empty after remote APPEND (Pritpal
+            // TestIndex: 36 rows / 0 keys). Prefer the ABI handle when it
+            // exists so sync_all_indexes_ updates every bound tag.
+            if (auto hit = tbls_h_.find(id); hit != tbls_h_.end()) {
+                UNSIGNED32 rrc = AdsAppendRecord(hit->second);
+                if (rrc != 0) { reply = err("AppendBlank", rrc); break; }
+                // Persist dirty index pages so a later reopen of the bag
+                // (or another station) sees the new keys.
+                (void)AdsFlushFileBuffers(hit->second);
+                sync_engine_cursor(id);
+                tbl->set_pending_append(true);
+            } else {
+                auto r = tbl->append_record();
+                if (!r) { reply = err("AppendBlank: append_record failed"); break; }
+                tbl->set_pending_append(true);
+            }
             reply.opcode = Opcode::AppendBlankAck;
             break;
         }
@@ -2812,6 +2926,28 @@ DispatchResult Session::dispatch(const Frame& f) {
             }
             auto* tbl = sess_conn_->lookup_table(it->second);
             if (!tbl) { reply = err("SetField: lookup failed"); break; }
+
+            // When indexes live on the parallel ABI handle, write through
+            // AdsSetString so the bag is maintained (see AppendBlank).
+            if (auto hit = tbls_h_.find(id); hit != tbls_h_.end()) {
+                std::vector<UNSIGNED8> fn(fname.begin(), fname.end());
+                fn.push_back(0);
+                std::vector<UNSIGNED8> vv(val.begin(), val.end());
+                // AdsSetString takes length; do not require NUL in value.
+                UNSIGNED32 rrc = AdsSetString(
+                    hit->second, fn.data(),
+                    vv.empty() ? reinterpret_cast<UNSIGNED8*>(const_cast<char*>(""))
+                               : vv.data(),
+                    static_cast<UNSIGNED32>(val.size()));
+                if (rrc != 0) {
+                    reply = err("SetField: write failed", rrc);
+                    break;
+                }
+                (void)AdsFlushFileBuffers(hit->second);
+                sync_engine_cursor(id);
+                reply.opcode = Opcode::SetFieldAck;
+                break;
+            }
 
             std::int32_t fi = tbl->field_index(fname);
             if (fi < 0) { reply = err("SetField: column not found"); break; }
@@ -2858,8 +2994,14 @@ DispatchResult Session::dispatch(const Frame& f) {
             }
             auto* tbl = sess_conn_->lookup_table(it->second);
             if (!tbl) { reply = err("DeleteRecord: lookup failed"); break; }
-            auto r = tbl->mark_deleted();
-            if (!r) { reply = err("DeleteRecord: mark_deleted failed"); break; }
+            if (auto hit = tbls_h_.find(id); hit != tbls_h_.end()) {
+                UNSIGNED32 rrc = AdsDeleteRecord(hit->second);
+                if (rrc != 0) { reply = err("DeleteRecord", rrc); break; }
+                sync_engine_cursor(id);
+            } else {
+                auto r = tbl->mark_deleted();
+                if (!r) { reply = err("DeleteRecord: mark_deleted failed"); break; }
+            }
             reply.opcode = Opcode::DeleteRecordAck;
             break;
         }
@@ -2911,6 +3053,10 @@ DispatchResult Session::dispatch(const Frame& f) {
             }
             auto* tbl = sess_conn_->lookup_table(it->second);
             if (!tbl) { reply = err("FlushTable: lookup failed"); break; }
+            // Flush the ABI twin first (holds open index bags), then engine.
+            if (auto hit = tbls_h_.find(id); hit != tbls_h_.end()) {
+                (void)AdsFlushFileBuffers(hit->second);
+            }
             auto r = tbl->flush();
             if (!r) { reply = err("FlushTable: flush failed"); break; }
             reply.opcode = Opcode::FlushTableAck;

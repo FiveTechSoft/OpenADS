@@ -53,7 +53,7 @@ copy /Y "%ROOT%\build\release-x64\tools\bench\Release\openads_bench.exe"     "%O
 REM ---- x86 build -----------------------------------------------------
 echo [build_release] x86 configure + build...
 call %VSDEV% -arch=x86 -no_logo
-cmake -S "%ROOT%" -B "%ROOT%/build/release-x86" -G "Visual Studio 17 2022" -A Win32 -DOPENADS_WITH_TLS=ON -DOPENADS_WITH_HTTP=ON -DOPENADS_ACE_DEF="%ROOT%/src/openads_ace_x86.def"
+cmake -S "%ROOT%" -B "%ROOT%/build/release-x86" -G "Visual Studio 17 2022" -A Win32 -DOPENADS_WITH_TLS=ON -DOPENADS_WITH_HTTP=ON
 if errorlevel 1 exit /b 1
 cmake --build "%ROOT%/build/release-x86" --config Release -j
 if errorlevel 1 exit /b 1

@@ -571,29 +571,33 @@ std::string acl_users_catalog_sql(SqlDdlDialect dialect) {
     const std::string qacl = quote_ident(dialect, kAclTable);
     const std::string qmem = quote_ident(dialect, kMemberTable);
     const std::string qusr = quote_ident(dialect, kUserTable);
-    return std::string("SELECT 'PUBLIC' AS \"USER_NAME\" UNION SELECT DISTINCT "
-                       "user_name AS \"USER_NAME\" FROM ") +
-           qmem + " UNION SELECT DISTINCT user_name AS \"USER_NAME\" FROM " +
-           qusr + " UNION SELECT DISTINCT grantee AS \"USER_NAME\" FROM " +
+    // Column alias is SAP's "Name" (matching system.users on the native DD
+    // backend), so the same client SQL works against either backend.
+    return std::string("SELECT 'PUBLIC' AS \"Name\" UNION SELECT DISTINCT "
+                       "user_name AS \"Name\" FROM ") +
+           qmem + " UNION SELECT DISTINCT user_name AS \"Name\" FROM " +
+           qusr + " UNION SELECT DISTINCT grantee AS \"Name\" FROM " +
            qacl + " WHERE is_group = 0";
 }
 
 std::string acl_groups_catalog_sql(SqlDdlDialect dialect) {
     const std::string qacl = quote_ident(dialect, kAclTable);
     const std::string qmem = quote_ident(dialect, kMemberTable);
-    return std::string("SELECT 'PUBLIC' AS \"GROUP_NAME\" UNION SELECT DISTINCT "
-                       "group_name AS \"GROUP_NAME\" FROM ") +
-           qmem + " UNION SELECT DISTINCT grantee AS \"GROUP_NAME\" FROM " +
+    // SAP's system.usergroups column is "Name" — see acl_users_catalog_sql().
+    return std::string("SELECT 'PUBLIC' AS \"Name\" UNION SELECT DISTINCT "
+                       "group_name AS \"Name\" FROM ") +
+           qmem + " UNION SELECT DISTINCT grantee AS \"Name\" FROM " +
            qacl + " WHERE is_group != 0";
 }
 
 std::string acl_members_catalog_sql(SqlDdlDialect dialect) {
     const std::string qmem = quote_ident(dialect, kMemberTable);
+    // SAP's system.usergroupmembers is User_Name THEN Group_Name.
     return std::string(
-               "SELECT group_name AS \"GROUP_NAME\", user_name AS \"USER_NAME\" "
+               "SELECT user_name AS \"User_Name\", group_name AS \"Group_Name\" "
                "FROM ") +
            qmem +
-           " UNION SELECT 'PUBLIC' AS \"GROUP_NAME\", 'PUBLIC' AS \"USER_NAME\"";
+           " UNION SELECT 'PUBLIC' AS \"User_Name\", 'PUBLIC' AS \"Group_Name\"";
 }
 
 std::string acl_permissions_select_sql(SqlDdlDialect dialect) {

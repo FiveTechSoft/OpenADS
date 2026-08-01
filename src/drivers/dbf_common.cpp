@@ -710,6 +710,60 @@ util::Result<void> encode_field_string(const DbfField& f,
         return {};
     }
 
+    // ADT/VFP binary-encoded numeric types: a string arriving over the
+    // wire (remote SetField routes everything through AdsSetString on the
+    // twin, see Session SetField) must be parsed and packed as binary,
+    // not stored as ASCII — the generic memcpy branch below wrote the
+    // literal characters into the 8-byte field and read-back as a binary
+    // double/int came out as garbage (remote ADT numeric round-trip,
+    // abi_adt_scope_validation_test).
+    switch (f.type) {
+        case DbfFieldType::Double:
+            if (f.length >= 8) {
+                write_f64_le(dst, value.empty() ? 0.0 : std::strtod(value.c_str(), nullptr));
+                return {};
+            }
+            break;
+        case DbfFieldType::Integer:
+            if (f.length >= 4) {
+                write_i32_le(dst, static_cast<std::int32_t>(
+                    value.empty() ? 0 : std::strtol(value.c_str(), nullptr, 10)));
+                return {};
+            }
+            break;
+        case DbfFieldType::Currency:
+        case DbfFieldType::AdtMoney:
+            if (f.length >= 8) {
+                write_i64_le(dst, static_cast<std::int64_t>(
+                    (value.empty() ? 0.0 : std::strtod(value.c_str(), nullptr)) * 10000.0));
+                return {};
+            }
+            break;
+        case DbfFieldType::ShortInt:
+            if (f.length >= 2) {
+                auto sv = static_cast<std::int16_t>(
+                    value.empty() ? 0 : std::strtol(value.c_str(), nullptr, 10));
+                dst[0] = static_cast<std::uint8_t>( sv        & 0xFF);
+                dst[1] = static_cast<std::uint8_t>((sv >>  8) & 0xFF);
+                return {};
+            }
+            break;
+        case DbfFieldType::AutoInc:
+        case DbfFieldType::Time:
+            if (f.length >= 4) {
+                auto uv = static_cast<std::uint32_t>(
+                    value.empty() ? 0 : std::strtoul(value.c_str(), nullptr, 10));
+                dst[0] = static_cast<std::uint8_t>( uv        & 0xFF);
+                dst[1] = static_cast<std::uint8_t>((uv >>  8) & 0xFF);
+                dst[2] = static_cast<std::uint8_t>((uv >> 16) & 0xFF);
+                dst[3] = static_cast<std::uint8_t>((uv >> 24) & 0xFF);
+                return {};
+            }
+            break;
+        default:
+            break;
+    }
+
     std::size_t n = std::min<std::size_t>(value.size(), f.length);
     std::memcpy(dst, value.data(), n);
     // M11.1 — VFP V / Q pad the unused tail with NUL so callers can

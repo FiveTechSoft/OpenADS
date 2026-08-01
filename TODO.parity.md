@@ -1,18 +1,260 @@
 # OpenADS ↔ SAP Parity — Open Items & Verification Backlog
 
-Living checklist of SAP-parity gaps. The S4 gate (`tools/qa-diff/s4_parity.ps1`)
-is **42/42** on pmsys as of 2026-07-26. This file tracks what's left and what
-still needs verification against current code.
+Living checklist of SAP-parity gaps. Two S4 gates now run:
+`tools/qa-diff/s4_parity.ps1` (pmsys, 41/1 — the 1 is sandbox counter drift, not
+a defect) and `tools/qa-diff/s4_parity_mp.ps1` (mp, 29/26). This file tracks
+what's left and what still needs verification against current code.
 
-## ⚠️ Blocked on the user
-- [ ] **Find other UNENCRYPTED SAP dictionaries for data-level testing.**
-      This is on Reinaldo. mp10 (`e:\AdsData\sfi\mp.add`) is sealed by SAP's
-      proprietary table encryption — OpenADS can't read the row data
-      (COUNT works off the header; field names/data come back as ciphertext),
-      so it cannot serve as a data-level second corpus. The S4 gate is
-      pmsys-only until an unencrypted DD with real data is available. A second
-      corpus is the single biggest thing that would harden the "1:1" claim
-      against SQL shapes pmsys never exercises.
+---
+
+## 🔖 TRACKED BACKLOG — verified open, ready to pick up (2026-07-30)
+
+Five items confirmed against current `main`, each with the exact site and the
+shape of the fix, so none of them gets lost. Ordered by value.
+
+| # | Item | Where | Verified |
+|---|---|---|---|
+| 1 | **Column-level permission ENFORCEMENT** | `get_effective_ops()` / query projection | analysed, not started |
+| 2 | ~~`sp_` `__output` truncates column names to 10 chars~~ | `run_dd_procedure()` | ✅ **FIXED 2026-07-30** |
+| 3 | **`AdsSetString` into an ADT DOUBLE stores text verbatim** | ADT write path | ✅ hit while writing a fixture |
+| 4 | **`DB:Debug` group not imported** | `import_dd` | ✅ mp gate `cat_db_groups` |
+| 5 | **`Ver8L` link not surfaced as a permission object** | permissions matrix builder | ✅ mp gate `cat_perms_links` |
+
+### 1. Column-level permission enforcement — the security item
+
+The **catalog half is done** (`system.permissions` renders SAP's full
+grantee×object matrix incl. the column rows). **Enforcement is not.** OpenADS
+imports table grants *without* the per-column restrictions and enforces
+table-level only, so it hands over columns SAP hides.
+
+Verified on pmsys: SAP grants the `General` group table access AND restricts it
+to specific columns on 32 tables (`leases`: 23 columns); OpenADS gives the whole
+table. 12/12 sampled tables were under-restrictive. 310 of 389 real grants are
+column-level and never imported — `import_dd` only probes
+Tables/Views/Procs/Functions, never columns.
+
+Reassuring for scoping: the column *dimension* is intact — type 4 is 1081
+columns on both engines for mp (55131/51 = 54050/50 = 1081, matching
+`system.columns`). The matrix is right; only the enforcement is missing.
+
+Work: import column grants → per-column model → enforce at query time
+(projection masking / deny). Detail in `todo.local.md`.
+
+### 2. ✅ FIXED 2026-07-30 — `sp_` `__output` no longer truncates to 10 chars
+
+Was: `EXECUTE PROCEDURE sp_GetPhysicalPath()` returned `databasepa` where SAP
+returns `databasepath`. Capping every stored-procedure result column at 10
+characters limited the SQL engine for no reason — procedures read ADT tables and
+declare outputs mirroring SAP catalog columns, whose names run to 18.
+
+The earlier v1.8.40 fix covered only the **static-cursor** path (`_srt_`);
+procedure output is a separate site. `run_dd_procedure()` builds `_spout_*`
+through `CREATE TABLE … AS FREE TABLE`, which takes its format from the
+statement's table type and defaults to CDX (DBF). It now pins `ADS_ADT` across
+that one DDL and restores the caller's setting afterwards, so a procedure body
+running its own `CREATE TABLE` does not inherit the choice.
+
+Also lifted `sql_type_of()`'s `CHAR` clamp from 254 (DBF's character maximum) —
+ADT carries the length in a uint16, and an over-long *record* is now rejected by
+`AdsCreateTable` rather than silently shortened. SAP procs routinely declare
+`CICHAR(255)` and wider.
+
+Guarded by `abi_script_proc_test.cpp` *"script proc: `__output` keeps column
+names longer than 10 chars"*, verified to fail with the fix reverted. mp gate
+`sp_GetPhysicalPath` now passes on the column name, not just the path.
+
+**Still open — the same truncation remains in the join / union / aggregate
+materialisers** (joins additionally rename right-side columns `R_*`, itself a
+consequence of squeezing `R_` + the source name into 10 bytes). Same root cause,
+same fix, same doc: `docs/materialised-cursor-temps.md`.
+
+### 3. `AdsSetString` into an ADT DOUBLE stores the text verbatim
+
+Does not parse the string, so the value reads back as garbage:
+`"10.50"` → ~`6.01e-154`. Reachable by creating an ADT table with
+`Numeric,12,2` — which `adt_spec_for()` maps to DOUBLE — and writing via
+`AdsSetString`. DBF is unaffected (it stores numerics as ASCII, so the same
+write round-trips). Found while building a test fixture, which had to be
+rewritten to dodge it.
+
+### 4. `DB:Debug` is not imported
+
+Missing both as a grantee and as a type-9 (USER GROUP) object;
+`DB:Admin`/`DB:Backup`/`DB:Public` all import fine. It is one of the two items
+behind mp's 63801 vs 62450 permission-row gap, and also part of
+`system.usergroups` 20 vs 17. Ref: memory `project_sap_builtin_groups.md`
+(per-user cipher detection).
+
+### 5. `Ver8L` link is not surfaced as a permission object
+
+Type 12 (LINK): SAP has `Ver8L` plus the `LINK` root singleton, OpenADS has only
+the root. `system.links` counts 1 on both, so the DD knows the link — it just
+is not projected into the permissions matrix. Second of the two items behind the
+row-count gap above.
+
+**Also open, smaller:** `system.usergroups` omits `SERVER:Admin`/`SERVER:Monitor`
+that the permissions builder already synthesises (2 of the 3-group shortfall);
+`adssys` appears in OpenADS's user catalogs where SAP omits it.
+
+---
+
+## ✅ UNBLOCKED 2026-07-29 — mp10 is now a live second corpus
+mp10 was sealed by SAP table encryption. All 90 encrypted tables were decrypted
+in place with `tools/decrypt_dd` (SAP's own `sp_DecryptTable`), so the row data
+is readable and mp10 now serves as the data-level second corpus this file has
+been asking for. Gate: `tools/qa-diff/s4_parity_mp.ps1`.
+
+**Corpus profile** — medical billing, complementary to pmsys in every axis that
+matters: 95 tables / 1081 columns / **9.65M rows**; mixed **ADT (90) + DBF with
+NTX/CDX (5)** where pmsys is ADT-only; **63801 permission rows** (pmsys 7912);
+32 triggers; 11 RI rules; 7 script functions using MERGE / CASE / cursor loops /
+TimeStampAdd; 2 views; 3 procs.
+
+**First run: 27 identical, 18 diverged.** Every divergence below is a real
+OpenADS gap (test-case bugs already fixed). Grouped by root cause:
+
+- [ ] **Deleted-record visibility on DBF** *(new class, 2 cases)* — SAP counts
+      deleted rows (`SET DELETED OFF` default), OpenADS filters them.
+      `users.dbf` 18 physical / 8 deleted → SAP 18, OA 10; `provider.dbf`
+      20/4 → SAP 20, OA 16; `Forms.dbf` 64/0 → both 64 (control). Invisible on
+      pmsys because it is ADT-only. Affects every DBF table with deletions.
+- [ ] **SQL feature gaps** *(5 cases)* — `Length()` raises 2158 (unknown
+      function) even on a literal, though it is a documented SAP scalar;
+      `COUNT(DISTINCT col)` raises 2115; an aggregate over an *expression*
+      (`Sum(Real * UNITS)`) raises 2115 — only bare column args parse;
+      `SELECT ... FROM <view>` raises 5004 for both mp views, so plain
+      single-table view resolution is broken (not just views-inside-joins).
+- [ ] **Join column resolution + result naming** *(3 cases)* — a 2-table join on
+      `ADM_NUM` returns "Column not found: ADM_NUM"; 3-way and LEFT joins return
+      right-side columns renamed `R_UNITS` / `R_Status` and left-side names
+      lowercased, where SAP preserves the declared casing.
+- [ ] **Numeric / date string formatting** *(3 cases)* — SAP pads and formats to
+      the declared field width (`"                 0.00"`, `"  0"`) while OA
+      returns `"0"`; date columns inside aggregates come back `"0"` from OA vs
+      `"01/18/0203"` from SAP. Same family as task #1 below, now with a second
+      corpus confirming it.
+- [ ] **DD catalog divergence** — fully diagnosed below. Trigger ordering also
+      differs under `ORDER BY Trig_TableName, Name`.
+
+### system.permissions divergence — DIAGNOSED 2026-07-29, and it is small
+
+The first mp run looked alarming (`Object_Type = 4`: SAP 255 vs OA 54050). That
+was **a SAP bug, not an OpenADS one**, and the real gap is three concrete items.
+
+**SAP AQE bug — `Object_Type = 4` on system.permissions.** SAP returns 255 while
+its own `GROUP BY Object_Type` reports 55131 for the same predicate; `= 1`
+(4896) and `= 8` (1632) are both correct, and the semantically identical
+`>= 4 AND <= 4` returns the correct 55131. One literal, wrong answer. The gate
+uses the range form so the case measures OpenADS; `cat_perms_type4_eq` keeps the
+buggy shape as a documented known-diff. **Do not "fix" OpenADS to match 255.**
+
+**The actual divergence reconciles exactly:**
+
+```
+SAP: 51 grantees x 1251 objects = 63801   OK
+OA : 50 grantees x 1249 objects = 62450   OK
+delta 1351 = 1 missing grantee + 2 missing objects
+```
+
+- [ ] **`DB:Debug` is not imported** → **backlog item 4** (top of file).
+      Missing both as a grantee and as a type-9 (USER GROUP) object;
+      `DB:Admin`/`DB:Backup`/`DB:Public` all import fine. Accounts for the
+      missing grantee *and* one of the two objects.
+- [ ] **`Ver8L` link object is not imported** → **backlog item 5** (top of file).
+      Type 12 (LINK); `system.links` counts 1 on both, so the link is known but
+      not surfaced as a perm object.
+- [x] **Importer lowercased user grantee names — FIXED 2026-07-30** (commit
+      `e4f3c055`). 27 mixed-case users, not the "two" previously recorded.
+      `users_` keeps folded lookup keys; `user_display_` carries the declared
+      spelling and `save()` persists it. Case mismatches vs SAP: 27 → 0, and
+      `WHERE Grantee = 'RCB'` returns rows again. Note existing converted DDs
+      hold the folded spelling on disk and need a re-import to recover it.
+
+**Good news for column-level enforcement:** type 4 is **1081 columns on both**
+engines (55131/51 = 54050/50 = 1081), matching `system.columns`. The column
+dimension of the matrix is intact — the only shortfall is the missing grantee.
+
+- [x] **Task #4's three missing catalogs — DONE 2026-07-29.** `system.users`,
+      `system.usergroups` and `system.usergroupmembers` now emit SAP's exact
+      column names, order and types, so `WHERE Name = …` works. Note
+      usergroupmembers was `User_Name` THEN `Group_Name` in SAP — the reverse of
+      the pair OpenADS emitted, so positional readers had the values swapped as
+      well as misnamed. Both backends updated (native DD + the SQL-URI/sqlite
+      ACL projection in `sql_acl_store.cpp`, which had its own copy) plus the
+      DA-Web queries that named the old columns explicitly.
+
+**Newly visible now that those columns exist** — the shapes match, the values
+don't:
+
+- [ ] **import_dd does not capture user/group `Comment` or `User_Defined_Prop`**
+      — SAP has `AM` → "Amneris Maldonado" and `AdjustmentAuthUsers` →
+      "Authorize adjustments to claims"; OpenADS returns empty for every user
+      and group. Same for the `User_Defined_Prop` XML blob (SAP stores an
+      `<EMAIL>` element per user). The DD can hold these (`prop_1` / `prop_3`
+      via `set_user_property`) — the importer just never reads them from SAP.
+- [ ] **`system.usergroups` omits `SERVER:Admin` / `SERVER:Monitor`** — SAP
+      lists both (that is 2 of the 3-group shortfall, 20 vs 17; `DB:Debug`
+      above is the third). Inconsistent *within* OpenADS: the
+      `system.permissions` builder already synthesises both pseudo-groups, the
+      usergroups builder does not. Cheap fix, but it will surface them in
+      DA-Web's group tree, so decide that deliberately.
+- [ ] **`adssys` appears in OpenADS's user catalogs, SAP omits it** — the
+      importer creates it ("adssys created (SAP built-in, not in export)") and
+      it sorts first, shifting every ordered comparison. Accounts for users
+      31 (SAP) vs 32 (OA).
+
+## ✅ FIXED 2026-07-30 — the 10-char truncation regression on v1.8.40
+
+**`TOP` / `ORDER BY` / `DISTINCT` / `LIMIT` truncated every column name to 10
+characters.** Same root cause as task #2 (the materialisation temp was a **DBF**
+free table, and DBF caps field names at 10) but a far wider blast radius than
+the `sp_` `__output` case that task describes — it was not cosmetic.
+
+**Fix:** the temp is now ADT, and its decimal numerics use ADT type 2 (ASCII
+digits) via the new `AsciiNumeric` field-type name, so full-length names and the
+declared numeric scale survive together. Three constraints pin that format and
+two of them only surface in specific customer scenarios — the reasoning is
+written up in **`docs/materialised-cursor-temps.md`**, linked from
+CONTRIBUTING.md and from the code at the decision site. Regression test:
+`abi_sql_orderby_test.cpp` *"materialised cursors keep column names longer than
+10 chars"*, which asserts names and scale in the same pass.
+
+Found while doing it, **not fixed**:
+
+- [ ] **`AdsSetString` into an ADT DOUBLE stores the text verbatim**
+      → **backlog item 3** (top of file).
+- [ ] **The other materialisers still truncate to 10 chars** — joins (which also
+      rename right-side columns `R_*`), unions, aggregates and the `sp_`
+      `__output` path each build their own DBF temp.
+      → tracked as **backlog item 2** at the top of this file.
+
+Original report, kept for context:
+
+```
+SELECT Name, RI_Primary_Table, RI_Foreign_Table FROM system.relations
+   -> RI_Primary_Table   (correct)
+... the same query + ORDER BY Name
+   -> RI_Primary         (truncated)
+
+SELECT TOP 1 AccidentDate, LengthOfNeed FROM admit   -> AccidentDa, LengthOfNe
+SELECT DISTINCT AccidentDate FROM admit              -> AccidentDa
+```
+
+Affects **user tables**, not just catalogs, so it hits real applications. It also
+silently breaks the SAP-parity column names from tasks #4 and the users/groups
+work, because SAP's catalog names are routinely longer than 10 chars
+(`RI_Primary_Table` 16, `Enable_Internet` 15, `User_Defined_Prop` 17,
+`Trig_Function_Name` 18).
+
+Origin: **#136** materialises single-table ORDER BY / DISTINCT / LIMIT through
+`build_memory_result()`, a helper written for `system.*` and `sp_*` result sets.
+**#146** (91f0ea49) fixed that helper's numeric typing and 64 KB record cap but
+not the field-name length. Confirmed as a regression: the `cat_rel_names` mp gate
+case passed before the rebase and fails after it.
+
+Fix is the one task #2 already prescribes — materialise into an **ADT** temp
+(long field names) instead of a DBF — but it should now be scoped to
+`build_memory_result()` generally, not just the proc `__output` path.
 
 ## A. S4 polish (cosmetic — tracked as tasks #1–3)
 - [ ] **#1 Date display format** — `AdsGetString` on date cols returns raw
@@ -20,9 +262,13 @@ still needs verification against current code.
       Highest-value but riskiest (touches every string-read path). FIRST do a
       DA-Web/OpenERP impact check — do those apps depend on raw `YYYYMMDD`?
       Ref: memory `project_oa_date_string_gap.md`.
-- [ ] **#2 `_spout_` >10-char output column names** — proc `__output` temp is a
-      DBF free table, so `databasepath` → `databasepa`. Fix: make `__output`
-      an ADT-typed temp (long field names). Low risk.
+- [ ] **#2 `_spout_` >10-char output column names** — see **backlog item 2** at
+      the top of this file. Re-confirmed open 2026-07-30; the v1.8.40 truncation
+      fix covered only the static-cursor path, not procedure output. No longer
+      "low risk / cosmetic": the same DBF-temp root cause silently undoes the
+      SAP catalog column names whenever a materialising path is involved, and it
+      trades against numeric scale — read `docs/materialised-cursor-temps.md`
+      before touching it.
 - [ ] **#3 EXPR_n numbering, mixed aliased/unaliased aggregates** — verify
       `SELECT COUNT(*), SUM(x) AS s, MIN(y)` column naming matches SAP.
 

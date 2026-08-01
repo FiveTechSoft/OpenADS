@@ -1,0 +1,71 @@
+; x86 stdcall build: the DLL exports the __stdcall-decorated wrappers
+; (AdsXxx@N, from ace_stdcall_x86.c) instead of the plain AdsXxx names,
+; because x86 MSVC cannot export both a plain name and the @N-decorated
+; form of the same symbol (LNK4022 "cannot find unique match").
+; Plain-name consumers link through the aliased import libraries.
+LIBRARY
+EXPORTS
+; OpenADS ACE-compatible DLL exports.
+; Reported by JONSSON RUSSI (RusSoft Ltda).
+;
+; All entry points use the Microsoft __cdecl convention (the SAP ACE
+; default on Windows). Names are exported undecorated on x64 and x86;
+; __cdecl on x86 prepends a leading underscore at link time, but the
+; .def NAME form forces the public export to match the source name.
+;
+; NOTE: For x86 Harbour (rddads) compatibility, use openads_ace_x86.def
+; which exports __stdcall-decorated (@N) names instead.
+LIBRARY
+EXPORTS
+    oads_FOpen
+    oads_FCreate
+    oads_FClose
+    oads_FRead
+    oads_FWrite
+    oads_FSeek
+    oads_CheckExistence
+    oads_DeleteFile
+    oads_RenameFile
+    oads_GetFileSize
+    oads_GetFileTime
+    oads_GetFileDate
+    oads_DirMake
+    oads_DirRemove
+    oads_DirExist
+    oads_Directory
+
+    ; Legacy MSVC2013-era CRT shims (M8.2). Harbour's msvc64 prebuilt
+    ; libs reference these symbols; modern UCRT no longer ships them.
+    ; ace64.dll re-exports them under their legacy names so a Harbour
+    ; app links cleanly without rebuilding Harbour.
+    ;
+    ; NOTE: _wfsopen is intentionally NOT exported here. Modern UCRT
+    ; provides _wfsopen via api-ms-win-crt-stdio-l1-1-0.dll. Exporting
+    ; it from the DLL caused STATUS_ENTRYPOINT_NOT_FOUND (0xC0000139)
+    ; at load time: the PE loader resolved the DLL's own internal UCRT
+    ; import of _wfsopen to its own export, creating a circular symbol
+    ; that couldn't be located. See GitHub issue #N.
+    _dclass   = openads_dclass
+    _dsign    = openads_dsign
+    _getch    = openads_getch
+    _kbhit    = openads_kbhit
+    _eof      = openads_eof
+
+    ; M(rddads-compat) — extra Ads* entry points needed by Harbour
+    ; contrib/rddads. Implemented as stubs in ace_exports.cpp;
+    ; promoted here so the contrib links cleanly against ace64.lib.
+    ; M12.22 — versioned ACE overloads bound by name from the X# RDD.
+    ; Forwards to the base signatures (extra charset/collation/page-size
+    ; params dropped); bookmark / property / find-by-name get a minimal
+    ; implementation. See ace_exports.cpp.
+
+    ; M12.23 — further entry points the X# Advantage RDD binds by name.
+
+    ; RI property get/set.
+
+    ; SAP ACE API name aliases — Add/Remove and permission variants used by SAP-built clients.
+
+    ; Task 2: server-side filtered scan result-set API
+
+    ; Tier-3: server-side aggregation result API
+

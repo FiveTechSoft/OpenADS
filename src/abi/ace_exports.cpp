@@ -1,3 +1,4 @@
+#include <cstdarg>
 #include "openads/ace.h"
 #include "openads/error.h"
 #include "abi/lock_retry_policy.h"
@@ -127,6 +128,10 @@ using openads::engine::Table;
 using openads::session::Connection;
 using openads::session::Handle;
 using openads::session::HandleKind;
+
+// SAP ACE defines ADSHANDLE as 32-bit on all platforms while the internal
+// registry Handle is 64-bit; centralise the (value-preserving) narrowing.
+ADSHANDLE to_ads_handle(Handle h) { return static_cast<ADSHANDLE>(h); }
 
 struct ProcessState {
     // M10.36 — recursive_mutex so UNION dispatch can re-enter
@@ -995,6 +1000,21 @@ bool remote_table_has_index(const openads::network::RemoteTable* rt) {
            (rt->active_index_id != 0 || !rt->index_by_tag.empty());
 }
 
+static void cli_trace(const char* fmt, ...) {
+    static const bool on = std::getenv("OPENADS_WIRE_TRACE") != nullptr;
+    if (!on) return;
+    FILE* hf = std::fopen("C:/tmp/cli_trace.log", "a");
+    if (hf == nullptr) return;
+    char buf[512];
+    va_list ap; va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf) - 1, fmt, ap);
+    va_end(ap);
+    buf[sizeof(buf) - 1] = 0;
+    std::fwrite(buf, 1, std::strlen(buf), hf);
+    std::fwrite("\n", 1, 1, hf);
+    std::fclose(hf);
+}
+
 void remote_clear_nav_boundaries(openads::network::RemoteTable* rt) {
     if (rt == nullptr) return;
     rt->nav_at_bof = false;
@@ -1007,6 +1027,31 @@ void remote_ensure_rec_count(openads::network::RemoteTable* rt) {
         rt->cached_rec_count = r.value();
         rt->rec_count_cached = true;
     }
+}
+
+// Scoped key count of the active order — the server computes it scope +
+// SET DELETED aware, so it matches what OrdKeyCount reports. Falls back
+// to the physical record count in natural order. The remote keyno
+// machinery (GoBottom, KeyGoto, RelKeyPos, skip clamp) must use THIS,
+// not cached_rec_count: with a scope of 1 live row in a 36-row table,
+// clamping to 36 made GoBottom report KeyNo=36 and sent KeyGoto/rel-pos
+// walks 35 rows past the scope end — the phantom/duplicate rows in Tim
+// Stone's scoped remote xBrowse (31/07/2026).
+std::uint32_t remote_ensure_key_count(openads::network::RemoteTable* rt) {
+    if (rt == nullptr) return 0;
+    if (rt->active_index_id == 0) {
+        // Natural record order (or no order installed yet): key position
+        // tracks recno, so the count is the physical record count.
+        remote_ensure_rec_count(rt);
+        return rt->rec_count_cached ? rt->cached_rec_count : 0u;
+    }
+    if (!rt->key_count_cached) {
+        if (auto r = rt->conn->key_count(rt->id)) {
+            rt->cached_key_count = r.value();
+            rt->key_count_cached = true;
+        }
+    }
+    return rt->key_count_cached ? rt->cached_key_count : 0u;
 }
 
 void remote_update_nav_boundaries(openads::network::RemoteTable* rt,
@@ -1051,13 +1096,10 @@ void remote_sync_keyno_gotobottom(openads::network::RemoteTable* rt) {
     if (rt == nullptr) return;
     remote_clear_nav_boundaries(rt);
     if (remote_table_has_index(rt)) {
-        if (!rt->rec_count_cached) {
-            if (auto r = rt->conn->record_count(rt->id)) {
-                rt->cached_rec_count   = r.value();
-                rt->rec_count_cached   = true;
-            }
-        }
-        rt->current_keyno = rt->rec_count_cached ? rt->cached_rec_count : 1u;
+        // Bottom of the ORDER, not of the file: with a scope active the
+        // last key is key #scoped_key_count, not #physical_rec_count.
+        const std::uint32_t kc = remote_ensure_key_count(rt);
+        rt->current_keyno = kc > 0 ? kc : 1u;
         rt->keyno_valid   = true;
     } else if (rt->row_valid) {
         rt->current_keyno = rt->current_recno;
@@ -1075,12 +1117,22 @@ void remote_sync_keyno_skip(openads::network::RemoteTable* rt,
         // then DbGoto(bookmark). AdsGotoRecord invalidates keyno; do not
         // invent a position here or KeyNo/CalcRowSelPos drift.
         if (!rt->keyno_valid) return;
+        if (!rt->row_valid) {
+            // Landed at EOF. The phantom key number is key_count + 1, so
+            // a Skip(-1) back lands exactly on the last scoped key. Fetch
+            // the scoped count ONLY here (it is then cached): fetching on
+            // the per-skip hot path would add a wire RTT to every browse
+            // step (broke the zero-packet prefetch guarantee, M12.24).
+            if (step > 0) {
+                const std::uint32_t kc = remote_ensure_key_count(rt);
+                if (kc > 0) rt->current_keyno = kc + 1;
+            }
+            return;
+        }
+        // On a valid row the counter is exact by construction (seeded by
+        // GoTop/GoBottom/measure); no clamp, no wire traffic.
         std::int64_t k = static_cast<std::int64_t>(rt->current_keyno) + step;
         if (k < 1) k = 1;
-        if (rt->rec_count_cached &&
-            k > static_cast<std::int64_t>(rt->cached_rec_count)) {
-            k = static_cast<std::int64_t>(rt->cached_rec_count);
-        }
         rt->current_keyno = static_cast<std::uint32_t>(k);
         return;
     }
@@ -1137,6 +1189,13 @@ UNSIGNED32 remote_query_key_num(openads::network::RemoteTable* rt,
         auto act = openads::network::remote_activate_index(ri);
         if (!act) return fail(act.error());
     }
+    // At the EOF phantom there is no key under the cursor: the local
+    // engine reports 0 here (recno past end is not in the index walk),
+    // and xBrowse depends on that to stop painting rows.
+    if (rt->nav_at_eof && !rt->row_valid) {
+        *pulKeyNum = 0;
+        return ok();
+    }
     const bool has_index = rt->active_index_id != 0 ||
                            !rt->index_by_tag.empty();
     if (!has_index) {
@@ -1170,8 +1229,15 @@ UNSIGNED32 remote_goto_key_num(openads::network::RemoteTable* rt,
         if (!act) return fail(act.error());
     }
     remote_ensure_rec_count(rt);
-    if (rt->rec_count_cached && keyno > rt->cached_rec_count) {
-        keyno = rt->cached_rec_count;
+    // Clamp to the scoped key count when an order is active — a KeyGoto
+    // past the scope end must land on the last scoped key, not on a
+    // physical record outside the scope.
+    const std::uint32_t kmax = remote_table_has_index(rt)
+        ? remote_ensure_key_count(rt)
+        : (rt->rec_count_cached ? rt->cached_rec_count : 0u);
+    cli_trace("[cli] goto_key_num: want=%u kmax=%u", keyno, kmax);
+    if (kmax > 0 && keyno > kmax) {
+        keyno = kmax;
     }
     if (!remote_table_has_index(rt)) {
         rt->found_cached      = true;
@@ -1208,8 +1274,12 @@ UNSIGNED32 remote_query_rel_key_pos(openads::network::RemoteTable* rt,
         if (!act) return fail(act.error());
     }
     remote_ensure_rec_count(rt);
-    const std::uint32_t rc =
-        rt->rec_count_cached ? rt->cached_rec_count : 0u;
+    // Relative position is within the active order's key walk, so the
+    // denominator is the scoped key count when an order is active —
+    // not the physical record count.
+    const std::uint32_t rc = remote_table_has_index(rt)
+        ? remote_ensure_key_count(rt)
+        : (rt->rec_count_cached ? rt->cached_rec_count : 0u);
     if (rc <= 1u) {
         *p = 0.0;
         return ok();
@@ -1273,8 +1343,8 @@ ADSHANDLE get_or_create_default_connection() {
     Connection* raw = holder.get();
     Handle h = s.registry.register_object(HandleKind::Connection, raw);
     s.conns.emplace(h, std::move(holder));
-    cached = h;
-    return h;
+    cached = to_ads_handle(h);
+    return to_ads_handle(h);
 }
 
 // Harbour rddads: AdsConnect stores the handle globally; BEGIN/COMMIT/
@@ -1731,7 +1801,7 @@ UNSIGNED32 sqlite_open_index(ADSHANDLE hTable, UNSIGNED8* pucName,
     std::lock_guard<std::recursive_mutex> lk(s.mu);
     Handle gh = s.registry.register_object(
         HandleKind::SqliteIndex, si.get());
-    ahIndex[0] = gh;
+    ahIndex[0] = to_ads_handle(gh);
     if (pu16ArrayLen != nullptr) {
         *pu16ArrayLen = 1;
     }
@@ -2043,7 +2113,7 @@ UNSIGNED32 odbc_open_index(ADSHANDLE hTable, UNSIGNED8* pucName,
     std::lock_guard<std::recursive_mutex> lk(s.mu);
     Handle gh = s.registry.register_object(
         HandleKind::OdbcIndex, si.get());
-    ahIndex[0] = gh;
+    ahIndex[0] = to_ads_handle(gh);
     if (pu16ArrayLen != nullptr) {
         *pu16ArrayLen = 1;
     }
@@ -2332,7 +2402,7 @@ UNSIGNED32 mssql_open_index(ADSHANDLE hTable, UNSIGNED8* pucName,
     auto& s = state();
     std::lock_guard<std::recursive_mutex> lk(s.mu);
     Handle gh = s.registry.register_object(HandleKind::MssqlIndex, si.get());
-    ahIndex[0] = gh;
+    ahIndex[0] = to_ads_handle(gh);
     if (pu16ArrayLen != nullptr) *pu16ArrayLen = 1;
     mssql_indexes_map().emplace(gh, std::move(si));
     return ok();
@@ -2645,7 +2715,7 @@ UNSIGNED32 firebird_open_index(ADSHANDLE hTable, UNSIGNED8* pucName,
     std::lock_guard<std::recursive_mutex> lk(s.mu);
     Handle gh = s.registry.register_object(
         HandleKind::FirebirdIndex, si.get());
-    ahIndex[0] = gh;
+    ahIndex[0] = to_ads_handle(gh);
     if (pu16ArrayLen != nullptr) {
         *pu16ArrayLen = 1;
     }
@@ -2960,7 +3030,7 @@ UNSIGNED32 maria_open_index(ADSHANDLE hTable, UNSIGNED8* pucName,
     std::lock_guard<std::recursive_mutex> lk(s.mu);
     Handle gh = s.registry.register_object(
         HandleKind::MariaIndex, si.get());
-    ahIndex[0] = gh;
+    ahIndex[0] = to_ads_handle(gh);
     if (pu16ArrayLen != nullptr) {
         *pu16ArrayLen = 1;
     }
@@ -3307,7 +3377,7 @@ UNSIGNED32 postgres_open_index(ADSHANDLE hTable, UNSIGNED8* pucName,
     std::lock_guard<std::recursive_mutex> lk(s.mu);
     Handle gh = s.registry.register_object(
         HandleKind::PostgresIndex, si.get());
-    ahIndex[0] = gh;
+    ahIndex[0] = to_ads_handle(gh);
     if (pu16ArrayLen != nullptr) {
         *pu16ArrayLen = 1;
     }
@@ -4616,7 +4686,7 @@ void apply_relations_for_table(Table* parent) {
     s.registry.for_each_handle([&](Handle handle, HandleKind k, void* p) {
         if (!h && k == HandleKind::Table &&
             static_cast<Table*>(p) == parent) {
-            h = handle;
+            h = to_ads_handle(handle);
         }
     });
     if (h) apply_relations_for_handle(h);
@@ -4710,8 +4780,9 @@ openads::util::Result<void> ri_enforce_update(Connection* conn, Table& parent) {
             bool any = ri_scan(*child, rule.parent_tag, old_pk, nullptr);
             if (opened_here) conn->close_table(ch_handle);
             if (any) {
-                // Restore parent's old PK to disk. set_field wrote the new
-                // value immediately (writeback_record_), so we must undo it.
+                // Restore parent's old PK in the dirty buffer (and any prior
+                // immediate write). set_field encodes into the buffer; the
+                // failed WriteRecord path never commits, so disk stays old.
                 auto rfi = parent.field_index(rule.parent_tag);
                 if (rfi >= 0) {
                     auto rfi16 = static_cast<std::uint16_t>(rfi);
@@ -5265,9 +5336,16 @@ materialised_cursor_temps() {
     return temps;
 }
 
-// Delete the files of a materialised cursor's temp table: the .dbf plus any
-// memo / index companion an application created on it (the ERP runs
-// INDEX ON over the result, producing <stem>.cdx).
+// Delete the files of a materialised cursor's temp table: the table itself plus
+// any memo / index companion an application created on it (the ERP runs
+// INDEX ON over the result, producing <stem>.cdx or <stem>.adi).
+//
+// The materialising path builds ADT temps (see the ADS_ADT call in
+// exec_sql_direct_impl — DBF would truncate column names to 10 chars), so .adt
+// and its .adm/.adi companions must be listed here. The DBF-era extensions stay
+// so temps written by an older build are still cleaned up. If a new
+// materialising path introduces another on-disk format, add its extensions here
+// too — anything missing leaks one file per query into the data directory.
 void drop_materialised_cursor_temp(ADSHANDLE h) {
     auto& m = materialised_cursor_temps();
     auto it = m.find(h);
@@ -5275,7 +5353,8 @@ void drop_materialised_cursor_temp(ADSHANDLE h) {
     const std::string stem = it->second;
     m.erase(it);
     std::error_code ec;
-    for (const char* ext : {".dbf", ".cdx", ".fpt", ".dbt", ".ntx"}) {
+    for (const char* ext : {".adt", ".adm", ".adi",
+                            ".dbf", ".cdx", ".fpt", ".dbt", ".ntx"}) {
         std::filesystem::remove(std::filesystem::path(stem + ext), ec);
     }
 }
@@ -5465,10 +5544,10 @@ UNSIGNED32 ENTRYPOINT AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 usServerType
                 std::unique_ptr<openads::network::RemoteConnection>>
                 remote_tls_conns;
             remote_tls_conns.emplace(h, std::move(rc));
-            *phConnect = h;
+            *phConnect = to_ads_handle(h);
             // Harbour rddads stores the last AdsConnect handle for
             // AdsCreateTable / AdsBeginTransaction(0) etc.
-            rddads_default_connection() = h;
+            rddads_default_connection() = to_ads_handle(h);
             return ok();
 #else
             return fail(openads::AE_FUNCTION_NOT_AVAILABLE,
@@ -5498,10 +5577,10 @@ UNSIGNED32 ENTRYPOINT AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 usServerType
                 std::unique_ptr<openads::network::RemoteConnection>>
                 remote_conns;
             remote_conns.emplace(h, std::move(rc));
-            *phConnect = h;
+            *phConnect = to_ads_handle(h);
             // Harbour rddads stores the last AdsConnect handle for
             // AdsCreateTable / AdsBeginTransaction(0) etc.
-            rddads_default_connection() = h;
+            rddads_default_connection() = to_ads_handle(h);
             return ok();
         }
     }
@@ -5519,9 +5598,9 @@ UNSIGNED32 ENTRYPOINT AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 usServerType
             Handle h = s.registry.register_object(
                 HandleKind::SqliteConnection, raw);
             sqlite_conns_map().emplace(h, std::move(holder));
-            sql_uri_connect_register_user(h, pucUser, raw,
+            sql_uri_connect_register_user(to_ads_handle(h), pucUser, raw,
                                           openads::sql_backend::SqlDdlDialect::Sqlite);
-            *phConnect = h;
+            *phConnect = to_ads_handle(h);
             return ok();
         }
     }
@@ -5546,9 +5625,9 @@ UNSIGNED32 ENTRYPOINT AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 usServerType
             odbc_conns_map().emplace(h, std::move(holder));
             sql_uri_remember_odbc_dialect(
                 h, openads::sql_backend::SqlDdlDialect::Oracle);
-            sql_uri_connect_register_user(h, pucUser, raw,
+            sql_uri_connect_register_user(to_ads_handle(h), pucUser, raw,
                                           openads::sql_backend::SqlDdlDialect::Oracle);
-            *phConnect = h;
+            *phConnect = to_ads_handle(h);
             return ok();
         }
     }
@@ -5568,9 +5647,9 @@ UNSIGNED32 ENTRYPOINT AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 usServerType
             odbc_conns_map().emplace(h, std::move(holder));
             sql_uri_remember_odbc_dialect(
                 h, openads::sql_backend::SqlDdlDialect::Postgres);
-            sql_uri_connect_register_user(h, pucUser, raw,
+            sql_uri_connect_register_user(to_ads_handle(h), pucUser, raw,
                                           openads::sql_backend::SqlDdlDialect::Postgres);
-            *phConnect = h;
+            *phConnect = to_ads_handle(h);
             return ok();
         }
     }
@@ -5603,9 +5682,9 @@ UNSIGNED32 ENTRYPOINT AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 usServerType
             Handle h = s.registry.register_object(
                 HandleKind::MssqlConnection, raw);
             mssql_conns_map().emplace(h, std::move(holder));
-            sql_uri_connect_register_user(h, pucUser, raw,
+            sql_uri_connect_register_user(to_ads_handle(h), pucUser, raw,
                                           openads::sql_backend::SqlDdlDialect::Mssql);
-            *phConnect = h;
+            *phConnect = to_ads_handle(h);
             return ok();
         }
     }
@@ -5642,9 +5721,9 @@ UNSIGNED32 ENTRYPOINT AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 usServerType
             Handle h = s.registry.register_object(
                 HandleKind::FirebirdConnection, raw);
             firebird_conns_map().emplace(h, std::move(holder));
-            sql_uri_connect_register_user(h, pucUser, raw,
+            sql_uri_connect_register_user(to_ads_handle(h), pucUser, raw,
                                           openads::sql_backend::SqlDdlDialect::Firebird);
-            *phConnect = h;
+            *phConnect = to_ads_handle(h);
             return ok();
         }
     }
@@ -5676,9 +5755,9 @@ UNSIGNED32 ENTRYPOINT AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 usServerType
             Handle h = s.registry.register_object(
                 HandleKind::MariaConnection, raw);
             maria_conns_map().emplace(h, std::move(holder));
-            sql_uri_connect_register_user(h, pucUser, raw,
+            sql_uri_connect_register_user(to_ads_handle(h), pucUser, raw,
                                           openads::sql_backend::SqlDdlDialect::Maria);
-            *phConnect = h;
+            *phConnect = to_ads_handle(h);
             return ok();
         }
     }
@@ -5711,9 +5790,9 @@ UNSIGNED32 ENTRYPOINT AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 usServerType
             Handle h = s.registry.register_object(
                 HandleKind::PostgresConnection, raw);
             postgres_conns_map().emplace(h, std::move(holder));
-            sql_uri_connect_register_user(h, pucUser, raw,
+            sql_uri_connect_register_user(to_ads_handle(h), pucUser, raw,
                                           openads::sql_backend::SqlDdlDialect::Postgres);
-            *phConnect = h;
+            *phConnect = to_ads_handle(h);
             return ok();
         }
     }
@@ -5801,8 +5880,8 @@ UNSIGNED32 ENTRYPOINT AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 usServerType
     std::lock_guard<std::recursive_mutex> lk(s.mu);
     Handle h = s.registry.register_object(HandleKind::Connection, raw);
     s.conns.emplace(h, std::move(holder));
-    *phConnect = h;
-    rddads_default_connection() = h;
+    *phConnect = to_ads_handle(h);
+    rddads_default_connection() = to_ads_handle(h);
     // Reject connections to SAP proprietary binary .add files.  OpenADS
     // can read them (load_add_binary_) but cannot safely write them back
     // (format is closed and permission fields are encrypted).  Direct the
@@ -5927,8 +6006,8 @@ UNSIGNED32 ENTRYPOINT AdsConnect101(UNSIGNED8* pucConnectString,
         auto& s = state();
         std::lock_guard<std::recursive_mutex> lk(s.mu);
         Handle h = s.registry.register_object(HandleKind::Table, raw);
-        connect101_option_tables().emplace(h, std::move(holder));
-        *phConnectOptions = h;
+        connect101_option_tables().emplace(to_ads_handle(h), std::move(holder));
+        *phConnectOptions = to_ads_handle(h);
     }
     return ok();
 }
@@ -6093,7 +6172,7 @@ UNSIGNED32 ENTRYPOINT AdsDisconnect(ADSHANDLE hConnect) {
             purge_pending_binaries_for_table(tp);
         }
         for (Handle h : owned_handles) {
-            cursor_projections().erase(h);
+            cursor_projections().erase(to_ads_handle(h));
             s.registry.release(h);
         }
     }
@@ -6147,7 +6226,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
         Handle gh = s.registry.register_object(
             HandleKind::RemoteTable, rt.get());
         remote_tables.emplace(gh, std::move(rt));
-        *phTable = gh;
+        *phTable = to_ads_handle(gh);
         // Mirror the local M-AOF.6 production-index auto-open over the
         // wire: opening <base>.dbf binds <base>.cdx (or <base>.adi for
         // ADT) when the server has it, so rddads / X# see the production
@@ -6184,13 +6263,13 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
                 std::memcpy(b.data(), bag.data(), bag.size());
                 ADSHANDLE arr[64] = {0};
                 UNSIGNED16 alen = 64;
-                (void)AdsOpenIndex(gh, b.data(), arr, &alen);
+                (void)AdsOpenIndex(to_ads_handle(gh), b.data(), arr, &alen);
                 // ADS semantics: auto-opening the production index leaves
                 // the controlling order natural (0) until DbSetOrder picks
                 // one. AdsOpenIndex optimistically marks the first tag
                 // active; undo that so the first nav-by-index actually
                 // sends SetOrder to the server.
-                if (auto* rtp = get_remote_table(gh)) {
+                if (auto* rtp = get_remote_table(to_ads_handle(gh))) {
                     rtp->active_index_id = 0;
                     // Store the confirmed production bag path so
                     // AdsGetIndexFilename / OrdBagName works locally.
@@ -6206,8 +6285,8 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
         // would read uninitialized memory.  One extra round-trip on
         // table open positions the cursor on record 1 and populates
         // the record cache, matching LOCAL semantics.
-        if (get_remote_table(gh) != nullptr) {
-            (void)AdsGotoTop(gh);
+        if (get_remote_table(to_ads_handle(gh)) != nullptr) {
+            (void)AdsGotoTop(to_ads_handle(gh));
         }
         return ok();
     }
@@ -6241,7 +6320,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
                 Handle gh = s.registry.register_object(
                     HandleKind::SqliteTable, st.get());
                 sqlite_tables_map().emplace(gh, std::move(st));
-                *phTable = gh;
+                *phTable = to_ads_handle(gh);
                 return ok();
             }
         }
@@ -6256,7 +6335,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
         Handle gh = s.registry.register_object(
             HandleKind::SqliteTable, st.get());
         sqlite_tables_map().emplace(gh, std::move(st));
-        *phTable = gh;
+        *phTable = to_ads_handle(gh);
         return ok();
     }
 #endif
@@ -6282,7 +6361,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
         Handle gh = s.registry.register_object(
             HandleKind::OdbcTable, st.get());
         odbc_tables_map().emplace(gh, std::move(st));
-        *phTable = gh;
+        *phTable = to_ads_handle(gh);
         return ok();
     }
 #endif
@@ -6319,7 +6398,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
                 Handle gh = s.registry.register_object(
                     HandleKind::MssqlTable, st.get());
                 mssql_tables_map().emplace(gh, std::move(st));
-                *phTable = gh;
+                *phTable = to_ads_handle(gh);
                 return ok();
             }
             return fail(openads::AE_NO_FILE_FOUND, name.c_str());
@@ -6355,7 +6434,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
         Handle gh = s.registry.register_object(
             HandleKind::MssqlTable, st.get());
         mssql_tables_map().emplace(gh, std::move(st));
-        *phTable = gh;
+        *phTable = to_ads_handle(gh);
         return ok();
     }
 #endif
@@ -6389,7 +6468,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
                 Handle gh = s.registry.register_object(
                     HandleKind::FirebirdTable, st.get());
                 firebird_tables_map().emplace(gh, std::move(st));
-                *phTable = gh;
+                *phTable = to_ads_handle(gh);
                 return ok();
             }
             return fail(openads::AE_NO_FILE_FOUND, name.c_str());
@@ -6402,7 +6481,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
         Handle gh = s.registry.register_object(
             HandleKind::FirebirdTable, st.get());
         firebird_tables_map().emplace(gh, std::move(st));
-        *phTable = gh;
+        *phTable = to_ads_handle(gh);
         return ok();
     }
 #endif
@@ -6436,7 +6515,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
                 Handle gh = s.registry.register_object(
                     HandleKind::MariaTable, st.get());
                 maria_tables_map().emplace(gh, std::move(st));
-                *phTable = gh;
+                *phTable = to_ads_handle(gh);
                 return ok();
             }
             return fail(openads::AE_NO_FILE_FOUND, name.c_str());
@@ -6449,7 +6528,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
         Handle gh = s.registry.register_object(
             HandleKind::MariaTable, st.get());
         maria_tables_map().emplace(gh, std::move(st));
-        *phTable = gh;
+        *phTable = to_ads_handle(gh);
         return ok();
     }
 #endif
@@ -6483,7 +6562,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
                 Handle gh = s.registry.register_object(
                     HandleKind::PostgresTable, st.get());
                 postgres_tables_map().emplace(gh, std::move(st));
-                *phTable = gh;
+                *phTable = to_ads_handle(gh);
                 return ok();
             }
             return fail(openads::AE_NO_FILE_FOUND, name.c_str());
@@ -6496,7 +6575,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
         Handle gh = s.registry.register_object(
             HandleKind::PostgresTable, st.get());
         postgres_tables_map().emplace(gh, std::move(st));
-        *phTable = gh;
+        *phTable = to_ads_handle(gh);
         return ok();
     }
 #endif
@@ -6552,7 +6631,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
     if (!th) return fail(th.error());
     Table* tbl = conn->lookup_table(th.value());
     Handle gh = s.registry.register_object(HandleKind::Table, tbl);
-    *phTable = gh;
+    *phTable = to_ads_handle(gh);
 
     // Set the table alias from the filename (without extension).
     {
@@ -6597,7 +6676,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
             // Up to 64 tag handles is plenty for a production CDX.
             ADSHANDLE arr[64] = {0};
             UNSIGNED16 alen = 64;
-            (void)AdsOpenIndex(gh, b.data(), arr, &alen);
+            (void)AdsOpenIndex(to_ads_handle(gh), b.data(), arr, &alen);
         }
     }
     // ADI auto-open: same convention for ADT tables — opening `<base>.adt`
@@ -6614,7 +6693,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
             std::memcpy(b.data(), adis.data(), adis.size());
             ADSHANDLE arr[64] = {0};
             UNSIGNED16 alen = 64;
-            (void)AdsOpenIndex(gh, b.data(), arr, &alen);
+            (void)AdsOpenIndex(to_ads_handle(gh), b.data(), arr, &alen);
         }
     }
     return ok();
@@ -6879,7 +6958,34 @@ DbfTypeSpec dbf_type_for(const std::string& name) {
         return {'A', 4, 0, false};    // ADT type 15: 4-byte uint32 auto-increment
     if (eq("Time"))
         return {'Z', 4, 0, false};    // ADT type 13: 4-byte ms since midnight
+    // ADT type 2 — numeric stored as ASCII digits, so the declared scale is
+    // part of the value ("10.50" stays "10.50"). Plain "Numeric" with decimals
+    // maps to ADT DOUBLE (type 10) instead, and a conforming ADT DOUBLE
+    // descriptor carries NO decimal count (see the fd[137] comment in the ADT
+    // writer — stamping one makes the real ADS engine report the table corrupt,
+    // 7016), so a DOUBLE round-trips the value but not its formatting. Used by
+    // the SELECT materialisation path, which needs full-length column names
+    // (ADT) *and* the source's numeric scale.
+    if (eq("AsciiNumeric"))
+        return {'#', 0, 0, false};
     return {'C', 0, 0, false};        // unknown -> Character
+}
+
+// Map a parsed field-type char to the byte a DBF field descriptor can carry.
+// The ADT sentinels above ('W', 'S', '$', 'P', 'A', 'Z', '#') are internal
+// markers, not DBF type codes — writing one into fd[11] would produce a table
+// no reader can classify. Collapse each to its closest DBF equivalent.
+char dbf_descriptor_type_char(char t) {
+    switch (t) {
+        case 'W': return 'C';   // CICHARACTER -> Character
+        case 'S': return 'N';   // SHORTINT    -> Numeric
+        case '$': return 'Y';   // MONEY       -> Currency
+        case 'P': return 'T';   // TIMESTAMP   -> DateTime
+        case 'A': return 'N';   // AUTOINC     -> Numeric
+        case 'Z': return 'C';   // TIME        -> Character
+        case '#': return 'N';   // ASCII numeric is exactly DBF's 'N'
+        default:  return t;
+    }
 }
 
 // Trim leading/trailing whitespace.
@@ -7034,6 +7140,8 @@ AdtFieldSpec adt_spec_for(const FieldOut& f) {
         case 'P': return {14, 8,          0,     false};  // TIMESTAMP (JDN+ms)
         case 'A': return {15, 4,          0,     false};  // AUTOINC
         case 'Z': return {13, 4,          0,     false};  // TIME (ms since midnight)
+        case '#': return { 2, static_cast<std::uint16_t>(f.length ? f.length : 10u),
+                          f.dec, false};                  // NUMERIC as ASCII digits
         case 'C':
         default:
             return { 4, static_cast<std::uint16_t>(f.length ? f.length : 10u),
@@ -7336,7 +7444,8 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
             std::vector<std::uint8_t> fd(32, 0);
             std::size_t n = std::min<std::size_t>(f.name.size(), 10);
             std::memcpy(fd.data(), f.name.data(), n);
-            fd[11] = static_cast<std::uint8_t>(f.type);
+            fd[11] = static_cast<std::uint8_t>(
+                dbf_descriptor_type_char(f.type));
             fd[16] = f.length;
             fd[17] = f.dec;
             std::uint8_t flags = 0;
@@ -7420,7 +7529,8 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
         std::vector<std::uint8_t> fd(32, 0);
         std::size_t n = std::min<std::size_t>(f.name.size(), 10);
         std::memcpy(fd.data(), f.name.data(), n);
-        fd[11] = static_cast<std::uint8_t>(f.type);
+        fd[11] = static_cast<std::uint8_t>(
+            dbf_descriptor_type_char(f.type));
         fd[16] = f.length;
         fd[17] = f.dec;
         file.insert(file.end(), fd.begin(), fd.end());
@@ -7842,7 +7952,8 @@ UNSIGNED32 ENTRYPOINT AdsRestructureTable(ADSHANDLE   hConnect,
             std::vector<std::uint8_t> fd(32, 0);
             std::size_t n = std::min<std::size_t>(f.name.size(), 10);
             std::memcpy(fd.data(), f.name.data(), n);
-            fd[11] = static_cast<std::uint8_t>(f.type);
+            fd[11] = static_cast<std::uint8_t>(
+                dbf_descriptor_type_char(f.type));
             fd[16] = f.length;
             fd[17] = f.dec;
             file_bytes.insert(file_bytes.end(), fd.begin(), fd.end());
@@ -7978,7 +8089,8 @@ UNSIGNED32 ENTRYPOINT AdsRefreshRecord(ADSHANDLE hTable) {
     if (auto* rt = get_remote_table(hTable)) {
         remote_settle_cursor(rt);                   // M12.21 option C
         rt->row_valid = false;                      // M12.17 cache invalidation
-        rt->rec_count_cached = false;               // force fresh record count from server
+        rt->rec_count_cached = false;
+        rt->key_count_cached = false;               // force fresh record count from server
         auto r = rt->conn->refresh_record(rt->id);
         if (!r) return fail(r.error());
         return ok();
@@ -8376,8 +8488,8 @@ UNSIGNED32 ENTRYPOINT AdsFOpen(ADSHANDLE hConn, UNSIGNED8* pucName,
         auto* raw = rec.get();
         Handle h = s.registry.register_object(
             openads::session::HandleKind::RemoteFile, raw);
-        remote_files_map().emplace(h, std::move(rec));
-        *phFile = h;
+        remote_files_map().emplace(to_ads_handle(h), std::move(rec));
+        *phFile = to_ads_handle(h);
         return ok();
     }
     if (!ctx.local) return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
@@ -8388,8 +8500,8 @@ UNSIGNED32 ENTRYPOINT AdsFOpen(ADSHANDLE hConn, UNSIGNED8* pucName,
     auto* raw = fo.value().get();
     Handle h = s.registry.register_object(
         openads::session::HandleKind::LocalFile, raw);
-    local_files_map().emplace(h, std::move(fo.value()));
-    *phFile = h;
+    local_files_map().emplace(to_ads_handle(h), std::move(fo.value()));
+    *phFile = to_ads_handle(h);
     return ok();
 }
 
@@ -8411,8 +8523,8 @@ UNSIGNED32 ENTRYPOINT AdsFCreate(ADSHANDLE hConn, UNSIGNED8* pucName,
         auto* raw = rec.get();
         Handle h = s.registry.register_object(
             openads::session::HandleKind::RemoteFile, raw);
-        remote_files_map().emplace(h, std::move(rec));
-        *phFile = h;
+        remote_files_map().emplace(to_ads_handle(h), std::move(rec));
+        *phFile = to_ads_handle(h);
         return ok();
     }
     if (!ctx.local) return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
@@ -8424,8 +8536,8 @@ UNSIGNED32 ENTRYPOINT AdsFCreate(ADSHANDLE hConn, UNSIGNED8* pucName,
     auto* raw = fo.value().get();
     Handle h = s.registry.register_object(
         openads::session::HandleKind::LocalFile, raw);
-    local_files_map().emplace(h, std::move(fo.value()));
-    *phFile = h;
+    local_files_map().emplace(to_ads_handle(h), std::move(fo.value()));
+    *phFile = to_ads_handle(h);
     return ok();
 }
 
@@ -8570,7 +8682,7 @@ UNSIGNED32 ENTRYPOINT AdsCloseAllTables(void) {
             (void)t->flush();
             purge_bindings_for_table(t);
             purge_pending_binaries_for_table(t);
-            connect101_option_tables().erase(h);
+            connect101_option_tables().erase(to_ads_handle(h));
             if (owning) owning->close_table_ptr(t);
         }
         s.registry.release(h);
@@ -8638,8 +8750,12 @@ UNSIGNED32 ENTRYPOINT AdsGotoTop(ADSHANDLE hTable) {
         auto r = openads::network::remote_index_goto_top(ri);
         if (!r) return fail(r.error());
         remote_sync_keyno_gototop(ri->parent);
+        cli_trace("[cli] AdsGotoTop(idx): row_valid=%d recno=%u keyno=%u eof=%d bof=%d",
+                  (int)ri->parent->row_valid, ri->parent->current_recno,
+                  ri->parent->current_keyno, (int)ri->parent->nav_at_eof,
+                  (int)ri->parent->nav_at_bof);
         if (Handle th = handle_for_remote_table(ri->parent))
-            apply_relations_for_handle(th);
+            apply_relations_for_handle(to_ads_handle(th));
         return ok();
     }
     if (auto* rt = get_remote_table(hTable)) {
@@ -8674,8 +8790,12 @@ UNSIGNED32 ENTRYPOINT AdsGotoBottom(ADSHANDLE hTable) {
         auto r = openads::network::remote_index_goto_bottom(ri);
         if (!r) return fail(r.error());
         remote_sync_keyno_gotobottom(ri->parent);
+        cli_trace("[cli] AdsGotoBottom(idx): row_valid=%d recno=%u keyno=%u eof=%d bof=%d",
+                  (int)ri->parent->row_valid, ri->parent->current_recno,
+                  ri->parent->current_keyno, (int)ri->parent->nav_at_eof,
+                  (int)ri->parent->nav_at_bof);
         if (Handle th = handle_for_remote_table(ri->parent))
-            apply_relations_for_handle(th);
+            apply_relations_for_handle(to_ads_handle(th));
         return ok();
     }
     if (auto* rt = get_remote_table(hTable)) {
@@ -8705,6 +8825,7 @@ UNSIGNED32 ENTRYPOINT AdsGotoBottom(ADSHANDLE hTable) {
 UNSIGNED32 ENTRYPOINT AdsSkip(ADSHANDLE hTable, SIGNED32 lRows) {
     seek_last_retry_latch() = false;
     if (auto* ri = get_remote_index(hTable)) {
+        cli_trace("[cli] AdsSkip(idx) rows=%d", (int)lRows);
         openads::network::RemoteTable* rt = ri->parent;
         const std::uint32_t rec_before =
             (rt != nullptr && rt->row_valid) ? rt->current_recno : 0u;
@@ -8713,8 +8834,11 @@ UNSIGNED32 ENTRYPOINT AdsSkip(ADSHANDLE hTable, SIGNED32 lRows) {
         if (!r) return fail(r.error());
         remote_sync_keyno_skip(rt, lRows);
         remote_update_nav_boundaries(rt, lRows, rec_before, row_valid_before);
+        cli_trace("[cli] AdsSkip(idx) done: row_valid=%d recno=%u keyno=%u eof=%d bof=%d",
+                  (int)rt->row_valid, rt->current_recno, rt->current_keyno,
+                  (int)rt->nav_at_eof, (int)rt->nav_at_bof);
         if (Handle th = handle_for_remote_table(rt))
-            apply_relations_for_handle(th);
+            apply_relations_for_handle(to_ads_handle(th));
         return ok();
     }
     if (auto* rt = get_remote_table(hTable)) {
@@ -8777,6 +8901,8 @@ UNSIGNED32 ENTRYPOINT AdsSkip(ADSHANDLE hTable, SIGNED32 lRows) {
 UNSIGNED32 ENTRYPOINT AdsAtEOF(ADSHANDLE hTable, UNSIGNED16* pbAtEnd) {
     if (auto* rt = get_remote_table(hTable)) {
         if (pbAtEnd == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+        cli_trace("[cli] AdsAtEOF: nav_eof=%d row_valid=%d",
+                  (int)rt->nav_at_eof, (int)rt->row_valid);
         if (rt->nav_at_eof) { *pbAtEnd = 1; return ok(); }
         // M12.21 option C — a valid cached current row (including one
         // served locally from the prefetch queue) means the cursor is
@@ -8800,6 +8926,8 @@ UNSIGNED32 ENTRYPOINT AdsAtEOF(ADSHANDLE hTable, UNSIGNED16* pbAtEnd) {
 UNSIGNED32 ENTRYPOINT AdsAtBOF(ADSHANDLE hTable, UNSIGNED16* pbAtBegin) {
     if (pbAtBegin == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
     if (auto* rt = get_remote_table(hTable)) {
+        cli_trace("[cli] AdsAtBOF: nav_bof=%d row_valid=%d",
+                  (int)rt->nav_at_bof, (int)rt->row_valid);
         if (rt->nav_at_bof) { *pbAtBegin = 1; return ok(); }
         // M12.21 option C — a valid cached current row means the cursor
         // is on a record, so it cannot be at BOF: answer with no round
@@ -9575,6 +9703,10 @@ UNSIGNED32 ENTRYPOINT AdsGetRecordCount(ADSHANDLE hTable, UNSIGNED16 bFilterOpti
         t->goto_record(saved);
         *pulRecordCount = live;
     } else {
+        // Multiuser: peer appends bump the on-disk header; re-read so
+        // LastRec() / RecCount() match the other stations (and so the
+        // browser's EOF fence is not stuck at open-time count).
+        t->refresh_record_count_from_disk();
         *pulRecordCount = t->record_count();
     }
     return ok();
@@ -9665,13 +9797,33 @@ UNSIGNED32 ENTRYPOINT AdsGetLastError(UNSIGNED32* pulCode, UNSIGNED8* pucBuf,
 // pucDesc / pusDescLen : caller-allocated description buffer +
 //             in/out length. We write the OpenADS version string
 //             and truncate to the caller's capacity.
+//
+// Major/minor come from OPENADS_VERSION_STR (CMake project version, e.g.
+// "1.8.43" or "1.8.43-5-gdeadbee") so a client can display the server
+// build programmatically; the description carries the full string.
 UNSIGNED32 ENTRYPOINT AdsGetVersion(UNSIGNED32* pulMajor, UNSIGNED32* pulMinor,
                          UNSIGNED8*  pucLetter, UNSIGNED8* pucDesc,
                          UNSIGNED16* pusDescLen) {
-    if (pulMajor  != nullptr) *pulMajor  = 0;
-    if (pulMinor  != nullptr) *pulMinor  = 0;
+#ifndef OPENADS_VERSION_STR
+#  define OPENADS_VERSION_STR "0.0"
+#endif
+    UNSIGNED32 maj = 0, min = 0;
+    {
+        const char* v = OPENADS_VERSION_STR;
+        char* end = nullptr;
+        unsigned long a = std::strtoul(v, &end, 10);
+        unsigned long b = 0;
+        if (end != nullptr && *end == '.') {
+            b = std::strtoul(end + 1, nullptr, 10);
+        }
+        maj = static_cast<UNSIGNED32>(a);
+        min = static_cast<UNSIGNED32>(b);
+    }
+    if (pulMajor  != nullptr) *pulMajor  = maj;
+    if (pulMinor  != nullptr) *pulMinor  = min;
     if (pucLetter != nullptr) *pucLetter = 'a';
-    static const char kDesc[] = "OpenADS ACE-compatible engine";
+    static const char kDesc[] = "OpenADS " OPENADS_VERSION_STR
+        " ACE-compatible engine";
     if (pucDesc != nullptr && pusDescLen != nullptr) {
         UNSIGNED16 cap = *pusDescLen;
         UNSIGNED16 n = static_cast<UNSIGNED16>(
@@ -9958,7 +10110,7 @@ bool fire_triggers_(Handle hConn, Connection* conn,
         // procs, RAISE). A failure is REPORTED to the caller — the old
         // fragment silently swallowed it, so pmsys audit triggers "fired"
         // while writing nothing and the DML still reported success.
-        auto r = script_run_trigger_body(conn, hConn, body_copy,
+        auto r = script_run_trigger_body(conn, to_ads_handle(hConn), body_copy,
                                          new_fields, old_fields,
                                          timing == 2u /*is_instead_of*/);
         if (timing == 2u) instead_of_fired = true;
@@ -9980,7 +10132,8 @@ UNSIGNED32 ENTRYPOINT AdsAppendRecord(ADSHANDLE hTable) {
     if (auto* rt = get_remote_table(hTable)) {
         remote_settle_cursor(rt);                   // M12.21 option C
         rt->row_valid        = false;               // M12.17
-        rt->rec_count_cached = false;               // M12.19
+        rt->rec_count_cached = false;
+        rt->key_count_cached = false;               // M12.19
         auto r = rt->conn->append_blank(rt->id);
         if (!r) return fail(r.error());
         return ok();
@@ -10254,7 +10407,12 @@ UNSIGNED32 ENTRYPOINT AdsWriteRecord(ADSHANDLE hTable) {
         }
     }
 
-    if (!t->deferred_flush()) {
+    // Always settle the dirty record buffer (field replaces coalesce until
+    // here). deferred_flush only skips OS FlushFileBuffers / index fsync.
+    if (t->deferred_flush()) {
+        auto r = t->commit_dirty_record();
+        if (!r) return fail(r.error());
+    } else {
         auto r = t->flush();
         if (!r) return fail(r.error());
     }
@@ -10279,7 +10437,8 @@ UNSIGNED32 ENTRYPOINT AdsDeleteRecord(ADSHANDLE hTable) {
     if (auto* rt = get_remote_table(hTable)) {
         remote_settle_cursor(rt);                   // M12.21 option C
         rt->row_valid        = false;               // M12.17
-        rt->rec_count_cached = false;               // M12.19 (Pack drops the row)
+        rt->rec_count_cached = false;
+        rt->key_count_cached = false;               // M12.19 (Pack drops the row)
         auto r = rt->conn->delete_record(rt->id);
         if (!r) return fail(r.error());
         return ok();
@@ -10441,7 +10600,8 @@ UNSIGNED32 ENTRYPOINT AdsRecallRecord(ADSHANDLE hTable) {
     if (auto* rt = get_remote_table(hTable)) {
         remote_settle_cursor(rt);                   // M12.21 option C
         rt->row_valid        = false;               // M12.17
-        rt->rec_count_cached = false;               // M12.19
+        rt->rec_count_cached = false;
+        rt->key_count_cached = false;               // M12.19
         auto r = rt->conn->recall_record(rt->id);
         if (!r) return fail(r.error());
         return ok();
@@ -11486,6 +11646,23 @@ std::unordered_map<Table*, ADSHANDLE>& active_binding_for() {
     return m;
 }
 
+// Park the table's active order back into its binding slot, leaving the
+// table in natural order (AdsSetIndexOrder(h, "") semantics).
+void park_active_order(Table* t) {
+    auto& act = active_binding_for();
+    auto act_it = act.find(t);
+    if (act_it == act.end()) return;
+    auto& m = index_bindings();
+    auto bit = m.find(act_it->second);
+    if (bit != m.end()) {
+        auto taken = t->take_order();
+        openads::drivers::IIndex* raw = taken.get();
+        bit->second.parked = std::move(taken);
+        if (raw) t->register_extra_index_view(raw);
+    }
+    act.erase(act_it);
+}
+
 // Drop every binding tied to `t`. Called from AdsCloseTable / AdsCloseAllTables
 // / AdsDisconnect — without this, a Connection teardown leaves the bindings
 // behind, so a later test (or app reconnect) that allocates a Table at the
@@ -11565,7 +11742,7 @@ openads::util::Result<void> activate_binding(ADSHANDLE h) {
 
 ADSHANDLE next_index_handle() {
     static std::uint64_t n = 0x40000000ULL;  // disjoint from table handles
-    return ++n;
+    return static_cast<ADSHANDLE>(++n);
 }
 
 Table* table_for_index(ADSHANDLE hIndex) {
@@ -11795,7 +11972,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
             ri->is_descending = entries[i].is_descending;
             Handle gh = s.registry.register_object(
                 HandleKind::RemoteIndex, ri.get());
-            ahIndex[i] = gh;
+            ahIndex[i] = to_ads_handle(gh);
             remote_indexes.emplace(gh, std::move(ri));
             // Dedup by tag: production-CDX auto-open and a later explicit
             // AdsOpenIndex on the same bag must not register the order
@@ -11896,11 +12073,17 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
     // Refresh: drop any prior bindings for this Table that came from
     // the same file path. If the active binding was among them, also
     // surrender Table::order_; the caller's reopen will repopulate it.
+    // RCB 01/08/2026: keep the old tag→handle mapping and REUSE those
+    // handles below — remote clients (openads_serverd's wire index_h_)
+    // hold the numeric handles across a bag reopen, and erasing them
+    // made the next SetOrder fail with 5000 (stale binding).
+    std::unordered_map<std::string, ADSHANDLE> old_handles;
     bool active_dropped = false;
     auto act_it = act.find(t);
     ADSHANDLE active_h = act_it != act.end() ? act_it->second : 0;
     for (auto it = m.begin(); it != m.end(); ) {
         if (it->second.table == t && same_index_path(it->second.path, path)) {
+            old_handles[it->second.tag_name] = it->first;
             if (it->first == active_h) {
                 active_dropped = true;
             } else if (it->second.parked) {
@@ -11951,7 +12134,8 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
         std::string tag_name = idx->name();
         if (path_ends_with_ci(path, ".ntx"))
             mark_ntx_key_encoding(t, idx.get());
-        ADSHANDLE h = next_index_handle();
+        ADSHANDLE h = old_handles.count(tag_name)
+            ? old_handles[tag_name] : next_index_handle();
         if (!table_has_active) {
             t->set_order(std::move(idx));
             m[h] = IndexBinding{t, tag_name, nullptr, path};
@@ -11995,7 +12179,8 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
             apply_cdx_oem_collation(t, idx.get());
             sub = std::move(idx);
         }
-        ADSHANDLE h = next_index_handle();
+        ADSHANDLE h = old_handles.count(name)
+            ? old_handles[name] : next_index_handle();
         if (!table_has_active) {
             t->set_order(std::move(sub));
             m[h] = IndexBinding{t, name, nullptr, path};
@@ -12143,7 +12328,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
         auto& s = state();
         std::lock_guard<std::recursive_mutex> lk(s.mu);
         Handle gh = s.registry.register_object(HandleKind::SqliteIndex, si.get());
-        *phIndex = gh;
+        *phIndex = to_ads_handle(gh);
         sqlite_indexes_map().emplace(gh, std::move(si));
         (void)pucFileName;
         (void)pucCondition;
@@ -12171,7 +12356,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
         auto& s = state();
         std::lock_guard<std::recursive_mutex> lk(s.mu);
         Handle gh = s.registry.register_object(HandleKind::PostgresIndex, si.get());
-        *phIndex = gh;
+        *phIndex = to_ads_handle(gh);
         postgres_indexes_map().emplace(gh, std::move(si));
         (void)pucFileName;
         (void)pucCondition;
@@ -12199,7 +12384,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
         auto& s = state();
         std::lock_guard<std::recursive_mutex> lk(s.mu);
         Handle gh = s.registry.register_object(HandleKind::MariaIndex, si.get());
-        *phIndex = gh;
+        *phIndex = to_ads_handle(gh);
         maria_indexes_map().emplace(gh, std::move(si));
         (void)pucFileName;
         (void)pucCondition;
@@ -12227,7 +12412,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
         auto& s = state();
         std::lock_guard<std::recursive_mutex> lk(s.mu);
         Handle gh = s.registry.register_object(HandleKind::MssqlIndex, si.get());
-        *phIndex = gh;
+        *phIndex = to_ads_handle(gh);
         mssql_indexes_map().emplace(gh, std::move(si));
         (void)pucFileName;
         (void)pucCondition;
@@ -12251,7 +12436,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
         std::lock_guard<std::recursive_mutex> lk(s.mu);
         Handle gh = s.registry.register_object(
             HandleKind::OdbcIndex, si.get());
-        *phIndex = gh;
+        *phIndex = to_ads_handle(gh);
         odbc_indexes_map().emplace(gh, std::move(si));
         (void)pucFileName;
         (void)pucIndexName;
@@ -12282,7 +12467,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
         std::lock_guard<std::recursive_mutex> lk(s.mu);
         Handle gh = s.registry.register_object(
             HandleKind::FirebirdIndex, si.get());
-        *phIndex = gh;
+        *phIndex = to_ads_handle(gh);
         firebird_indexes_map().emplace(gh, std::move(si));
         (void)pucFileName;
         (void)pucCondition;
@@ -12317,7 +12502,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
         ri->tag_name = tag;
         Handle gh = s.registry.register_object(
             HandleKind::RemoteIndex, ri.get());
-        *phIndex = gh;
+        *phIndex = to_ads_handle(gh);
         remote_indexes.emplace(gh, std::move(ri));
         rt->index_by_tag.emplace_back(tag, r.value());
         return ok();
@@ -12326,6 +12511,11 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
     if (!t) {
         return fail(openads::AE_INTERNAL_ERROR, "unknown table");
     }
+    // Settle any coalesced dirty record first: the build loop below reads
+    // rows straight from disk, so a pending buffer edit would be indexed
+    // from its stale on-disk image (and silently dropped by
+    // load_record_for_bulk_scan's discard).
+    if (auto cr = t->commit_dirty_record(); !cr) return fail(cr.error());
     // The native (DBF/CDX/NTX/ADI) create path mutates the process-global
     // index_bindings() / active_binding_for() maps (and the per-table order
     // list) with no synchronization, so two connections building indexes
@@ -12339,6 +12529,12 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
         openads::abi::to_internal(pucFileName, 0));
     auto tag  = openads::abi::to_internal(pucIndexName, 0);
     auto expr = openads::abi::to_internal(pucExpr, 0);
+    // Never persist the FIELD->/ALIAS-> qualifier in the stored key
+    // expression: native DbfCdx strips it ("INDEX ON FIELD->name" saves
+    // key "name"), and Harbour errors on a bare field reference when the
+    // qualifier leaks into the bag header. The evaluator is qualifier-
+    // agnostic (strip_alias_qualifiers), so building/seeking is unchanged.
+    expr = openads::engine::strip_alias_qualifiers(expr);
     std::string for_expr = pucCondition != nullptr
         ? openads::abi::to_internal(pucCondition, 0)
         : std::string{};
@@ -12971,10 +13167,15 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex(ADSHANDLE hTable, UNSIGNED8* pucFile,
     if (!t) {
         return fail(openads::AE_INTERNAL_ERROR, "unknown table or null out");
     }
+    // Settle any coalesced dirty record first (see AdsCreateIndex61).
+    if (auto cr = t->commit_dirty_record(); !cr) return fail(cr.error());
     auto file = normalize_index_path(
         openads::abi::to_internal(pucFile, 0));
     auto tag  = openads::abi::to_internal(pucTag,  0);
     auto expr = openads::abi::to_internal(pucExpr, 0);
+    // Never persist the FIELD->/ALIAS-> qualifier in the stored key
+    // expression (mirrors AdsCreateIndex61 and native DbfCdx).
+    expr = openads::engine::strip_alias_qualifiers(expr);
     // A FOR condition makes this a conditional index: only matching rows get
     // a key entry (mirrors AdsCreateIndex61's build loop). Ignoring pucCondition
     // built a full index over every row, so AdsGetKeyCount, OrdKeyNo, SKIP and
@@ -13410,6 +13611,7 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrder(ADSHANDLE hTable, UNSIGNED8* pucName) {
         // traffic to make it look suspicious.
         rt->row_valid = false;
         rt->invalidate_prefetch();
+        rt->key_count_cached = false;
         // RCB 07/14/2026: the server now orders by whatever `name` resolved to
         // on ITS side. Mirror that into server_order_id when we can map the tag
         // locally; when we can't, deliberately leave it "unknown" so the next
@@ -13463,7 +13665,7 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrder(ADSHANDLE hTable, UNSIGNED8* pucName) {
         for (auto& [ih, si] : sqlite_indexes_map()) {
             if (si->parent == get_sqlite_table(hTable) &&
                 upper_eq(si->column, name)) {
-                sql_active_index_handle()[hTable] = ih;
+                sql_active_index_handle()[hTable] = static_cast<ADSHANDLE>(ih);
                 return ok();
             }
         }
@@ -13472,7 +13674,7 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrder(ADSHANDLE hTable, UNSIGNED8* pucName) {
         for (auto& [ih, si] : maria_indexes_map()) {
             if (si->parent == get_maria_table(hTable) &&
                 upper_eq(si->column, name)) {
-                sql_active_index_handle()[hTable] = ih;
+                sql_active_index_handle()[hTable] = static_cast<ADSHANDLE>(ih);
                 return ok();
             }
         }
@@ -13481,7 +13683,7 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrder(ADSHANDLE hTable, UNSIGNED8* pucName) {
         for (auto& [ih, si] : postgres_indexes_map()) {
             if (si->parent == get_postgres_table(hTable) &&
                 upper_eq(si->column, name)) {
-                sql_active_index_handle()[hTable] = ih;
+                sql_active_index_handle()[hTable] = static_cast<ADSHANDLE>(ih);
                 return ok();
             }
         }
@@ -13490,7 +13692,7 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrder(ADSHANDLE hTable, UNSIGNED8* pucName) {
         for (auto& [ih, si] : odbc_indexes_map()) {
             if (si->parent == get_odbc_table(hTable) &&
                 upper_eq(si->column, name)) {
-                sql_active_index_handle()[hTable] = ih;
+                sql_active_index_handle()[hTable] = static_cast<ADSHANDLE>(ih);
                 return ok();
             }
         }
@@ -13499,7 +13701,7 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrder(ADSHANDLE hTable, UNSIGNED8* pucName) {
         for (auto& [ih, si] : firebird_indexes_map()) {
             if (si->parent == get_firebird_table(hTable) &&
                 upper_eq(si->column, name)) {
-                sql_active_index_handle()[hTable] = ih;
+                sql_active_index_handle()[hTable] = static_cast<ADSHANDLE>(ih);
                 return ok();
             }
         }
@@ -13508,7 +13710,7 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrder(ADSHANDLE hTable, UNSIGNED8* pucName) {
         for (auto& [ih, si] : mssql_indexes_map()) {
             if (si->parent == get_mssql_table(hTable) &&
                 upper_eq(si->column, name)) {
-                sql_active_index_handle()[hTable] = ih;
+                sql_active_index_handle()[hTable] = static_cast<ADSHANDLE>(ih);
                 return ok();
             }
         }
@@ -13524,19 +13726,7 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrder(ADSHANDLE hTable, UNSIGNED8* pucName) {
         // Empty tag = natural order. Park the active binding back
         // into its slot so a subsequent AdsSetIndexOrder picks the
         // current Table::order_ up cleanly.
-        auto& act = active_binding_for();
-        auto act_it = act.find(t);
-        if (act_it != act.end()) {
-            auto& m = index_bindings();
-            auto bit = m.find(act_it->second);
-            if (bit != m.end()) {
-                auto taken = t->take_order();
-                openads::drivers::IIndex* raw = taken.get();
-                bit->second.parked = std::move(taken);
-                if (raw) t->register_extra_index_view(raw);
-            }
-            act.erase(act_it);
-        }
+        park_active_order(t);
         return ok();
     }
     auto upper_eq = [](const std::string& a, const std::string& b) {
@@ -13565,19 +13755,18 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrder(ADSHANDLE hTable, UNSIGNED8* pucName) {
 UNSIGNED32 ENTRYPOINT AdsSetIndexOrderByHandle(ADSHANDLE hTable, ADSHANDLE hIndex) {
     if (auto* rt = get_remote_table(hTable)) {
         if (hIndex == 0) {
+            // "Back to natural order" via the explicit API: send the reset
+            // frame so the server drops its ordered_tables_ entry (it used
+            // to send NO frame, and table-handle Skips kept walking the
+            // old index order).
+            auto r = rt->conn->set_order_by_name(rt->id, "");
+            if (!r) return fail(r.error());
             rt->active_index_id = 0;
+            rt->server_order_id = 0;
             rt->keyno_valid     = false;
+            rt->key_count_cached = false;
             rt->row_valid       = false;
             rt->invalidate_prefetch();
-            // RCB 07/14/2026: heads-up for whoever reads this next — this
-            // branch (hIndex == 0 == "back to natural order") sends NO frame,
-            // so the server keeps the old order installed in ordered_tables_
-            // and a table-handle Skip still walks it in index order. That is a
-            // PRE-EXISTING gap, not something introduced here; it is written up
-            // as a side bug in todo.local.md. Forcing server_order_id back to
-            // unknown at least makes the next index-handle nav re-install a
-            // known order instead of trusting a stale belief.
-            rt->server_order_id = openads::network::RemoteTable::kOrderUnknown;
             return ok();
         }
         if (auto* ri = get_remote_index(hIndex)) {
@@ -13586,6 +13775,7 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrderByHandle(ADSHANDLE hTable, ADSHANDLE hInde
             rt->active_index_id = ri->id;
             rt->server_order_id = ri->id;
             rt->keyno_valid     = false;
+            rt->key_count_cached = false;
             // RCB 07/14/2026: BUG FIX — order changed, so the cached row and
             // the queued lookahead rows are in the wrong order. Drop them.
             // (Same stale-queue family as AdsSeek / AdsSetIndexOrder.)
@@ -13625,6 +13815,12 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrderByHandle(ADSHANDLE hTable, ADSHANDLE hInde
     }
     Table* t = get_table(hTable);
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
+    if (hIndex == 0) {
+        // Natural order (rddads' patched DbSetOrder(0) calls this): park
+        // the active order back into its binding slot.
+        park_active_order(t);
+        return ok();
+    }
     auto& m = index_bindings();
     auto it = m.find(hIndex);
     if (it == m.end() || it->second.table != t) {
@@ -16508,6 +16704,14 @@ UNSIGNED32 ENTRYPOINT AdsSetScope(ADSHANDLE hIndex, UNSIGNED16 usScope,
         auto r = ri->conn->set_scope(ri->id, usScope, key,
                                      usDataType);
         if (!r) return fail(r.error());
+        // The scoped key count and every keyno/rel-pos value derived
+        // from it just changed; recompute lazily on next use. Also drop
+        // read-ahead rows — they were read under the old scope.
+        if (ri->parent != nullptr) {
+            ri->parent->key_count_cached = false;
+            ri->parent->keyno_valid      = false;
+            ri->parent->invalidate_prefetch();
+        }
         return ok();
     }
     Table* t = table_for_index(hIndex);
@@ -16596,6 +16800,11 @@ UNSIGNED32 ENTRYPOINT AdsClearScope(ADSHANDLE hIndex, UNSIGNED16 usScope) {
     if (auto* ri = get_remote_index(hIndex)) {
         auto r = ri->conn->clear_scope(ri->id, usScope);
         if (!r) return fail(r.error());
+        if (ri->parent != nullptr) {
+            ri->parent->key_count_cached = false;
+            ri->parent->keyno_valid      = false;
+            ri->parent->invalidate_prefetch();
+        }
         return ok();
     }
     Table* t = table_for_index(hIndex);
@@ -16632,6 +16841,7 @@ UNSIGNED32 ENTRYPOINT AdsPackTable(ADSHANDLE hTable) {
     if (auto* rt = get_remote_table(hTable)) {
         rt->row_valid        = false;               // M12.17/19
         rt->rec_count_cached = false;
+        rt->key_count_cached = false;
         auto r = rt->conn->pack_table(rt->id);
         if (!r) return fail(r.error());
         return ok();
@@ -16656,6 +16866,7 @@ UNSIGNED32 ENTRYPOINT AdsZapTable(ADSHANDLE hTable) {
     if (auto* rt = get_remote_table(hTable)) {
         rt->row_valid        = false;               // M12.17/19
         rt->rec_count_cached = false;
+        rt->key_count_cached = false;
         auto r = rt->conn->zap_table(rt->id);
         if (!r) return fail(r.error());
         return ok();
@@ -18140,7 +18351,7 @@ UNSIGNED32 ENTRYPOINT AdsFindFirstTable(ADSHANDLE   hConnect,
 
     auto [find_ptr, name] = std::move(r).value();
     Handle gh = s.registry.register_object(HandleKind::Find, find_ptr);
-    *phFind = gh;
+    *phFind = to_ads_handle(gh);
     return emit_name(pucFileName, pusFileNameLen, name);
 }
 
@@ -18199,7 +18410,7 @@ UNSIGNED32 ENTRYPOINT AdsDDCreate(UNSIGNED8* pucDictionary, UNSIGNED16 /*bEncryp
     std::lock_guard<std::recursive_mutex> lk(s.mu);
     Handle h = s.registry.register_object(HandleKind::Connection, raw);
     s.conns.emplace(h, std::move(holder));
-    *phConnect = h;
+    *phConnect = to_ads_handle(h);
     return ok();
 }
 
@@ -19017,10 +19228,44 @@ build_system_table(Connection* c, std::string sys_name,
         return build(cols, rows);
     }
     if (sys_name == "users") {
-        const std::vector<Col> cols = {{"USER_NAME", 'C', 200, 0}};
+        // SAP system.users column set + order (2026-07-29). Task #4 converted
+        // five catalogs to SAP's exact names but missed this one, so a client
+        // filtering `WHERE Name = ...` got "Column not found" from OpenADS.
+        // Logins_Disabled and Require_Old_Password are per-user in SAP but
+        // OpenADS only tracks logins-disabled at the DATABASE level
+        // (ADS_DD_LOGINS_DISABLED / prop_16), so they render as SAP's defaults
+        // rather than being invented per user.
+        const std::vector<Col> cols = {
+            {"Name",                 'C', 200, 0},
+            {"Enable_Internet",      'L',   1, 0},
+            {"Logins_Disabled",      'L',   1, 0},
+            {"Comment",              'C', 200, 0},
+            {"User_Defined_Prop",    'C', 4096, 0},
+            {"Require_Old_Password", 'L',   1, 0},
+        };
+        // DD boolean props arrive in several encodings depending on who wrote
+        // them (SAP export, sp_ModifyUserProperty, a raw 2-byte UNSIGNED16).
+        auto prop_is_true = [](const std::string& v) {
+            if (v.empty()) return false;
+            if (v.size() == 2 && v[1] == '\0')            // raw UNSIGNED16
+                return v[0] != '\0';
+            const char c = static_cast<char>(
+                std::toupper(static_cast<unsigned char>(v[0])));
+            return c == 'T' || c == 'Y' || c == '1';
+        };
         std::vector<std::vector<std::string>> rows;
-        for (const auto& u : dd->users())
-            rows.push_back({u});
+        // users_ holds folded lookup keys; show the declared spelling.
+        for (const auto& u : dd->users()) {
+            const auto internet = dd->get_user_property(u, "prop_1104");
+            rows.push_back({
+                dd->display_user(u),
+                prop_is_true(internet) ? "T" : "F",
+                "F",                                   // not tracked per user
+                dd->get_user_property(u, "prop_1"),    // COMMENT
+                dd->get_user_property(u, "prop_3"),    // ADS_DD_USER_DEFINED_PROP
+                "T",                                   // SAP default
+            });
+        }
         return build(cols, rows);
     }
     if (sys_name == "groups") {
@@ -19034,7 +19279,14 @@ build_system_table(Connection* c, std::string sys_name,
         // Lists all defined groups (SAP: system.usergroups = group catalogue).
         // Include both explicit group records AND groups referenced in memberships,
         // so text-format DDs that only have MEMBER entries still list their groups.
-        const std::vector<Col> cols = {{"GROUP_NAME", 'C', 200, 0}};
+        // SAP system.usergroups column set + order (2026-07-29): Name, Comment,
+        // User_Defined_Prop. Group props share the user_props_ map (see
+        // sp_ModifyGroupProperty), so prop_1 / prop_3 apply here too.
+        const std::vector<Col> cols = {
+            {"Name",              'C', 200, 0},
+            {"Comment",           'C', 200, 0},
+            {"User_Defined_Prop", 'C', 4096, 0},
+        };
         std::unordered_set<std::string> seen;
         std::vector<std::vector<std::string>> rows;
         auto add_group_row = [&](const std::string& g) {
@@ -19042,7 +19294,10 @@ build_system_table(Connection* c, std::string sys_name,
                 openads::engine::DataDict::ci_name(g) !=
                     openads::engine::DataDict::ci_name(*filter->group_name))
                 return;
-            if (seen.insert(g).second) rows.push_back({g});
+            if (seen.insert(g).second)
+                rows.push_back({g,
+                                dd->get_user_property(g, "prop_1"),
+                                dd->get_user_property(g, "prop_3")});
         };
         for (const auto& g : dd->groups())
             add_group_row(g);
@@ -19053,9 +19308,13 @@ build_system_table(Connection* c, std::string sys_name,
     }
     if (sys_name == "usergroupmembers") {
         // Lists which users belong to which group.
+        // SAP column set + order (2026-07-29) is User_Name THEN Group_Name —
+        // the reverse of the GROUP_NAME/USER_NAME pair OpenADS used to emit, so
+        // positional readers saw the two values swapped as well as misnamed.
+        // User_Name carries the declared spelling, matching system.users.Name.
         const std::vector<Col> cols = {
-            {"GROUP_NAME", 'C', 200, 0},
-            {"USER_NAME",  'C', 200, 0},
+            {"User_Name",  'C', 200, 0},
+            {"Group_Name", 'C', 200, 0},
         };
         std::vector<std::vector<std::string>> rows;
         if (filter && filter->group_name) {
@@ -19063,14 +19322,14 @@ build_system_table(Connection* c, std::string sys_name,
                 if (!filter->user_name ||
                     openads::engine::DataDict::ci_name(user) ==
                         openads::engine::DataDict::ci_name(*filter->user_name))
-                    rows.push_back({*filter->group_name, user});
+                    rows.push_back({dd->display_user(user), *filter->group_name});
         } else if (filter && filter->user_name) {
             for (const auto& grp : dd->groups_of(*filter->user_name))
-                rows.push_back({grp, openads::engine::DataDict::ci_name(*filter->user_name)});
+                rows.push_back({dd->display_user(*filter->user_name), grp});
         } else {
             for (const auto& kv : dd->memberships())
                 for (const auto& grp : kv.second)
-                    rows.push_back({grp, kv.first});   // group, user
+                    rows.push_back({dd->display_user(kv.first), grp});
         }
         return build(cols, rows);
     }
@@ -19301,7 +19560,9 @@ build_system_table(Connection* c, std::string sys_name,
             if (gseen.insert(openads::engine::DataDict::ci_name(n)).second)
                 grantees.push_back({n, grp});
         };
-        for (const auto& u : dd->users())  add_grantee(u, false);
+        // SAP reports Grantee with the declared spelling ("RCB", "AutoTasks").
+        // add_grantee() already dedupes/filters case-insensitively.
+        for (const auto& u : dd->users())  add_grantee(dd->display_user(u), false);
         for (const auto& g : dd->groups()) add_grantee(g, true);
         add_grantee("SERVER:Admin",   true);
         add_grantee("SERVER:Monitor", true);
@@ -19342,7 +19603,7 @@ build_system_table(Connection* c, std::string sys_name,
         for (const auto& kv : dd->views()) add_obj(kv.first, "", 6);
         add_obj("VIEW", "", 6);                         // t6 category root
         for (const auto& u : dd->users())
-            if (!is_adssys(u)) add_obj(u, "", 8);
+            if (!is_adssys(u)) add_obj(dd->display_user(u), "", 8);
         add_obj("USER", "", 8);                         // t8 category root
         for (const auto& g : dd->groups()) add_obj(g, "", 9);
         add_obj("SERVER:Admin",   "", 9);
@@ -20126,7 +20387,7 @@ extern "C++" bool dispatch_sp_builtin(
         ADSHANDLE conn_h = 0;
         s.registry.for_each_handle([&](Handle h, HandleKind k, void* p) {
             if (k != HandleKind::Connection) return;
-            if (static_cast<Connection*>(p) == c) conn_h = h;
+            if (static_cast<Connection*>(p) == c) conn_h = to_ads_handle(h);
         });
         if (conn_h == 0) {
             *prc = fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
@@ -22293,11 +22554,18 @@ struct ProcBridge final : openads::script::SqlBridge {
 };
 
 // SQL column type for a declared output parameter (temp __output table).
+//
+// The __output temp is an ADT (see run_dd_procedure below), so DBF's limits do
+// not apply here. The old 254 cap was DBF's character-field maximum and it
+// silently shortened any wider declared output — SAP procs routinely declare
+// CICHAR(255) and wider. ADT carries the length in a uint16 field descriptor;
+// an over-long *record* is rejected by AdsCreateTable ("ADT record too long")
+// rather than silently truncated, which is the behaviour we want.
 inline std::string sql_type_of(const openads::script::Param& p) {
     switch (p.type) {
         case Type::Char: {
             std::size_t n = p.char_limit ? p.char_limit : 254;
-            if (n > 254) n = 254;
+            if (n > 0xFFFFu) n = 0xFFFFu;
             return "CHAR(" + std::to_string(n) + ")";
         }
         case Type::Integer:   return "INTEGER";
@@ -22337,7 +22605,36 @@ inline openads::util::Result<std::string> run_dd_procedure(
             ddl += "[" + p.name + "] " + sql_type_of(p);
         }
         ddl += ") AS FREE TABLE";
+
+        // >>> The __output temp MUST be ADT. Read
+        // >>> docs/materialised-cursor-temps.md before changing this.
+        //
+        // A DBF field descriptor allots the column name 11 bytes, so a DBF
+        // temp truncates every declared output column to 10 characters:
+        // sp_GetPhysicalPath's `databasepath` came back as `databasepa`. That
+        // is not cosmetic — the procedure may be reading ADT tables or
+        // declaring outputs that mirror SAP catalog columns, whose names run
+        // well past 10 (Trig_Function_Name is 18), and a caller that then
+        // references the column by name simply cannot find it. Capping every
+        // stored-procedure result column at 10 chars limits the SQL engine for
+        // no reason: ADT carries full-length names and costs nothing here.
+        //
+        // Plain CREATE TABLE takes its format from the statement's table type
+        // and defaults to CDX (i.e. DBF), so pin ADT across this one DDL and
+        // restore the caller's setting afterwards — the procedure body may run
+        // its own CREATE TABLE and must not inherit our choice.
+        //
+        // This mirrors the fix already made to the SELECT static-cursor path
+        // (the `_srt_` temp in exec_sql_direct_impl). Both had the same root
+        // cause; fixing only one leaves the other silently truncating.
+        UNSIGNED16 saved_tt = 0;
+        SqlStatement* st_out = stmt_lookup(hStmt);
+        if (st_out != nullptr) {
+            saved_tt = st_out->table_type;
+            st_out->table_type = ADS_ADT;
+        }
         auto cr = bridge.inner.exec(ddl);
+        if (st_out != nullptr) st_out->table_type = saved_tt;
         if (!cr) return cr.error();
         bridge.out_table = nb;
     }
@@ -22875,7 +23172,7 @@ inline openads::util::Result<void> run_top_level_script(
             "script result post-open", ""};
     auto& s = state();
     std::lock_guard<std::recursive_mutex> lk(s.mu);
-    *phCursor = s.registry.register_object(HandleKind::Table, tbl);
+    *phCursor = to_ads_handle(s.registry.register_object(HandleKind::Table, tbl));
     return {};
 }
 
@@ -23396,7 +23693,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         Handle h = s.registry.register_object(
             HandleKind::RemoteTable, rt.get());
         remote_sql_cursors_map()[h] = std::move(rt);
-        *phCursor = h;
+        *phCursor = to_ads_handle(h);
         return ok();
     }
 #if defined(OPENADS_WITH_SQLITE)
@@ -23446,7 +23743,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         openads::sql_backend::SqliteTable* raw = cursor.get();
         Handle h = s.registry.register_object(HandleKind::SqliteTable, raw);
         sqlite_tables_map().emplace(h, std::move(cursor));
-        *phCursor = h;
+        *phCursor = to_ads_handle(h);
         return ok();
     }
 #endif
@@ -23499,7 +23796,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         Handle h = s.registry.register_object(
             HandleKind::MssqlTable, st.get());
         mssql_tables_map().emplace(h, std::move(st));
-        *phCursor = h;
+        *phCursor = to_ads_handle(h);
         return ok();
     }
 #endif
@@ -23557,7 +23854,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         Handle h = s.registry.register_object(
             HandleKind::PostgresTable, cursor.get());
         postgres_tables_map().emplace(h, std::move(cursor));
-        *phCursor = h;
+        *phCursor = to_ads_handle(h);
         return ok();
     }
 #endif
@@ -23615,7 +23912,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         Handle h = s.registry.register_object(
             HandleKind::MariaTable, cursor.get());
         maria_tables_map().emplace(h, std::move(cursor));
-        *phCursor = h;
+        *phCursor = to_ads_handle(h);
         return ok();
     }
 #endif
@@ -23723,7 +24020,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         Handle h = s.registry.register_object(
             HandleKind::FirebirdTable, cursor.get());
         firebird_tables_map().emplace(h, std::move(cursor));
-        *phCursor = h;
+        *phCursor = to_ads_handle(h);
         return ok();
     }
 #endif
@@ -24231,7 +24528,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         ADSHANDLE conn_h = 0;
         s.registry.for_each_handle([&](Handle h, HandleKind k, void* p) {
             if (k != HandleKind::Connection) return;
-            if (static_cast<Connection*>(p) == c) conn_h = h;
+            if (static_cast<Connection*>(p) == c) conn_h = to_ads_handle(h);
         });
         if (conn_h == 0) return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
         std::vector<UNSIGNED8> name_buf(at.value().table.size() + 1, 0);
@@ -24365,7 +24662,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             ADSHANDLE conn_h = 0;
             s.registry.for_each_handle([&](Handle h, HandleKind k, void* p) {
                 if (k != HandleKind::Connection) return;
-                if (static_cast<Connection*>(p) == c) conn_h = h;
+                if (static_cast<Connection*>(p) == c) conn_h = to_ads_handle(h);
             });
             if (conn_h == 0) {
                 AdsCloseTable(srcCur);
@@ -24474,7 +24771,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         ADSHANDLE conn_h = 0;
         s.registry.for_each_handle([&](Handle h, HandleKind k, void* p) {
             if (k != HandleKind::Connection) return;
-            if (static_cast<Connection*>(p) == c) conn_h = h;
+            if (static_cast<Connection*>(p) == c) conn_h = to_ads_handle(h);
         });
         if (conn_h == 0) return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
         UNSIGNED32 rc = AdsCreateTable(conn_h, name_buf.data(), nullptr,
@@ -24496,7 +24793,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         ADSHANDLE conn_h = 0;
         s.registry.for_each_handle([&](Handle h, HandleKind k, void* p) {
             if (k != HandleKind::Connection) return;
-            if (static_cast<Connection*>(p) == c) conn_h = h;
+            if (static_cast<Connection*>(p) == c) conn_h = to_ads_handle(h);
         });
         if (conn_h == 0) return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
 
@@ -24687,8 +24984,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 if (!th) return fail(th.error());
                 openads::engine::Table* tbl = c->lookup_table(th.value());
                 if (!tbl) return fail(openads::AE_INTERNAL_ERROR, "sp adopt");
-                ADSHANDLE gh = s.registry.register_object(
-                    HandleKind::Table, tbl);
+                ADSHANDLE gh = to_ads_handle(s.registry.register_object(
+                    HandleKind::Table, tbl));
                 *phCursor = gh;
                 return ok();
             }
@@ -24786,7 +25083,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         if (!th) return fail(th.error());
         openads::engine::Table* tbl = c->lookup_table(th.value());
         if (!tbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
-        ADSHANDLE gh = s.registry.register_object(HandleKind::Table, tbl);
+        ADSHANDLE gh = to_ads_handle(s.registry.register_object(HandleKind::Table, tbl));
         *phCursor = gh;
         return ok();
     }
@@ -25345,6 +25642,14 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         if (!wr) return fail(wr.error());
                     }
                     if (upd_hConn) {
+                        // AFTER runs once the write has landed: settle the
+                        // coalesced dirty record so a failing trigger still
+                        // leaves the updated row on disk (write persists).
+                        if (auto cd = tbl->commit_dirty_record(); !cd) {
+                            tbl->clear_filter();
+                            c->close_table(th.value());
+                            return fail(cd.error());
+                        }
                         fire_triggers_(upd_hConn, c, upd_alias, 2u,
                                        4u /*AFTER*/, tbl, nullptr,
                                        &upd_terr, &new_img, &old_img);
@@ -26196,7 +26501,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             if (!uth) return fail(uth.error());
             openads::engine::Table* utbl = c->lookup_table(uth.value());
             if (!utbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
-            ADSHANDLE gh = s.registry.register_object(HandleKind::Table, utbl);
+            ADSHANDLE gh = to_ads_handle(s.registry.register_object(HandleKind::Table, utbl));
             *phCursor = gh;
             return ok();
         }
@@ -27096,7 +27401,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         if (!cth) return fail(cth.error());
         openads::engine::Table* ctbl = c->lookup_table(cth.value());
         if (!ctbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
-        ADSHANDLE gh = s.registry.register_object(HandleKind::Table, ctbl);
+        ADSHANDLE gh = to_ads_handle(s.registry.register_object(HandleKind::Table, ctbl));
         *phCursor = gh;
         return ok();
     }
@@ -27971,7 +28276,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             if (!gth) return fail(gth.error());
             openads::engine::Table* gtbl = c->lookup_table(gth.value());
             if (!gtbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
-            ADSHANDLE gh = s.registry.register_object(HandleKind::Table, gtbl);
+            ADSHANDLE gh = to_ads_handle(s.registry.register_object(HandleKind::Table, gtbl));
             *phCursor = gh;
             return ok();
         }
@@ -28128,12 +28433,12 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             if (!ath) return fail(ath.error());
             openads::engine::Table* atbl = c->lookup_table(ath.value());
             if (!atbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
-            ADSHANDLE gh = s.registry.register_object(HandleKind::Table, atbl);
+            ADSHANDLE gh = to_ads_handle(s.registry.register_object(HandleKind::Table, atbl));
             *phCursor = gh;
             return ok();
         }
 
-        ADSHANDLE gh = s.registry.register_object(HandleKind::Table, ctbl);
+        ADSHANDLE gh = to_ads_handle(s.registry.register_object(HandleKind::Table, ctbl));
         // Apply the SELECT projection to the joined cursor (previously
         // ignored — a join always exposed every merged column). Left
         // columns resolve by name; a right-table column that collides
@@ -28771,7 +29076,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             if (!gth) return fail(gth.error());
             openads::engine::Table* gtbl = c->lookup_table(gth.value());
             if (!gtbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
-            ADSHANDLE gh = s.registry.register_object(HandleKind::Table, gtbl);
+            ADSHANDLE gh = to_ads_handle(s.registry.register_object(HandleKind::Table, gtbl));
             *phCursor = gh;
             return ok();
         }
@@ -29077,7 +29382,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         if (!cth) return fail(cth.error());
         openads::engine::Table* ctbl = c->lookup_table(cth.value());
         if (!ctbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
-        ADSHANDLE gh = s.registry.register_object(HandleKind::Table, ctbl);
+        ADSHANDLE gh = to_ads_handle(s.registry.register_object(HandleKind::Table, ctbl));
         *phCursor = gh;
         return ok();
     }
@@ -31034,7 +31339,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         if (!cth) return fail(cth.error());
         openads::engine::Table* ctbl = c->lookup_table(cth.value());
         if (!ctbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
-        ADSHANDLE gh_case = s.registry.register_object(HandleKind::Table, ctbl);
+        ADSHANDLE gh_case = to_ads_handle(s.registry.register_object(HandleKind::Table, ctbl));
         *phCursor = gh_case;
         return ok();
     }
@@ -31078,7 +31383,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         ADSHANDLE conn_h = 0;
         s.registry.for_each_handle([&](Handle h, HandleKind k, void* p) {
             if (k != HandleKind::Connection) return;
-            if (static_cast<Connection*>(p) == c) conn_h = h;
+            if (static_cast<Connection*>(p) == c) conn_h = to_ads_handle(h);
         });
         if (conn_h != 0) {
             std::vector<std::uint16_t> cols;
@@ -31115,11 +31420,18 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             if (col_err) return fail(openads::AE_COLUMN_NOT_FOUND, "");
             if (col_denied) return fail(openads::AE_ACCESS_DENIED,
                                         "no column permission");
-            auto type_name = [](char raw) -> const char* {
+            // `dec` decides how a numeric is spelled for the ADT temp below.
+            // "Numeric" with decimals becomes an ADT DOUBLE, which cannot carry
+            // a decimal count on disk, so N(12,2) would come back "10.5" instead
+            // of "10.50" and undo issue #146. "AsciiNumeric" pins ADT type 2
+            // (digits stored as text), which keeps the declared scale.
+            auto type_name = [](char raw, std::uint8_t dec) -> const char* {
                 switch (raw) {
-                    case 'C': return "Character";  case 'N': return "Numeric";
+                    case 'C': return "Character";
+                    case 'N': return dec > 0 ? "AsciiNumeric" : "Numeric";
                     case 'D': return "Date";       case 'L': return "Logical";
-                    case 'M': return "Memo";       case 'F': return "Float";
+                    case 'M': return "Memo";
+                    case 'F': return dec > 0 ? "AsciiNumeric" : "Numeric";
                     case 'I': return "Integer";    case 'Y': return "Currency";
                     case 'B': return "Double";     case 'V': return "Varchar";
                     case 'Q': return "Varbinary";
@@ -31132,7 +31444,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 if (!defs.empty()) defs.push_back(';');
                 defs += fd.name;
                 defs.push_back(',');
-                defs += type_name(static_cast<char>(fd.raw_type));
+                defs += type_name(static_cast<char>(fd.raw_type), fd.decimals);
                 if (fd.length   > 0) { defs.push_back(','); defs += std::to_string(fd.length); }
                 if (fd.decimals > 0) { defs.push_back(','); defs += std::to_string(fd.decimals); }
             }
@@ -31146,8 +31458,32 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             std::vector<UNSIGNED8> def_buf(defs.size() + 1, 0);
             std::memcpy(def_buf.data(), defs.data(), defs.size());
             ADSHANDLE hNew = 0;
+            // >>> Before changing this format, read
+            // >>> docs/materialised-cursor-temps.md. Three constraints pin it
+            // >>> and two of them are invisible until a specific customer
+            // >>> scenario breaks; both have already been regressed once.
+            //
+            // ADS_ADT, not ADS_CDX — the temp must preserve full column names.
+            //
+            // A DBF field descriptor allots 11 bytes to the name, so a DBF temp
+            // silently truncates every column to 10 characters. That is not
+            // cosmetic: SAP's own catalog names are routinely longer
+            // (RI_Primary_Table 16, Enable_Internet 15, User_Defined_Prop 17,
+            // Trig_Function_Name 18), so a DBF temp turned
+            //     SELECT Name, RI_Primary_Table FROM system.relations ORDER BY Name
+            // into a result whose second column was called RI_Primary — undoing
+            // the SAP column-name parity work and breaking any client that then
+            // referenced the column by name. User tables with long columns were
+            // mangled the same way. ADT carries full-length names.
+            //
+            // ADT also keeps what #146 came here for: this is still a standalone
+            // temp with its own recnos and its own index space, so an
+            // application running INDEX ON / DBSETORDER over the result cannot
+            // touch the source table's production index. Only the on-disk
+            // format changed (index companion is .adi rather than .cdx), which
+            // is transparent through the cursor handle.
             UNSIGNED32 crc = AdsCreateTable(conn_h, name_buf.data(), nullptr,
-                                            ADS_CDX, 0, 0, 0, 0,
+                                            ADS_ADT, 0, 0, 0, 0,
                                             def_buf.data(), &hNew);
             if (crc == openads::AE_SUCCESS) {
                 openads::engine::Table* tgt =
@@ -31160,10 +31496,40 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         if (auto ar = tgt->append_record(); !ar) break;
                         for (std::size_t i = 0; i < cols.size(); ++i) {
                             auto v = tbl->read_field(cols[i]);
-                            std::string sv =
-                                v ? v.value().as_string : std::string();
-                            (void)tgt->set_field(
-                                static_cast<std::uint16_t>(i), sv);
+                            if (!v) continue;
+                            const auto ti = static_cast<std::uint16_t>(i);
+                            // Copy through the setter that matches how the
+                            // TARGET field is stored, not always the string one.
+                            //
+                            // Numeric/Float are ASCII in both DBF and ADT (see
+                            // decode_field), so as_string carries the declared
+                            // scale exactly — "10.50" stays "10.50". Writing a
+                            // double there would re-render it as "10.5" and lose
+                            // the N(12,2) formatting that #146 exists to protect.
+                            //
+                            // The genuinely BINARY numerics below are the ones a
+                            // string write corrupts: on ADT they are raw little
+                            // endian values, so pushing text into them made
+                            // "10.50" read back as ~6e-154. That never showed on
+                            // the old DBF temp because DBF stores numerics as
+                            // ASCII, so the string write round-tripped by
+                            // accident.
+                            switch (tgt->field_descriptor(ti).type) {
+                                case openads::drivers::DbfFieldType::Integer:
+                                case openads::drivers::DbfFieldType::Double:
+                                case openads::drivers::DbfFieldType::Currency:
+                                case openads::drivers::DbfFieldType::ShortInt:
+                                case openads::drivers::DbfFieldType::AutoInc:
+                                case openads::drivers::DbfFieldType::AdtMoney:
+                                    (void)tgt->set_field(ti, v.value().as_double);
+                                    break;
+                                case openads::drivers::DbfFieldType::Logical:
+                                    (void)tgt->set_field(ti, v.value().as_bool);
+                                    break;
+                                default:
+                                    (void)tgt->set_field(ti, v.value().as_string);
+                                    break;
+                            }
                         }
                     }
                     (void)tgt->flush();
@@ -31172,15 +31538,16 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 // Drop the live source cursor so the ERP's INDEX ON / close
                 // never touches the production table or its official .cdx.
                 if (table_handle != 0) c->close_table(table_handle);
+                // Must match the type the temp was CREATED as (ADT, above).
                 auto cth = c->open_table(tmp_name,
-                                         openads::engine::TableType::Cdx,
+                                         openads::engine::TableType::Adt,
                                          openads::engine::OpenMode::Shared);
                 if (!cth) return fail(cth.error());
                 openads::engine::Table* ctbl = c->lookup_table(cth.value());
                 if (!ctbl) return fail(openads::AE_INTERNAL_ERROR,
                                        "sorted temp post-open");
                 ADSHANDLE gh_srt =
-                    s.registry.register_object(HandleKind::Table, ctbl);
+                    to_ads_handle(s.registry.register_object(HandleKind::Table, ctbl));
                 // Tie the temp table's lifetime to the cursor handle: without
                 // this, every SELECT ... ORDER BY leaves a _srt_*.dbf (and any
                 // index the caller built on it) behind in the data directory.
@@ -31198,7 +31565,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
     // cursor isn't a stale alias of an already-registered Table*.
     ADSHANDLE gh = (derived_cur != 0)
         ? derived_cur
-        : s.registry.register_object(HandleKind::Table, tbl);
+        : to_ads_handle(s.registry.register_object(HandleKind::Table, tbl));
 
     if (!parsed.value().projection.empty()) {
         std::vector<std::uint16_t> proj;
@@ -31743,6 +32110,20 @@ UNSIGNED32 ENTRYPOINT AdsGetIndexFilename(ADSHANDLE hIndex, UNSIGNED16 /*usOrder
 UNSIGNED32 ENTRYPOINT AdsGetIndexOrderByHandle(ADSHANDLE hIndex, UNSIGNED16* p) {
     if (p == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
     *p = 0;
+    // Remote index handle (RemoteIndex): the ordinal is the tag's 1-based
+    // position among the orders opened on the parent table. Match by tag
+    // name, not handle identity, so the answer is stable when the same bag
+    // is opened twice (production auto-open + explicit dbSetIndex).
+    if (auto* ri = get_remote_index(hIndex)) {
+        if (ri->parent == nullptr) return ok();
+        for (std::size_t i = 0; i < ri->parent->index_by_tag.size(); ++i) {
+            if (ri->parent->index_by_tag[i].first == ri->tag_name) {
+                *p = static_cast<UNSIGNED16>(i + 1);
+                break;
+            }
+        }
+        return ok();
+    }
     auto& m = index_bindings();
     Table* t = nullptr;
     std::string tag;
@@ -32224,7 +32605,7 @@ UNSIGNED32 ENTRYPOINT AdsGetTableConnection(ADSHANDLE hTable, ADSHANDLE* p) {
         s.registry.for_each_handle([&](Handle h, HandleKind k, void* ptr) {
             if (k == HandleKind::RemoteConnection &&
                 ptr == static_cast<void*>(rt->conn)) {
-                *p = h;
+                *p = to_ads_handle(h);
             }
         });
         return ok();
@@ -32238,7 +32619,7 @@ UNSIGNED32 ENTRYPOINT AdsGetTableConnection(ADSHANDLE hTable, ADSHANDLE* p) {
     s.registry.for_each_handle([&](Handle h, HandleKind k, void* ptr) {
         if (k == HandleKind::Connection &&
             ptr == static_cast<void*>(c)) {
-            *p = h;
+            *p = to_ads_handle(h);
         }
     });
     return ok();
@@ -32667,6 +33048,10 @@ UNSIGNED32 ENTRYPOINT AdsShowDeleted(UNSIGNED16 us) {
             if (rt == nullptr) return;
             rt->row_valid = false;
             rt->invalidate_prefetch();
+            // Which keys are visible just changed, so the scoped key
+            // count and any cached keyno are stale too.
+            rt->key_count_cached = false;
+            rt->keyno_valid      = false;
         });
     }
     // Release s.mu before the wire round-trips — the in-process test
@@ -33550,6 +33935,10 @@ UNSIGNED32 ENTRYPOINT AdsGetKeyCount(ADSHANDLE hIndex, UNSIGNED16 /*usFilter*/,
     }
     Table* t = get_table(hIndex);
     if (t == nullptr) return ok();
+    // Settle any coalesced dirty record first: its index keys are only
+    // inserted on writeback, so a pending edit would be missing from the
+    // count.
+    if (auto cr = t->commit_dirty_record(); !cr) return fail(cr.error());
     // With an active order, the KEY count can be far fewer than the table's
     // record_count() (a conditional/FOR index indexes only matching rows).
     // Returning record_count() here made it inconsistent with OrdKeyNo /
@@ -33721,7 +34110,7 @@ UNSIGNED32 ENTRYPOINT AdsGetAllTables(ADSHANDLE hConnect, ADSHANDLE* ahTable,
     std::vector<ADSHANDLE> found;
     s.registry.for_each_handle([&](Handle h, HandleKind k, void* p) {
         if (k != HandleKind::Table) return;
-        if (conn->owns_table_ptr(static_cast<Table*>(p))) found.push_back(h);
+        if (conn->owns_table_ptr(static_cast<Table*>(p))) found.push_back(to_ads_handle(h));
     });
     UNSIGNED16 cap   = *pusArrayLen;
     auto       total = static_cast<UNSIGNED16>(found.size());
@@ -33823,7 +34212,7 @@ UNSIGNED32 ENTRYPOINT AdsCloneTable(ADSHANDLE hTable, ADSHANDLE* phClone) {
     Table* clone = owning->lookup_table(th.value());
     if (!clone) return fail(openads::AE_INTERNAL_ERROR,
                             "AdsCloneTable: post-open");
-    *phClone = s.registry.register_object(HandleKind::Table, clone);
+    *phClone = to_ads_handle(s.registry.register_object(HandleKind::Table, clone));
     return ok();
 }
 
@@ -34028,7 +34417,7 @@ UNSIGNED32 ENTRYPOINT AdsGetDate(ADSHANDLE hObj, UNSIGNED8* pId, UNSIGNED8* pucB
     // AdsGetField only checks get_remote_table(); resolve index -> parent.
     ADSHANDLE real_hObj = hObj;
     if (auto* ri = get_remote_index(hObj)) {
-        if (ri->parent) real_hObj = handle_for_remote_table(ri->parent);
+        if (ri->parent) real_hObj = to_ads_handle(handle_for_remote_table(ri->parent));
     }
     UNSIGNED32 rc = AdsGetField(real_hObj,
                                 as_field(resolve_field_id(real_hObj, pId, nm, sizeof(nm))),
