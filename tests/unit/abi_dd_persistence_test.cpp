@@ -127,7 +127,7 @@ TEST_CASE("system.* materialization uses memory table instead of temp ADT") {
     ADSHANDLE hStmt = 0;
     REQUIRE(AdsCreateSQLStatement(hConn, &hStmt) == 0);
 
-    UNSIGNED8 sql[] = "SELECT USER_NAME FROM system.users";
+    UNSIGNED8 sql[] = "SELECT Name FROM system.users";
     ADSHANDLE hCur = 0;
     REQUIRE(AdsExecuteSQLDirect(hStmt, sql, &hCur) == 0);
     REQUIRE(hCur != 0);
@@ -201,6 +201,64 @@ TEST_CASE("M10.1 DD remove-user clears membership + props") {
         auto& dd = dd2.value();
         CHECK(!dd.has_user("alice"));
         CHECK(dd.memberships().count("alice") == 0);
+    }
+
+    fs::remove_all(dir, ec);
+}
+
+// ---------------------------------------------------------------------------
+// User names are case-INSENSITIVE for lookup but case-PRESERVING for display.
+// SAP's system.users.Name / system.permissions.Grantee report the declared
+// spelling ("RCB", "AutoTasks"); OpenADS used to fold to lowercase on load and
+// then write the folded form back out in save(), so the original casing was
+// destroyed permanently and `WHERE Grantee = 'RCB'` matched nothing.
+// ---------------------------------------------------------------------------
+TEST_CASE("DD user names preserve declared case across save/reload") {
+    auto dir = fs::temp_directory_path() / "openads_dd_user_case";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    auto add_path = stage_dd(dir);
+
+    {
+        auto opened = openads::engine::DataDict::open(add_path.string());
+        REQUIRE(opened.has_value());
+        auto& dd = opened.value();
+        REQUIRE(dd.create_user("RCB").has_value());
+        REQUIRE(dd.create_user("AutoTasks").has_value());
+        REQUIRE(dd.create_user("lower").has_value());
+
+        CHECK(dd.display_user("RCB")       == "RCB");
+        CHECK(dd.display_user("AutoTasks") == "AutoTasks");
+        CHECK(dd.display_user("lower")     == "lower");
+        // display_user() is itself case-insensitive on the way in.
+        CHECK(dd.display_user("rcb")       == "RCB");
+        CHECK(dd.display_user("AUTOTASKS") == "AutoTasks");
+        // Unknown users fall back to the folded name rather than throwing.
+        CHECK(dd.display_user("Nobody")    == "nobody");
+    }
+
+    // Reopen: the declared spelling must survive save() + load, which is the
+    // step that used to bake the lowercasing into the file.
+    {
+        auto reopened = openads::engine::DataDict::open(add_path.string());
+        REQUIRE(reopened.has_value());
+        auto& dd = reopened.value();
+
+        CHECK(dd.display_user("RCB")       == "RCB");
+        CHECK(dd.display_user("AutoTasks") == "AutoTasks");
+        CHECK(dd.display_user("lower")     == "lower");
+
+        // Lookup stays case-insensitive — the whole point of folding.
+        CHECK(dd.has_user("RCB"));
+        CHECK(dd.has_user("rcb"));
+        CHECK(dd.has_user("rCb"));
+        CHECK(dd.has_user("AUTOTASKS"));
+        CHECK(!dd.has_user("nosuchuser"));
+
+        // users() still yields folded keys, so existing callers that use it as
+        // a lookup key set are unaffected.
+        CHECK(dd.users().count("rcb") == 1);
+        CHECK(dd.users().count("autotasks") == 1);
     }
 
     fs::remove_all(dir, ec);

@@ -152,7 +152,7 @@ jobs:
           Copy-Item "$build/tools/bench/Release/openads_bench.exe"     "$stage/"
           Copy-Item LICENSE,NOTICE,README.md                $stage/
           if ("${{ matrix.arch }}" -eq "x86") {
-              Copy-Item src/openads_ace_x86.def               "$stage/"
+              Copy-Item src/openads_ace_x86_stdcall.def      "$stage/"
           } else {
               Copy-Item src/openads_ace.def                   "$stage/"
           }

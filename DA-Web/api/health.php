@@ -323,12 +323,14 @@ try {
     }
     api_perf_mark($perf, 'objects');
 
-    foreach (health_rows($conn, 'SELECT USER_NAME FROM system.users') as $row) {
-        $name = health_value($row, ['USER_NAME']);
+    // Name is SAP's column on both catalogs; USER_NAME / GROUP_NAME are the old
+    // OpenADS-only spellings, kept as read fallbacks for older engine builds.
+    foreach (health_rows($conn, 'SELECT Name FROM system.users') as $row) {
+        $name = health_value($row, ['Name', 'USER_NAME']);
         if ($name !== '') $users[health_ci($name)][] = $name;
     }
-    foreach (health_rows($conn, 'SELECT GROUP_NAME FROM system.usergroups') as $row) {
-        $name = health_value($row, ['GROUP_NAME']);
+    foreach (health_rows($conn, 'SELECT Name FROM system.usergroups') as $row) {
+        $name = health_value($row, ['Name', 'GROUP_NAME']);
         if ($name !== '') $groups[health_ci($name)][] = $name;
     }
     foreach (['DB:Admin', 'DB:Backup', 'DB:Debug', 'DB:Public'] as $builtin) {

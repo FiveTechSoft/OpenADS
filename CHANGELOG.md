@@ -1,3 +1,338 @@
+## 1.8.49 - 2026-08-01
+
+The pre-existing unit failures are gone: the suite is green again
+(1267/1267, 0 failed) for the first time since the 30 Jul batch.
+Everything since **v1.8.48**.
+
+### Fixed - write coalescing broke rollback, CDX maintenance, and AFTER triggers (35c3bd62)
+
+v1.8.43's dirty-record write coalescing deferred writeback + before-image
+capture + index sync to commit time, but several state-boundary operations
+were never taught to settle the pending dirty record first:
+
+- **Rollback / savepoints lost data** (silent corruption): the tx journal's
+  undo image is captured at writeback, so a rollback arriving while the edit
+  was still buffer-only found nothing to restore — and the *next* navigation
+  wrote the rolled-back value to disk. The connection now settles every
+  dirty table at transaction boundaries: `begin_tx` (before the journal
+  activates), `commit_tx`, `rollback_tx`, `create_savepoint`, and
+  `rollback_to_savepoint`.
+- **CDX tags stale or short by one**: `AdsCreateIndex61`, legacy
+  `AdsCreateIndex`, `Table::reindex()`, and `AdsGetKeyCount` read rows
+  straight from disk while the last edit was still coalesced; they now
+  settle first, so the FOR-tag count, re-created tag walks, and key counts
+  include the pending row.
+- **AFTER UPDATE trigger could not reject a write**: the SQL UPDATE row
+  loop fired the AFTER trigger while the update was still a pending buffer
+  and closed the table (dropping it) on trigger failure; the loop now
+  settles before firing, so a failing trigger leaves the write on disk and
+  propagates the error, matching the INSERT path.
+
+### Fixed - remote ADT numeric round-trip (234d42d6)
+
+Remote SetField routes values as strings through `AdsSetString` on the
+server's ABI twin. `encode_field_string` stored the ASCII characters into
+binary-typed fields (Double, Integer, Currency/AdtMoney, ShortInt,
+AutoInc/Time) instead of converting, so `AdsSetDouble(99.0)` over the wire
+read back as garbage. String input is now parsed and packed as binary for
+those types, mirroring `encode_field_double`.
+
+### Tests
+
+- Full suite: **1267 passed, 0 failed** (was 11 failing since v1.8.43).
+- `tests/e2e/b_big_e2e.prg`: 23/23 PASS on x64+x86, local+remote.
+
+## 1.8.48 - 2026-08-01
+
+32-bit toolchain alignment: everything that compiles against
+`include/openads/ace.h` on 32-bit MSVC now uses the SAP `__stdcall`
+convention, matching the decorated (`_AdsXxx@N`) names ace32.dll exports
+since v1.8.46. Everything since **v1.8.47**.
+
+### Fixed - our own tools failed to link on x86
+
+- v1.8.46 made ace32.dll export only the `__stdcall`-decorated names, but
+  `include/openads/ace.h` still declared the API as `__cdecl`, so every
+  in-tree consumer (bench, stress, mgprobe, tests) referenced plain
+  `_AdsXxx` symbols the DLL no longer exports — the CI x86 leg failed at
+  Build. The header now uses `__stdcall` on 32-bit MSVC (exactly like
+  SAP's ace.h); the `oads_*` file/dir helpers keep `__cdecl` via a new
+  `OADSAPI` macro since they stay plain exports.
+- Implementation TUs (ace_exports.cpp, studio_embed.cpp, and everything
+  else pulled into openads_core) keep `__cdecl` definitions via
+  `OPENADS_ACE_IMPLEMENTATION`, which openads_core now exports as a PUBLIC
+  compile definition so core-linking tools resolve against the plain
+  `_AdsXxx` implementations.
+- `abi/ace_stdcall_x86.c` now wraps the full public surface: 421
+  `__stdcall` wrappers (added AdsCreateIndex and the AdsMg*/DD/FetchWhere
+  families that rddads itself never calls but mgprobe and Studio do).
+
+## 1.8.47 - 2026-08-01
+
+The last of Tim Stone's remote phantom rows: a scoped xBrowse with exactly
+one record no longer paints it twice. Two server-side boundary bugs, found
+by tracing every wire op his REMOTETEST64 makes and comparing client-side
+navigation state local vs remote. Everything since **v1.8.46**.
+
+### Fixed - remote AtBOF/AtEOF answered from the wrong cursor
+
+- For ordered tables the server's AtBOF/AtEOF handlers answered from the
+  mirrored engine cursor, which can sit with bof+eof both set after a
+  scope-end sync (the ABI twin does the real navigation; the engine
+  cursor is only a recno mirror). rddads' DBOI_POSITION (OrdKeyGoto past
+  the scoped key count) read Bof()=.T. from that. Both handlers now answer
+  from the ABI twin, like GotoTop/Skip already did.
+
+### Fixed - row trailer carried a row at BOF -> first backward skip at the top reported Bof()=.F.
+
+- `pack_row_trailer` packed the current row when the cursor was at BOF
+  (it only checked EOF), so a skip(-1) at the scope top ack'd has_row=1.
+  The client's boundary detection then needed a pristine row_valid_before
+  — which AdsRefreshRecord (called by xBrowse between skips) invalidates
+  — and the FIRST backward skip at the top reported Bof()=.F. instead of
+  .T. xBrowse counted one extra row above and painted the single scoped
+  record twice: the phantom duplicate row (Tim Stone, REMTEST 100011).
+  BOF now reports has_row=0, symmetric with EOF; field reads at BOF still
+  work (cache miss costs one round trip).
+- Verified end-to-end with Tim's own REMOTETEST64.exe against the fixed
+  server: exactly one row, pointer on it; tab 2 (4 rows) unchanged.
+
+### Diagnostics
+
+- `OPENADS_WIRE_TRACE=1` now enables wire-op tracing in openads_serverd
+  (stderr) and in the client DLL (C:/tmp/cli_trace.log): opcodes, skip
+  steps, twin boundary states, and client nav state per ACE call.
+
+### Tests
+
+- `abi_remote_timscope_test.cpp`: extended with the BOF-at-top scenario
+  (skip(-1) at scope top after AdsRefreshRecord must report BOF at once).
+- `b_big_e2e.prg`: two new sections for the same scenario — 23/23 PASS on
+  x64+x86, local+remote.
+
+### Known issue (pre-existing, tracked)
+
+- dbSkip() forward out of BOF lands on the group's last physical recno
+  instead of the first scoped key (engine-side CDX boundary walk, local
+  AND remote). Harmless for the browse paths fixed here; queued for a
+  later engine pass.
+
+## 1.8.46 - 2026-08-01
+
+DbSetOrder(0) restores natural order again (local and remote), and the
+32-bit Windows build actually works with rddads now — three independent
+ABI bugs made every 32-bit rddads app either fail to load or crash in
+the first ACE call. Reported by Pritpal Bedi. Everything since **v1.8.45**.
+
+### Fixed - DbSetOrder(0) shows the index order instead of natural order
+
+- `DbSetOrder(0)` must return the table to natural (record-number) order.
+  Since the index-work in .43 the browse kept showing order 1. The local
+  engine now parks the active order on `AdsSetIndexOrderByHandle(h, 0)`,
+  and the remote branch sends a `set_order_by_name("")` frame so the
+  server parks it too. Reported by Pritpal Bedi with a Browse() repro.
+- `AdsOpenIndex` refresh reused stale wire handles; `SetOrder` after a
+  reindex could fail with 5000. Opened index handles are now re-registered
+  from the refreshed list (`old_handles` reuse).
+- `OrdNumber()` always returned 0 over a remote connection:
+  `AdsGetIndexOrderByHandle` had no remote branch; it now resolves the
+  active order from the client's tag table.
+
+### Fixed - ace32.dll did not export the __stdcall (@N) names rddads imports
+
+- 32-bit Harbour rddads.lib references `_AdsXxx@N` (stdcall-decorated)
+  symbols; ace32.dll exported only undecorated names, so every 32-bit
+  rddads app died at startup with 0xC0000139. The DLL now exports all
+  360 decorated names through generated `__stdcall` wrappers
+  (`src/abi/ace_stdcall_x86.c`), and `src/openads_ace_x86_stdcall.def`
+  is the default .def for 32-bit builds (CI needs no extra flag).
+- `AdsSetIndexOrderByHandle` was missing from the x86 export set entirely.
+
+### Fixed - ADSHANDLE was 64-bit (SAP ACE defines it 32-bit)
+
+- `include/openads/ace.h` typedef'd `ADSHANDLE` as `uint64_t`. Every
+  `ADSHANDLE*` out-parameter (`AdsConnect60`, `AdsOpenTable`, ...) then
+  wrote 8 bytes into the caller's 4-byte storage, trashing the stack
+  frame of 32-bit callers — 32-bit apps crashed inside the first
+  `AdsConnect60` with EBP zeroed. The typedef is now `uint32_t`, with
+  explicit narrowing casts at the ABI boundary in ace_exports.cpp.
+- The patched rddads (dbSetOrder routing etc.) was also rebuilt for
+  32-bit with the corrected header — previously only the 64-bit
+  rddads.lib carried those fixes, which is why bugs fixed on x64 kept
+  "reappearing" on x86.
+
+### Tests - end-to-end regression PRG (b_big_e2e)
+
+- `tests/e2e/b_big_e2e.prg`: the comprehensive end-to-end .PRG Pritpal
+  asked for — 21 sections covering AdsVersion, FIELD-> key stripping,
+  production-bag auto-open, dbSetIndex/dbSetOrder(0)/dbSetOrder(n),
+  scope + SET DELETED walk/KeyCount/KeyNo/EOF, custom-extension bags,
+  reindex, the 9-records-commit timing (< 5 s), a second shared
+  connection, and 3 reader threads. `tests/e2e/build_e2e.bat` builds
+  BOTH bitnesses; current status: 21/21 PASS on x64 local, x64 remote,
+  x86 local and x86 remote.
+
+## 1.8.45 - 2026-07-31
+
+Scoped-key-count fix for the remote KeyNo / scrollbar machinery — the
+"phantom rows" (correct row, blank row, duplicate) in scoped remote
+xBrowse screens. Reported by Tim Stone with a REMTEST repro. Everything
+since **v1.8.44**.
+
+### Fixed - remote KeyNo/RelKeyPos used the physical record count under a scope
+
+- With a top/bottom scope active (e.g. 1 live row in a 36-row table),
+  `GoBottom` reported `KeyNo=36` instead of `1`, and `AdsSetRelKeyPos` /
+  KeyGoto clamped against the physical record count, walking the cursor
+  tens of rows past the scope end. FiveWin xBrowse positions rows through
+  `ADSKEYNO` / `ADSGETRELKEYPOS` / `ADSSETRELKEYPOS`, so scoped browses
+  painted phantom rows — "OpenADS REMOTE does not know how to cut off at
+  only 1 record".
+- The remote keyno machinery now clamps to the server-computed, scope +
+  SET DELETED aware key count (`remote_ensure_key_count`), and
+  `AdsGetKeyNum` reports 0 at the EOF phantom, matching the local engine.
+  Client-side fix in ace64/ace32; the server needs no update for this one
+  (v1.8.44 server is fine).
+- The scoped count is fetched only when a skip lands at EOF (then cached),
+  preserving the zero-round-trip prefetch guarantee on the skip hot path.
+- Cache invalidated on scope set/clear, order change, SET DELETED flip,
+  and every write path.
+
+### Tests
+
+- `abi_remote_timscope_test.cpp`: replays Tim's exact REMTEST.DBF
+  (1 live + 5 deleted in the scoped group) over the wire — scoped walk,
+  KeyNo at top/bottom/EOF, skip-back from EOF, RelKeyPos/SetRelKeyPos
+  clamp.
+
+## 1.8.44 - 2026-07-31
+
+Remote record-lock routing (the "~10 s to commit 9 records" stall), CDX key
+expressions no longer persist the `FIELD->` qualifier, and `AdsGetVersion`
+reports the real build version. Reported by Pritpal Bedi. Everything since
+**v1.8.43**.
+
+### Fixed - remote RLock after APPEND BLANK burned ~1 s per record
+
+- The server keeps two Table instances per remote table (engine + parallel
+  ABI handle, M12.16). Appends go through the ABI handle and
+  `AdsAppendRecord` auto-locks the new record there — but the
+  `LockRecord` / `UnlockRecord` opcodes were routed to the *engine* Table,
+  a different OS file handle, so every client `RLock()` after an append
+  conflicted with the server's own auto-lock and burned the full lock-retry
+  budget (10 x 100 ms ≈ 1 s per record; 9 records ≈ 10 s). Matching
+  unlocks never released the ABI-side lock, stalling other stations.
+  Lock/unlock opcodes now route through the same ABI handle whenever it
+  exists; unlock also clears any stale engine-side lock.
+
+### Fixed - FIELD-> qualifier persisted in the stored CDX key expression
+
+- `INDEX ON FIELD->name TAG t` saved `FIELD->name` in the bag header.
+  Harbour's DbfCdx strips the qualifier (key is stored as `name`) and a
+  native reader errors on the leaked alias. `AdsCreateIndex61` and legacy
+  `AdsCreateIndex` now strip `ALIAS->` before the expression is written;
+  evaluation was already qualifier-agnostic.
+
+### Changed - AdsGetVersion reports the real version
+
+- Major/minor come from `OPENADS_VERSION_STR` (CMake project version)
+  instead of hardcoded 0.0; the description string reads
+  `OpenADS <version> ACE-compatible engine`.
+
+## 1.8.43 - 2026-07-30
+
+Dirty-record write coalescing for append/replace/commit speed. Field
+setters encode into the current record buffer; one writeback + index sync
+runs on WriteRecord, flush, navigation, or unlock (GoCold). Everything
+since **v1.8.42**.
+
+### Changed - dirty record buffer (GoHot / GoCold)
+
+- **`set_field` / `set_field_null` / `set_record_raw`:** update `record_buf_`
+  only; snapshot bound index keys once on the first mutation of the row.
+- **`commit_dirty_record`:** single `writeback_record_` + `sync_all_indexes_`.
+  Invoked from `AdsWriteRecord`, `flush` / `AdsFlushFileBuffers`, Skip /
+  GoTop / GoBottom / Goto / Seek, Append (previous row), Close, delete/recall.
+- **Unlock GoCold:** `unlock_record` and `unlock_table` settle the dirty
+  buffer while the RLock/FLock is still held, so Shared
+  `RLock → REPLACE → Unlock` without an explicit WriteRecord remains durable
+  (5035 avoided; peers see the final row).
+- **Refresh:** `refresh_record_buffer` discards uncommitted edits (does not
+  write).
+- **Deferred flush:** still skips OS `FlushFileBuffers`; dirty settle always
+  runs on WriteRecord.
+
+Does not remove per-row commit/`FlushFileBuffers` cost when the app commits
+every record; it removes N disk+index updates for N field replaces on one row.
+
+### Tests
+
+- Dirty unlock commit + multi-field coalesce until flush
+  (`engine_table_write_test.cpp`).
+
+## 1.8.42 - 2026-07-30
+
+Multiuser browse visibility: stations saw the same LastRec after a peer
+append, but Skip / Browse only walked the rows present when the workarea
+was opened. Reported by Pritpal Bedi. Everything since **v1.8.41**.
+
+### Fixed - peer-appended rows invisible to open browsers
+
+- **Natural order:** `CdxDriver` cached `rec_count_` at open. Local
+  `AdsGetRecordCount`, `GoTop` / `GoBottom` / `Skip` / `GotoRecord`
+  used that fence as EOF, so a Shared workarea never reached rows another
+  station had just written. Refresh the on-disk DBF header before those
+  operations (server `GetRecordCount` already did).
+- **Ordered browse:** each station kept a private CDX page cache. Leaf-only
+  inserts did not bump the on-disk sub-tag counter, so peers never dropped
+  stale pages. Every insert now rewrites the tag header (counter++), and
+  `refresh_from_disk()` reloads root/counter and clears clean page cache
+  before navigation and key-count walks.
+
+### Tests
+
+- `abi_multiuser_nav_visibility_test.cpp` — two Shared connections:
+  natural-order walk and production-CDX ordered walk after peer append.
+
+## 1.8.41 - 2026-07-30
+
+Remote CDX index maintenance fix reported by Pritpal Bedi, plus regression
+tests that pin the empty-order semantics (local + remote). Everything since
+**v1.8.40**.
+
+### Fixed - remote APPEND did not update open CDX bags (Pritpal Bedi)
+
+`AdsCreateIndex` / `AdsOpenIndex` over `tcp://` bind tags on a **parallel ABI
+table handle** (M12.16 `ensure_abi_handle` / `tbls_h_`). `AppendBlank` and
+`SetField` wrote only through the **engine** `Table`, which never held those
+index bindings, so `sync_all_indexes_` was a no-op.
+
+Symptom: after remote `INDEX ON` (even empty) and subsequent `APPEND`, the
+production `.cdx` stayed at `root_page=0` / `OrdKeyCount=0` while the DBF had
+rows. ADSCDX then did GoTop on an empty order - BOF+EOF, blank `FieldGet` /
+Browse with **no error**. HbDBU/DBFCDX could report the companion bag as
+corrupt. Verified against a live iMac `openads_serverd` on the LAN.
+
+Fix in `session.cpp`: when the ABI twin exists, route Append / SetField /
+Delete through it, flush dirty index pages, and refresh the engine cursor
+(`record_count` + invalidate read cache) so the dual handles stay aligned.
+
+### Tests
+
+- `abi_pritpal_empty_index_test.cpp` - local: empty INDEX ON, non-structural
+  bag without open, production auto-open maintenance, data-first INDEX ON,
+  append with order open.
+- `abi_remote_pritpal_empty_index_test.cpp` - same scenarios over an embedded
+  `openads_serverd` (loopback).
+
+### Compatibility notes
+
+- Requires updating **both** client (`ace64`/`ace32`) and `openads_serverd`
+  for the remote index-maintenance fix (server-side write path).
+- Empty bags created under unfixed servers remain empty on disk; delete the
+  `.cdx` and recreate after data exists, or re-run `INDEX ON` / `REINDEX` once
+  on a fixed server with the table populated.
+
 ## 1.8.40 - 2026-07-30
 
 RusSoft ERP production batch integrated from open PRs #148–#155, plus the CI

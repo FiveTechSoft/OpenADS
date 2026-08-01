@@ -1,0 +1,11 @@
+# build products / run artifacts — only sources are committed
+*.exe
+*.dll
+*.exp
+*.lib
+*.obj
+*.log
+.hbmk/
+_locdata/
+_srvdata/
+_*

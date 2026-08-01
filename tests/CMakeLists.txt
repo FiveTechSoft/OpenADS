@@ -188,6 +188,8 @@ add_executable(openads_unit_tests
     unit/abi_record_crc_aof_test.cpp
     unit/abi_settings_refreshaof_test.cpp
     unit/abi_dd_persistence_test.cpp
+    unit/abi_remote_timscope_test.cpp
+    unit/abi_setorder_zero_test.cpp
     unit/dbf_vfp_test.cpp
     unit/abi_sql_or_test.cpp
     unit/abi_index_direction_test.cpp
@@ -277,6 +279,9 @@ add_executable(openads_unit_tests
     unit/backend_tier1_test.cpp
     unit/abi_oads_file_funcs_test.cpp
     unit/abi_create_index_path_test.cpp
+    unit/abi_pritpal_empty_index_test.cpp
+    unit/abi_remote_pritpal_empty_index_test.cpp
+    unit/abi_multiuser_nav_visibility_test.cpp
 )
 
 # OpenADS ODBC driver (provider) test — drives the driver's SQL* exports

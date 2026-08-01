@@ -137,3 +137,7 @@ DA-Web/config/sql_scripts.json
 testdata/pmsys/
 /third_party/sqlcipher/
 IMAC_CONNECTION.md
+
+# Local scratch / one-off tool output
+/temp.txt
+/decrypt_results.txt

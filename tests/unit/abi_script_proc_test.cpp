@@ -138,6 +138,67 @@ TEST_CASE("script proc: __output insert becomes the result cursor") {
     CHECK(f.scalar("EXECUTE PROCEDURE sp_hello()") == "hello world");
 }
 
+// ---------------------------------------------------------------------------
+// A declared output column name must reach the caller in full.
+//
+// The __output temp used to be created as a DBF free table, and a DBF field
+// descriptor allots the name 11 bytes — so every stored-procedure result column
+// was silently cut to 10 characters (sp_GetPhysicalPath's `databasepath` came
+// back as `databasepa`). That capped the whole SQL engine at 10-character
+// result columns for no reason: procedures read ADT tables and declare outputs
+// mirroring SAP catalog columns, whose names run to 18. A caller that then
+// referenced the column by name simply could not find it.
+//
+// The temp is now ADT. If this fails with a truncated name, a materialising
+// path went back to a DBF-format temp — see docs/materialised-cursor-temps.md.
+// Do not "fix" the expectation.
+// ---------------------------------------------------------------------------
+TEST_CASE("script proc: __output keeps column names longer than 10 chars") {
+    SpFixture f("openads_sp_longcol");
+    // 17 and 12 characters: both past DBF's limit, both real SAP widths
+    // (User_Defined_Prop is a system.users column; databasepath is what
+    // sp_GetPhysicalPath declares).
+    f.create_proc("sp_longcols",
+                  "INSERT INTO __output(User_Defined_Prop, databasepath) "
+                  "VALUES ('abc', 'xyz');",
+                  "", "User_Defined_Prop,CHAR,20;databasepath,CHAR,20;");
+
+    ADSHANDLE hc = 0;
+    REQUIRE(f.run("EXECUTE PROCEDURE sp_longcols()", &hc) == 0);
+    REQUIRE(hc != 0);
+
+    UNSIGNED16 count = 0;
+    REQUIRE(AdsGetNumFields(hc, &count) == 0);
+    REQUIRE(count == 2);
+
+    std::vector<std::string> names;
+    for (UNSIGNED16 i = 1; i <= count; ++i) {
+        UNSIGNED8  nm[128] = {0};
+        UNSIGNED16 cap = sizeof(nm) - 1;
+        REQUIRE(AdsGetFieldName(hc, i, nm, &cap) == 0);
+        std::string got(reinterpret_cast<char*>(nm), cap);
+        while (!got.empty() && (got.back() == ' ' || got.back() == '\0'))
+            got.pop_back();
+        names.push_back(got);
+    }
+    CAPTURE(names[0]);
+    CAPTURE(names[1]);
+    CHECK(names[0] == "User_Defined_Prop");
+    CHECK(names[1] == "databasepath");
+
+    // ...and the value is still reachable BY that full name, which is the
+    // thing a truncated descriptor actually breaks for callers.
+    UNSIGNED8  fld[32] = "User_Defined_Prop";
+    UNSIGNED8  vb[64]  = {0};
+    UNSIGNED32 vl      = sizeof(vb) - 1;
+    REQUIRE(AdsGetString(hc, fld, vb, &vl, 0) == 0);
+    std::string v(reinterpret_cast<char*>(vb), vl);
+    while (!v.empty() && v.back() == ' ') v.pop_back();
+    CHECK(v == "abc");
+
+    AdsCloseTable(hc);
+}
+
 TEST_CASE("script proc: reads __input params, writes a real table") {
     SpFixture f("openads_sp_in");
     f.create_proc("sp_add",

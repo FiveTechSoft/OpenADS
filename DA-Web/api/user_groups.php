@@ -82,9 +82,11 @@ try {
     }
 
     $allGroups = [];
-    $stmt3 = $conn->query('SELECT GROUP_NAME FROM system.usergroups ORDER BY GROUP_NAME');
+    // Name is SAP's column; GROUP_NAME was the old OpenADS-only spelling.
+    $stmt3 = $conn->query('SELECT Name FROM system.usergroups ORDER BY Name');
     while ($row = $stmt3->fetchAssoc()) {
-        $g = daweb_row_field($row, 'GROUP_NAME');
+        $g = daweb_row_field($row, 'Name');
+        if ($g === '') $g = daweb_row_field($row, 'GROUP_NAME');
         if ($g !== '' && strncasecmp($g, 'DB:', 3) !== 0) {
             $allGroups[] = $g;
         }

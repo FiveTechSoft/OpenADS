@@ -259,7 +259,7 @@ TEST_CASE("SQL URI smoke: sqlite:// DDL + DML + filter + scoped relation + ALTER
         REQUIRE(AdsOpenTable(hConn, sugname, sugname, ADS_DEFAULT, 0, 0, 0,
                              ADS_READONLY, &hUg) == 0);
         REQUIRE(AdsGotoTop(hUg) == 0);
-        UNSIGNED8 gfn[16] = "GROUP_NAME";
+        UNSIGNED8 gfn[16] = "Name";   // SAP's system.usergroups column
         UNSIGNED8 gbuf[64] = {};
         UNSIGNED32 glen = sizeof(gbuf) - 1;
         REQUIRE(AdsGetField(hUg, gfn, gbuf, &glen, 0) == 0);
@@ -458,7 +458,7 @@ TEST_CASE("SQL URI smoke: sqlite:// DDL + DML + filter + scoped relation + ALTER
         REQUIRE(AdsCreateSQLStatement(hConn, &hStmtBob) == 0);
         ADSHANDLE hCurBob = 0;
         UNSIGNED8 sbob[] =
-            "SELECT USER_NAME FROM system.users WHERE USER_NAME = 'bob'";
+            "SELECT Name FROM system.users WHERE Name = 'bob'";
         REQUIRE(AdsExecuteSQLDirect(hStmtBob, sbob, &hCurBob) == 0);
         REQUIRE(hCurBob != 0);
         REQUIRE(AdsGotoTop(hCurBob) == 0);
@@ -519,7 +519,7 @@ TEST_CASE("SQL URI smoke: sqlite:// DDL + DML + filter + scoped relation + ALTER
         REQUIRE(AdsCloseTable(hCurGrp) == 0);
 
         UNSIGNED8 susers[] =
-            "SELECT USER_NAME FROM system.users WHERE USER_NAME = 'carol'";
+            "SELECT Name FROM system.users WHERE Name = 'carol'";
         REQUIRE(AdsExecuteSQLDirect(hStmtGrp, susers, &hCurGrp) == 0);
         REQUIRE(hCurGrp != 0);
         REQUIRE(AdsGotoTop(hCurGrp) == 0);
@@ -527,7 +527,10 @@ TEST_CASE("SQL URI smoke: sqlite:// DDL + DML + filter + scoped relation + ALTER
         REQUIRE(AdsAtEOF(hCurGrp, &eof_usr) == 0);
         CHECK(eof_usr == 0);
         ulen = sizeof(ubuf) - 1;
-        REQUIRE(AdsGetField(hCurGrp, ufn, ubuf, &ulen, 0) == 0);
+        // system.users exposes SAP's "Name"; ufn above is User_Name, which is
+        // the usergroupmembers column and does not exist on system.users.
+        UNSIGNED8 nfn[16] = "Name";
+        REQUIRE(AdsGetField(hCurGrp, nfn, ubuf, &ulen, 0) == 0);
         uname = std::string(reinterpret_cast<const char*>(ubuf), ulen);
         while (!uname.empty() && uname.back() == ' ') uname.pop_back();
         CHECK(uname == "carol");

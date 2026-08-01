@@ -6,7 +6,7 @@
 ; __cdecl on x86 prepends a leading underscore at link time, but the
 ; .def NAME form forces the public export to match the source name.
 ;
-; NOTE: For x86 Harbour (rddads) compatibility, use openads_ace_x86.def
+; NOTE: For x86 Harbour (rddads) compatibility, use openads_ace_x86_stdcall.def
 ; which exports __stdcall-decorated (@N) names instead.
 LIBRARY
 EXPORTS

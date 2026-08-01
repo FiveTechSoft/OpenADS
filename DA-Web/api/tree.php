@@ -189,9 +189,12 @@ if ($action === 'category_children') {
                 break;
 
             case 'users':
-                $stmt = $conn->query("SELECT USER_NAME FROM system.users ORDER BY USER_NAME");
+                // Name is SAP's column on system.users; USER_NAME was the old
+                // OpenADS-only spelling, kept as a fallback for older builds.
+                $stmt = $conn->query("SELECT Name FROM system.users ORDER BY Name");
                 while ($row = $stmt->fetchAssoc()) {
-                    $u = $row['USER_NAME'];
+                    $u = trim((string)($row['Name'] ?? $row['USER_NAME'] ?? ''));
+                    if ($u === '') continue;
                     $nodes[] = ['id' => "usr_{$ddName}_{$u}", 'text' => $u,
                                 'icon' => 'jstree-icon-user', 'children' => false,
                                 'a_attr' => ['data-dd' => $ddName, 'data-type' => 'user', 'data-name' => $u]];
@@ -199,10 +202,10 @@ if ($action === 'category_children') {
                 break;
 
             case 'groups':
-                $stmt = $conn->query("SELECT GROUP_NAME FROM system.usergroups ORDER BY GROUP_NAME");
+                $stmt = $conn->query("SELECT Name FROM system.usergroups ORDER BY Name");
                 $seen = [];
                 while ($row = $stmt->fetchAssoc()) {
-                    $g = trim($row['GROUP_NAME']);
+                    $g = trim((string)($row['Name'] ?? $row['GROUP_NAME'] ?? ''));
                     if ($g === '' || isset($seen[$g])) continue;
                     $seen[$g] = true;
                     $nodes[] = ['id' => "grp_{$ddName}_{$g}", 'text' => $g,

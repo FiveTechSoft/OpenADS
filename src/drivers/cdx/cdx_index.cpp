@@ -716,7 +716,48 @@ int CdxIndex::compare_keys_(const char* a, const char* b,
     return openads::engine::compare_oem_keys(oem_sort_, a, b, len);
 }
 
+void CdxIndex::refresh_from_disk() {
+    (void)reload_header_if_changed_();
+}
+
+util::Result<void> CdxIndex::reload_header_if_changed_() {
+    if (sub_header_offset_ == 0) return {};
+    // If we hold dirty pages we own the bag; peer writers cannot have
+    // rewritten our pages without a lock conflict. Keep local state.
+    for (const auto& kv : dirty_) {
+        if (kv.second) return {};
+    }
+    std::array<std::uint8_t, CDX_HEADER_LEN> sub_hdr{};
+    auto got = file_.read_at(sub_header_offset_, sub_hdr.data(), sub_hdr.size());
+    if (!got) return got.error();
+    if (got.value() < CDX_HEADER_LEN) {
+        return util::Error{6106, 0, "CDX sub-tag header truncated on refresh", ""};
+    }
+    const std::uint32_t new_root = read_u32_le(sub_hdr.data() + 0);
+    const std::uint32_t new_free = read_u32_le(sub_hdr.data() + 4);
+    const std::uint32_t new_ctr  = read_u32_le(sub_hdr.data() + 8);
+    if (new_ctr == counter_ && new_root == root_page_ && new_free == free_ptr_) {
+        return {};
+    }
+    // Peer rewrite: drop every clean page so the next get_page_ re-reads.
+    page_cache_.clear();
+    dirty_.clear();
+    root_page_ = new_root;
+    free_ptr_  = new_free;
+    counter_   = new_ctr;
+    key_size_  = read_u16_le(sub_hdr.data() + 12);
+    if (auto sz = file_.size(); sz) {
+        file_size_ = sz.value();
+        std::lock_guard<std::mutex> lk(g_cdx_alloc_mu);
+        g_cdx_alloc_tail[path_] = std::max(g_cdx_alloc_tail[path_], file_size_);
+    }
+    invalidate_pos_cache();
+    invalidate_cursor();
+    return {};
+}
+
 util::Result<SeekOutcome> CdxIndex::seek_first() {
+    if (auto r = reload_header_if_changed_(); !r) return r.error();
     cur_leaf_   = 0;
     cur_index_  = -1;
     cur_decoded_.clear();
@@ -760,7 +801,11 @@ util::Result<SeekOutcome> CdxIndex::seek_first() {
 }
 
 util::Result<SeekOutcome> CdxIndex::seek_last() {
-    if (root_page_ == 0) return SeekOutcome{SeekHit::AfterEnd, 0, false};
+    // seek_first() already reloads the header when the bag changed.
+    if (root_page_ == 0) {
+        if (auto r = reload_header_if_changed_(); !r) return r.error();
+        if (root_page_ == 0) return SeekOutcome{SeekHit::AfterEnd, 0, false};
+    }
     cur_leaf_ = 0; cur_index_ = -1; cur_decoded_.clear();
 
     auto first = seek_first();
@@ -792,6 +837,7 @@ util::Result<SeekOutcome> CdxIndex::seek_last() {
 
 util::Result<SeekOutcome>
 CdxIndex::seek_key(const std::string& key, bool soft) {
+    if (auto r = reload_header_if_changed_(); !r) return r.error();
     if (root_page_ == 0) return SeekOutcome{SeekHit::AfterEnd, 0, false};
     std::string padded = key;
     if (padded.size() < key_size_) padded.append(key_size_ - padded.size(), ' ');
@@ -1319,9 +1365,15 @@ CdxIndex::insert(std::uint32_t recno, const std::string& key) {
     if (auto e = insert_into_subtree_(root_page_, recno, padded, promote); !e)
         return e.error();
 
-    if (!promote.have) return {};
+    if (!promote.have) {
+        // Always bump the on-disk counter so peer workareas that re-read
+        // the sub-tag header (refresh_from_disk) notice the bag changed.
+        // Without this, leaf-only inserts leave counter_ unchanged on disk
+        // and multiuser stations keep navigating a stale page cache.
+        return rewrite_header_();
+    }
 
-    // Root split â†’ allocate new branch root with two children.
+    // Root split → allocate new branch root with two children.
     std::uint32_t new_root = allocate_page_();
 
     std::vector<BranchEntry> entries = {
@@ -1484,8 +1536,11 @@ CdxIndex::build_bulk(std::vector<std::pair<std::string, std::uint32_t>> keys) {
 }
 
 const std::vector<std::uint32_t>& CdxIndex::ordered_recnos_cached() {
+    // Peer writers may have grown the bag since we last walked; drop a
+    // stale pos cache when the on-disk counter moved.
+    (void)reload_header_if_changed_();
     if (pos_cache_valid_) return pos_walk_;
-    // Save the navigation cursor â€” the walk below moves it, and callers
+    // Save the navigation cursor — the walk below moves it, and callers
     // (scrollbar / OrdKeyNo) must not see their position change.
     std::uint32_t  s_leaf    = cur_leaf_;
     std::int32_t   s_index   = cur_index_;
@@ -1523,6 +1578,7 @@ std::uint32_t CdxIndex::count_scoped_keys(
     const std::string& top,
     const std::string& bottom,
     const std::function<bool(std::uint32_t recno)>* include_recno) {
+    (void)reload_header_if_changed_();
     // Save the navigation cursor so callers see no side-effect.
     std::uint32_t  s_leaf    = cur_leaf_;
     std::int32_t   s_index   = cur_index_;

@@ -217,6 +217,7 @@ Avoid vendor trademarks and phrases like "reverse engineering" or
 | Architecture | [`docs/en/architecture.md`](docs/en/architecture.md) |
 | Wire protocol | [`docs/wire-protocol.md`](docs/wire-protocol.md) |
 | Data Dictionary | [`docs/en/data-dictionary.md`](docs/en/data-dictionary.md) |
+| **Temp tables behind `ORDER BY` / `DISTINCT` / `TOP`** | [`docs/materialised-cursor-temps.md`](docs/materialised-cursor-temps.md) — **required reading before changing that temp's format.** Three constraints pin it (standalone table, full-length column names, numeric scale); two are invisible until a specific customer scenario breaks, and both have already been regressed once. |
 | Open tasks | [`TODO.md`](TODO.md), [`roadmap.txt`](roadmap.txt) |
 | Changelog | [`CHANGELOG.md`](CHANGELOG.md) |
 | Licence | [`LICENSE`](LICENSE), [`NOTICE`](NOTICE) |
