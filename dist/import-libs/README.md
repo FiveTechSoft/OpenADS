@@ -27,21 +27,25 @@ name loads the same engine.
 
 ## x86 `__stdcall` decoration
 
-The x86 import libs are built from `src/openads_ace_x86.def` which exports
-`__stdcall`-decorated (`@N`) names matching what Harbour's prebuilt
-`contrib/rddads` expects. The x64 import libs use the undecorated
-`src/openads_ace.def` (x64 has no `@N` decoration).
+The x86 DLL exports `__stdcall`-decorated (`_AdsXxx@N`) names matching what
+Harbour's `contrib/rddads` imports on 32-bit Windows. The MSVC `ace32.lib`
+is the import lib produced by the DLL's own link (it carries exactly those
+symbols); the MinGW `libace32.a` is generated from the DLL's export table
+with `dlltool --no-leading-underscore`; the Borland one comes straight from
+the DLL. The x64 import libs use the undecorated `src/openads_ace.def`
+(x64 has no `@N` decoration).
 
 (Reported by JONSSON RUSSI, RusSoft Ltda.)
 
 ## Regenerating
 
 These are committed because the release CI runners have no Borland toolchain.
-Regenerate after any change to `src/openads_ace.def` (the export list):
+Regenerate after any change to the export surface (`src/openads_ace.def`,
+`src/abi/ace_stdcall_x86.c`, `src/openads_ace_x86_stdcall.def`):
 
 ```powershell
 cmake --build build/msvc-x64    --config Release --target openads_ace
-cmake --build build/release-x86  --config Release --target openads_ace
+cmake --build build-x86         --config Release --target openads_ace
 pwsh dist/import-libs/gen.ps1
 ```
 

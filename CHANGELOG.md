@@ -1,3 +1,58 @@
+## 1.8.46 - 2026-08-01
+
+DbSetOrder(0) restores natural order again (local and remote), and the
+32-bit Windows build actually works with rddads now — three independent
+ABI bugs made every 32-bit rddads app either fail to load or crash in
+the first ACE call. Reported by Pritpal Bedi. Everything since **v1.8.45**.
+
+### Fixed - DbSetOrder(0) shows the index order instead of natural order
+
+- `DbSetOrder(0)` must return the table to natural (record-number) order.
+  Since the index-work in .43 the browse kept showing order 1. The local
+  engine now parks the active order on `AdsSetIndexOrderByHandle(h, 0)`,
+  and the remote branch sends a `set_order_by_name("")` frame so the
+  server parks it too. Reported by Pritpal Bedi with a Browse() repro.
+- `AdsOpenIndex` refresh reused stale wire handles; `SetOrder` after a
+  reindex could fail with 5000. Opened index handles are now re-registered
+  from the refreshed list (`old_handles` reuse).
+- `OrdNumber()` always returned 0 over a remote connection:
+  `AdsGetIndexOrderByHandle` had no remote branch; it now resolves the
+  active order from the client's tag table.
+
+### Fixed - ace32.dll did not export the __stdcall (@N) names rddads imports
+
+- 32-bit Harbour rddads.lib references `_AdsXxx@N` (stdcall-decorated)
+  symbols; ace32.dll exported only undecorated names, so every 32-bit
+  rddads app died at startup with 0xC0000139. The DLL now exports all
+  360 decorated names through generated `__stdcall` wrappers
+  (`src/abi/ace_stdcall_x86.c`), and `src/openads_ace_x86_stdcall.def`
+  is the default .def for 32-bit builds (CI needs no extra flag).
+- `AdsSetIndexOrderByHandle` was missing from the x86 export set entirely.
+
+### Fixed - ADSHANDLE was 64-bit (SAP ACE defines it 32-bit)
+
+- `include/openads/ace.h` typedef'd `ADSHANDLE` as `uint64_t`. Every
+  `ADSHANDLE*` out-parameter (`AdsConnect60`, `AdsOpenTable`, ...) then
+  wrote 8 bytes into the caller's 4-byte storage, trashing the stack
+  frame of 32-bit callers — 32-bit apps crashed inside the first
+  `AdsConnect60` with EBP zeroed. The typedef is now `uint32_t`, with
+  explicit narrowing casts at the ABI boundary in ace_exports.cpp.
+- The patched rddads (dbSetOrder routing etc.) was also rebuilt for
+  32-bit with the corrected header — previously only the 64-bit
+  rddads.lib carried those fixes, which is why bugs fixed on x64 kept
+  "reappearing" on x86.
+
+### Tests - end-to-end regression PRG (b_big_e2e)
+
+- `tests/e2e/b_big_e2e.prg`: the comprehensive end-to-end .PRG Pritpal
+  asked for — 21 sections covering AdsVersion, FIELD-> key stripping,
+  production-bag auto-open, dbSetIndex/dbSetOrder(0)/dbSetOrder(n),
+  scope + SET DELETED walk/KeyCount/KeyNo/EOF, custom-extension bags,
+  reindex, the 9-records-commit timing (< 5 s), a second shared
+  connection, and 3 reader threads. `tests/e2e/build_e2e.bat` builds
+  BOTH bitnesses; current status: 21/21 PASS on x64 local, x64 remote,
+  x86 local and x86 remote.
+
 ## 1.8.45 - 2026-07-31
 
 Scoped-key-count fix for the remote KeyNo / scrollbar machinery — the

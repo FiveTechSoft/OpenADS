@@ -128,6 +128,10 @@ using openads::session::Connection;
 using openads::session::Handle;
 using openads::session::HandleKind;
 
+// SAP ACE defines ADSHANDLE as 32-bit on all platforms while the internal
+// registry Handle is 64-bit; centralise the (value-preserving) narrowing.
+ADSHANDLE to_ads_handle(Handle h) { return static_cast<ADSHANDLE>(h); }
+
 struct ProcessState {
     // M10.36 — recursive_mutex so UNION dispatch can re-enter
     // AdsExecuteSQLDirect (used to materialise each member's cursor)
@@ -1322,8 +1326,8 @@ ADSHANDLE get_or_create_default_connection() {
     Connection* raw = holder.get();
     Handle h = s.registry.register_object(HandleKind::Connection, raw);
     s.conns.emplace(h, std::move(holder));
-    cached = h;
-    return h;
+    cached = to_ads_handle(h);
+    return to_ads_handle(h);
 }
 
 // Harbour rddads: AdsConnect stores the handle globally; BEGIN/COMMIT/
@@ -1780,7 +1784,7 @@ UNSIGNED32 sqlite_open_index(ADSHANDLE hTable, UNSIGNED8* pucName,
     std::lock_guard<std::recursive_mutex> lk(s.mu);
     Handle gh = s.registry.register_object(
         HandleKind::SqliteIndex, si.get());
-    ahIndex[0] = gh;
+    ahIndex[0] = to_ads_handle(gh);
     if (pu16ArrayLen != nullptr) {
         *pu16ArrayLen = 1;
     }
@@ -2092,7 +2096,7 @@ UNSIGNED32 odbc_open_index(ADSHANDLE hTable, UNSIGNED8* pucName,
     std::lock_guard<std::recursive_mutex> lk(s.mu);
     Handle gh = s.registry.register_object(
         HandleKind::OdbcIndex, si.get());
-    ahIndex[0] = gh;
+    ahIndex[0] = to_ads_handle(gh);
     if (pu16ArrayLen != nullptr) {
         *pu16ArrayLen = 1;
     }
@@ -2381,7 +2385,7 @@ UNSIGNED32 mssql_open_index(ADSHANDLE hTable, UNSIGNED8* pucName,
     auto& s = state();
     std::lock_guard<std::recursive_mutex> lk(s.mu);
     Handle gh = s.registry.register_object(HandleKind::MssqlIndex, si.get());
-    ahIndex[0] = gh;
+    ahIndex[0] = to_ads_handle(gh);
     if (pu16ArrayLen != nullptr) *pu16ArrayLen = 1;
     mssql_indexes_map().emplace(gh, std::move(si));
     return ok();
@@ -2694,7 +2698,7 @@ UNSIGNED32 firebird_open_index(ADSHANDLE hTable, UNSIGNED8* pucName,
     std::lock_guard<std::recursive_mutex> lk(s.mu);
     Handle gh = s.registry.register_object(
         HandleKind::FirebirdIndex, si.get());
-    ahIndex[0] = gh;
+    ahIndex[0] = to_ads_handle(gh);
     if (pu16ArrayLen != nullptr) {
         *pu16ArrayLen = 1;
     }
@@ -3009,7 +3013,7 @@ UNSIGNED32 maria_open_index(ADSHANDLE hTable, UNSIGNED8* pucName,
     std::lock_guard<std::recursive_mutex> lk(s.mu);
     Handle gh = s.registry.register_object(
         HandleKind::MariaIndex, si.get());
-    ahIndex[0] = gh;
+    ahIndex[0] = to_ads_handle(gh);
     if (pu16ArrayLen != nullptr) {
         *pu16ArrayLen = 1;
     }
@@ -3356,7 +3360,7 @@ UNSIGNED32 postgres_open_index(ADSHANDLE hTable, UNSIGNED8* pucName,
     std::lock_guard<std::recursive_mutex> lk(s.mu);
     Handle gh = s.registry.register_object(
         HandleKind::PostgresIndex, si.get());
-    ahIndex[0] = gh;
+    ahIndex[0] = to_ads_handle(gh);
     if (pu16ArrayLen != nullptr) {
         *pu16ArrayLen = 1;
     }
@@ -4665,7 +4669,7 @@ void apply_relations_for_table(Table* parent) {
     s.registry.for_each_handle([&](Handle handle, HandleKind k, void* p) {
         if (!h && k == HandleKind::Table &&
             static_cast<Table*>(p) == parent) {
-            h = handle;
+            h = to_ads_handle(handle);
         }
     });
     if (h) apply_relations_for_handle(h);
@@ -5523,10 +5527,10 @@ UNSIGNED32 ENTRYPOINT AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 usServerType
                 std::unique_ptr<openads::network::RemoteConnection>>
                 remote_tls_conns;
             remote_tls_conns.emplace(h, std::move(rc));
-            *phConnect = h;
+            *phConnect = to_ads_handle(h);
             // Harbour rddads stores the last AdsConnect handle for
             // AdsCreateTable / AdsBeginTransaction(0) etc.
-            rddads_default_connection() = h;
+            rddads_default_connection() = to_ads_handle(h);
             return ok();
 #else
             return fail(openads::AE_FUNCTION_NOT_AVAILABLE,
@@ -5556,10 +5560,10 @@ UNSIGNED32 ENTRYPOINT AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 usServerType
                 std::unique_ptr<openads::network::RemoteConnection>>
                 remote_conns;
             remote_conns.emplace(h, std::move(rc));
-            *phConnect = h;
+            *phConnect = to_ads_handle(h);
             // Harbour rddads stores the last AdsConnect handle for
             // AdsCreateTable / AdsBeginTransaction(0) etc.
-            rddads_default_connection() = h;
+            rddads_default_connection() = to_ads_handle(h);
             return ok();
         }
     }
@@ -5577,9 +5581,9 @@ UNSIGNED32 ENTRYPOINT AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 usServerType
             Handle h = s.registry.register_object(
                 HandleKind::SqliteConnection, raw);
             sqlite_conns_map().emplace(h, std::move(holder));
-            sql_uri_connect_register_user(h, pucUser, raw,
+            sql_uri_connect_register_user(to_ads_handle(h), pucUser, raw,
                                           openads::sql_backend::SqlDdlDialect::Sqlite);
-            *phConnect = h;
+            *phConnect = to_ads_handle(h);
             return ok();
         }
     }
@@ -5604,9 +5608,9 @@ UNSIGNED32 ENTRYPOINT AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 usServerType
             odbc_conns_map().emplace(h, std::move(holder));
             sql_uri_remember_odbc_dialect(
                 h, openads::sql_backend::SqlDdlDialect::Oracle);
-            sql_uri_connect_register_user(h, pucUser, raw,
+            sql_uri_connect_register_user(to_ads_handle(h), pucUser, raw,
                                           openads::sql_backend::SqlDdlDialect::Oracle);
-            *phConnect = h;
+            *phConnect = to_ads_handle(h);
             return ok();
         }
     }
@@ -5626,9 +5630,9 @@ UNSIGNED32 ENTRYPOINT AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 usServerType
             odbc_conns_map().emplace(h, std::move(holder));
             sql_uri_remember_odbc_dialect(
                 h, openads::sql_backend::SqlDdlDialect::Postgres);
-            sql_uri_connect_register_user(h, pucUser, raw,
+            sql_uri_connect_register_user(to_ads_handle(h), pucUser, raw,
                                           openads::sql_backend::SqlDdlDialect::Postgres);
-            *phConnect = h;
+            *phConnect = to_ads_handle(h);
             return ok();
         }
     }
@@ -5661,9 +5665,9 @@ UNSIGNED32 ENTRYPOINT AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 usServerType
             Handle h = s.registry.register_object(
                 HandleKind::MssqlConnection, raw);
             mssql_conns_map().emplace(h, std::move(holder));
-            sql_uri_connect_register_user(h, pucUser, raw,
+            sql_uri_connect_register_user(to_ads_handle(h), pucUser, raw,
                                           openads::sql_backend::SqlDdlDialect::Mssql);
-            *phConnect = h;
+            *phConnect = to_ads_handle(h);
             return ok();
         }
     }
@@ -5700,9 +5704,9 @@ UNSIGNED32 ENTRYPOINT AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 usServerType
             Handle h = s.registry.register_object(
                 HandleKind::FirebirdConnection, raw);
             firebird_conns_map().emplace(h, std::move(holder));
-            sql_uri_connect_register_user(h, pucUser, raw,
+            sql_uri_connect_register_user(to_ads_handle(h), pucUser, raw,
                                           openads::sql_backend::SqlDdlDialect::Firebird);
-            *phConnect = h;
+            *phConnect = to_ads_handle(h);
             return ok();
         }
     }
@@ -5734,9 +5738,9 @@ UNSIGNED32 ENTRYPOINT AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 usServerType
             Handle h = s.registry.register_object(
                 HandleKind::MariaConnection, raw);
             maria_conns_map().emplace(h, std::move(holder));
-            sql_uri_connect_register_user(h, pucUser, raw,
+            sql_uri_connect_register_user(to_ads_handle(h), pucUser, raw,
                                           openads::sql_backend::SqlDdlDialect::Maria);
-            *phConnect = h;
+            *phConnect = to_ads_handle(h);
             return ok();
         }
     }
@@ -5769,9 +5773,9 @@ UNSIGNED32 ENTRYPOINT AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 usServerType
             Handle h = s.registry.register_object(
                 HandleKind::PostgresConnection, raw);
             postgres_conns_map().emplace(h, std::move(holder));
-            sql_uri_connect_register_user(h, pucUser, raw,
+            sql_uri_connect_register_user(to_ads_handle(h), pucUser, raw,
                                           openads::sql_backend::SqlDdlDialect::Postgres);
-            *phConnect = h;
+            *phConnect = to_ads_handle(h);
             return ok();
         }
     }
@@ -5859,8 +5863,8 @@ UNSIGNED32 ENTRYPOINT AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 usServerType
     std::lock_guard<std::recursive_mutex> lk(s.mu);
     Handle h = s.registry.register_object(HandleKind::Connection, raw);
     s.conns.emplace(h, std::move(holder));
-    *phConnect = h;
-    rddads_default_connection() = h;
+    *phConnect = to_ads_handle(h);
+    rddads_default_connection() = to_ads_handle(h);
     // Reject connections to SAP proprietary binary .add files.  OpenADS
     // can read them (load_add_binary_) but cannot safely write them back
     // (format is closed and permission fields are encrypted).  Direct the
@@ -5985,8 +5989,8 @@ UNSIGNED32 ENTRYPOINT AdsConnect101(UNSIGNED8* pucConnectString,
         auto& s = state();
         std::lock_guard<std::recursive_mutex> lk(s.mu);
         Handle h = s.registry.register_object(HandleKind::Table, raw);
-        connect101_option_tables().emplace(h, std::move(holder));
-        *phConnectOptions = h;
+        connect101_option_tables().emplace(to_ads_handle(h), std::move(holder));
+        *phConnectOptions = to_ads_handle(h);
     }
     return ok();
 }
@@ -6151,7 +6155,7 @@ UNSIGNED32 ENTRYPOINT AdsDisconnect(ADSHANDLE hConnect) {
             purge_pending_binaries_for_table(tp);
         }
         for (Handle h : owned_handles) {
-            cursor_projections().erase(h);
+            cursor_projections().erase(to_ads_handle(h));
             s.registry.release(h);
         }
     }
@@ -6205,7 +6209,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
         Handle gh = s.registry.register_object(
             HandleKind::RemoteTable, rt.get());
         remote_tables.emplace(gh, std::move(rt));
-        *phTable = gh;
+        *phTable = to_ads_handle(gh);
         // Mirror the local M-AOF.6 production-index auto-open over the
         // wire: opening <base>.dbf binds <base>.cdx (or <base>.adi for
         // ADT) when the server has it, so rddads / X# see the production
@@ -6242,13 +6246,13 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
                 std::memcpy(b.data(), bag.data(), bag.size());
                 ADSHANDLE arr[64] = {0};
                 UNSIGNED16 alen = 64;
-                (void)AdsOpenIndex(gh, b.data(), arr, &alen);
+                (void)AdsOpenIndex(to_ads_handle(gh), b.data(), arr, &alen);
                 // ADS semantics: auto-opening the production index leaves
                 // the controlling order natural (0) until DbSetOrder picks
                 // one. AdsOpenIndex optimistically marks the first tag
                 // active; undo that so the first nav-by-index actually
                 // sends SetOrder to the server.
-                if (auto* rtp = get_remote_table(gh)) {
+                if (auto* rtp = get_remote_table(to_ads_handle(gh))) {
                     rtp->active_index_id = 0;
                     // Store the confirmed production bag path so
                     // AdsGetIndexFilename / OrdBagName works locally.
@@ -6264,8 +6268,8 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
         // would read uninitialized memory.  One extra round-trip on
         // table open positions the cursor on record 1 and populates
         // the record cache, matching LOCAL semantics.
-        if (get_remote_table(gh) != nullptr) {
-            (void)AdsGotoTop(gh);
+        if (get_remote_table(to_ads_handle(gh)) != nullptr) {
+            (void)AdsGotoTop(to_ads_handle(gh));
         }
         return ok();
     }
@@ -6299,7 +6303,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
                 Handle gh = s.registry.register_object(
                     HandleKind::SqliteTable, st.get());
                 sqlite_tables_map().emplace(gh, std::move(st));
-                *phTable = gh;
+                *phTable = to_ads_handle(gh);
                 return ok();
             }
         }
@@ -6314,7 +6318,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
         Handle gh = s.registry.register_object(
             HandleKind::SqliteTable, st.get());
         sqlite_tables_map().emplace(gh, std::move(st));
-        *phTable = gh;
+        *phTable = to_ads_handle(gh);
         return ok();
     }
 #endif
@@ -6340,7 +6344,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
         Handle gh = s.registry.register_object(
             HandleKind::OdbcTable, st.get());
         odbc_tables_map().emplace(gh, std::move(st));
-        *phTable = gh;
+        *phTable = to_ads_handle(gh);
         return ok();
     }
 #endif
@@ -6377,7 +6381,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
                 Handle gh = s.registry.register_object(
                     HandleKind::MssqlTable, st.get());
                 mssql_tables_map().emplace(gh, std::move(st));
-                *phTable = gh;
+                *phTable = to_ads_handle(gh);
                 return ok();
             }
             return fail(openads::AE_NO_FILE_FOUND, name.c_str());
@@ -6413,7 +6417,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
         Handle gh = s.registry.register_object(
             HandleKind::MssqlTable, st.get());
         mssql_tables_map().emplace(gh, std::move(st));
-        *phTable = gh;
+        *phTable = to_ads_handle(gh);
         return ok();
     }
 #endif
@@ -6447,7 +6451,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
                 Handle gh = s.registry.register_object(
                     HandleKind::FirebirdTable, st.get());
                 firebird_tables_map().emplace(gh, std::move(st));
-                *phTable = gh;
+                *phTable = to_ads_handle(gh);
                 return ok();
             }
             return fail(openads::AE_NO_FILE_FOUND, name.c_str());
@@ -6460,7 +6464,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
         Handle gh = s.registry.register_object(
             HandleKind::FirebirdTable, st.get());
         firebird_tables_map().emplace(gh, std::move(st));
-        *phTable = gh;
+        *phTable = to_ads_handle(gh);
         return ok();
     }
 #endif
@@ -6494,7 +6498,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
                 Handle gh = s.registry.register_object(
                     HandleKind::MariaTable, st.get());
                 maria_tables_map().emplace(gh, std::move(st));
-                *phTable = gh;
+                *phTable = to_ads_handle(gh);
                 return ok();
             }
             return fail(openads::AE_NO_FILE_FOUND, name.c_str());
@@ -6507,7 +6511,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
         Handle gh = s.registry.register_object(
             HandleKind::MariaTable, st.get());
         maria_tables_map().emplace(gh, std::move(st));
-        *phTable = gh;
+        *phTable = to_ads_handle(gh);
         return ok();
     }
 #endif
@@ -6541,7 +6545,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
                 Handle gh = s.registry.register_object(
                     HandleKind::PostgresTable, st.get());
                 postgres_tables_map().emplace(gh, std::move(st));
-                *phTable = gh;
+                *phTable = to_ads_handle(gh);
                 return ok();
             }
             return fail(openads::AE_NO_FILE_FOUND, name.c_str());
@@ -6554,7 +6558,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
         Handle gh = s.registry.register_object(
             HandleKind::PostgresTable, st.get());
         postgres_tables_map().emplace(gh, std::move(st));
-        *phTable = gh;
+        *phTable = to_ads_handle(gh);
         return ok();
     }
 #endif
@@ -6610,7 +6614,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
     if (!th) return fail(th.error());
     Table* tbl = conn->lookup_table(th.value());
     Handle gh = s.registry.register_object(HandleKind::Table, tbl);
-    *phTable = gh;
+    *phTable = to_ads_handle(gh);
 
     // Set the table alias from the filename (without extension).
     {
@@ -6655,7 +6659,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
             // Up to 64 tag handles is plenty for a production CDX.
             ADSHANDLE arr[64] = {0};
             UNSIGNED16 alen = 64;
-            (void)AdsOpenIndex(gh, b.data(), arr, &alen);
+            (void)AdsOpenIndex(to_ads_handle(gh), b.data(), arr, &alen);
         }
     }
     // ADI auto-open: same convention for ADT tables — opening `<base>.adt`
@@ -6672,7 +6676,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
             std::memcpy(b.data(), adis.data(), adis.size());
             ADSHANDLE arr[64] = {0};
             UNSIGNED16 alen = 64;
-            (void)AdsOpenIndex(gh, b.data(), arr, &alen);
+            (void)AdsOpenIndex(to_ads_handle(gh), b.data(), arr, &alen);
         }
     }
     return ok();
@@ -8467,8 +8471,8 @@ UNSIGNED32 ENTRYPOINT AdsFOpen(ADSHANDLE hConn, UNSIGNED8* pucName,
         auto* raw = rec.get();
         Handle h = s.registry.register_object(
             openads::session::HandleKind::RemoteFile, raw);
-        remote_files_map().emplace(h, std::move(rec));
-        *phFile = h;
+        remote_files_map().emplace(to_ads_handle(h), std::move(rec));
+        *phFile = to_ads_handle(h);
         return ok();
     }
     if (!ctx.local) return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
@@ -8479,8 +8483,8 @@ UNSIGNED32 ENTRYPOINT AdsFOpen(ADSHANDLE hConn, UNSIGNED8* pucName,
     auto* raw = fo.value().get();
     Handle h = s.registry.register_object(
         openads::session::HandleKind::LocalFile, raw);
-    local_files_map().emplace(h, std::move(fo.value()));
-    *phFile = h;
+    local_files_map().emplace(to_ads_handle(h), std::move(fo.value()));
+    *phFile = to_ads_handle(h);
     return ok();
 }
 
@@ -8502,8 +8506,8 @@ UNSIGNED32 ENTRYPOINT AdsFCreate(ADSHANDLE hConn, UNSIGNED8* pucName,
         auto* raw = rec.get();
         Handle h = s.registry.register_object(
             openads::session::HandleKind::RemoteFile, raw);
-        remote_files_map().emplace(h, std::move(rec));
-        *phFile = h;
+        remote_files_map().emplace(to_ads_handle(h), std::move(rec));
+        *phFile = to_ads_handle(h);
         return ok();
     }
     if (!ctx.local) return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
@@ -8515,8 +8519,8 @@ UNSIGNED32 ENTRYPOINT AdsFCreate(ADSHANDLE hConn, UNSIGNED8* pucName,
     auto* raw = fo.value().get();
     Handle h = s.registry.register_object(
         openads::session::HandleKind::LocalFile, raw);
-    local_files_map().emplace(h, std::move(fo.value()));
-    *phFile = h;
+    local_files_map().emplace(to_ads_handle(h), std::move(fo.value()));
+    *phFile = to_ads_handle(h);
     return ok();
 }
 
@@ -8661,7 +8665,7 @@ UNSIGNED32 ENTRYPOINT AdsCloseAllTables(void) {
             (void)t->flush();
             purge_bindings_for_table(t);
             purge_pending_binaries_for_table(t);
-            connect101_option_tables().erase(h);
+            connect101_option_tables().erase(to_ads_handle(h));
             if (owning) owning->close_table_ptr(t);
         }
         s.registry.release(h);
@@ -8730,7 +8734,7 @@ UNSIGNED32 ENTRYPOINT AdsGotoTop(ADSHANDLE hTable) {
         if (!r) return fail(r.error());
         remote_sync_keyno_gototop(ri->parent);
         if (Handle th = handle_for_remote_table(ri->parent))
-            apply_relations_for_handle(th);
+            apply_relations_for_handle(to_ads_handle(th));
         return ok();
     }
     if (auto* rt = get_remote_table(hTable)) {
@@ -8766,7 +8770,7 @@ UNSIGNED32 ENTRYPOINT AdsGotoBottom(ADSHANDLE hTable) {
         if (!r) return fail(r.error());
         remote_sync_keyno_gotobottom(ri->parent);
         if (Handle th = handle_for_remote_table(ri->parent))
-            apply_relations_for_handle(th);
+            apply_relations_for_handle(to_ads_handle(th));
         return ok();
     }
     if (auto* rt = get_remote_table(hTable)) {
@@ -8805,7 +8809,7 @@ UNSIGNED32 ENTRYPOINT AdsSkip(ADSHANDLE hTable, SIGNED32 lRows) {
         remote_sync_keyno_skip(rt, lRows);
         remote_update_nav_boundaries(rt, lRows, rec_before, row_valid_before);
         if (Handle th = handle_for_remote_table(rt))
-            apply_relations_for_handle(th);
+            apply_relations_for_handle(to_ads_handle(th));
         return ok();
     }
     if (auto* rt = get_remote_table(hTable)) {
@@ -10073,7 +10077,7 @@ bool fire_triggers_(Handle hConn, Connection* conn,
         // procs, RAISE). A failure is REPORTED to the caller — the old
         // fragment silently swallowed it, so pmsys audit triggers "fired"
         // while writing nothing and the DML still reported success.
-        auto r = script_run_trigger_body(conn, hConn, body_copy,
+        auto r = script_run_trigger_body(conn, to_ads_handle(hConn), body_copy,
                                          new_fields, old_fields,
                                          timing == 2u /*is_instead_of*/);
         if (timing == 2u) instead_of_fired = true;
@@ -11609,6 +11613,23 @@ std::unordered_map<Table*, ADSHANDLE>& active_binding_for() {
     return m;
 }
 
+// Park the table's active order back into its binding slot, leaving the
+// table in natural order (AdsSetIndexOrder(h, "") semantics).
+void park_active_order(Table* t) {
+    auto& act = active_binding_for();
+    auto act_it = act.find(t);
+    if (act_it == act.end()) return;
+    auto& m = index_bindings();
+    auto bit = m.find(act_it->second);
+    if (bit != m.end()) {
+        auto taken = t->take_order();
+        openads::drivers::IIndex* raw = taken.get();
+        bit->second.parked = std::move(taken);
+        if (raw) t->register_extra_index_view(raw);
+    }
+    act.erase(act_it);
+}
+
 // Drop every binding tied to `t`. Called from AdsCloseTable / AdsCloseAllTables
 // / AdsDisconnect — without this, a Connection teardown leaves the bindings
 // behind, so a later test (or app reconnect) that allocates a Table at the
@@ -11688,7 +11709,7 @@ openads::util::Result<void> activate_binding(ADSHANDLE h) {
 
 ADSHANDLE next_index_handle() {
     static std::uint64_t n = 0x40000000ULL;  // disjoint from table handles
-    return ++n;
+    return static_cast<ADSHANDLE>(++n);
 }
 
 Table* table_for_index(ADSHANDLE hIndex) {
@@ -11918,7 +11939,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
             ri->is_descending = entries[i].is_descending;
             Handle gh = s.registry.register_object(
                 HandleKind::RemoteIndex, ri.get());
-            ahIndex[i] = gh;
+            ahIndex[i] = to_ads_handle(gh);
             remote_indexes.emplace(gh, std::move(ri));
             // Dedup by tag: production-CDX auto-open and a later explicit
             // AdsOpenIndex on the same bag must not register the order
@@ -12019,11 +12040,17 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
     // Refresh: drop any prior bindings for this Table that came from
     // the same file path. If the active binding was among them, also
     // surrender Table::order_; the caller's reopen will repopulate it.
+    // RCB 01/08/2026: keep the old tag→handle mapping and REUSE those
+    // handles below — remote clients (openads_serverd's wire index_h_)
+    // hold the numeric handles across a bag reopen, and erasing them
+    // made the next SetOrder fail with 5000 (stale binding).
+    std::unordered_map<std::string, ADSHANDLE> old_handles;
     bool active_dropped = false;
     auto act_it = act.find(t);
     ADSHANDLE active_h = act_it != act.end() ? act_it->second : 0;
     for (auto it = m.begin(); it != m.end(); ) {
         if (it->second.table == t && same_index_path(it->second.path, path)) {
+            old_handles[it->second.tag_name] = it->first;
             if (it->first == active_h) {
                 active_dropped = true;
             } else if (it->second.parked) {
@@ -12074,7 +12101,8 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
         std::string tag_name = idx->name();
         if (path_ends_with_ci(path, ".ntx"))
             mark_ntx_key_encoding(t, idx.get());
-        ADSHANDLE h = next_index_handle();
+        ADSHANDLE h = old_handles.count(tag_name)
+            ? old_handles[tag_name] : next_index_handle();
         if (!table_has_active) {
             t->set_order(std::move(idx));
             m[h] = IndexBinding{t, tag_name, nullptr, path};
@@ -12118,7 +12146,8 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
             apply_cdx_oem_collation(t, idx.get());
             sub = std::move(idx);
         }
-        ADSHANDLE h = next_index_handle();
+        ADSHANDLE h = old_handles.count(name)
+            ? old_handles[name] : next_index_handle();
         if (!table_has_active) {
             t->set_order(std::move(sub));
             m[h] = IndexBinding{t, name, nullptr, path};
@@ -12266,7 +12295,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
         auto& s = state();
         std::lock_guard<std::recursive_mutex> lk(s.mu);
         Handle gh = s.registry.register_object(HandleKind::SqliteIndex, si.get());
-        *phIndex = gh;
+        *phIndex = to_ads_handle(gh);
         sqlite_indexes_map().emplace(gh, std::move(si));
         (void)pucFileName;
         (void)pucCondition;
@@ -12294,7 +12323,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
         auto& s = state();
         std::lock_guard<std::recursive_mutex> lk(s.mu);
         Handle gh = s.registry.register_object(HandleKind::PostgresIndex, si.get());
-        *phIndex = gh;
+        *phIndex = to_ads_handle(gh);
         postgres_indexes_map().emplace(gh, std::move(si));
         (void)pucFileName;
         (void)pucCondition;
@@ -12322,7 +12351,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
         auto& s = state();
         std::lock_guard<std::recursive_mutex> lk(s.mu);
         Handle gh = s.registry.register_object(HandleKind::MariaIndex, si.get());
-        *phIndex = gh;
+        *phIndex = to_ads_handle(gh);
         maria_indexes_map().emplace(gh, std::move(si));
         (void)pucFileName;
         (void)pucCondition;
@@ -12350,7 +12379,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
         auto& s = state();
         std::lock_guard<std::recursive_mutex> lk(s.mu);
         Handle gh = s.registry.register_object(HandleKind::MssqlIndex, si.get());
-        *phIndex = gh;
+        *phIndex = to_ads_handle(gh);
         mssql_indexes_map().emplace(gh, std::move(si));
         (void)pucFileName;
         (void)pucCondition;
@@ -12374,7 +12403,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
         std::lock_guard<std::recursive_mutex> lk(s.mu);
         Handle gh = s.registry.register_object(
             HandleKind::OdbcIndex, si.get());
-        *phIndex = gh;
+        *phIndex = to_ads_handle(gh);
         odbc_indexes_map().emplace(gh, std::move(si));
         (void)pucFileName;
         (void)pucIndexName;
@@ -12405,7 +12434,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
         std::lock_guard<std::recursive_mutex> lk(s.mu);
         Handle gh = s.registry.register_object(
             HandleKind::FirebirdIndex, si.get());
-        *phIndex = gh;
+        *phIndex = to_ads_handle(gh);
         firebird_indexes_map().emplace(gh, std::move(si));
         (void)pucFileName;
         (void)pucCondition;
@@ -12440,7 +12469,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
         ri->tag_name = tag;
         Handle gh = s.registry.register_object(
             HandleKind::RemoteIndex, ri.get());
-        *phIndex = gh;
+        *phIndex = to_ads_handle(gh);
         remote_indexes.emplace(gh, std::move(ri));
         rt->index_by_tag.emplace_back(tag, r.value());
         return ok();
@@ -13596,7 +13625,7 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrder(ADSHANDLE hTable, UNSIGNED8* pucName) {
         for (auto& [ih, si] : sqlite_indexes_map()) {
             if (si->parent == get_sqlite_table(hTable) &&
                 upper_eq(si->column, name)) {
-                sql_active_index_handle()[hTable] = ih;
+                sql_active_index_handle()[hTable] = static_cast<ADSHANDLE>(ih);
                 return ok();
             }
         }
@@ -13605,7 +13634,7 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrder(ADSHANDLE hTable, UNSIGNED8* pucName) {
         for (auto& [ih, si] : maria_indexes_map()) {
             if (si->parent == get_maria_table(hTable) &&
                 upper_eq(si->column, name)) {
-                sql_active_index_handle()[hTable] = ih;
+                sql_active_index_handle()[hTable] = static_cast<ADSHANDLE>(ih);
                 return ok();
             }
         }
@@ -13614,7 +13643,7 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrder(ADSHANDLE hTable, UNSIGNED8* pucName) {
         for (auto& [ih, si] : postgres_indexes_map()) {
             if (si->parent == get_postgres_table(hTable) &&
                 upper_eq(si->column, name)) {
-                sql_active_index_handle()[hTable] = ih;
+                sql_active_index_handle()[hTable] = static_cast<ADSHANDLE>(ih);
                 return ok();
             }
         }
@@ -13623,7 +13652,7 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrder(ADSHANDLE hTable, UNSIGNED8* pucName) {
         for (auto& [ih, si] : odbc_indexes_map()) {
             if (si->parent == get_odbc_table(hTable) &&
                 upper_eq(si->column, name)) {
-                sql_active_index_handle()[hTable] = ih;
+                sql_active_index_handle()[hTable] = static_cast<ADSHANDLE>(ih);
                 return ok();
             }
         }
@@ -13632,7 +13661,7 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrder(ADSHANDLE hTable, UNSIGNED8* pucName) {
         for (auto& [ih, si] : firebird_indexes_map()) {
             if (si->parent == get_firebird_table(hTable) &&
                 upper_eq(si->column, name)) {
-                sql_active_index_handle()[hTable] = ih;
+                sql_active_index_handle()[hTable] = static_cast<ADSHANDLE>(ih);
                 return ok();
             }
         }
@@ -13641,7 +13670,7 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrder(ADSHANDLE hTable, UNSIGNED8* pucName) {
         for (auto& [ih, si] : mssql_indexes_map()) {
             if (si->parent == get_mssql_table(hTable) &&
                 upper_eq(si->column, name)) {
-                sql_active_index_handle()[hTable] = ih;
+                sql_active_index_handle()[hTable] = static_cast<ADSHANDLE>(ih);
                 return ok();
             }
         }
@@ -13657,19 +13686,7 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrder(ADSHANDLE hTable, UNSIGNED8* pucName) {
         // Empty tag = natural order. Park the active binding back
         // into its slot so a subsequent AdsSetIndexOrder picks the
         // current Table::order_ up cleanly.
-        auto& act = active_binding_for();
-        auto act_it = act.find(t);
-        if (act_it != act.end()) {
-            auto& m = index_bindings();
-            auto bit = m.find(act_it->second);
-            if (bit != m.end()) {
-                auto taken = t->take_order();
-                openads::drivers::IIndex* raw = taken.get();
-                bit->second.parked = std::move(taken);
-                if (raw) t->register_extra_index_view(raw);
-            }
-            act.erase(act_it);
-        }
+        park_active_order(t);
         return ok();
     }
     auto upper_eq = [](const std::string& a, const std::string& b) {
@@ -13698,20 +13715,18 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrder(ADSHANDLE hTable, UNSIGNED8* pucName) {
 UNSIGNED32 ENTRYPOINT AdsSetIndexOrderByHandle(ADSHANDLE hTable, ADSHANDLE hIndex) {
     if (auto* rt = get_remote_table(hTable)) {
         if (hIndex == 0) {
+            // "Back to natural order" via the explicit API: send the reset
+            // frame so the server drops its ordered_tables_ entry (it used
+            // to send NO frame, and table-handle Skips kept walking the
+            // old index order).
+            auto r = rt->conn->set_order_by_name(rt->id, "");
+            if (!r) return fail(r.error());
             rt->active_index_id = 0;
+            rt->server_order_id = 0;
             rt->keyno_valid     = false;
-            rt->row_valid       = false;
             rt->key_count_cached = false;
+            rt->row_valid       = false;
             rt->invalidate_prefetch();
-            // RCB 07/14/2026: heads-up for whoever reads this next — this
-            // branch (hIndex == 0 == "back to natural order") sends NO frame,
-            // so the server keeps the old order installed in ordered_tables_
-            // and a table-handle Skip still walks it in index order. That is a
-            // PRE-EXISTING gap, not something introduced here; it is written up
-            // as a side bug in todo.local.md. Forcing server_order_id back to
-            // unknown at least makes the next index-handle nav re-install a
-            // known order instead of trusting a stale belief.
-            rt->server_order_id = openads::network::RemoteTable::kOrderUnknown;
             return ok();
         }
         if (auto* ri = get_remote_index(hIndex)) {
@@ -13760,6 +13775,12 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrderByHandle(ADSHANDLE hTable, ADSHANDLE hInde
     }
     Table* t = get_table(hTable);
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
+    if (hIndex == 0) {
+        // Natural order (rddads' patched DbSetOrder(0) calls this): park
+        // the active order back into its binding slot.
+        park_active_order(t);
+        return ok();
+    }
     auto& m = index_bindings();
     auto it = m.find(hIndex);
     if (it == m.end() || it->second.table != t) {
@@ -18290,7 +18311,7 @@ UNSIGNED32 ENTRYPOINT AdsFindFirstTable(ADSHANDLE   hConnect,
 
     auto [find_ptr, name] = std::move(r).value();
     Handle gh = s.registry.register_object(HandleKind::Find, find_ptr);
-    *phFind = gh;
+    *phFind = to_ads_handle(gh);
     return emit_name(pucFileName, pusFileNameLen, name);
 }
 
@@ -18349,7 +18370,7 @@ UNSIGNED32 ENTRYPOINT AdsDDCreate(UNSIGNED8* pucDictionary, UNSIGNED16 /*bEncryp
     std::lock_guard<std::recursive_mutex> lk(s.mu);
     Handle h = s.registry.register_object(HandleKind::Connection, raw);
     s.conns.emplace(h, std::move(holder));
-    *phConnect = h;
+    *phConnect = to_ads_handle(h);
     return ok();
 }
 
@@ -20326,7 +20347,7 @@ extern "C++" bool dispatch_sp_builtin(
         ADSHANDLE conn_h = 0;
         s.registry.for_each_handle([&](Handle h, HandleKind k, void* p) {
             if (k != HandleKind::Connection) return;
-            if (static_cast<Connection*>(p) == c) conn_h = h;
+            if (static_cast<Connection*>(p) == c) conn_h = to_ads_handle(h);
         });
         if (conn_h == 0) {
             *prc = fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
@@ -23111,7 +23132,7 @@ inline openads::util::Result<void> run_top_level_script(
             "script result post-open", ""};
     auto& s = state();
     std::lock_guard<std::recursive_mutex> lk(s.mu);
-    *phCursor = s.registry.register_object(HandleKind::Table, tbl);
+    *phCursor = to_ads_handle(s.registry.register_object(HandleKind::Table, tbl));
     return {};
 }
 
@@ -23632,7 +23653,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         Handle h = s.registry.register_object(
             HandleKind::RemoteTable, rt.get());
         remote_sql_cursors_map()[h] = std::move(rt);
-        *phCursor = h;
+        *phCursor = to_ads_handle(h);
         return ok();
     }
 #if defined(OPENADS_WITH_SQLITE)
@@ -23682,7 +23703,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         openads::sql_backend::SqliteTable* raw = cursor.get();
         Handle h = s.registry.register_object(HandleKind::SqliteTable, raw);
         sqlite_tables_map().emplace(h, std::move(cursor));
-        *phCursor = h;
+        *phCursor = to_ads_handle(h);
         return ok();
     }
 #endif
@@ -23735,7 +23756,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         Handle h = s.registry.register_object(
             HandleKind::MssqlTable, st.get());
         mssql_tables_map().emplace(h, std::move(st));
-        *phCursor = h;
+        *phCursor = to_ads_handle(h);
         return ok();
     }
 #endif
@@ -23793,7 +23814,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         Handle h = s.registry.register_object(
             HandleKind::PostgresTable, cursor.get());
         postgres_tables_map().emplace(h, std::move(cursor));
-        *phCursor = h;
+        *phCursor = to_ads_handle(h);
         return ok();
     }
 #endif
@@ -23851,7 +23872,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         Handle h = s.registry.register_object(
             HandleKind::MariaTable, cursor.get());
         maria_tables_map().emplace(h, std::move(cursor));
-        *phCursor = h;
+        *phCursor = to_ads_handle(h);
         return ok();
     }
 #endif
@@ -23959,7 +23980,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         Handle h = s.registry.register_object(
             HandleKind::FirebirdTable, cursor.get());
         firebird_tables_map().emplace(h, std::move(cursor));
-        *phCursor = h;
+        *phCursor = to_ads_handle(h);
         return ok();
     }
 #endif
@@ -24467,7 +24488,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         ADSHANDLE conn_h = 0;
         s.registry.for_each_handle([&](Handle h, HandleKind k, void* p) {
             if (k != HandleKind::Connection) return;
-            if (static_cast<Connection*>(p) == c) conn_h = h;
+            if (static_cast<Connection*>(p) == c) conn_h = to_ads_handle(h);
         });
         if (conn_h == 0) return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
         std::vector<UNSIGNED8> name_buf(at.value().table.size() + 1, 0);
@@ -24601,7 +24622,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             ADSHANDLE conn_h = 0;
             s.registry.for_each_handle([&](Handle h, HandleKind k, void* p) {
                 if (k != HandleKind::Connection) return;
-                if (static_cast<Connection*>(p) == c) conn_h = h;
+                if (static_cast<Connection*>(p) == c) conn_h = to_ads_handle(h);
             });
             if (conn_h == 0) {
                 AdsCloseTable(srcCur);
@@ -24710,7 +24731,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         ADSHANDLE conn_h = 0;
         s.registry.for_each_handle([&](Handle h, HandleKind k, void* p) {
             if (k != HandleKind::Connection) return;
-            if (static_cast<Connection*>(p) == c) conn_h = h;
+            if (static_cast<Connection*>(p) == c) conn_h = to_ads_handle(h);
         });
         if (conn_h == 0) return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
         UNSIGNED32 rc = AdsCreateTable(conn_h, name_buf.data(), nullptr,
@@ -24732,7 +24753,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         ADSHANDLE conn_h = 0;
         s.registry.for_each_handle([&](Handle h, HandleKind k, void* p) {
             if (k != HandleKind::Connection) return;
-            if (static_cast<Connection*>(p) == c) conn_h = h;
+            if (static_cast<Connection*>(p) == c) conn_h = to_ads_handle(h);
         });
         if (conn_h == 0) return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
 
@@ -24923,8 +24944,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 if (!th) return fail(th.error());
                 openads::engine::Table* tbl = c->lookup_table(th.value());
                 if (!tbl) return fail(openads::AE_INTERNAL_ERROR, "sp adopt");
-                ADSHANDLE gh = s.registry.register_object(
-                    HandleKind::Table, tbl);
+                ADSHANDLE gh = to_ads_handle(s.registry.register_object(
+                    HandleKind::Table, tbl));
                 *phCursor = gh;
                 return ok();
             }
@@ -25022,7 +25043,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         if (!th) return fail(th.error());
         openads::engine::Table* tbl = c->lookup_table(th.value());
         if (!tbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
-        ADSHANDLE gh = s.registry.register_object(HandleKind::Table, tbl);
+        ADSHANDLE gh = to_ads_handle(s.registry.register_object(HandleKind::Table, tbl));
         *phCursor = gh;
         return ok();
     }
@@ -26432,7 +26453,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             if (!uth) return fail(uth.error());
             openads::engine::Table* utbl = c->lookup_table(uth.value());
             if (!utbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
-            ADSHANDLE gh = s.registry.register_object(HandleKind::Table, utbl);
+            ADSHANDLE gh = to_ads_handle(s.registry.register_object(HandleKind::Table, utbl));
             *phCursor = gh;
             return ok();
         }
@@ -27332,7 +27353,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         if (!cth) return fail(cth.error());
         openads::engine::Table* ctbl = c->lookup_table(cth.value());
         if (!ctbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
-        ADSHANDLE gh = s.registry.register_object(HandleKind::Table, ctbl);
+        ADSHANDLE gh = to_ads_handle(s.registry.register_object(HandleKind::Table, ctbl));
         *phCursor = gh;
         return ok();
     }
@@ -28207,7 +28228,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             if (!gth) return fail(gth.error());
             openads::engine::Table* gtbl = c->lookup_table(gth.value());
             if (!gtbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
-            ADSHANDLE gh = s.registry.register_object(HandleKind::Table, gtbl);
+            ADSHANDLE gh = to_ads_handle(s.registry.register_object(HandleKind::Table, gtbl));
             *phCursor = gh;
             return ok();
         }
@@ -28364,12 +28385,12 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             if (!ath) return fail(ath.error());
             openads::engine::Table* atbl = c->lookup_table(ath.value());
             if (!atbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
-            ADSHANDLE gh = s.registry.register_object(HandleKind::Table, atbl);
+            ADSHANDLE gh = to_ads_handle(s.registry.register_object(HandleKind::Table, atbl));
             *phCursor = gh;
             return ok();
         }
 
-        ADSHANDLE gh = s.registry.register_object(HandleKind::Table, ctbl);
+        ADSHANDLE gh = to_ads_handle(s.registry.register_object(HandleKind::Table, ctbl));
         // Apply the SELECT projection to the joined cursor (previously
         // ignored — a join always exposed every merged column). Left
         // columns resolve by name; a right-table column that collides
@@ -29007,7 +29028,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             if (!gth) return fail(gth.error());
             openads::engine::Table* gtbl = c->lookup_table(gth.value());
             if (!gtbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
-            ADSHANDLE gh = s.registry.register_object(HandleKind::Table, gtbl);
+            ADSHANDLE gh = to_ads_handle(s.registry.register_object(HandleKind::Table, gtbl));
             *phCursor = gh;
             return ok();
         }
@@ -29313,7 +29334,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         if (!cth) return fail(cth.error());
         openads::engine::Table* ctbl = c->lookup_table(cth.value());
         if (!ctbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
-        ADSHANDLE gh = s.registry.register_object(HandleKind::Table, ctbl);
+        ADSHANDLE gh = to_ads_handle(s.registry.register_object(HandleKind::Table, ctbl));
         *phCursor = gh;
         return ok();
     }
@@ -31270,7 +31291,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         if (!cth) return fail(cth.error());
         openads::engine::Table* ctbl = c->lookup_table(cth.value());
         if (!ctbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
-        ADSHANDLE gh_case = s.registry.register_object(HandleKind::Table, ctbl);
+        ADSHANDLE gh_case = to_ads_handle(s.registry.register_object(HandleKind::Table, ctbl));
         *phCursor = gh_case;
         return ok();
     }
@@ -31314,7 +31335,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         ADSHANDLE conn_h = 0;
         s.registry.for_each_handle([&](Handle h, HandleKind k, void* p) {
             if (k != HandleKind::Connection) return;
-            if (static_cast<Connection*>(p) == c) conn_h = h;
+            if (static_cast<Connection*>(p) == c) conn_h = to_ads_handle(h);
         });
         if (conn_h != 0) {
             std::vector<std::uint16_t> cols;
@@ -31478,7 +31499,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 if (!ctbl) return fail(openads::AE_INTERNAL_ERROR,
                                        "sorted temp post-open");
                 ADSHANDLE gh_srt =
-                    s.registry.register_object(HandleKind::Table, ctbl);
+                    to_ads_handle(s.registry.register_object(HandleKind::Table, ctbl));
                 // Tie the temp table's lifetime to the cursor handle: without
                 // this, every SELECT ... ORDER BY leaves a _srt_*.dbf (and any
                 // index the caller built on it) behind in the data directory.
@@ -31496,7 +31517,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
     // cursor isn't a stale alias of an already-registered Table*.
     ADSHANDLE gh = (derived_cur != 0)
         ? derived_cur
-        : s.registry.register_object(HandleKind::Table, tbl);
+        : to_ads_handle(s.registry.register_object(HandleKind::Table, tbl));
 
     if (!parsed.value().projection.empty()) {
         std::vector<std::uint16_t> proj;
@@ -32041,6 +32062,20 @@ UNSIGNED32 ENTRYPOINT AdsGetIndexFilename(ADSHANDLE hIndex, UNSIGNED16 /*usOrder
 UNSIGNED32 ENTRYPOINT AdsGetIndexOrderByHandle(ADSHANDLE hIndex, UNSIGNED16* p) {
     if (p == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
     *p = 0;
+    // Remote index handle (RemoteIndex): the ordinal is the tag's 1-based
+    // position among the orders opened on the parent table. Match by tag
+    // name, not handle identity, so the answer is stable when the same bag
+    // is opened twice (production auto-open + explicit dbSetIndex).
+    if (auto* ri = get_remote_index(hIndex)) {
+        if (ri->parent == nullptr) return ok();
+        for (std::size_t i = 0; i < ri->parent->index_by_tag.size(); ++i) {
+            if (ri->parent->index_by_tag[i].first == ri->tag_name) {
+                *p = static_cast<UNSIGNED16>(i + 1);
+                break;
+            }
+        }
+        return ok();
+    }
     auto& m = index_bindings();
     Table* t = nullptr;
     std::string tag;
@@ -32522,7 +32557,7 @@ UNSIGNED32 ENTRYPOINT AdsGetTableConnection(ADSHANDLE hTable, ADSHANDLE* p) {
         s.registry.for_each_handle([&](Handle h, HandleKind k, void* ptr) {
             if (k == HandleKind::RemoteConnection &&
                 ptr == static_cast<void*>(rt->conn)) {
-                *p = h;
+                *p = to_ads_handle(h);
             }
         });
         return ok();
@@ -32536,7 +32571,7 @@ UNSIGNED32 ENTRYPOINT AdsGetTableConnection(ADSHANDLE hTable, ADSHANDLE* p) {
     s.registry.for_each_handle([&](Handle h, HandleKind k, void* ptr) {
         if (k == HandleKind::Connection &&
             ptr == static_cast<void*>(c)) {
-            *p = h;
+            *p = to_ads_handle(h);
         }
     });
     return ok();
@@ -34023,7 +34058,7 @@ UNSIGNED32 ENTRYPOINT AdsGetAllTables(ADSHANDLE hConnect, ADSHANDLE* ahTable,
     std::vector<ADSHANDLE> found;
     s.registry.for_each_handle([&](Handle h, HandleKind k, void* p) {
         if (k != HandleKind::Table) return;
-        if (conn->owns_table_ptr(static_cast<Table*>(p))) found.push_back(h);
+        if (conn->owns_table_ptr(static_cast<Table*>(p))) found.push_back(to_ads_handle(h));
     });
     UNSIGNED16 cap   = *pusArrayLen;
     auto       total = static_cast<UNSIGNED16>(found.size());
@@ -34125,7 +34160,7 @@ UNSIGNED32 ENTRYPOINT AdsCloneTable(ADSHANDLE hTable, ADSHANDLE* phClone) {
     Table* clone = owning->lookup_table(th.value());
     if (!clone) return fail(openads::AE_INTERNAL_ERROR,
                             "AdsCloneTable: post-open");
-    *phClone = s.registry.register_object(HandleKind::Table, clone);
+    *phClone = to_ads_handle(s.registry.register_object(HandleKind::Table, clone));
     return ok();
 }
 
@@ -34330,7 +34365,7 @@ UNSIGNED32 ENTRYPOINT AdsGetDate(ADSHANDLE hObj, UNSIGNED8* pId, UNSIGNED8* pucB
     // AdsGetField only checks get_remote_table(); resolve index -> parent.
     ADSHANDLE real_hObj = hObj;
     if (auto* ri = get_remote_index(hObj)) {
-        if (ri->parent) real_hObj = handle_for_remote_table(ri->parent);
+        if (ri->parent) real_hObj = to_ads_handle(handle_for_remote_table(ri->parent));
     }
     UNSIGNED32 rc = AdsGetField(real_hObj,
                                 as_field(resolve_field_id(real_hObj, pId, nm, sizeof(nm))),

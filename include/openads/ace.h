@@ -34,7 +34,11 @@ typedef uint32_t UNSIGNED32;
 typedef int32_t  SIGNED32;
 typedef int64_t  SIGNED64;
 typedef uint64_t UNSIGNED64;
-typedef uint64_t ADSHANDLE;
+// SAP ACE defines ADSHANDLE as a 32-bit value on every platform.
+// Declaring it 64-bit here made every ADSHANDLE-by-reference out
+// parameter write 8 bytes into the caller's 4-byte storage, which
+// corrupts the stack of 32-bit callers (rddads) — v1.8.46.
+typedef uint32_t ADSHANDLE;
 
 #define ADS_DEFAULT 0
 #define ADS_NTX     1

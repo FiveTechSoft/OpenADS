@@ -1,4 +1,4 @@
-﻿add_library(openads_aes_impl OBJECT
+add_library(openads_aes_impl OBJECT
     ${CMAKE_SOURCE_DIR}/third_party/tinyaes/aes128_impl.c
     ${CMAKE_SOURCE_DIR}/third_party/tinyaes/aes256_impl.c
 )
@@ -281,9 +281,17 @@ add_library(openads_ace SHARED
     abi/legacy_crt_shims.cpp
 )
 
+if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 4)
+    # x86-only: __stdcall aliases (AdsXxx@N) so 32-bit Harbour rddads.lib /
+    # FiveWin apps built for SAP ACE's stdcall ABI can link AND load
+    # (ace32.dll must export the decorated names; without them every
+    # 32-bit rddads app died with 0xC0000139 at startup).
+    target_sources(openads_ace PRIVATE abi/ace_stdcall_x86.c)
+endif()
+
 if(WIN32)
     # Default .def is name-based exports (undecorated, __cdecl). For x86
-    # Harbour (rddads) compatibility, openads_ace_x86.def exports
+    # Harbour (rddads) compatibility, openads_ace_x86_stdcall.def exports
     # __stdcall-decorated (@N) names instead. See dist/import-libs/gen.ps1.
     # Apps linked against an
     # ace32.lib / ace64.lib whose imports are by-ordinal need a
@@ -291,7 +299,17 @@ if(WIN32)
     # user is replacing â€” generate it once per-machine with
     # tools/scripts/sap_ordinals_to_def.py and pass it in via
     # -DOPENADS_ACE_DEF=<path> at configure time.
-    set(OPENADS_ACE_DEF "${CMAKE_CURRENT_SOURCE_DIR}/openads_ace.def"
+    if(CMAKE_SIZEOF_VOID_P EQUAL 4)
+        # 32-bit: the DLL must export the __stdcall-decorated (_AdsXxx@N)
+        # names 32-bit rddads.lib imports - with a plain-name def every
+        # 32-bit rddads app dies with 0xC0000139 at startup. The decorated
+        # exports come from the dllexport wrappers in abi/ace_stdcall_x86.c;
+        # this def adds the oads_* C API and the legacy-CRT shims.
+        set(_ace_def_default "${CMAKE_CURRENT_SOURCE_DIR}/openads_ace_x86_stdcall.def")
+    else()
+        set(_ace_def_default "${CMAKE_CURRENT_SOURCE_DIR}/openads_ace.def")
+    endif()
+    set(OPENADS_ACE_DEF "${_ace_def_default}"
         CACHE FILEPATH
         "Path to the .def file driving openads_ace exports.")
     if(MINGW)
