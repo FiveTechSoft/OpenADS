@@ -96,6 +96,14 @@ if(OPENADS_WITH_HBNETIO_BRIDGE)
     target_compile_definitions(openads_core PUBLIC OPENADS_WITH_HBNETIO_BRIDGE=1)
 endif()
 
+# Targets linking openads_core get the ACE implementations, not the DLL
+# exports, so on x86 they must see the __cdecl declarations (v1.8.48):
+# without this their __stdcall-decorated (_AdsXxx@N) references cannot
+# resolve against the core's plain _AdsXxx symbols.
+if(MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 4)
+    target_compile_definitions(openads_core PUBLIC OPENADS_ACE_IMPLEMENTATION)
+endif()
+
 if(OPENADS_WITH_POSTGRESQL)
     target_sources(openads_core PRIVATE
         sql_backend/postgres_uri.cpp

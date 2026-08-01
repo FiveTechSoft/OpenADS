@@ -416,6 +416,15 @@ __declspec(dllexport) UNSIGNED32 __stdcall AdsCreateFTSIndex(ADSHANDLE a0, UNSIG
     return oadsimpl_AdsCreateFTSIndex(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17);
 }
 
+/* ---- AdsCreateIndex ---- */
+#define AdsCreateIndex oadsimpl_AdsCreateIndex
+extern UNSIGNED32 ENTRYPOINT AdsCreateIndex(ADSHANDLE hTable, UNSIGNED8* pucFile, UNSIGNED8* pucTag, UNSIGNED8* pucExpr, UNSIGNED8* pucCondition, UNSIGNED32 ulOptions, UNSIGNED16 usKeyType, ADSHANDLE* phIndex);
+#undef AdsCreateIndex
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsCreateIndex=_AdsCreateIndex")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsCreateIndex(ADSHANDLE a0, UNSIGNED8* a1, UNSIGNED8* a2, UNSIGNED8* a3, UNSIGNED8* a4, UNSIGNED32 a5, UNSIGNED16 a6, ADSHANDLE* a7) {
+    return oadsimpl_AdsCreateIndex(a0, a1, a2, a3, a4, a5, a6, a7);
+}
+
 /* ---- AdsCreateIndex61 ---- */
 #define AdsCreateIndex61 oadsimpl_AdsCreateIndex61
 extern UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE hTable, UNSIGNED8* pucFileName, UNSIGNED8* pucIndexName, UNSIGNED8* pucExpr, UNSIGNED8* pucCondition, UNSIGNED8* pucKeyFilter, UNSIGNED32 ulOptions, UNSIGNED16 usPageSize, ADSHANDLE* phIndex);
@@ -3150,6 +3159,546 @@ extern UNSIGNED32 ENTRYPOINT AdsStmtSetTableType(ADSHANDLE hStmt, UNSIGNED16 usT
 #pragma comment(linker, "/alternatename:_oadsimpl_AdsStmtSetTableType=_AdsStmtSetTableType")
 __declspec(dllexport) UNSIGNED32 __stdcall AdsStmtSetTableType(ADSHANDLE a0, UNSIGNED16 a1) {
     return oadsimpl_AdsStmtSetTableType(a0, a1);
+}
+
+/* ---- AdsAggregate ---- */
+#define AdsAggregate oadsimpl_AdsAggregate
+extern UNSIGNED32 ENTRYPOINT AdsAggregate(ADSHANDLE hTbl, UNSIGNED8* pszForCond, UNSIGNED8* pszAggSpec, ADSHANDLE* phResult);
+#undef AdsAggregate
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsAggregate=_AdsAggregate")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsAggregate(ADSHANDLE a0, UNSIGNED8* a1, UNSIGNED8* a2, ADSHANDLE* a3) {
+    return oadsimpl_AdsAggregate(a0, a1, a2, a3);
+}
+
+/* ---- AdsAggregateClose ---- */
+#define AdsAggregateClose oadsimpl_AdsAggregateClose
+extern UNSIGNED32 ENTRYPOINT AdsAggregateClose(ADSHANDLE hRes);
+#undef AdsAggregateClose
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsAggregateClose=_AdsAggregateClose")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsAggregateClose(ADSHANDLE a0) {
+    return oadsimpl_AdsAggregateClose(a0);
+}
+
+/* ---- AdsAggregateCount ---- */
+#define AdsAggregateCount oadsimpl_AdsAggregateCount
+extern UNSIGNED32 ENTRYPOINT AdsAggregateCount(ADSHANDLE hRes, UNSIGNED32* pulCount);
+#undef AdsAggregateCount
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsAggregateCount=_AdsAggregateCount")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsAggregateCount(ADSHANDLE a0, UNSIGNED32* a1) {
+    return oadsimpl_AdsAggregateCount(a0, a1);
+}
+
+/* ---- AdsAggregateValue ---- */
+#define AdsAggregateValue oadsimpl_AdsAggregateValue
+extern UNSIGNED32 ENTRYPOINT AdsAggregateValue(ADSHANDLE hRes, UNSIGNED32 ulIndex, UNSIGNED16* pusType, UNSIGNED8* pucBuf, UNSIGNED16* pusLen);
+#undef AdsAggregateValue
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsAggregateValue=_AdsAggregateValue")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsAggregateValue(ADSHANDLE a0, UNSIGNED32 a1, UNSIGNED16* a2, UNSIGNED8* a3, UNSIGNED16* a4) {
+    return oadsimpl_AdsAggregateValue(a0, a1, a2, a3, a4);
+}
+
+/* ---- AdsConnect101 ---- */
+#define AdsConnect101 oadsimpl_AdsConnect101
+extern UNSIGNED32 ENTRYPOINT AdsConnect101(UNSIGNED8* pucConnectString, ADSHANDLE* phConnectOptions, ADSHANDLE* phConnect);
+#undef AdsConnect101
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsConnect101=_AdsConnect101")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsConnect101(UNSIGNED8* a0, ADSHANDLE* a1, ADSHANDLE* a2) {
+    return oadsimpl_AdsConnect101(a0, a1, a2);
+}
+
+/* ---- AdsCreateIndex90 ---- */
+#define AdsCreateIndex90 oadsimpl_AdsCreateIndex90
+extern UNSIGNED32 ENTRYPOINT AdsCreateIndex90(ADSHANDLE hObj, UNSIGNED8* pucFileName, UNSIGNED8* pucTag, UNSIGNED8* pucExpr, UNSIGNED8* pucCondition, UNSIGNED8* pucWhile, UNSIGNED32 ulOptions, UNSIGNED32 ulPageSize, UNSIGNED8* pucCollation, ADSHANDLE* phIndex);
+#undef AdsCreateIndex90
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsCreateIndex90=_AdsCreateIndex90")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsCreateIndex90(ADSHANDLE a0, UNSIGNED8* a1, UNSIGNED8* a2, UNSIGNED8* a3, UNSIGNED8* a4, UNSIGNED8* a5, UNSIGNED32 a6, UNSIGNED32 a7, UNSIGNED8* a8, ADSHANDLE* a9) {
+    return oadsimpl_AdsCreateIndex90(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9);
+}
+
+/* ---- AdsCreateTable71 ---- */
+#define AdsCreateTable71 oadsimpl_AdsCreateTable71
+extern UNSIGNED32 ENTRYPOINT AdsCreateTable71(ADSHANDLE hConnect, UNSIGNED8* pucName, UNSIGNED8* pucAlias, UNSIGNED16 usTableType, UNSIGNED16 usCharType, UNSIGNED16 usLockType, UNSIGNED16 usCheckRights, UNSIGNED16 usMemoSize, UNSIGNED8* pucFields, UNSIGNED32 ulOptions, ADSHANDLE* phTable);
+#undef AdsCreateTable71
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsCreateTable71=_AdsCreateTable71")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsCreateTable71(ADSHANDLE a0, UNSIGNED8* a1, UNSIGNED8* a2, UNSIGNED16 a3, UNSIGNED16 a4, UNSIGNED16 a5, UNSIGNED16 a6, UNSIGNED16 a7, UNSIGNED8* a8, UNSIGNED32 a9, ADSHANDLE* a10) {
+    return oadsimpl_AdsCreateTable71(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10);
+}
+
+/* ---- AdsCreateTable90 ---- */
+#define AdsCreateTable90 oadsimpl_AdsCreateTable90
+extern UNSIGNED32 ENTRYPOINT AdsCreateTable90(ADSHANDLE hConnect, UNSIGNED8* pucName, UNSIGNED8* pucAlias, UNSIGNED16 usTableType, UNSIGNED16 usCharType, UNSIGNED16 usLockType, UNSIGNED16 usCheckRights, UNSIGNED16 usMemoSize, UNSIGNED8* pucFields, UNSIGNED32 ulOptions, UNSIGNED8* pucCollation, ADSHANDLE* phTable);
+#undef AdsCreateTable90
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsCreateTable90=_AdsCreateTable90")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsCreateTable90(ADSHANDLE a0, UNSIGNED8* a1, UNSIGNED8* a2, UNSIGNED16 a3, UNSIGNED16 a4, UNSIGNED16 a5, UNSIGNED16 a6, UNSIGNED16 a7, UNSIGNED8* a8, UNSIGNED32 a9, UNSIGNED8* a10, ADSHANDLE* a11) {
+    return oadsimpl_AdsCreateTable90(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11);
+}
+
+/* ---- AdsDDCreateFunction ---- */
+#define AdsDDCreateFunction oadsimpl_AdsDDCreateFunction
+extern UNSIGNED32 ENTRYPOINT AdsDDCreateFunction(ADSHANDLE hConnect, UNSIGNED8* pucName, UNSIGNED8* pucContainer, UNSIGNED8* pucImplementation, UNSIGNED8* pucRetType, UNSIGNED8* pucInParams, UNSIGNED8* pucComment);
+#undef AdsDDCreateFunction
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsDDCreateFunction=_AdsDDCreateFunction")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsDDCreateFunction(ADSHANDLE a0, UNSIGNED8* a1, UNSIGNED8* a2, UNSIGNED8* a3, UNSIGNED8* a4, UNSIGNED8* a5, UNSIGNED8* a6) {
+    return oadsimpl_AdsDDCreateFunction(a0, a1, a2, a3, a4, a5, a6);
+}
+
+/* ---- AdsDDCreateRefIntegrity62 ---- */
+#define AdsDDCreateRefIntegrity62 oadsimpl_AdsDDCreateRefIntegrity62
+extern UNSIGNED32 ENTRYPOINT AdsDDCreateRefIntegrity62(ADSHANDLE hConnect, UNSIGNED8* pucName, UNSIGNED8* pucFail, UNSIGNED8* pucParent, UNSIGNED8* pucParentTag, UNSIGNED8* pucChild, UNSIGNED8* pucChildTag, UNSIGNED16 usUpdate, UNSIGNED16 usDelete, UNSIGNED8* pucNoPrimaryError, UNSIGNED8* pucCascadeError);
+#undef AdsDDCreateRefIntegrity62
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsDDCreateRefIntegrity62=_AdsDDCreateRefIntegrity62")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsDDCreateRefIntegrity62(ADSHANDLE a0, UNSIGNED8* a1, UNSIGNED8* a2, UNSIGNED8* a3, UNSIGNED8* a4, UNSIGNED8* a5, UNSIGNED8* a6, UNSIGNED16 a7, UNSIGNED16 a8, UNSIGNED8* a9, UNSIGNED8* a10) {
+    return oadsimpl_AdsDDCreateRefIntegrity62(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10);
+}
+
+/* ---- AdsDDCreateTrigger ---- */
+#define AdsDDCreateTrigger oadsimpl_AdsDDCreateTrigger
+extern UNSIGNED32 ENTRYPOINT AdsDDCreateTrigger(ADSHANDLE hConnect, UNSIGNED8* pucName, UNSIGNED8* pucTable, UNSIGNED32 ulType, UNSIGNED32 ulOptions, UNSIGNED8* pucContainer, UNSIGNED8* pucProcedure, UNSIGNED32 ulPriority);
+#undef AdsDDCreateTrigger
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsDDCreateTrigger=_AdsDDCreateTrigger")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsDDCreateTrigger(ADSHANDLE a0, UNSIGNED8* a1, UNSIGNED8* a2, UNSIGNED32 a3, UNSIGNED32 a4, UNSIGNED8* a5, UNSIGNED8* a6, UNSIGNED32 a7) {
+    return oadsimpl_AdsDDCreateTrigger(a0, a1, a2, a3, a4, a5, a6, a7);
+}
+
+/* ---- AdsDDGetPermissions ---- */
+#define AdsDDGetPermissions oadsimpl_AdsDDGetPermissions
+extern UNSIGNED32 ENTRYPOINT AdsDDGetPermissions(ADSHANDLE hConnect, UNSIGNED8* pucGrantee, UNSIGNED16 usObjectType, UNSIGNED8* pucObjectName, UNSIGNED8* pucParentName, UNSIGNED16 usGetInherited, UNSIGNED32* pulPermissions);
+#undef AdsDDGetPermissions
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsDDGetPermissions=_AdsDDGetPermissions")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsDDGetPermissions(ADSHANDLE a0, UNSIGNED8* a1, UNSIGNED16 a2, UNSIGNED8* a3, UNSIGNED8* a4, UNSIGNED16 a5, UNSIGNED32* a6) {
+    return oadsimpl_AdsDDGetPermissions(a0, a1, a2, a3, a4, a5, a6);
+}
+
+/* ---- AdsDDGetTableProperty ---- */
+#define AdsDDGetTableProperty oadsimpl_AdsDDGetTableProperty
+extern UNSIGNED32 ENTRYPOINT AdsDDGetTableProperty(ADSHANDLE hConnect, UNSIGNED8* pucTable, UNSIGNED16 usProp, void* pvBuf, UNSIGNED16* pusLen);
+#undef AdsDDGetTableProperty
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsDDGetTableProperty=_AdsDDGetTableProperty")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsDDGetTableProperty(ADSHANDLE a0, UNSIGNED8* a1, UNSIGNED16 a2, void* a3, UNSIGNED16* a4) {
+    return oadsimpl_AdsDDGetTableProperty(a0, a1, a2, a3, a4);
+}
+
+/* ---- AdsDDGetTriggerProperty ---- */
+#define AdsDDGetTriggerProperty oadsimpl_AdsDDGetTriggerProperty
+extern UNSIGNED32 ENTRYPOINT AdsDDGetTriggerProperty(ADSHANDLE hConnect, UNSIGNED8* pucName, UNSIGNED16 usProp, void* pvBuf, UNSIGNED16* pusLen);
+#undef AdsDDGetTriggerProperty
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsDDGetTriggerProperty=_AdsDDGetTriggerProperty")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsDDGetTriggerProperty(ADSHANDLE a0, UNSIGNED8* a1, UNSIGNED16 a2, void* a3, UNSIGNED16* a4) {
+    return oadsimpl_AdsDDGetTriggerProperty(a0, a1, a2, a3, a4);
+}
+
+/* ---- AdsDDGetViewProperty ---- */
+#define AdsDDGetViewProperty oadsimpl_AdsDDGetViewProperty
+extern UNSIGNED32 ENTRYPOINT AdsDDGetViewProperty(ADSHANDLE hConnect, UNSIGNED8* pucName, UNSIGNED16 usProp, void* pvBuf, UNSIGNED16* pusLen);
+#undef AdsDDGetViewProperty
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsDDGetViewProperty=_AdsDDGetViewProperty")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsDDGetViewProperty(ADSHANDLE a0, UNSIGNED8* a1, UNSIGNED16 a2, void* a3, UNSIGNED16* a4) {
+    return oadsimpl_AdsDDGetViewProperty(a0, a1, a2, a3, a4);
+}
+
+/* ---- AdsDDGrantPermission ---- */
+#define AdsDDGrantPermission oadsimpl_AdsDDGrantPermission
+extern UNSIGNED32 ENTRYPOINT AdsDDGrantPermission(ADSHANDLE hConnect, UNSIGNED16 usObjectType, UNSIGNED8* pucObjectName, UNSIGNED8* pucParentName, UNSIGNED8* pucGrantee, UNSIGNED32 ulPermissions);
+#undef AdsDDGrantPermission
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsDDGrantPermission=_AdsDDGrantPermission")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsDDGrantPermission(ADSHANDLE a0, UNSIGNED16 a1, UNSIGNED8* a2, UNSIGNED8* a3, UNSIGNED8* a4, UNSIGNED32 a5) {
+    return oadsimpl_AdsDDGrantPermission(a0, a1, a2, a3, a4, a5);
+}
+
+/* ---- AdsDDRevokePermission ---- */
+#define AdsDDRevokePermission oadsimpl_AdsDDRevokePermission
+extern UNSIGNED32 ENTRYPOINT AdsDDRevokePermission(ADSHANDLE hConnect, UNSIGNED16 usObjectType, UNSIGNED8* pucObjectName, UNSIGNED8* pucParentName, UNSIGNED8* pucGrantee, UNSIGNED32 ulPermissions);
+#undef AdsDDRevokePermission
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsDDRevokePermission=_AdsDDRevokePermission")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsDDRevokePermission(ADSHANDLE a0, UNSIGNED16 a1, UNSIGNED8* a2, UNSIGNED8* a3, UNSIGNED8* a4, UNSIGNED32 a5) {
+    return oadsimpl_AdsDDRevokePermission(a0, a1, a2, a3, a4, a5);
+}
+
+/* ---- AdsDDSetTableProperty ---- */
+#define AdsDDSetTableProperty oadsimpl_AdsDDSetTableProperty
+extern UNSIGNED32 ENTRYPOINT AdsDDSetTableProperty(ADSHANDLE hConnect, UNSIGNED8* pucTable, UNSIGNED16 usProp, void* pvBuf, UNSIGNED16 usLen);
+#undef AdsDDSetTableProperty
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsDDSetTableProperty=_AdsDDSetTableProperty")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsDDSetTableProperty(ADSHANDLE a0, UNSIGNED8* a1, UNSIGNED16 a2, void* a3, UNSIGNED16 a4) {
+    return oadsimpl_AdsDDSetTableProperty(a0, a1, a2, a3, a4);
+}
+
+/* ---- AdsDDSetTriggerProperty ---- */
+#define AdsDDSetTriggerProperty oadsimpl_AdsDDSetTriggerProperty
+extern UNSIGNED32 ENTRYPOINT AdsDDSetTriggerProperty(ADSHANDLE hConnect, UNSIGNED8* pucName, UNSIGNED16 usProp, void* pvBuf, UNSIGNED16 usLen);
+#undef AdsDDSetTriggerProperty
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsDDSetTriggerProperty=_AdsDDSetTriggerProperty")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsDDSetTriggerProperty(ADSHANDLE a0, UNSIGNED8* a1, UNSIGNED16 a2, void* a3, UNSIGNED16 a4) {
+    return oadsimpl_AdsDDSetTriggerProperty(a0, a1, a2, a3, a4);
+}
+
+/* ---- AdsDDSetUserProperty ---- */
+#define AdsDDSetUserProperty oadsimpl_AdsDDSetUserProperty
+extern UNSIGNED32 ENTRYPOINT AdsDDSetUserProperty(ADSHANDLE hConnect, UNSIGNED8* pucUser, UNSIGNED16 usProp, void* pvBuf, UNSIGNED16 usLen);
+#undef AdsDDSetUserProperty
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsDDSetUserProperty=_AdsDDSetUserProperty")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsDDSetUserProperty(ADSHANDLE a0, UNSIGNED8* a1, UNSIGNED16 a2, void* a3, UNSIGNED16 a4) {
+    return oadsimpl_AdsDDSetUserProperty(a0, a1, a2, a3, a4);
+}
+
+/* ---- AdsDDSetViewProperty ---- */
+#define AdsDDSetViewProperty oadsimpl_AdsDDSetViewProperty
+extern UNSIGNED32 ENTRYPOINT AdsDDSetViewProperty(ADSHANDLE hConnect, UNSIGNED8* pucName, UNSIGNED16 usProp, void* pvBuf, UNSIGNED16 usLen);
+#undef AdsDDSetViewProperty
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsDDSetViewProperty=_AdsDDSetViewProperty")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsDDSetViewProperty(ADSHANDLE a0, UNSIGNED8* a1, UNSIGNED16 a2, void* a3, UNSIGNED16 a4) {
+    return oadsimpl_AdsDDSetViewProperty(a0, a1, a2, a3, a4);
+}
+
+/* ---- AdsEvalAOF100 ---- */
+#define AdsEvalAOF100 oadsimpl_AdsEvalAOF100
+extern UNSIGNED32 ENTRYPOINT AdsEvalAOF100(ADSHANDLE hTable, void* pvExpr, UNSIGNED32 ulOptions, UNSIGNED16* pusOptLevel);
+#undef AdsEvalAOF100
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsEvalAOF100=_AdsEvalAOF100")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsEvalAOF100(ADSHANDLE a0, void* a1, UNSIGNED32 a2, UNSIGNED16* a3) {
+    return oadsimpl_AdsEvalAOF100(a0, a1, a2, a3);
+}
+
+/* ---- AdsFetchWhere ---- */
+#define AdsFetchWhere oadsimpl_AdsFetchWhere
+extern UNSIGNED32 ENTRYPOINT AdsFetchWhere(ADSHANDLE hTbl, UNSIGNED8* pszExpr, UNSIGNED8* pszCols, UNSIGNED32 ulMaxRows, UNSIGNED32 ulFlags, ADSHANDLE* phResult);
+#undef AdsFetchWhere
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsFetchWhere=_AdsFetchWhere")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsFetchWhere(ADSHANDLE a0, UNSIGNED8* a1, UNSIGNED8* a2, UNSIGNED32 a3, UNSIGNED32 a4, ADSHANDLE* a5) {
+    return oadsimpl_AdsFetchWhere(a0, a1, a2, a3, a4, a5);
+}
+
+/* ---- AdsFetchWhereApplyRow ---- */
+#define AdsFetchWhereApplyRow oadsimpl_AdsFetchWhereApplyRow
+extern UNSIGNED32 ENTRYPOINT AdsFetchWhereApplyRow(ADSHANDLE hRes, UNSIGNED32 ulRow, ADSHANDLE hTbl);
+#undef AdsFetchWhereApplyRow
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsFetchWhereApplyRow=_AdsFetchWhereApplyRow")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsFetchWhereApplyRow(ADSHANDLE a0, UNSIGNED32 a1, ADSHANDLE a2) {
+    return oadsimpl_AdsFetchWhereApplyRow(a0, a1, a2);
+}
+
+/* ---- AdsFetchWhereClose ---- */
+#define AdsFetchWhereClose oadsimpl_AdsFetchWhereClose
+extern UNSIGNED32 ENTRYPOINT AdsFetchWhereClose(ADSHANDLE hRes);
+#undef AdsFetchWhereClose
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsFetchWhereClose=_AdsFetchWhereClose")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsFetchWhereClose(ADSHANDLE a0) {
+    return oadsimpl_AdsFetchWhereClose(a0);
+}
+
+/* ---- AdsFetchWhereEof ---- */
+#define AdsFetchWhereEof oadsimpl_AdsFetchWhereEof
+extern UNSIGNED32 ENTRYPOINT AdsFetchWhereEof(ADSHANDLE hRes, UNSIGNED16* pbEof);
+#undef AdsFetchWhereEof
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsFetchWhereEof=_AdsFetchWhereEof")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsFetchWhereEof(ADSHANDLE a0, UNSIGNED16* a1) {
+    return oadsimpl_AdsFetchWhereEof(a0, a1);
+}
+
+/* ---- AdsFetchWhereField ---- */
+#define AdsFetchWhereField oadsimpl_AdsFetchWhereField
+extern UNSIGNED32 ENTRYPOINT AdsFetchWhereField(ADSHANDLE hRes, UNSIGNED32 ulRow, UNSIGNED8* pszCol, UNSIGNED8* pucBuf, UNSIGNED16* pusLen);
+#undef AdsFetchWhereField
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsFetchWhereField=_AdsFetchWhereField")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsFetchWhereField(ADSHANDLE a0, UNSIGNED32 a1, UNSIGNED8* a2, UNSIGNED8* a3, UNSIGNED16* a4) {
+    return oadsimpl_AdsFetchWhereField(a0, a1, a2, a3, a4);
+}
+
+/* ---- AdsFetchWhereRecno ---- */
+#define AdsFetchWhereRecno oadsimpl_AdsFetchWhereRecno
+extern UNSIGNED32 ENTRYPOINT AdsFetchWhereRecno(ADSHANDLE hRes, UNSIGNED32 ulRow, UNSIGNED32* pulRec);
+#undef AdsFetchWhereRecno
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsFetchWhereRecno=_AdsFetchWhereRecno")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsFetchWhereRecno(ADSHANDLE a0, UNSIGNED32 a1, UNSIGNED32* a2) {
+    return oadsimpl_AdsFetchWhereRecno(a0, a1, a2);
+}
+
+/* ---- AdsFetchWhereRows ---- */
+#define AdsFetchWhereRows oadsimpl_AdsFetchWhereRows
+extern UNSIGNED32 ENTRYPOINT AdsFetchWhereRows(ADSHANDLE hRes, UNSIGNED32* pulRows);
+#undef AdsFetchWhereRows
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsFetchWhereRows=_AdsFetchWhereRows")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsFetchWhereRows(ADSHANDLE a0, UNSIGNED32* a1) {
+    return oadsimpl_AdsFetchWhereRows(a0, a1);
+}
+
+/* ---- AdsFindFirstTable62 ---- */
+#define AdsFindFirstTable62 oadsimpl_AdsFindFirstTable62
+extern UNSIGNED32 ENTRYPOINT AdsFindFirstTable62(ADSHANDLE hConnect, UNSIGNED8* pucFileMask, UNSIGNED8* pucFirstDD, UNSIGNED16* pusDDLen, UNSIGNED8* pucFirstFile, UNSIGNED16* pusFileLen, ADSHANDLE* phFind);
+#undef AdsFindFirstTable62
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsFindFirstTable62=_AdsFindFirstTable62")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsFindFirstTable62(ADSHANDLE a0, UNSIGNED8* a1, UNSIGNED8* a2, UNSIGNED16* a3, UNSIGNED8* a4, UNSIGNED16* a5, ADSHANDLE* a6) {
+    return oadsimpl_AdsFindFirstTable62(a0, a1, a2, a3, a4, a5, a6);
+}
+
+/* ---- AdsFindNextTable62 ---- */
+#define AdsFindNextTable62 oadsimpl_AdsFindNextTable62
+extern UNSIGNED32 ENTRYPOINT AdsFindNextTable62(ADSHANDLE hConnect, ADSHANDLE hFind, UNSIGNED8* pucDDName, UNSIGNED16* pusDDLen, UNSIGNED8* pucFileName, UNSIGNED16* pusFileLen);
+#undef AdsFindNextTable62
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsFindNextTable62=_AdsFindNextTable62")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsFindNextTable62(ADSHANDLE a0, ADSHANDLE a1, UNSIGNED8* a2, UNSIGNED16* a3, UNSIGNED8* a4, UNSIGNED16* a5) {
+    return oadsimpl_AdsFindNextTable62(a0, a1, a2, a3, a4, a5);
+}
+
+/* ---- AdsGetAOF100 ---- */
+#define AdsGetAOF100 oadsimpl_AdsGetAOF100
+extern UNSIGNED32 ENTRYPOINT AdsGetAOF100(ADSHANDLE hTable, void* pvFilter, UNSIGNED16* pusLen, UNSIGNED32 ulOptions);
+#undef AdsGetAOF100
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsGetAOF100=_AdsGetAOF100")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsGetAOF100(ADSHANDLE a0, void* a1, UNSIGNED16* a2, UNSIGNED32 a3) {
+    return oadsimpl_AdsGetAOF100(a0, a1, a2, a3);
+}
+
+/* ---- AdsGetAOFOptLevel100 ---- */
+#define AdsGetAOFOptLevel100 oadsimpl_AdsGetAOFOptLevel100
+extern UNSIGNED32 ENTRYPOINT AdsGetAOFOptLevel100(ADSHANDLE hTable, UNSIGNED16* pusLevel, void* pvBuf, UNSIGNED16* pusLen, UNSIGNED32 ulOptions);
+#undef AdsGetAOFOptLevel100
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsGetAOFOptLevel100=_AdsGetAOFOptLevel100")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsGetAOFOptLevel100(ADSHANDLE a0, UNSIGNED16* a1, void* a2, UNSIGNED16* a3, UNSIGNED32 a4) {
+    return oadsimpl_AdsGetAOFOptLevel100(a0, a1, a2, a3, a4);
+}
+
+/* ---- AdsGetDecimals ---- */
+#define AdsGetDecimals oadsimpl_AdsGetDecimals
+extern UNSIGNED32 ENTRYPOINT AdsGetDecimals(UNSIGNED16* pusDecimals);
+#undef AdsGetDecimals
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsGetDecimals=_AdsGetDecimals")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsGetDecimals(UNSIGNED16* a0) {
+    return oadsimpl_AdsGetDecimals(a0);
+}
+
+/* ---- AdsGetTableHandle ---- */
+#define AdsGetTableHandle oadsimpl_AdsGetTableHandle
+extern UNSIGNED32 ENTRYPOINT AdsGetTableHandle(ADSHANDLE hConnect, UNSIGNED8* pucName, ADSHANDLE* phTable);
+#undef AdsGetTableHandle
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsGetTableHandle=_AdsGetTableHandle")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsGetTableHandle(ADSHANDLE a0, UNSIGNED8* a1, ADSHANDLE* a2) {
+    return oadsimpl_AdsGetTableHandle(a0, a1, a2);
+}
+
+/* ---- AdsGotoBOF ---- */
+#define AdsGotoBOF oadsimpl_AdsGotoBOF
+extern UNSIGNED32 ENTRYPOINT AdsGotoBOF(ADSHANDLE hTable);
+#undef AdsGotoBOF
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsGotoBOF=_AdsGotoBOF")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsGotoBOF(ADSHANDLE a0) {
+    return oadsimpl_AdsGotoBOF(a0);
+}
+
+/* ---- AdsGotoEOF ---- */
+#define AdsGotoEOF oadsimpl_AdsGotoEOF
+extern UNSIGNED32 ENTRYPOINT AdsGotoEOF(ADSHANDLE hTable);
+#undef AdsGotoEOF
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsGotoEOF=_AdsGotoEOF")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsGotoEOF(ADSHANDLE a0) {
+    return oadsimpl_AdsGotoEOF(a0);
+}
+
+/* ---- AdsIsTableTransactionFree ---- */
+#define AdsIsTableTransactionFree oadsimpl_AdsIsTableTransactionFree
+extern UNSIGNED32 ENTRYPOINT AdsIsTableTransactionFree(ADSHANDLE hTable, UNSIGNED16* pusTransFree);
+#undef AdsIsTableTransactionFree
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsIsTableTransactionFree=_AdsIsTableTransactionFree")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsIsTableTransactionFree(ADSHANDLE a0, UNSIGNED16* a1) {
+    return oadsimpl_AdsIsTableTransactionFree(a0, a1);
+}
+
+/* ---- AdsMgKillUser90 ---- */
+#define AdsMgKillUser90 oadsimpl_AdsMgKillUser90
+extern UNSIGNED32 ENTRYPOINT AdsMgKillUser90(ADSHANDLE hMg, UNSIGNED8* pucUser, UNSIGNED16 usOption, UNSIGNED32 ulOptions);
+#undef AdsMgKillUser90
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsMgKillUser90=_AdsMgKillUser90")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsMgKillUser90(ADSHANDLE a0, UNSIGNED8* a1, UNSIGNED16 a2, UNSIGNED32 a3) {
+    return oadsimpl_AdsMgKillUser90(a0, a1, a2, a3);
+}
+
+/* ---- AdsOpenTable101 ---- */
+#define AdsOpenTable101 oadsimpl_AdsOpenTable101
+extern UNSIGNED32 ENTRYPOINT AdsOpenTable101(ADSHANDLE hConnect, UNSIGNED8* pucName, ADSHANDLE* phTable);
+#undef AdsOpenTable101
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsOpenTable101=_AdsOpenTable101")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsOpenTable101(ADSHANDLE a0, UNSIGNED8* a1, ADSHANDLE* a2) {
+    return oadsimpl_AdsOpenTable101(a0, a1, a2);
+}
+
+/* ---- AdsOpenTable90 ---- */
+#define AdsOpenTable90 oadsimpl_AdsOpenTable90
+extern UNSIGNED32 ENTRYPOINT AdsOpenTable90(ADSHANDLE hConnect, UNSIGNED8* pucName, UNSIGNED8* pucAlias, UNSIGNED16 usTableType, UNSIGNED16 usCharType, UNSIGNED16 usLockType, UNSIGNED16 usCheckRights, UNSIGNED32 ulOptions, UNSIGNED8* pucCollation, ADSHANDLE* phTable);
+#undef AdsOpenTable90
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsOpenTable90=_AdsOpenTable90")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsOpenTable90(ADSHANDLE a0, UNSIGNED8* a1, UNSIGNED8* a2, UNSIGNED16 a3, UNSIGNED16 a4, UNSIGNED16 a5, UNSIGNED16 a6, UNSIGNED32 a7, UNSIGNED8* a8, ADSHANDLE* a9) {
+    return oadsimpl_AdsOpenTable90(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9);
+}
+
+/* ---- AdsRegisterCallbackFunction101 ---- */
+#define AdsRegisterCallbackFunction101 oadsimpl_AdsRegisterCallbackFunction101
+extern UNSIGNED32 ENTRYPOINT AdsRegisterCallbackFunction101(void* pCallback, SIGNED64 qCallbackID);
+#undef AdsRegisterCallbackFunction101
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsRegisterCallbackFunction101=_AdsRegisterCallbackFunction101")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsRegisterCallbackFunction101(void* a0, SIGNED64 a1) {
+    return oadsimpl_AdsRegisterCallbackFunction101(a0, a1);
+}
+
+/* ---- AdsRestructureTable120 ---- */
+#define AdsRestructureTable120 oadsimpl_AdsRestructureTable120
+extern UNSIGNED32 ENTRYPOINT AdsRestructureTable120(ADSHANDLE hConnect, UNSIGNED8* pucTableName, UNSIGNED8* pucPassword, UNSIGNED16 usTableType, UNSIGNED16 usCharType, UNSIGNED16 usLockType, UNSIGNED16 usCheckRights, UNSIGNED8* pucAddFields, UNSIGNED8* pucDeleteFields, UNSIGNED8* pucChangeFields, UNSIGNED8* pucCollation, UNSIGNED32 ulMemoBlockSize, UNSIGNED32 ulOptions);
+#undef AdsRestructureTable120
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsRestructureTable120=_AdsRestructureTable120")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsRestructureTable120(ADSHANDLE a0, UNSIGNED8* a1, UNSIGNED8* a2, UNSIGNED16 a3, UNSIGNED16 a4, UNSIGNED16 a5, UNSIGNED16 a6, UNSIGNED8* a7, UNSIGNED8* a8, UNSIGNED8* a9, UNSIGNED8* a10, UNSIGNED32 a11, UNSIGNED32 a12) {
+    return oadsimpl_AdsRestructureTable120(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12);
+}
+
+/* ---- AdsRestructureTable90 ---- */
+#define AdsRestructureTable90 oadsimpl_AdsRestructureTable90
+extern UNSIGNED32 ENTRYPOINT AdsRestructureTable90(ADSHANDLE hConnect, UNSIGNED8* pucTableName, UNSIGNED8* pucPassword, UNSIGNED16 usTableType, UNSIGNED16 usCharType, UNSIGNED16 usLockType, UNSIGNED16 usCheckRights, UNSIGNED8* pucAddFields, UNSIGNED8* pucDeleteFields, UNSIGNED8* pucChangeFields, UNSIGNED8* pucCollation);
+#undef AdsRestructureTable90
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsRestructureTable90=_AdsRestructureTable90")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsRestructureTable90(ADSHANDLE a0, UNSIGNED8* a1, UNSIGNED8* a2, UNSIGNED16 a3, UNSIGNED16 a4, UNSIGNED16 a5, UNSIGNED16 a6, UNSIGNED8* a7, UNSIGNED8* a8, UNSIGNED8* a9, UNSIGNED8* a10) {
+    return oadsimpl_AdsRestructureTable90(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10);
+}
+
+/* ---- AdsSetAOF100 ---- */
+#define AdsSetAOF100 oadsimpl_AdsSetAOF100
+extern UNSIGNED32 ENTRYPOINT AdsSetAOF100(ADSHANDLE hTable, void* pvFilter, UNSIGNED32 ulOptions);
+#undef AdsSetAOF100
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsSetAOF100=_AdsSetAOF100")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsSetAOF100(ADSHANDLE a0, void* a1, UNSIGNED32 a2) {
+    return oadsimpl_AdsSetAOF100(a0, a1, a2);
+}
+
+/* ---- AdsSetAutoCommit ---- */
+#define AdsSetAutoCommit oadsimpl_AdsSetAutoCommit
+extern UNSIGNED32 ENTRYPOINT AdsSetAutoCommit(ADSHANDLE hConnect, SIGNED32 nThreshold);
+#undef AdsSetAutoCommit
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsSetAutoCommit=_AdsSetAutoCommit")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsSetAutoCommit(ADSHANDLE a0, SIGNED32 a1) {
+    return oadsimpl_AdsSetAutoCommit(a0, a1);
+}
+
+/* ---- AdsSetDate ---- */
+#define AdsSetDate oadsimpl_AdsSetDate
+extern UNSIGNED32 ENTRYPOINT AdsSetDate(ADSHANDLE hTable, UNSIGNED8* pucField, UNSIGNED8* pucValue, UNSIGNED16 usLen);
+#undef AdsSetDate
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsSetDate=_AdsSetDate")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsSetDate(ADSHANDLE a0, UNSIGNED8* a1, UNSIGNED8* a2, UNSIGNED16 a3) {
+    return oadsimpl_AdsSetDate(a0, a1, a2, a3);
+}
+
+/* ---- AdsSetExact22 ---- */
+#define AdsSetExact22 oadsimpl_AdsSetExact22
+extern UNSIGNED32 ENTRYPOINT AdsSetExact22(ADSHANDLE hObj, UNSIGNED16 bIgnoreSpaces);
+#undef AdsSetExact22
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsSetExact22=_AdsSetExact22")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsSetExact22(ADSHANDLE a0, UNSIGNED16 a1) {
+    return oadsimpl_AdsSetExact22(a0, a1);
+}
+
+/* ---- AdsSetFieldW ---- */
+#define AdsSetFieldW oadsimpl_AdsSetFieldW
+extern UNSIGNED32 ENTRYPOINT AdsSetFieldW(ADSHANDLE hObj, UNSIGNED8* pucFldId, UNSIGNED16* pwcBuf, UNSIGNED32 ulLen);
+#undef AdsSetFieldW
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsSetFieldW=_AdsSetFieldW")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsSetFieldW(ADSHANDLE a0, UNSIGNED8* a1, UNSIGNED16* a2, UNSIGNED32 a3) {
+    return oadsimpl_AdsSetFieldW(a0, a1, a2, a3);
+}
+
+/* ---- AdsSetFilter100 ---- */
+#define AdsSetFilter100 oadsimpl_AdsSetFilter100
+extern UNSIGNED32 ENTRYPOINT AdsSetFilter100(ADSHANDLE hTable, void* pvExpr, UNSIGNED32 ulOptions);
+#undef AdsSetFilter100
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsSetFilter100=_AdsSetFilter100")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsSetFilter100(ADSHANDLE a0, void* a1, UNSIGNED32 a2) {
+    return oadsimpl_AdsSetFilter100(a0, a1, a2);
+}
+
+/* ---- AdsSetLong ---- */
+#define AdsSetLong oadsimpl_AdsSetLong
+extern UNSIGNED32 ENTRYPOINT AdsSetLong(ADSHANDLE hTable, UNSIGNED8* pucField, SIGNED32 lVal);
+#undef AdsSetLong
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsSetLong=_AdsSetLong")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsSetLong(ADSHANDLE a0, UNSIGNED8* a1, SIGNED32 a2) {
+    return oadsimpl_AdsSetLong(a0, a1, a2);
+}
+
+/* ---- AdsSetProperty ---- */
+#define AdsSetProperty oadsimpl_AdsSetProperty
+extern UNSIGNED32 ENTRYPOINT AdsSetProperty(ADSHANDLE hObj, UNSIGNED32 ulOperation, UNSIGNED32* pulValue);
+#undef AdsSetProperty
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsSetProperty=_AdsSetProperty")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsSetProperty(ADSHANDLE a0, UNSIGNED32 a1, UNSIGNED32* a2) {
+    return oadsimpl_AdsSetProperty(a0, a1, a2);
+}
+
+/* ---- AdsSetProperty90 ---- */
+#define AdsSetProperty90 oadsimpl_AdsSetProperty90
+extern UNSIGNED32 ENTRYPOINT AdsSetProperty90(ADSHANDLE hObj, UNSIGNED32 ulOperation, UNSIGNED64* puqValue);
+#undef AdsSetProperty90
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsSetProperty90=_AdsSetProperty90")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsSetProperty90(ADSHANDLE a0, UNSIGNED32 a1, UNSIGNED64* a2) {
+    return oadsimpl_AdsSetProperty90(a0, a1, a2);
+}
+
+/* ---- AdsSetRightsChecking ---- */
+#define AdsSetRightsChecking oadsimpl_AdsSetRightsChecking
+extern UNSIGNED32 ENTRYPOINT AdsSetRightsChecking(UNSIGNED32 ulOptions);
+#undef AdsSetRightsChecking
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsSetRightsChecking=_AdsSetRightsChecking")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsSetRightsChecking(UNSIGNED32 a0) {
+    return oadsimpl_AdsSetRightsChecking(a0);
+}
+
+/* ---- AdsSetSQLTimeout ---- */
+#define AdsSetSQLTimeout oadsimpl_AdsSetSQLTimeout
+extern UNSIGNED32 ENTRYPOINT AdsSetSQLTimeout(ADSHANDLE hObj, UNSIGNED32 ulTimeout);
+#undef AdsSetSQLTimeout
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsSetSQLTimeout=_AdsSetSQLTimeout")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsSetSQLTimeout(ADSHANDLE a0, UNSIGNED32 a1) {
+    return oadsimpl_AdsSetSQLTimeout(a0, a1);
+}
+
+/* ---- AdsSetTableTransactionFree ---- */
+#define AdsSetTableTransactionFree oadsimpl_AdsSetTableTransactionFree
+extern UNSIGNED32 ENTRYPOINT AdsSetTableTransactionFree(ADSHANDLE hTable, UNSIGNED16 usTransFree);
+#undef AdsSetTableTransactionFree
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsSetTableTransactionFree=_AdsSetTableTransactionFree")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsSetTableTransactionFree(ADSHANDLE a0, UNSIGNED16 a1) {
+    return oadsimpl_AdsSetTableTransactionFree(a0, a1);
+}
+
+/* ---- AdsSetTimeStampRaw ---- */
+#define AdsSetTimeStampRaw oadsimpl_AdsSetTimeStampRaw
+extern UNSIGNED32 ENTRYPOINT AdsSetTimeStampRaw(ADSHANDLE hObj, UNSIGNED8* pucFldId, UNSIGNED8* pucBuf, UNSIGNED32 ulLen);
+#undef AdsSetTimeStampRaw
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsSetTimeStampRaw=_AdsSetTimeStampRaw")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsSetTimeStampRaw(ADSHANDLE a0, UNSIGNED8* a1, UNSIGNED8* a2, UNSIGNED32 a3) {
+    return oadsimpl_AdsSetTimeStampRaw(a0, a1, a2, a3);
+}
+
+/* ---- AdsStmtSetTableCharType ---- */
+#define AdsStmtSetTableCharType oadsimpl_AdsStmtSetTableCharType
+extern UNSIGNED32 ENTRYPOINT AdsStmtSetTableCharType(ADSHANDLE hStatement, UNSIGNED16 usCharType);
+#undef AdsStmtSetTableCharType
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsStmtSetTableCharType=_AdsStmtSetTableCharType")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsStmtSetTableCharType(ADSHANDLE a0, UNSIGNED16 a1) {
+    return oadsimpl_AdsStmtSetTableCharType(a0, a1);
+}
+
+/* ---- AdsStmtSetTableRights ---- */
+#define AdsStmtSetTableRights oadsimpl_AdsStmtSetTableRights
+extern UNSIGNED32 ENTRYPOINT AdsStmtSetTableRights(ADSHANDLE hStatement, UNSIGNED16 usCheckRights);
+#undef AdsStmtSetTableRights
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsStmtSetTableRights=_AdsStmtSetTableRights")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsStmtSetTableRights(ADSHANDLE a0, UNSIGNED16 a1) {
+    return oadsimpl_AdsStmtSetTableRights(a0, a1);
+}
+
+/* ---- AdsTestLogin ---- */
+#define AdsTestLogin oadsimpl_AdsTestLogin
+extern UNSIGNED32 ENTRYPOINT AdsTestLogin(UNSIGNED8* pucServer, UNSIGNED16 usServerType, UNSIGNED8* pucUser, UNSIGNED8* pucPwd, UNSIGNED32 ulOptions);
+#undef AdsTestLogin
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsTestLogin=_AdsTestLogin")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsTestLogin(UNSIGNED8* a0, UNSIGNED16 a1, UNSIGNED8* a2, UNSIGNED8* a3, UNSIGNED32 a4) {
+    return oadsimpl_AdsTestLogin(a0, a1, a2, a3, a4);
 }
 
 /* ---- AdsStudioPort ---- */

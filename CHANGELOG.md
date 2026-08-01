@@ -1,3 +1,28 @@
+## 1.8.48 - 2026-08-01
+
+32-bit toolchain alignment: everything that compiles against
+`include/openads/ace.h` on 32-bit MSVC now uses the SAP `__stdcall`
+convention, matching the decorated (`_AdsXxx@N`) names ace32.dll exports
+since v1.8.46. Everything since **v1.8.47**.
+
+### Fixed - our own tools failed to link on x86
+
+- v1.8.46 made ace32.dll export only the `__stdcall`-decorated names, but
+  `include/openads/ace.h` still declared the API as `__cdecl`, so every
+  in-tree consumer (bench, stress, mgprobe, tests) referenced plain
+  `_AdsXxx` symbols the DLL no longer exports — the CI x86 leg failed at
+  Build. The header now uses `__stdcall` on 32-bit MSVC (exactly like
+  SAP's ace.h); the `oads_*` file/dir helpers keep `__cdecl` via a new
+  `OADSAPI` macro since they stay plain exports.
+- Implementation TUs (ace_exports.cpp, studio_embed.cpp, and everything
+  else pulled into openads_core) keep `__cdecl` definitions via
+  `OPENADS_ACE_IMPLEMENTATION`, which openads_core now exports as a PUBLIC
+  compile definition so core-linking tools resolve against the plain
+  `_AdsXxx` implementations.
+- `abi/ace_stdcall_x86.c` now wraps the full public surface: 421
+  `__stdcall` wrappers (added AdsCreateIndex and the AdsMg*/DD/FetchWhere
+  families that rddads itself never calls but mgprobe and Studio do).
+
 ## 1.8.47 - 2026-08-01
 
 The last of Tim Stone's remote phantom rows: a scoped xBrowse with exactly
