@@ -130,9 +130,11 @@ TEST_CASE("sql_system_catalog: users/groups/members catalog SQL on SQLite") {
                                &stmt, nullptr) == SQLITE_OK);
     bool saw_pair = false;
     while (sqlite3_step(stmt) == SQLITE_ROW) {
-        const char* g =
-            reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        // SAP's system.usergroupmembers order is User_Name THEN Group_Name,
+        // so column 0 is the user and column 1 is the group.
         const char* u =
+            reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        const char* g =
             reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
         if (g && u && std::string(g) == "SALES" &&
             std::string(u) == "carol") {

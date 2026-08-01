@@ -415,6 +415,14 @@ struct RemoteTable {
     // DeleteRecord / RecallRecord / Pack / Zap.
     std::uint32_t            cached_rec_count   = 0;
     bool                     rec_count_cached   = false;
+    // Scoped key count of the active order (scope + SET DELETED aware,
+    // computed server-side). What the keyno machinery must clamp to —
+    // NOT the physical record count, or a 1-row scope reports KeyNo=36
+    // and xBrowse walks past the scope end (Tim Stone, 31/07/2026).
+    // Invalidated on scope set/clear, order change, show-deleted flip,
+    // and every write that invalidates rec_count_cached.
+    std::uint32_t            cached_key_count   = 0;
+    bool                     key_count_cached   = false;
     // M12.21 — sequential prefetch queue. SkipAck (when step==1)
     // returns the row at +1 plus up to N lookahead rows; the
     // bridge pops one entry per Skip(1) call so a 20-row PgDn

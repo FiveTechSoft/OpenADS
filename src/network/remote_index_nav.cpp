@@ -44,9 +44,12 @@ util::Result<void> remote_activate_index(RemoteIndex* ri) {
     ri->parent->server_order_id = ri->id;
     ri->parent->active_index_id = ri->id;
     // The controlling order just changed on the server — anything queued was
-    // read in the previous order.
+    // read in the previous order, and the key walk (count + positions) is
+    // a different one.
     ri->parent->row_valid = false;
     ri->parent->invalidate_prefetch();
+    ri->parent->key_count_cached = false;
+    ri->parent->keyno_valid      = false;
     return {};
 }
 

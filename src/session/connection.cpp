@@ -477,6 +477,11 @@ util::Result<void> Connection::begin_tx() {
         ++tx_nest_depth_;
         return {};
     }
+    // Settle coalesced dirty records BEFORE activating the tx: edits made
+    // before BEGIN were never journaled under write-through, so they must
+    // not become undoable now. Writeback with tx_ inactive skips
+    // note_before_image entirely.
+    if (auto s = settle_dirty_tables_(); !s) return s.error();
     std::uint64_t tid = next_tx_id_++;
     tx_.activate(tid, &tx_log_);
     tx_nest_depth_ = 1;
@@ -491,6 +496,14 @@ util::Result<void> Connection::begin_tx() {
     return {};
 }
 
+util::Result<void> Connection::settle_dirty_tables_() {
+    for (auto& [h, holder] : tables_) {
+        if (!holder->record_dirty()) continue;
+        if (auto r = holder->commit_dirty_record(); !r) return r.error();
+    }
+    return {};
+}
+
 util::Result<void> Connection::commit_tx() {
     if (!tx_.active()) {
         return util::Error{5000, 0, "no active transaction", ""};
@@ -501,6 +514,10 @@ util::Result<void> Connection::commit_tx() {
         --tx_nest_depth_;
         return {};
     }
+    // Settle coalesced dirty records first: their writeback is what
+    // journals the before-image / update op, and it must land in the
+    // log before the commit record for crash recovery to be sound.
+    if (auto s = settle_dirty_tables_(); !s) return s.error();
     if (auto r = tx_log_.append_commit(tx_.id()); !r) return r.error();
     std::unordered_set<Handle> touched;
     for (const auto& op : tx_.ops()) {
@@ -521,6 +538,11 @@ util::Result<void> Connection::rollback_tx() {
     if (!tx_.active()) {
         return util::Error{5000, 0, "no active transaction", ""};
     }
+    // Settle coalesced dirty records first so their before-images reach
+    // the journal before we walk it; otherwise an edit that never hit
+    // disk would survive the rollback in the record buffer (and be
+    // flushed by the next navigation — silent data loss).
+    if (auto s = settle_dirty_tables_(); !s) return s.error();
     std::unordered_set<Handle> touched;
     tx_.for_each_before_image(
         [&](const engine::Tx::RecordKey& k,
@@ -576,6 +598,10 @@ Connection::create_savepoint(const std::string& name) {
     if (!tx_.active()) {
         return util::Error{5000, 0, "no active transaction", ""};
     }
+    // Settle coalesced dirty records so the savepoint marks a journal
+    // position that already includes every edit made so far (a pending
+    // buffer has no journal entry to roll back to).
+    if (auto s = settle_dirty_tables_(); !s) return s.error();
     tx_.create_savepoint(name);
     return {};
 }
@@ -585,6 +611,10 @@ Connection::rollback_to_savepoint(const std::string& name) {
     if (!tx_.active()) {
         return util::Error{5000, 0, "no active transaction", ""};
     }
+    // Settle coalesced dirty records first: their writeback appends the
+    // journal op (before-image = current disk state) that the undo walk
+    // below reverts, restoring the exact state the savepoint marked.
+    if (auto s = settle_dirty_tables_(); !s) return s.error();
     std::size_t idx = tx_.savepoint_index(name);
     if (idx == static_cast<std::size_t>(-1)) {
         return util::Error{5000, 0, "savepoint not found", name};

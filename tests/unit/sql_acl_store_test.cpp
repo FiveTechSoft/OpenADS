@@ -208,10 +208,11 @@ TEST_CASE("sql_acl_store: catalog SQL lists members and users") {
                                &stmt, nullptr) == SQLITE_OK);
     bool saw_carol = false;
     while (sqlite3_step(stmt) == SQLITE_ROW) {
+        // SAP order: User_Name (col 0) then Group_Name (col 1).
         const char* user =
-            reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-        const char* group =
             reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        const char* group =
+            reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
         if (user && group && std::string(user) == "carol" &&
             std::string(group) == "SALES") {
             saw_carol = true;

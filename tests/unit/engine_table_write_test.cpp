@@ -258,3 +258,56 @@ TEST_CASE("Write guard: FLock allows write to any record") {
     }
     fs::remove(p);
 }
+
+// Dirty-record buffer: set_field defers writeback; unlock must GoCold so
+// Shared RLock → REPLACE → Unlock without an explicit flush still persists.
+TEST_CASE("Dirty buffer: unlock_record commits pending field edits") {
+    auto p = make_empty_table("gh_dirty_unlock");
+    {
+        auto t1 = Table::open(p.string(), TableType::Cdx, OpenMode::Shared);
+        REQUIRE(t1.has_value());
+        Table w1 = std::move(t1).value();
+        REQUIRE(w1.append_record().has_value());
+        REQUIRE(w1.set_field(0, std::string("seed")).has_value());
+        REQUIRE(w1.flush().has_value());
+
+        REQUIRE(w1.goto_top().has_value());
+        REQUIRE(w1.lock_record_excl(1).has_value());
+        REQUIRE(w1.set_field(0, std::string("cold")).has_value());
+        CHECK(w1.record_dirty());
+        // No flush — unlock must settle the dirty buffer.
+        REQUIRE(w1.unlock_record(1).has_value());
+        CHECK_FALSE(w1.record_dirty());
+    }
+    {
+        auto t2 = Table::open(p.string(), TableType::Cdx, OpenMode::Read);
+        REQUIRE(t2.has_value());
+        Table r = std::move(t2).value();
+        REQUIRE(r.goto_top().has_value());
+        auto v = r.read_field(0);
+        REQUIRE(v.has_value());
+        CHECK(v.value().as_string == "cold");
+    }
+    fs::remove(p);
+}
+
+TEST_CASE("Dirty buffer: multi-field set_field coalesces until flush") {
+    auto p = make_empty_table("gh_dirty_coalesce");
+    {
+        auto t = Table::open(p.string(), TableType::Cdx, OpenMode::Exclusive);
+        REQUIRE(t.has_value());
+        Table table = std::move(t).value();
+        REQUIRE(table.append_record().has_value());
+        REQUIRE(table.set_field(0, std::string("A")).has_value());
+        REQUIRE(table.set_field(0, std::string("B")).has_value());
+        REQUIRE(table.set_field(0, std::string("C")).has_value());
+        CHECK(table.record_dirty());
+        REQUIRE(table.flush().has_value());
+        CHECK_FALSE(table.record_dirty());
+        REQUIRE(table.goto_top().has_value());
+        auto v = table.read_field(0);
+        REQUIRE(v.has_value());
+        CHECK(v.value().as_string == "C");
+    }
+    fs::remove(p);
+}

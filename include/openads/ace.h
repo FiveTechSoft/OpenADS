@@ -21,11 +21,27 @@ extern "C" {
 //
 // __stdcall (the original SAP / MSVC convention) decorates names on
 // x86 as _Func@N where N is the parameter byte-width.  The OpenADS
-// import libraries ship both flavours; this header defaults to
-// __cdecl so hbmk2 / MinGW projects resolve symbols without
-// @N decoration mismatches.
+// ace32.dll exports exactly those decorated names, so on 32-bit MSVC
+// this header MUST use __stdcall (v1.8.48: with the cdecl default our
+// own tools referenced plain _AdsXxx symbols the DLL does not export).
+// Implementation TUs (ace_exports.cpp, studio_embed.cpp) define
+// OPENADS_ACE_IMPLEMENTATION so their definitions stay __cdecl — the
+// stdcall-decorated exports are produced by abi/ace_stdcall_x86.c
+// wrappers forwarding to them.
+#if defined(_MSC_VER) && defined(_WIN32) && !defined(_WIN64) && \
+    !defined(OPENADS_ACE_IMPLEMENTATION)
+#  ifndef ENTRYPOINT
+#    define ENTRYPOINT __stdcall
+#  endif
+#endif
 #ifndef ENTRYPOINT
 #  define ENTRYPOINT
+#endif
+// The oads_* file/dir helpers are plain __cdecl exports on every
+// platform (no @N decoration even on x86) — they are NOT part of the
+// SAP surface.
+#ifndef OADSAPI
+#  define OADSAPI
 #endif
 
 typedef uint8_t  UNSIGNED8;
@@ -34,7 +50,11 @@ typedef uint32_t UNSIGNED32;
 typedef int32_t  SIGNED32;
 typedef int64_t  SIGNED64;
 typedef uint64_t UNSIGNED64;
-typedef uint64_t ADSHANDLE;
+// SAP ACE defines ADSHANDLE as a 32-bit value on every platform.
+// Declaring it 64-bit here made every ADSHANDLE-by-reference out
+// parameter write 8 bytes into the caller's 4-byte storage, which
+// corrupts the stack of 32-bit callers (rddads) — v1.8.46.
+typedef uint32_t ADSHANDLE;
 
 #define ADS_DEFAULT 0
 #define ADS_NTX     1
@@ -109,33 +129,33 @@ UNSIGNED32 ENTRYPOINT AdsFWrite        (ADSHANDLE  hFile, const void* pBuf,
 UNSIGNED32 ENTRYPOINT AdsFSeek         (ADSHANDLE  hFile, SIGNED32 lOffset,
                                UNSIGNED16 usOrigin, UNSIGNED32* pulPos);
 // OpenADS compatibility aliases used by legacy oads_* callers.
-UNSIGNED32 ENTRYPOINT oads_FOpen       (ADSHANDLE  hConnect, UNSIGNED8* pucName,
+UNSIGNED32 OADSAPI oads_FOpen       (ADSHANDLE  hConnect, UNSIGNED8* pucName,
                                UNSIGNED16 usMode, ADSHANDLE* phFile);
-UNSIGNED32 ENTRYPOINT oads_FCreate     (ADSHANDLE  hConnect, UNSIGNED8* pucName,
+UNSIGNED32 OADSAPI oads_FCreate     (ADSHANDLE  hConnect, UNSIGNED8* pucName,
                                UNSIGNED16 usAttribute, ADSHANDLE* phFile);
-UNSIGNED32 ENTRYPOINT oads_FClose      (ADSHANDLE hFile);
-UNSIGNED32 ENTRYPOINT oads_FRead       (ADSHANDLE hFile, void* pBuf,
+UNSIGNED32 OADSAPI oads_FClose      (ADSHANDLE hFile);
+UNSIGNED32 OADSAPI oads_FRead       (ADSHANDLE hFile, void* pBuf,
                                UNSIGNED32 ulLen, UNSIGNED32* pulRead);
-UNSIGNED32 ENTRYPOINT oads_FWrite      (ADSHANDLE hFile, const void* pBuf,
+UNSIGNED32 OADSAPI oads_FWrite      (ADSHANDLE hFile, const void* pBuf,
                                UNSIGNED32 ulLen, UNSIGNED32* pulWritten);
-UNSIGNED32 ENTRYPOINT oads_FSeek       (ADSHANDLE hFile, SIGNED32 lOffset,
+UNSIGNED32 OADSAPI oads_FSeek       (ADSHANDLE hFile, SIGNED32 lOffset,
                                UNSIGNED16 usOrigin, UNSIGNED32* pulPos);
-UNSIGNED32 ENTRYPOINT oads_CheckExistence (ADSHANDLE  hConnect, UNSIGNED8* pucName,
+UNSIGNED32 OADSAPI oads_CheckExistence (ADSHANDLE  hConnect, UNSIGNED8* pucName,
                                 UNSIGNED16* pbExists);
-UNSIGNED32 ENTRYPOINT oads_DeleteFile     (ADSHANDLE  hConnect, UNSIGNED8* pucName);
-UNSIGNED32 ENTRYPOINT oads_RenameFile     (ADSHANDLE  hConnect, UNSIGNED8* pucOld,
+UNSIGNED32 OADSAPI oads_DeleteFile     (ADSHANDLE  hConnect, UNSIGNED8* pucName);
+UNSIGNED32 OADSAPI oads_RenameFile     (ADSHANDLE  hConnect, UNSIGNED8* pucOld,
                                 UNSIGNED8* pucNew);
-UNSIGNED32 ENTRYPOINT oads_GetFileSize    (ADSHANDLE  hConnect, UNSIGNED8* pucName,
+UNSIGNED32 OADSAPI oads_GetFileSize    (ADSHANDLE  hConnect, UNSIGNED8* pucName,
                                 UNSIGNED32* pulSize);
-UNSIGNED32 ENTRYPOINT oads_GetFileTime    (ADSHANDLE  hConnect, UNSIGNED8* pucName,
+UNSIGNED32 OADSAPI oads_GetFileTime    (ADSHANDLE  hConnect, UNSIGNED8* pucName,
                                 UNSIGNED8* pucTime, UNSIGNED16* pusLen);
-UNSIGNED32 ENTRYPOINT oads_GetFileDate    (ADSHANDLE  hConnect, UNSIGNED8* pucName,
+UNSIGNED32 OADSAPI oads_GetFileDate    (ADSHANDLE  hConnect, UNSIGNED8* pucName,
                                 UNSIGNED8* pucDate, UNSIGNED16* pusLen);
-UNSIGNED32 ENTRYPOINT oads_DirMake        (ADSHANDLE  hConnect, UNSIGNED8* pucPath);
-UNSIGNED32 ENTRYPOINT oads_DirRemove      (ADSHANDLE  hConnect, UNSIGNED8* pucPath);
-UNSIGNED32 ENTRYPOINT oads_DirExist       (ADSHANDLE  hConnect, UNSIGNED8* pucPath,
+UNSIGNED32 OADSAPI oads_DirMake        (ADSHANDLE  hConnect, UNSIGNED8* pucPath);
+UNSIGNED32 OADSAPI oads_DirRemove      (ADSHANDLE  hConnect, UNSIGNED8* pucPath);
+UNSIGNED32 OADSAPI oads_DirExist       (ADSHANDLE  hConnect, UNSIGNED8* pucPath,
                                 UNSIGNED16* pbExists);
-UNSIGNED32 ENTRYPOINT oads_Directory      (ADSHANDLE  hConnect, UNSIGNED8* pucMask,
+UNSIGNED32 OADSAPI oads_Directory      (ADSHANDLE  hConnect, UNSIGNED8* pucMask,
                                 UNSIGNED16 usAttr, UNSIGNED8* pucBuffer,
                                 UNSIGNED32* pulBufLen);
 UNSIGNED32 ENTRYPOINT AdsCloseAllTables(void);

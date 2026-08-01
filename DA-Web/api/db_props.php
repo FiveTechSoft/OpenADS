@@ -109,11 +109,13 @@ try {
                 $hasPassword = false;
                 try {
                     $userCheckConn = AdsConnection::connect($opts);
-                    $stmt = $userCheckConn->query("SELECT user_name FROM system.users");
+                    // Name is SAP's column on system.users; user_name was the
+                    // old OpenADS-only spelling, kept as a read fallback.
+                    $stmt = $userCheckConn->query("SELECT Name FROM system.users");
                     $rows = $stmt->fetchAll();
                     $stmt->close();
                     foreach ($rows as $row) {
-                        $uname = $row['user_name'] ?? ($row['USER_NAME'] ?? '');
+                        $uname = $row['Name'] ?? ($row['user_name'] ?? ($row['USER_NAME'] ?? ''));
                         if ($uname === '') continue;
                         try {
                             $pwd = $dict->getUserProperty($uname, 1101);

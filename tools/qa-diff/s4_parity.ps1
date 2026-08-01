@@ -4,14 +4,35 @@
 #
 # Usage: .\s4_parity.ps1  (expects F:\tmp\parity\{sap_data,oa_data} set up
 #        and pmsys_OpenADS.add already converted in oa_data)
+#
+# PSAvoidUsingPlainTextForPassword is suppressed deliberately: dd_meta_dump.exe
+# takes --password as a command-line argument, so the value has to be plaintext
+# at the point of use. A SecureString here would only be decoded a few lines
+# later and would add ceremony without adding protection. What matters is that
+# the value is never *stored* in the repo — hence the env-var default below.
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+    'PSAvoidUsingPlainTextForPassword', 'Password')]
 param(
     [string]$SapLib = "F:\ads11\ace64.dll",
     [string]$SapDb  = "F:\tmp\parity\sap_data\pmsys.add",
     [string]$OaLib  = "F:\OpenADS\build\ninja-clang-local\src\openace64.dll",
-    [string]$OaDb   = "F:\tmp\parity\oa_data\pmsys_OpenADS.add"
+    [string]$OaDb   = "F:\tmp\parity\oa_data\pmsys_OpenADS.add",
+    [string]$User   = "adssys",
+    # NEVER hardcode this. This repo is public: a literal here is published,
+    # mirrored by every fork, and cannot be recalled by deleting the commit.
+    # Supply it per-run instead:
+    #   $env:OPENADS_PARITY_PW = 'secret'; .\s4_parity.ps1
+    # or  .\s4_parity.ps1 -Password 'secret'
+    [string]$Password = $env:OPENADS_PARITY_PW
 )
+
+if ([string]::IsNullOrEmpty($Password)) {
+    Write-Error ("No dictionary password supplied. Set `$env:OPENADS_PARITY_PW " +
+                 "or pass -Password. Do not hardcode it - this repo is public.")
+    exit 2
+}
 $dd = ".\dd_meta_dump.exe"
-$user = "adssys"; $pw = "pmsys"
+$user = $User; $pw = $Password
 
 $cases = [ordered]@{
 # ---- functions (8 with args; CurrentLease exercises SELECT TOP 1 inside) --

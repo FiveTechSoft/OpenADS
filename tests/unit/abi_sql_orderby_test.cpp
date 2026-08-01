@@ -285,3 +285,128 @@ TEST_CASE("M10.6 SQL ORDER BY combines with WHERE") {
     REQUIRE(AdsDisconnect(hConn) == 0);
     fs::remove_all(dir, ec);
 }
+
+// ---------------------------------------------------------------------------
+// Column names longer than 10 characters must survive the static-cursor
+// materialisation that ORDER BY / DISTINCT / LIMIT / TOP trigger (#136/#146).
+//
+// The temp table those paths build used to be created with ADS_CDX, i.e. a DBF,
+// whose on-disk field descriptor is 11 bytes — so every name was silently cut
+// to 10 and `RI_Primary_Table` came back as `RI_Primary`. That is not a
+// cosmetic difference: it breaks SAP parity on the system.* catalogs (SAP's own
+// names run to 18 chars) and mangles any user table with long columns.
+// The temp is now ADS_ADT, which carries full-length names.
+//
+// If this test fails with a truncated name, something re-introduced a DBF-format
+// temp on a materialising path. Do not "fix" the expectation.
+// ---------------------------------------------------------------------------
+TEST_CASE("materialised cursors keep column names longer than 10 chars") {
+    auto dir = fs::temp_directory_path() / "openads_sql_longcol";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+
+    UNSIGNED8 srv[512]{};
+    const auto ds = dir.string();
+    std::memcpy(srv, ds.c_str(), ds.size() + 1);
+    ADSHANDLE hConn = 0;
+    REQUIRE(AdsConnect60(srv, ADS_LOCAL_SERVER, nullptr, nullptr, 0,
+                         &hConn) == 0);
+
+    // An ADT source so the long names exist before the query runs; 17 and 16
+    // characters, both past DBF's limit and both real SAP catalog widths.
+    // The N(12,2) column is deliberate: the temp format has to carry a long
+    // name AND the declared scale at the same time. ADT DOUBLE can do the
+    // first but not the second (its descriptor stores no decimal count), so
+    // this pins the ASCII-numeric mapping the materialiser relies on.
+    UNSIGNED8 tname[32] = "longcols";
+    // AsciiNumeric (ADT type 2) rather than plain Numeric: on ADT, "Numeric"
+    // with decimals becomes a binary DOUBLE, and AdsSetString into an ADT
+    // DOUBLE currently stores the text verbatim instead of parsing it — a
+    // separate defect that would make this fixture, not the code under test,
+    // the thing that fails.
+    UNSIGNED8 defs[160] = "User_Defined_Prop,Character,20;"
+                          "RI_Primary_Table,Character,20;"
+                          "Trig_Priority_Num,AsciiNumeric,12,2";
+    ADSHANDLE hNew = 0;
+    REQUIRE(AdsCreateTable(hConn, tname, nullptr, ADS_ADT, 0, 0, 0, 0,
+                           defs, &hNew) == 0);
+    // Rows matter: with an empty source the materialising path is skipped and
+    // the truncation never shows up.
+    {
+        UNSIGNED8 f1[32] = "User_Defined_Prop";
+        UNSIGNED8 f2[32] = "RI_Primary_Table";
+        UNSIGNED8 f3[32] = "Trig_Priority_Num";
+        UNSIGNED8 num[16] = "10.50";
+        for (const char* v : {"bbb", "aaa", "ccc"}) {
+            REQUIRE(AdsAppendRecord(hNew) == 0);
+            UNSIGNED8 buf[32]{};
+            std::memcpy(buf, v, std::strlen(v));
+            REQUIRE(AdsSetString(hNew, f1, buf,
+                        static_cast<UNSIGNED32>(std::strlen(v))) == 0);
+            REQUIRE(AdsSetString(hNew, f2, buf,
+                        static_cast<UNSIGNED32>(std::strlen(v))) == 0);
+            REQUIRE(AdsSetString(hNew, f3, num, 5) == 0);
+            REQUIRE(AdsWriteRecord(hNew) == 0);
+        }
+    }
+    REQUIRE(AdsCloseTable(hNew) == 0);
+
+    ADSHANDLE hStmt = 0;
+    REQUIRE(AdsCreateSQLStatement(hConn, &hStmt) == 0);
+
+    // Each of these takes the materialising path; a plain SELECT does not.
+    const std::string cols =
+        "User_Defined_Prop, RI_Primary_Table, Trig_Priority_Num";
+    const std::vector<std::string> queries = {
+        "SELECT " + cols + " FROM longcols ORDER BY RI_Primary_Table",
+        "SELECT DISTINCT " + cols + " FROM longcols",
+        "SELECT TOP 1 " + cols + " FROM longcols",
+    };
+    for (const std::string& q : queries) {
+        UNSIGNED8 sql[256]{};
+        std::memcpy(sql, q.c_str(), q.size() + 1);
+        ADSHANDLE hCur = 0;
+        REQUIRE(AdsExecuteSQLDirect(hStmt, sql, &hCur) == 0);
+        REQUIRE(hCur != 0);
+
+        // Read the names back off the cursor: this is what a SAP-compatible
+        // client sees, and what `SELECT ... WHERE <name>` has to match.
+        UNSIGNED16 count = 0;
+        REQUIRE(AdsGetNumFields(hCur, &count) == 0);
+        REQUIRE(count == 3);
+        for (UNSIGNED16 i = 1; i <= count; ++i) {
+            UNSIGNED8  nm[128] = {};
+            UNSIGNED16 nlen = sizeof(nm) - 1;
+            REQUIRE(AdsGetFieldName(hCur, i, nm, &nlen) == 0);
+            std::string got(reinterpret_cast<const char*>(nm), nlen);
+            while (!got.empty() && (got.back() == ' ' || got.back() == '\0'))
+                got.pop_back();
+            CAPTURE(q);
+            CAPTURE(got);
+            CHECK((got == "User_Defined_Prop" || got == "RI_Primary_Table" ||
+                   got == "Trig_Priority_Num"));
+        }
+
+        // ...and the declared scale survives alongside the long name. Losing
+        // this means the temp went back to a format that cannot carry both.
+        REQUIRE(AdsGotoTop(hCur) == 0);
+        {
+            UNSIGNED8  fld[32] = "Trig_Priority_Num";
+            UNSIGNED8  vb[64]  = {};
+            UNSIGNED32 vlen    = sizeof(vb);
+            REQUIRE(AdsGetString(hCur, fld, vb, &vlen, 0) == 0);
+            std::string sv(reinterpret_cast<const char*>(vb), vlen);
+            while (!sv.empty() && sv.back()  == ' ') sv.pop_back();
+            while (!sv.empty() && sv.front() == ' ') sv.erase(sv.begin());
+            CAPTURE(q);
+            CAPTURE(sv);
+            CHECK(sv == "10.50");
+        }
+        REQUIRE(AdsCloseTable(hCur) == 0);
+    }
+
+    REQUIRE(AdsCloseSQLStatement(hStmt) == 0);
+    REQUIRE(AdsDisconnect(hConn) == 0);
+    fs::remove_all(dir, ec);
+}

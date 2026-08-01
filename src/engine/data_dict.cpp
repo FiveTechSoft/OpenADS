@@ -743,7 +743,10 @@ util::Result<void> DataDict::load_add_binary_(const std::string& buf) {
         } else if (rec.obj_type == "User" && !rec.obj_name.empty()) {
             // RCB 2026-06-27: Imported SAP user object names can arrive in
             // mixed case; store them folded so all user lookups share one key.
+            // ...but keep the declared spelling for display — SAP's
+            // system.users.Name / permissions.Grantee show "RCB", not "rcb".
             users_.insert(ci_name(rec.obj_name));
+            user_display_[ci_name(rec.obj_name)] = rec.obj_name;
 
         } else if (rec.obj_type == "Group" && !rec.obj_name.empty()) {
             groups_.insert(rec.obj_name);
@@ -1780,6 +1783,7 @@ util::Result<void> DataDict::load_() {
             // RCB 2026-06-27: Text-format OpenADS DDs also normalize user
             // records at load time, matching the binary loader and connect path.
             users_.insert(lo_name);
+            user_display_[lo_name] = obj_name;   // declared spelling, for display
             if (!json.empty()) {
                 auto m = json_parse_flat(json);
                 for (auto& [k, v] : m)
@@ -1995,7 +1999,11 @@ util::Result<void> DataDict::save() {
             auto it = user_props_.find(u);
             std::string j = (it != user_props_.end())
                           ? user_props_to_json(it->second) : "{}";
-            mk("User", u, "", j);
+            // Persist the DECLARED spelling as OBJ_NAME. Writing the folded
+            // key here is what made the lowercasing permanent: the loader
+            // folds on read anyway, so this round-trips without affecting
+            // lookup. Sort order stays on the folded key for stable output.
+            mk("User", display_user(u), "", j);
         }
     }
 
@@ -2334,10 +2342,17 @@ bool DataDict::has_user(const std::string& user) const noexcept {
     return users_.find(ci_name(user)) != users_.end();
 }
 
+std::string DataDict::display_user(const std::string& user) const noexcept {
+    const auto lo = ci_name(user);
+    auto it = user_display_.find(lo);
+    return it != user_display_.end() ? it->second : lo;
+}
+
 util::Result<void> DataDict::create_user(const std::string& user) {
     if (user.empty())
         return util::Error{5000, 0, "DD user name empty", ""};
     users_.insert(ci_name(user));
+    user_display_[ci_name(user)] = user;   // remember how the caller spelled it
     return save();
 }
 
@@ -2346,6 +2361,7 @@ util::Result<void> DataDict::delete_user(const std::string& user) {
     if (lo == "adssys")
         return util::Error{5000, 0, "AdsSys user cannot be deleted", ""};
     users_.erase(lo);
+    user_display_.erase(lo);
     memberships_.erase(lo);
     user_props_.erase(lo);
     invalidate_metadata_indexes_();

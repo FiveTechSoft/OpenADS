@@ -189,6 +189,12 @@ public:
 
 private:
     util::Result<void> recover_orphan_tx_();
+    // GoCold every table with a coalesced dirty record. Field setters
+    // defer writeback + before-image capture to commit_dirty_record();
+    // tx boundary events (commit / rollback / savepoint) must settle
+    // first so the journal sees the edits in the right order and no
+    // pending buffer survives a rollback.
+    util::Result<void> settle_dirty_tables_();
     std::uint16_t table_cache_mode_(const std::string& relative_path) const;
     std::string                                                data_dir_;
     std::string                                                dd_path_;   // full .add path if DD opened

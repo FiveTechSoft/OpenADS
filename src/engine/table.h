@@ -258,6 +258,13 @@ public:
     bool deferred_flush() const noexcept { return deferred_flush_; }
     void set_deferred_flush(bool v) noexcept { deferred_flush_ = v; }
 
+    // Dirty-record buffer: set_field* encode into record_buf_ and mark
+    // dirty; a single writeback + index sync runs here (or via flush /
+    // navigation). Matches ACE / xBase GoCold semantics and avoids
+    // N disk+index updates for N field replaces on one row.
+    bool record_dirty() const noexcept { return record_dirty_; }
+    util::Result<void> commit_dirty_record();
+
     util::Result<void> flush();
     util::Result<void> enable_cache(std::uint16_t cache_mode);
     bool cache_enabled() const noexcept { return cache_enabled_; }
@@ -479,6 +486,19 @@ private:
     util::Result<void> load_record_(std::uint32_t recno);
     util::Result<void> writeback_record_();
 
+    // GoHot lock / state check without writing. Used by set_field so
+    // multi-field replaces pay the lock cost once and still fail 5035
+    // on the first field when unlocked in Shared mode.
+    util::Result<void> ensure_writable_();
+
+    // First mutation of the current row: snapshot index keys (pre-edit)
+    // and mark the buffer dirty. Subsequent set_field* calls reuse the
+    // same snapshot until commit_dirty_record / discard.
+    util::Result<void> begin_dirty_edit_();
+
+    // Drop a pending dirty edit without writing (AdsRefreshRecord).
+    void discard_dirty_() noexcept;
+
     // Sync the active index with the current record's key. Called
     // after every record mutation (set_field / append_record). For
     // appends `prev_key` is empty so erase is skipped; for modifies
@@ -533,6 +553,10 @@ private:
     std::unordered_map<std::string, std::string>  ri_snapshot_;
     bool                                          pending_append_ = false;
     bool                                          deferred_flush_ = false;
+    bool                                          record_dirty_   = false;
+    // Pre-edit index keys captured on the first dirty mutation of the
+    // current row; applied once by commit_dirty_record().
+    std::vector<std::pair<drivers::IIndex*, std::string>> index_snap_;
     bool                                          cache_enabled_  = false;
     bool                                          last_seek_found_ = false;
     bool                                          aof_active_      = false;
