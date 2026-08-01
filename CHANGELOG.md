@@ -1,3 +1,47 @@
+## 1.8.49 - 2026-08-01
+
+The pre-existing unit failures are gone: the suite is green again
+(1267/1267, 0 failed) for the first time since the 30 Jul batch.
+Everything since **v1.8.48**.
+
+### Fixed - write coalescing broke rollback, CDX maintenance, and AFTER triggers (35c3bd62)
+
+v1.8.43's dirty-record write coalescing deferred writeback + before-image
+capture + index sync to commit time, but several state-boundary operations
+were never taught to settle the pending dirty record first:
+
+- **Rollback / savepoints lost data** (silent corruption): the tx journal's
+  undo image is captured at writeback, so a rollback arriving while the edit
+  was still buffer-only found nothing to restore — and the *next* navigation
+  wrote the rolled-back value to disk. The connection now settles every
+  dirty table at transaction boundaries: `begin_tx` (before the journal
+  activates), `commit_tx`, `rollback_tx`, `create_savepoint`, and
+  `rollback_to_savepoint`.
+- **CDX tags stale or short by one**: `AdsCreateIndex61`, legacy
+  `AdsCreateIndex`, `Table::reindex()`, and `AdsGetKeyCount` read rows
+  straight from disk while the last edit was still coalesced; they now
+  settle first, so the FOR-tag count, re-created tag walks, and key counts
+  include the pending row.
+- **AFTER UPDATE trigger could not reject a write**: the SQL UPDATE row
+  loop fired the AFTER trigger while the update was still a pending buffer
+  and closed the table (dropping it) on trigger failure; the loop now
+  settles before firing, so a failing trigger leaves the write on disk and
+  propagates the error, matching the INSERT path.
+
+### Fixed - remote ADT numeric round-trip (234d42d6)
+
+Remote SetField routes values as strings through `AdsSetString` on the
+server's ABI twin. `encode_field_string` stored the ASCII characters into
+binary-typed fields (Double, Integer, Currency/AdtMoney, ShortInt,
+AutoInc/Time) instead of converting, so `AdsSetDouble(99.0)` over the wire
+read back as garbage. String input is now parsed and packed as binary for
+those types, mirroring `encode_field_double`.
+
+### Tests
+
+- Full suite: **1267 passed, 0 failed** (was 11 failing since v1.8.43).
+- `tests/e2e/b_big_e2e.prg`: 23/23 PASS on x64+x86, local+remote.
+
 ## 1.8.48 - 2026-08-01
 
 32-bit toolchain alignment: everything that compiles against

@@ -1424,6 +1424,11 @@ util::Result<void> Table::reindex() {
     if (mode_ == OpenMode::Read) {
         return util::Error{5000, 0, "table opened read-only", ""};
     }
+    // Settle any coalesced dirty record first: the rebuild below reads
+    // rows straight from disk, so a pending buffer edit would otherwise
+    // be indexed from its stale on-disk image (and silently dropped by
+    // load_record_for_bulk_scan's discard).
+    if (auto r = commit_dirty_record(); !r) return r.error();
     if (driver_ == nullptr) return {};
 
     std::vector<drivers::IIndex*> indexes;

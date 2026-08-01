@@ -12511,6 +12511,11 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
     if (!t) {
         return fail(openads::AE_INTERNAL_ERROR, "unknown table");
     }
+    // Settle any coalesced dirty record first: the build loop below reads
+    // rows straight from disk, so a pending buffer edit would be indexed
+    // from its stale on-disk image (and silently dropped by
+    // load_record_for_bulk_scan's discard).
+    if (auto cr = t->commit_dirty_record(); !cr) return fail(cr.error());
     // The native (DBF/CDX/NTX/ADI) create path mutates the process-global
     // index_bindings() / active_binding_for() maps (and the per-table order
     // list) with no synchronization, so two connections building indexes
@@ -13162,6 +13167,8 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex(ADSHANDLE hTable, UNSIGNED8* pucFile,
     if (!t) {
         return fail(openads::AE_INTERNAL_ERROR, "unknown table or null out");
     }
+    // Settle any coalesced dirty record first (see AdsCreateIndex61).
+    if (auto cr = t->commit_dirty_record(); !cr) return fail(cr.error());
     auto file = normalize_index_path(
         openads::abi::to_internal(pucFile, 0));
     auto tag  = openads::abi::to_internal(pucTag,  0);
@@ -25635,6 +25642,14 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         if (!wr) return fail(wr.error());
                     }
                     if (upd_hConn) {
+                        // AFTER runs once the write has landed: settle the
+                        // coalesced dirty record so a failing trigger still
+                        // leaves the updated row on disk (write persists).
+                        if (auto cd = tbl->commit_dirty_record(); !cd) {
+                            tbl->clear_filter();
+                            c->close_table(th.value());
+                            return fail(cd.error());
+                        }
                         fire_triggers_(upd_hConn, c, upd_alias, 2u,
                                        4u /*AFTER*/, tbl, nullptr,
                                        &upd_terr, &new_img, &old_img);
@@ -33920,6 +33935,10 @@ UNSIGNED32 ENTRYPOINT AdsGetKeyCount(ADSHANDLE hIndex, UNSIGNED16 /*usFilter*/,
     }
     Table* t = get_table(hIndex);
     if (t == nullptr) return ok();
+    // Settle any coalesced dirty record first: its index keys are only
+    // inserted on writeback, so a pending edit would be missing from the
+    // count.
+    if (auto cr = t->commit_dirty_record(); !cr) return fail(cr.error());
     // With an active order, the KEY count can be far fewer than the table's
     // record_count() (a conditional/FOR index indexes only matching rows).
     // Returning record_count() here made it inconsistent with OrdKeyNo /
