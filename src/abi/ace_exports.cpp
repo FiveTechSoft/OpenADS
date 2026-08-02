@@ -360,6 +360,79 @@ projection_for(ADSHANDLE h) {
     return &it->second;
 }
 
+// S4 — user-visible column names for a projected cursor, parallel to
+// cursor_projections(). SAP names a result column after the SELECT list,
+// not after the table's declared spelling, so the two must be tracked
+// separately; see build_projection_aliases() for the rule.
+std::unordered_map<ADSHANDLE, std::vector<std::string>>&
+cursor_aliases() {
+    static std::unordered_map<ADSHANDLE, std::vector<std::string>> m;
+    return m;
+}
+
+const std::vector<std::string>*
+aliases_for(ADSHANDLE h) {
+    auto& m = cursor_aliases();
+    auto it = m.find(h);
+    if (it == m.end() || it->second.empty()) return nullptr;
+    return &it->second;
+}
+
+// Forget both maps together — an alias vector outliving its projection
+// would misname the next cursor to reuse the handle.
+void forget_cursor_projection(ADSHANDLE h) {
+    cursor_projections().erase(h);
+    cursor_aliases().erase(h);
+}
+
+// SAP's result-column naming rule, established by probing ace64.dll:
+//
+//   1. An explicit `AS alias` wins outright.
+//   2. Otherwise the column is named with the SPELLING USED IN THE SELECT
+//      LIST, not the table's declared spelling - `SELECT CLAIMKEY` over a
+//      column declared `claimkey` reports CLAIMKEY. The table qualifier is
+//      dropped, so `s.CLAIMKEY` still reports CLAIMKEY.
+//   3. Repeats are suffixed `_1`, `_2`, ... in select-list order; the first
+//      occurrence keeps the bare name. Collisions are detected
+//      case-insensitively but each item keeps ITS OWN case, so
+//      `s.ADM_NUM, l.ADM_NUM, s.adm_num` reports ADM_NUM, ADM_NUM_1 and
+//      adm_num_2 - note the third is lower-cased like the way it was
+//      written, not like the first.
+//
+// Returns an empty vector when there is nothing to override.
+std::vector<std::string>
+build_projection_aliases(const openads::sql::SelectStmt& st,
+                         std::size_t n) {
+    if (n == 0) return {};
+    std::vector<std::string> names;
+    names.reserve(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        const std::string* as_alias = nullptr;
+        for (const auto& pa : st.projection_aliases)
+            if (pa.first == i) { as_alias = &pa.second; break; }
+        if (as_alias != nullptr) {
+            names.push_back(*as_alias);
+        } else if (i < st.projection.size()) {
+            names.push_back(st.projection[i]);
+        } else {
+            names.emplace_back();
+        }
+    }
+    auto lower = [](std::string v) {
+        for (auto& ch : v)
+            ch = static_cast<char>(
+                std::tolower(static_cast<unsigned char>(ch)));
+        return v;
+    };
+    std::unordered_map<std::string, int> seen;
+    for (auto& nm : names) {
+        if (nm.empty()) continue;
+        const int k = seen[lower(nm)]++;
+        if (k > 0) nm += "_" + std::to_string(k);
+    }
+    return names;
+}
+
 // Projection-aware variant. Called by Get* entry points that take
 // hTable + pucField; routes ADSFIELD(n) numeric handles through the
 // projection map (n = position within projection, translated to the
@@ -378,6 +451,28 @@ bool resolve_field_index_h(ADSHANDLE h, Table* tbl,
             return true;
         }
         return false;
+    }
+    // S4 — a projected column may be visible under a name the underlying
+    // table does not carry (`AS alias`, or a duplicate suffixed `_1`), so
+    // match the cursor's own names before the table's.
+    if (proj != nullptr && p >= 0x10000u && pucField != nullptr) {
+        if (const auto* al = aliases_for(h); al != nullptr) {
+            const std::string want(reinterpret_cast<const char*>(pucField));
+            auto same = [](const std::string& a, const std::string& b) {
+                if (a.size() != b.size()) return false;
+                for (std::size_t k = 0; k < a.size(); ++k)
+                    if (std::tolower(static_cast<unsigned char>(a[k])) !=
+                        std::tolower(static_cast<unsigned char>(b[k])))
+                        return false;
+                return true;
+            };
+            for (std::size_t i = 0; i < al->size() && i < proj->size(); ++i) {
+                if (!(*al)[i].empty() && same((*al)[i], want)) {
+                    *out = (*proj)[i];
+                    return true;
+                }
+            }
+        }
     }
     return resolve_field_index(tbl, pucField, out);
 }
@@ -6187,7 +6282,7 @@ UNSIGNED32 ENTRYPOINT AdsDisconnect(ADSHANDLE hConnect) {
             purge_pending_binaries_for_table(tp);
         }
         for (Handle h : owned_handles) {
-            cursor_projections().erase(to_ads_handle(h));
+            forget_cursor_projection(to_ads_handle(h));
             s.registry.release(h);
         }
     }
@@ -8766,7 +8861,7 @@ UNSIGNED32 ENTRYPOINT AdsCloseTable(ADSHANDLE hTable) {
         // this same heap address).
         openads::mgmt::LockRegistry::instance().remove_all_for_table(t);
     }
-    cursor_projections().erase(hTable);
+    forget_cursor_projection(hTable);
     s.registry.release(hTable);
     // The table is closed and its handle released, so the temp table a
     // materialised SELECT built for this cursor can go with it.
@@ -9028,6 +9123,16 @@ UNSIGNED32 ENTRYPOINT AdsGetFieldName(ADSHANDLE hTable, UNSIGNED16 usFieldNum,
     if (p != nullptr) {
         if (usFieldNum == 0 || usFieldNum > p->size()) {
             return fail(openads::AE_COLUMN_NOT_FOUND, "");
+        }
+        // S4 — a projected column is named after the SELECT list, not
+        // after the table's declared spelling. See
+        // build_projection_aliases() for SAP's exact rule.
+        if (const auto* al = aliases_for(hTable);
+            al != nullptr && usFieldNum <= al->size() &&
+            !(*al)[usFieldNum - 1].empty()) {
+            openads::abi::copy_to_caller(pucBuf, pusLen,
+                                         (*al)[usFieldNum - 1]);
+            return ok();
         }
         src_idx = (*p)[usFieldNum - 1];
     } else {
@@ -28816,7 +28921,14 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             ctbl->clear_filter();
             ctbl->set_recno_sequence(std::move(seq));
         }
-        if (!jproj.empty()) cursor_projections()[gh] = std::move(jproj);
+        if (!jproj.empty()) {
+            // Name the result columns the way SAP does before jproj is
+            // moved from - a right-table column reached through its merged
+            // `R_<name>` form must still answer to the name the user wrote.
+            cursor_aliases()[gh] =
+                build_projection_aliases(parsed.value(), jproj.size());
+            cursor_projections()[gh] = std::move(jproj);
+        }
         *phCursor = gh;
         return ok();
     }
@@ -31935,11 +32047,24 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 }
                 return "Character";
             };
+            // S4 — a materialised cursor carries its OWN descriptors, so the
+            // SELECT-list naming applied to a live cursor via cursor_aliases()
+            // cannot reach it; the names have to be baked into the temp's DDL
+            // here instead. cols[i] corresponds to projection[i] one-for-one
+            // (a denied column aborts rather than being skipped), so the two
+            // stay aligned. SELECT * leaves this empty and keeps the declared
+            // spelling, which is what SAP does too.
+            std::vector<std::string> tmp_names;
+            if (!parsed.value().projection.empty())
+                tmp_names = build_projection_aliases(parsed.value(),
+                                                     cols.size());
             std::string defs;
-            for (auto cidx : cols) {
+            for (std::size_t ci = 0; ci < cols.size(); ++ci) {
+                const auto cidx = cols[ci];
                 const auto& fd = tbl->field_descriptor(cidx);
                 if (!defs.empty()) defs.push_back(';');
-                defs += fd.name;
+                defs += (ci < tmp_names.size() && !tmp_names[ci].empty())
+                      ? tmp_names[ci] : fd.name;
                 defs.push_back(',');
                 defs += type_name(static_cast<char>(fd.raw_type), fd.decimals);
                 if (fd.length   > 0) { defs.push_back(','); defs += std::to_string(fd.length); }
@@ -32079,6 +32204,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             }
             proj.push_back(static_cast<std::uint16_t>(fidx));
         }
+        cursor_aliases()[gh] =
+            build_projection_aliases(parsed.value(), proj.size());
         cursor_projections()[gh] = std::move(proj);
     } else if (allowed_cols) {
         // SELECT * by a column-restricted user → project only permitted columns,

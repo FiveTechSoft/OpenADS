@@ -179,9 +179,16 @@ Two residual divergences in this area, both measured, neither guessed at:
       i.e. it appears to accumulate at scale 2 and display at 4, while OpenADS
       accumulates at full double precision. Only shows when BOTH operands carry
       a scale.
-- [ ] **Join naming** — the `R_` prefix and the select-list-spelling rule (SAP:
-      output name is the identifier as written, duplicates get `_1`, `_2`…).
-      Verified against SAP with three probes; see backlog item 2.
+- [x] **Result-column naming** — *done*. Turned out to be wider than the `R_`
+      prefix: the select-list-spelling rule applies to **every** SELECT, not
+      just joins, and `AS` aliases were being ignored outright on the join
+      path. Both the live-cursor and materialised paths now name columns the
+      way SAP does; the rule and its three traps are written up in
+      `docs/materialised-cursor-temps.md` (constraint 4). What is *not* fixed
+      is the `R_` prefix itself — it remains the merged temp's internal
+      spelling for a colliding right-side column, now invisible to clients.
+      That still matters for constraint 2: `R_` + a long name overflows a DBF
+      descriptor, so join/union/aggregate temps moving to ADT is still open.
 - [ ] **`ntx_provider`** — `DOCT_NO` reads `"0"` vs SAP `"  0"` on a *plain* DBF
       read (no join, no aggregate), so a separate path from everything above.
 
@@ -241,10 +248,11 @@ OpenADS gap (test-case bugs already fixed). Grouped by root cause:
       (`Sum(Real * UNITS)`) raises 2115 — only bare column args parse;
       `SELECT ... FROM <view>` raises 5004 for both mp views, so plain
       single-table view resolution is broken (not just views-inside-joins).
-- [ ] **Join column resolution + result naming** *(3 cases)* — a 2-table join on
-      `ADM_NUM` returns "Column not found: ADM_NUM"; 3-way and LEFT joins return
-      right-side columns renamed `R_UNITS` / `R_Status` and left-side names
-      lowercased, where SAP preserves the declared casing.
+- [ ] **Join column resolution** *(1 case remaining)* — a 2-table join on
+      `ADM_NUM` still returns "Column not found: ADM_NUM". The **result
+      naming** half of this item is fixed: `R_UNITS` / `R_Status` and the
+      lowercased left-side names are gone, and the rule turned out to apply to
+      every SELECT rather than only joins — see the backlog entry above.
 - [ ] **Numeric / date string formatting** *(3 cases)* — SAP pads and formats to
       the declared field width (`"                 0.00"`, `"  0"`) while OA
       returns `"0"`; date columns inside aggregates come back `"0"` from OA vs
