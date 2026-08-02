@@ -33998,15 +33998,25 @@ UNSIGNED32 ENTRYPOINT AdsGetKeyCount(ADSHANDLE hIndex, UNSIGNED16 /*usFilter*/,
         // NTX: use cached B-tree walk for correct conditional count
         if (auto* ntx =
                 dynamic_cast<openads::drivers::ntx::NtxIndex*>(ord->index())) {
-            *pulCount = static_cast<UNSIGNED32>(
-                ntx->ordered_recnos_cached().size());
+            const bool hide_del = !t->show_deleted_records();
+            if (hide_del) {
+                *pulCount = count_live_recnos(t, ntx->ordered_recnos_cached());
+            } else {
+                *pulCount = static_cast<UNSIGNED32>(
+                    ntx->ordered_recnos_cached().size());
+            }
             return ok();
         }
         // ADI: use cached B-tree walk for correct conditional count
         if (auto* adi =
                 dynamic_cast<openads::drivers::adi::AdiIndex*>(ord->index())) {
-            *pulCount = static_cast<UNSIGNED32>(
-                adi->ordered_recnos_cached().size());
+            const bool hide_del = !t->show_deleted_records();
+            if (hide_del) {
+                *pulCount = count_live_recnos(t, adi->ordered_recnos_cached());
+            } else {
+                *pulCount = static_cast<UNSIGNED32>(
+                    adi->ordered_recnos_cached().size());
+            }
             return ok();
         }
     }

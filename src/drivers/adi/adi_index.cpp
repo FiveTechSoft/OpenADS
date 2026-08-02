@@ -1,4 +1,4 @@
-﻿#include "drivers/adi/adi_index.h"
+#include "drivers/adi/adi_index.h"
 
 #include <algorithm>
 #include <cctype>
@@ -2180,21 +2180,17 @@ const std::vector<std::uint32_t>& AdiIndex::ordered_recnos_cached() {
     pos_recnos_.clear();
     pos_map_.clear();
 
-    // Walk from first to last, collecting recnos in key order.
+    // Walk from first to last, collecting recnos in key order. Drive the
+    // walk through next() so EVERY entry of every dense leaf is collected
+    // (reading only entry 0 of each leaf under-counts multi-entry leaves).
     auto first = navigate_leftmost_();
     if (first && first.value().positioned) {
         std::uint32_t pos = 0;
-        // Collect the first entry's recno.
-        pos_recnos_.push_back(cur_recno_);
-        pos_map_[cur_recno_] = pos++;
-        // Walk forward through the dense-leaf chain.
-        while (cur_rsib_ != ADI_INVALID_PAGE) {
-            if (auto r = load_dense_leaf_(cur_rsib_); !r) break;
-            cur_idx_ = 0;
-            if (cur_cnt_ == 0) break;
-            if (auto r2 = refresh_current_(); !r2) break;
+        for (;;) {
             pos_recnos_.push_back(cur_recno_);
             pos_map_[cur_recno_] = pos++;
+            auto n = next();
+            if (!n || !n.value().positioned) break;
         }
     }
 
