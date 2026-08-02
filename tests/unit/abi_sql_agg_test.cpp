@@ -457,3 +457,96 @@ TEST_CASE("aggregate results use SAP's declared width and justification") {
     REQUIRE(AdsDisconnect(hConn) == 0);
     fs::remove_all(dir, ec);
 }
+
+// ---------------------------------------------------------------------------
+// MIN/MAX over a NON-NUMERIC column must compare the decoded text.
+//
+// The accumulators were all `double`, so a date or a name contributed
+// as_double == 0 for every row and MIN(PAY_DATE) reported "0" — the aggregate
+// silently answered a question about dates with a number. Dates decode to
+// "YYYYMMDD", which orders lexicographically exactly as it does
+// chronologically, so a plain string compare is correct for them.
+//
+// The result column is CHARACTER sized to the widest decoded value, not the
+// source's on-disk width: an ADT date is 4 bytes on disk but 8 characters
+// decoded, so sizing from the descriptor would truncate it back to "2009".
+// ---------------------------------------------------------------------------
+TEST_CASE("MIN/MAX over date and character columns compare as text") {
+    auto dir = fs::temp_directory_path() / "openads_agg_minmax_text";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+
+    UNSIGNED8 srv[512]{};
+    const auto ds = dir.string();
+    std::memcpy(srv, ds.c_str(), ds.size() + 1);
+    ADSHANDLE hConn = 0;
+    REQUIRE(AdsConnect60(srv, ADS_LOCAL_SERVER, nullptr, nullptr, 0,
+                         &hConn) == 0);
+
+    // ADT so the date column is a real 4-byte JDN, which is the case that
+    // truncated; NAME exercises the character path.
+    UNSIGNED8 tname[32] = "evts";
+    UNSIGNED8 defs[96]  = "WHEN,Date;NAME,Character,20";
+    ADSHANDLE hNew = 0;
+    REQUIRE(AdsCreateTable(hConn, tname, nullptr, ADS_ADT, 0, 0, 0, 0,
+                           defs, &hNew) == 0);
+    {
+        UNSIGNED8 fw[8] = "WHEN";
+        UNSIGNED8 fn[8] = "NAME";
+        struct Row { const char* d; const char* n; };
+        const Row rows[] = {
+            {"20110509", "MIKE"},
+            {"20090816", "ALFA"},   // earliest date, and not the min name
+            {"20170320", "ZULU"},   // latest date
+        };
+        for (const auto& r : rows) {
+            REQUIRE(AdsAppendRecord(hNew) == 0);
+            UNSIGNED8 b[32]{};
+            std::memcpy(b, r.d, std::strlen(r.d));
+            REQUIRE(AdsSetString(hNew, fw, b,
+                        static_cast<UNSIGNED32>(std::strlen(r.d))) == 0);
+            UNSIGNED8 b2[32]{};
+            std::memcpy(b2, r.n, std::strlen(r.n));
+            REQUIRE(AdsSetString(hNew, fn, b2,
+                        static_cast<UNSIGNED32>(std::strlen(r.n))) == 0);
+            REQUIRE(AdsWriteRecord(hNew) == 0);
+        }
+    }
+    REQUIRE(AdsCloseTable(hNew) == 0);
+
+    ADSHANDLE hStmt = 0;
+    REQUIRE(AdsCreateSQLStatement(hConn, &hStmt) == 0);
+
+    auto val = [&](const char* sql, const char* col) {
+        UNSIGNED8 sb[160]{};
+        std::memcpy(sb, sql, std::strlen(sql) + 1);
+        ADSHANDLE hc = 0;
+        REQUIRE(AdsExecuteSQLDirect(hStmt, sb, &hc) == 0);
+        REQUIRE(AdsGotoTop(hc) == 0);
+        UNSIGNED8 f[32]{};
+        std::memcpy(f, col, std::strlen(col) + 1);
+        UNSIGNED8 buf[128]{};
+        UNSIGNED32 cap = sizeof(buf);
+        REQUIRE(AdsGetField(hc, f, buf, &cap, 0) == 0);
+        std::string s(reinterpret_cast<const char*>(buf), cap);
+        while (!s.empty() && s.back() == ' ') s.pop_back();
+        AdsCloseTable(hc);
+        return s;
+    };
+
+    // Dates: full 8-character value, not "0" and not truncated to "2009".
+    const auto lo = val("SELECT MIN(WHEN) FROM evts", "EXPR");
+    const auto hi = val("SELECT MAX(WHEN) FROM evts", "EXPR");
+    CAPTURE(lo); CAPTURE(hi);
+    CHECK(lo == "20090816");
+    CHECK(hi == "20170320");
+
+    // Characters compare as text, and MIN is not simply the first row.
+    CHECK(val("SELECT MIN(NAME) FROM evts", "EXPR") == "ALFA");
+    CHECK(val("SELECT MAX(NAME) FROM evts", "EXPR") == "ZULU");
+
+    REQUIRE(AdsCloseSQLStatement(hStmt) == 0);
+    REQUIRE(AdsDisconnect(hConn) == 0);
+    fs::remove_all(dir, ec);
+}

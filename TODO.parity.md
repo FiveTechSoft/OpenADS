@@ -95,10 +95,30 @@ SUM are byte-identical to SAP.
 
 Still open in this area, each a *different* defect from the formatting:
 
-- [ ] **`MIN`/`MAX` over a DATE column return `"0"`** — the aggregate machinery
-      accumulates everything as a double, so a date min/max collapses to zero.
-      SAP: `MIN(PAY_DATE)` → `01/18/0203`, `MAX` → `03/20/2017`; OpenADS returns
-      `"   0"` for both. Last remaining piece of `agg_mixed_aggs`.
+- [x] **`MIN`/`MAX` over a DATE column — FIXED 2026-08-02.** The accumulators
+      were all `double`, so a date (and a character column) contributed
+      `as_double == 0` for every row and the aggregate answered a question about
+      dates with a number. MIN/MAX over a non-numeric source now compare the
+      decoded text — dates decode to `YYYYMMDD`, which orders lexicographically
+      exactly as it does chronologically — and the result column is CHARACTER
+      sized to the widest decoded value rather than the source's on-disk width.
+      `MIN(PAY_DATE)`/`MAX` now return `02030118`/`20170320`, the same dates SAP
+      shows as `01/18/0203`/`03/20/2017`; the remaining difference is purely the
+      display format (task #1), which affects every date read, not aggregates.
+      `MIN`/`MAX` over a character column now match SAP byte-for-byte
+      (`ABAD`/`ZZ TESTPATIENT`) — that was silently broken the same way.
+      Applies to the scalar aggregate path; the grouped and join-aggregate
+      paths keep their double-only accumulators and still need the same
+      treatment.
+- [x] **ADT non-character columns truncated through a materialised cursor —
+      FIXED 2026-08-02.** `type_name()` in the static-cursor materialiser
+      switched only on DBF *letter* type codes, but an ADT descriptor carries a
+      NUMERIC type code (1–22) in the same field, so every non-character ADT
+      column fell through to `Character` with its ON-DISK byte width. An ADT
+      date (type 3, 4 bytes) became `CHAR(4)`, so `TOP 1 ADM_DATE` returned
+      `"2009"` instead of `"20090816"` — while the same column read correctly
+      without `TOP`. Numerics survived only by luck, ADT type 2 being ASCII
+      already. Now mirrors the CTAS path, which always had both switch blocks.
 - [ ] **Aggregate over an *expression*** — `Sum([real] * units)` raises 2115;
       only a bare column parses (`agg_inline_sumbyclaim`).
 - [ ] **`COUNT(DISTINCT col)`** raises 2115 (`agg_distinct_ins`).

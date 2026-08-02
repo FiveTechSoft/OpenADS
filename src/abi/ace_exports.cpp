@@ -28697,6 +28697,11 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             std::int32_t            field_index = -1;   // -1 for COUNT(*)
             std::uint8_t            decimals    = 0;    // source-field dp
             std::uint16_t           src_len     = 0;    // source-field width
+            // MIN/MAX over a non-numeric column (a date, a name) has to
+            // compare the DECODED TEXT, not as_double. Accumulating a date
+            // as a double gave 0 for every row, so MIN(PAY_DATE) reported
+            // "0" instead of the earliest date.
+            bool                    is_text     = false;
         };
         std::vector<AggSlot> slots;
         slots.reserve(parsed.value().aggregates.size());
@@ -28717,6 +28722,15 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                                      sfd.type == FT::Currency)
                                   ? 4 : sfd.decimals;      // money: 4 implied
                     slot.src_len = sfd.length;
+                    switch (sfd.type) {
+                        case FT::Numeric:  case FT::Float:   case FT::Integer:
+                        case FT::Double:   case FT::Currency: case FT::ShortInt:
+                        case FT::AutoInc:  case FT::AdtMoney: case FT::Logical:
+                        case FT::RowVersion: case FT::ModTime:
+                            slot.is_text = false; break;
+                        default:
+                            slot.is_text = true;  break;   // Date, Char, Time…
+                    }
                 }
             }
             slots.push_back(std::move(slot));
@@ -29374,6 +29388,12 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             std::numeric_limits<double>::infinity());
         std::vector<double> maxv(slots.size(),
             -std::numeric_limits<double>::infinity());
+        // Parallel text accumulators for MIN/MAX over a non-numeric column.
+        // Dates decode to "YYYYMMDD", which orders lexicographically exactly
+        // as it does chronologically, so a plain string compare is correct.
+        std::vector<std::string> minsv(slots.size());
+        std::vector<std::string> maxsv(slots.size());
+        std::vector<std::size_t> textw(slots.size(), 0);
         std::vector<std::uint64_t> count(slots.size(), 0);
         std::uint64_t row_count = 0;
         std::uint32_t rcount = tbl->record_count();
@@ -29391,8 +29411,17 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 auto v = tbl->read_field(
                     static_cast<std::uint16_t>(slots[i].field_index));
                 if (!v) continue;
-                double d = v.value().as_double;
                 ++count[i];
+                if (slots[i].is_text) {
+                    // Skip NULLs so they cannot win a MIN as an empty string.
+                    if (v.value().is_null) { --count[i]; continue; }
+                    const std::string& sv = v.value().as_string;
+                    if (sv.size() > textw[i]) textw[i] = sv.size();
+                    if (minsv[i].empty() || sv < minsv[i]) minsv[i] = sv;
+                    if (maxsv[i].empty() || sv > maxsv[i]) maxsv[i] = sv;
+                    continue;
+                }
+                double d = v.value().as_double;
                 sum[i] += d;
                 if (d < minv[i]) minv[i] = d;
                 if (d > maxv[i]) maxv[i] = d;
@@ -29427,8 +29456,18 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 default: return static_cast<int>(slots[i].decimals);
             }
         };
-        // SAP's declared width per aggregate (see agg_result_width).
+        // SAP's declared width per aggregate (see agg_result_width). A
+        // text MIN/MAX is not a number: it is sized to the widest decoded
+        // value seen (a date decodes to 8 chars from a 4-byte field, so the
+        // source's on-disk width would truncate it).
+        auto agg_is_text = [&](std::size_t i) {
+            using K = openads::sql::AggregateKind;
+            return slots[i].is_text &&
+                   (slots[i].def.kind == K::Min || slots[i].def.kind == K::Max);
+        };
         auto agg_w = [&](std::size_t i) -> std::uint16_t {
+            if (agg_is_text(i))
+                return static_cast<std::uint16_t>(textw[i] ? textw[i] : 1);
             return scriptbridge::agg_result_width(slots[i].def.kind,
                                                   slots[i].src_len);
         };
@@ -29452,9 +29491,10 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 }
                 std::memcpy(fd.data(), nm.data(),
                             std::min(nm.size(), std::size_t{11}));
-                fd[11] = 'N';
+                fd[11] = agg_is_text(i) ? 'C' : 'N';
                 fd[16] = static_cast<std::uint8_t>(agg_w(i));
-                fd[17] = static_cast<std::uint8_t>(agg_dp(i));
+                fd[17] = agg_is_text(i)
+                       ? 0 : static_cast<std::uint8_t>(agg_dp(i));
                 file.insert(file.end(), fd.begin(), fd.end());
             }
         }
@@ -29489,11 +29529,19 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     break;
                 case openads::sql::AggregateKind::Min:
                     if (count[i] == 0) std::memcpy(buf, "0", 2);
+                    else if (slots[i].is_text)
+                        std::snprintf(buf, sizeof(buf), "%.*s",
+                                      static_cast<int>(minsv[i].size()),
+                                      minsv[i].c_str());
                     else std::snprintf(buf, sizeof(buf), "%.*f", agg_dp(i),
                                        minv[i]);
                     break;
                 case openads::sql::AggregateKind::Max:
                     if (count[i] == 0) std::memcpy(buf, "0", 2);
+                    else if (slots[i].is_text)
+                        std::snprintf(buf, sizeof(buf), "%.*s",
+                                      static_cast<int>(maxsv[i].size()),
+                                      maxsv[i].c_str());
                     else std::snprintf(buf, sizeof(buf), "%.*f", agg_dp(i),
                                        maxv[i]);
                     break;
@@ -29505,7 +29553,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             const std::size_t w = agg_w(i);
             const bool is_count =
                 slots[i].def.kind == openads::sql::AggregateKind::Count ||
-                slots[i].def.kind == openads::sql::AggregateKind::CountStar;
+                slots[i].def.kind == openads::sql::AggregateKind::CountStar ||
+                agg_is_text(i);   // character cells left-justify too
             std::vector<std::uint8_t> cell(w, ' ');
             std::size_t n = std::min<std::size_t>(std::strlen(buf), w);
             std::memcpy(cell.data() + (is_count ? 0 : (w - n)), buf, n);
@@ -31572,6 +31621,18 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             // of "10.50" and undo issue #146. "AsciiNumeric" pins ADT type 2
             // (digits stored as text), which keeps the declared scale.
             auto type_name = [](char raw, std::uint8_t dec) -> const char* {
+                // TWO switch blocks, and both are required. A DBF field
+                // descriptor carries a printable letter ('C', 'N', 'D', ...);
+                // an ADT one carries a NUMERIC type code (1-22) in the same
+                // field. The ranges are disjoint - DBF letters are all >= 'B'
+                // (0x42), ADT codes top out at 22 - so there is no ambiguity.
+                //
+                // Handling only the letters silently sent every non-character
+                // ADT column down the `return "Character"` fallback with its
+                // ON-DISK byte length: an ADT date (type 3, 4 bytes on disk)
+                // became CHAR(4), so "20090816" was stored as "2009". Numerics
+                // survived by luck, because ADT type 2 is ASCII text anyway.
+                // Mirrors the CTAS path, which has always had both blocks.
                 switch (raw) {
                     case 'C': return "Character";
                     case 'N': return dec > 0 ? "AsciiNumeric" : "Numeric";
@@ -31581,6 +31642,23 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     case 'I': return "Integer";    case 'Y': return "Currency";
                     case 'B': return "Double";     case 'V': return "Varchar";
                     case 'Q': return "Varbinary";
+                }
+                switch (static_cast<std::uint8_t>(raw)) {
+                    case  1: return "Logical";
+                    case  2: return dec > 0 ? "AsciiNumeric" : "Numeric";
+                    case  3: return "Date";
+                    case  4: return "Character";
+                    case  5: return "Memo";
+                    case  6: return "Binary";
+                    case  7: return "Image";
+                    case 10: return "Double";
+                    case 11: return "Integer";
+                    case 12: return "ShortInt";
+                    case 13: return "Time";
+                    case 14: return "Timestamp";
+                    case 15: return "AutoInc";
+                    case 18: return "Money";
+                    case 20: return "CiCharacter";
                 }
                 return "Character";
             };
