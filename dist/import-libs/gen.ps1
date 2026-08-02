@@ -78,17 +78,42 @@ $exports = & $link -dump -exports "$work\ace32.dll" |
     Where-Object { $_ -match '^_(Ads|oads_)' -or $_ -in @('_dclass','_dsign','_getch','_kbhit','_eof') }
 @('LIBRARY ace32', 'EXPORTS') + $exports | Set-Content "$work\ace32.def" -Encoding ascii
 
+# The DLL also exports plain undecorated (AdsXxx) aliases of every entry
+# point (see src/abi/ace_stdcall_x86.c). 32-bit MinGW-built Harbour rddads
+# references those as cdecl _AdsXxx, so they go into a second def; dlltool's
+# default mode prepends the underscore for us. (Reported by Pritpal Bedi.)
+$exports_cdecl = & $link -dump -exports "$work\ace32.dll" |
+    Select-String '^\s+\d+\s+[0-9A-F]+\s+[0-9A-F]+\s+(\S+)' |
+    ForEach-Object { $_.Matches[0].Groups[1].Value } |
+    Where-Object { $_ -match '^Ads' }
+@('LIBRARY ace32', 'EXPORTS') + $exports_cdecl | Set-Content "$work\ace32_cdecl.def" -Encoding ascii
+
 Push-Location $work
 try {
   & $lib /nologo /def:ace64.def /machine:X64 /out:"$out\x64\msvc\ace64.lib"
-  # MSVC x86: the DLL's own import lib already has the right _AdsXxx@N
-  # symbols - lib.exe cannot synthesize them from a def (@N parses as an
-  # ordinal), so copy it instead.
-  Copy-Item $lib32 "$out\x86\msvc\ace32.lib" -Force
+  # MSVC x86: the DLL's own import lib carries the __stdcall-decorated
+  # (_AdsXxx@N) symbols plus bare-name aliases for the plain exports -
+  # but not the _AdsXxx (underscore) form a cdecl x86 consumer references.
+  # lib.exe can synthesize those from the plain-name def (it cannot do the
+  # @N ones - @N parses as an ordinal), so build a cdecl supplement from
+  # ace32_cdecl.def and merge it with the DLL's own lib. (Pritpal Bedi.)
+  & $lib /nologo /def:ace32_cdecl.def /machine:X86 /out:ace32_cdecl.lib
+  & $lib /nologo /machine:X86 /out:"$out\x86\msvc\ace32.lib" "$lib32" ace32_cdecl.lib
   & "C:\gcc143w64\bin\dlltool.exe" --input-def ace64.def --dllname ace64.dll --output-lib "$out\x64\mingw\libace64.a"
   # --no-leading-underscore: def names already carry the stdcall
   # decoration (_AdsXxx@N); verified end-to-end against ace32.dll.
-  & "C:\gcc143\bin\dlltool.exe"    --no-leading-underscore --input-def ace32.def --dllname ace32.dll --output-lib "$out\x86\mingw\libace32.a"
+  & "C:\gcc143\bin\dlltool.exe"    --no-leading-underscore --input-def ace32.def --dllname ace32.dll --output-lib ace32_stdcall.a
+  & "C:\gcc143\bin\dlltool.exe"    --input-def ace32_cdecl.def --dllname ace32.dll --output-lib ace32_cdecl.a
+  # Merge both passes so a single libace32.a serves stdcall (MSVC-style
+  # rddads) and cdecl (MinGW rddads) callers alike.
+  $arOut = ($out -replace '\\','/') + "/x86/mingw/libace32.a"
+  @"
+CREATE $arOut
+ADDLIB ace32_stdcall.a
+ADDLIB ace32_cdecl.a
+SAVE
+END
+"@ | & "C:\gcc143\bin\ar.exe" -M
   & "C:\bcc7764\bin\mkexp.exe"  "$out\x64\borland\ace64.lib" ace64.dll
   & "C:\bcc77\bin\implib.exe"   "$out\x86\borland\ace32.lib" ace32.dll
 } finally { Pop-Location }

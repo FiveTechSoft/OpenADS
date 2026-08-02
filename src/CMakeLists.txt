@@ -294,6 +294,9 @@ if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 4)
     # FiveWin apps built for SAP ACE's stdcall ABI can link AND load
     # (ace32.dll must export the decorated names; without them every
     # 32-bit rddads app died with 0xC0000139 at startup).
+    # The same file also /export-aliases each entry point under its plain
+    # undecorated name (AdsXxx) for cdecl callers (MinGW-built rddads)
+    # and GetProcAddress probes (serverd's dll_probe_ace).
     target_sources(openads_ace PRIVATE abi/ace_stdcall_x86.c)
 endif()
 

@@ -28,12 +28,15 @@ name loads the same engine.
 ## x86 `__stdcall` decoration
 
 The x86 DLL exports `__stdcall`-decorated (`_AdsXxx@N`) names matching what
-Harbour's `contrib/rddads` imports on 32-bit Windows. The MSVC `ace32.lib`
-is the import lib produced by the DLL's own link (it carries exactly those
-symbols); the MinGW `libace32.a` is generated from the DLL's export table
-with `dlltool --no-leading-underscore`; the Borland one comes straight from
-the DLL. The x64 import libs use the undecorated `src/openads_ace.def`
-(x64 has no `@N` decoration).
+MSVC-built Harbour `contrib/rddads` imports on 32-bit Windows, plus a plain
+undecorated alias (`AdsXxx`, bound to the same `__cdecl` implementation) of
+every entry point for MinGW-built rddads (cdecl `_AdsXxx` references) and
+`GetProcAddress` probes. The MSVC `ace32.lib` merges the DLL's own link
+byproduct with a `lib.exe`-synthesized cdecl supplement; the MinGW
+`libace32.a` merges two `dlltool` passes over the DLL's export table
+(`--no-leading-underscore` for the `@N` names, default mode for the plain
+ones). Both libs therefore serve stdcall and cdecl callers. The x64 import
+libs use the undecorated `src/openads_ace.def` (x64 has no `@N` decoration).
 
 (Reported by JONSSON RUSSI, RusSoft Ltda.)
 

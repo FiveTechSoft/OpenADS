@@ -21,9 +21,11 @@ extern "C" {
 //
 // __stdcall (the original SAP / MSVC convention) decorates names on
 // x86 as _Func@N where N is the parameter byte-width.  The OpenADS
-// ace32.dll exports exactly those decorated names, so on 32-bit MSVC
-// this header MUST use __stdcall (v1.8.48: with the cdecl default our
-// own tools referenced plain _AdsXxx symbols the DLL does not export).
+// ace32.dll exports those decorated names plus a plain undecorated
+// alias (AdsXxx) of every entry point, so on 32-bit MSVC this header
+// uses __stdcall (v1.8.48: with the cdecl default our own tools
+// referenced plain _AdsXxx symbols the DLL did not export at the time;
+// the aliases added later keep MinGW/cdecl callers working too).
 // Implementation TUs (ace_exports.cpp, studio_embed.cpp) define
 // OPENADS_ACE_IMPLEMENTATION so their definitions stay __cdecl — the
 // stdcall-decorated exports are produced by abi/ace_stdcall_x86.c

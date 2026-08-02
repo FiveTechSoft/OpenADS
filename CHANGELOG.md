@@ -1,3 +1,20 @@
+## Unreleased
+
+### Fixed — x86 ace32.dll unusable from MinGW-built rddads (reported by Pritpal Bedi)
+
+The 32-bit DLL exported only the `__stdcall`-decorated (`_AdsXxx@N`)
+names, and every shipped x86 import lib carried only those symbols.
+MinGW-built Harbour `librddads.a` references the plain cdecl symbols
+(`_AdsXxx`), so linking any 32-bit MinGW ADS app (e.g. `B_BIG.hbp`)
+failed with ~200 undefined references, and `openads_serverd`'s ACE probe
+(`GetProcAddress("AdsGetVersion")`) misidentified OpenADS's own x86 DLL
+as "NOT an OpenADS build". `src/abi/ace_stdcall_x86.c` now also
+`/export`-aliases every entry point under its plain undecorated name
+(bound to the same `__cdecl` implementation); the MSVC `ace32.lib` and
+MinGW `libace32.a` each merge a cdecl symbol supplement, so both stdcall
+and cdecl 32-bit callers link and load. Verified end-to-end with 32-bit
+MinGW cdecl and stdcall smoke programs against `ace32.dll`.
+
 ## 1.8.50 - 2026-08-01
 
 Three community PRs landed plus the ADI keycount walk fix. Everything

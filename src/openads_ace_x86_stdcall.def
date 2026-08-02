@@ -1,7 +1,8 @@
 ; x86 stdcall build: the DLL exports the __stdcall-decorated wrappers
-; (AdsXxx@N, from ace_stdcall_x86.c) instead of the plain AdsXxx names,
-; because x86 MSVC cannot export both a plain name and the @N-decorated
-; form of the same symbol (LNK4022 "cannot find unique match").
+; (AdsXxx@N, from ace_stdcall_x86.c). The same file also re-exports
+; every entry point under its plain undecorated name (AdsXxx, bound to
+; the __cdecl implementation) via /export pragmas, so cdecl callers
+; (MinGW rddads) and GetProcAddress probes resolve too.
 ; Plain-name consumers link through the aliased import libraries.
 LIBRARY
 EXPORTS
