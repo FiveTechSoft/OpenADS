@@ -23324,6 +23324,46 @@ inline double avg_truncate(double v, int dp) {
 //
 // All four aggregate materialisers below used a hardcoded width of 20, which
 // matched none of these.
+// Is a MIN/MAX over this source column decided by TEXT rather than by
+// magnitude? The aggregate accumulators are doubles, so a date or a name
+// contributes as_double == 0 for every row and MIN/MAX answers "0". Dates
+// decode to "YYYYMMDD", which orders lexicographically exactly as it does
+// chronologically, so a plain string compare is correct for them.
+// Shared by all five aggregate materialisers so they cannot disagree.
+inline bool agg_source_is_text(openads::drivers::DbfFieldType t) {
+    using FT = openads::drivers::DbfFieldType;
+    switch (t) {
+        case FT::Numeric:  case FT::Float:     case FT::Integer:
+        case FT::Double:   case FT::Currency:  case FT::ShortInt:
+        case FT::AutoInc:  case FT::AdtMoney:  case FT::Logical:
+        case FT::RowVersion: case FT::ModTime:
+            return false;
+        default:
+            return true;          // Date, Character, Time, Timestamp, Memo…
+    }
+}
+
+// Running MIN/MAX over decoded text, plus the widest value seen (the result
+// column is sized from this: an ADT date is 4 bytes on disk but 8 characters
+// decoded, so the source descriptor's width would truncate it).
+struct TextMinMax {
+    std::string mn, mx;
+    std::size_t w = 0;
+    bool        any = false;
+    void feed(const std::string& v) {
+        // A blank value is absent, not a minimum. A zero-JDN ADT date is NULL
+        // and decodes to "", but a join/group temp stores it as a blank DBF
+        // cell with is_null unset — so without this an empty string wins every
+        // MIN. SAP agrees: MIN over a column with blank dates returns the
+        // earliest REAL date, never "".
+        if (v.find_first_not_of(' ') == std::string::npos) return;
+        if (v.size() > w) w = v.size();
+        if (!any) { mn = mx = v; any = true; return; }
+        if (v < mn) mn = v;
+        if (v > mx) mx = v;
+    }
+};
+
 inline std::uint16_t agg_result_width(openads::sql::AggregateKind k,
                                       std::uint16_t src_len) {
     using K = openads::sql::AggregateKind;
@@ -23345,8 +23385,17 @@ inline std::uint16_t agg_result_width(openads::sql::AggregateKind k,
 // declared width. Keeping both rules here means the five aggregate
 // materialisers cannot drift apart again.
 inline std::string agg_cell_text(openads::sql::AggregateKind k,
-                                 std::uint16_t w, int dec, double v) {
+                                 std::uint16_t w, int dec, double v,
+                                 const std::string* text = nullptr) {
     using K = openads::sql::AggregateKind;
+    // MIN/MAX over a non-numeric column: the answer IS the text (a date, a
+    // name). Character cells left-justify, like any other character column.
+    if (text != nullptr) {
+        std::string out = *text;
+        if (out.size() > w) out.resize(w);
+        out.resize(w, ' ');
+        return out;
+    }
     char b[80];
     if (k == K::Count || k == K::CountStar)
         std::snprintf(b, sizeof(b), "%-*.0f", static_cast<int>(w), v);
@@ -26927,6 +26976,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             std::int32_t  fi = -1;      // -1 for COUNT(*)
             std::uint8_t  dec = 0;      // source decimals (money: 4)
             std::uint16_t src_len = 0;  // source-field width
+            bool          is_text = false;  // MIN/MAX compares text
         };
         struct NKeyCol {
             std::size_t   ti = 0;
@@ -26953,6 +27003,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                                 sfd.type == FT::Currency)
                              ? 4 : sfd.decimals;
                     slot.src_len = sfd.length;
+                    slot.is_text = scriptbridge::agg_source_is_text(sfd.type);
                 }
                 nslots.push_back(std::move(slot));
             }
@@ -27175,6 +27226,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         struct NAcc {
             std::vector<std::string>   key_parts;
             std::vector<double>        sum, minv, maxv;
+            // MIN/MAX over a non-numeric column compares decoded text.
+            std::vector<scriptbridge::TextMinMax> txt;
             std::vector<std::uint64_t> cnt;
             std::uint64_t              rows = 0;
         };
@@ -27202,6 +27255,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     acc.maxv.assign(nslots.size(),
                         -std::numeric_limits<double>::infinity());
                     acc.cnt.assign(nslots.size(), 0);
+                    acc.txt.assign(nslots.size(), scriptbridge::TextMinMax{});
                     git = ngroups.emplace(key, std::move(acc)).first;
                     ngroup_order.push_back(key);
                 }
@@ -27216,6 +27270,11 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     auto v = tbls[nslots[i2].ti]->read_field(
                         static_cast<std::uint16_t>(nslots[i2].fi));
                     if (!v || v.value().is_null) continue;
+                    if (nslots[i2].is_text) {
+                        ++acc.cnt[i2];
+                        acc.txt[i2].feed(v.value().as_string);
+                        continue;
+                    }
                     double d = v.value().as_double;
                     ++acc.cnt[i2];
                     acc.sum[i2] += d;
@@ -27286,6 +27345,18 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         //         source descriptor, groups sorted ascending, HAVING
         //         evaluated per group).
         if (nway_agg) {
+            // A text MIN/MAX column is one width for every group: the
+            // widest decoded value seen anywhere.
+            std::vector<std::size_t> ntextw(nslots.size(), 0);
+            for (auto& kv : ngroups)
+                for (std::size_t i = 0; i < nslots.size(); ++i)
+                    if (kv.second.txt[i].w > ntextw[i])
+                        ntextw[i] = kv.second.txt[i].w;
+            auto nslot_is_text = [&](std::size_t i) {
+                using K = openads::sql::AggregateKind;
+                return nslots[i].is_text && (nslots[i].def.kind == K::Min ||
+                                             nslots[i].def.kind == K::Max);
+            };
             auto ndp = [&](std::size_t i) -> int {
                 using K = openads::sql::AggregateKind;
                 switch (nslots[i].def.kind) {
@@ -27327,9 +27398,14 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                             ++unal;
                         }
                         o.name = nm;
-                        o.type = 'N';
-                        o.len  = scriptbridge::agg_result_width(
-                            nslots[o.idx].def.kind, nslots[o.idx].src_len);
+                        const bool tx_n = nslot_is_text(o.idx);
+                        o.type = tx_n ? 'C' : 'N';
+                        o.len  = tx_n
+                               ? static_cast<std::uint16_t>(
+                                     ntextw[o.idx] ? ntextw[o.idx] : 1)
+                               : scriptbridge::agg_result_width(
+                                     nslots[o.idx].def.kind,
+                                     nslots[o.idx].src_len);
                         o.dec  = static_cast<std::uint8_t>(ndp(o.idx));
                     } else {
                         std::int32_t gi = -1;
@@ -27430,6 +27506,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 acc.maxv.assign(nslots.size(),
                     -std::numeric_limits<double>::infinity());
                 acc.cnt.assign(nslots.size(), 0);
+                acc.txt.assign(nslots.size(), scriptbridge::TextMinMax{});
                 ngroups.emplace(std::string(), std::move(acc));
                 ngroup_order.push_back(std::string());
             }
@@ -27465,9 +27542,14 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 file.push_back(' ');
                 for (const auto& o : nouts) {
                     if (o.is_agg) {
+                        const std::string* ntv = nullptr;
+                        if (nslot_is_text(o.idx))
+                            ntv = (nslots[o.idx].def.kind ==
+                                   openads::sql::AggregateKind::Min)
+                                ? &acc.txt[o.idx].mn : &acc.txt[o.idx].mx;
                         const auto cell = scriptbridge::agg_cell_text(
                             nslots[o.idx].def.kind, o.len,
-                            static_cast<int>(o.dec), agg_at(acc, o.idx));
+                            static_cast<int>(o.dec), agg_at(acc, o.idx), ntv);
                         file.insert(file.end(), cell.begin(), cell.end());
                     } else {
                         std::string kp = o.idx < acc.key_parts.size()
@@ -28093,6 +28175,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 std::int32_t            field_index = -1;
                 std::uint8_t            decimals    = 0;  // source-field dp
                 std::uint16_t           src_len     = 0;  // source-field width
+                bool                    is_text     = false;  // MIN/MAX on text
             };
             std::vector<AggSlot> slots;
             slots.reserve(parsed.value().aggregates.size());
@@ -28114,6 +28197,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                                          sfd.type == FT::Currency)
                                       ? 4 : sfd.decimals;  // money: 4 implied
                         slot.src_len = sfd.length;
+                        slot.is_text =
+                            scriptbridge::agg_source_is_text(sfd.type);
                     }
                 }
                 slots.push_back(std::move(slot));
@@ -28195,6 +28280,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 std::vector<double>        sum;
                 std::vector<double>        minv;
                 std::vector<double>        maxv;
+                // MIN/MAX over a non-numeric column compares decoded text.
+                std::vector<scriptbridge::TextMinMax> txt;
                 std::vector<std::uint64_t> count;
                 std::uint64_t              row_count = 0;
             };
@@ -28228,6 +28315,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     acc.maxv.assign(slots.size(),
                         -std::numeric_limits<double>::infinity());
                     acc.count.assign(slots.size(), 0);
+                    acc.txt.assign(slots.size(), scriptbridge::TextMinMax{});
                     git = groups.emplace(key, std::move(acc)).first;
                     insertion_order.push_back(key);
                 }
@@ -28241,6 +28329,12 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     auto v = ctbl->read_field(
                         static_cast<std::uint16_t>(slots[i].field_index));
                     if (!v) continue;
+                    if (slots[i].is_text) {
+                        if (v.value().is_null) continue;
+                        ++acc.count[i];
+                        acc.txt[i].feed(v.value().as_string);
+                        continue;
+                    }
                     double d = v.value().as_double;
                     ++acc.count[i];
                     acc.sum[i] += d;
@@ -28325,8 +28419,24 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     default: return static_cast<int>(slots[i].decimals);
                 }
             };
+            // A text MIN/MAX column is one width for every group: the widest
+            // decoded value seen anywhere (the source descriptor would
+            // truncate — an ADT date is 4 bytes on disk, 8 decoded).
+            std::vector<std::size_t> jg_textw(slots.size(), 0);
+            for (auto& kv : groups)
+                for (std::size_t i = 0; i < slots.size(); ++i)
+                    if (kv.second.txt[i].w > jg_textw[i])
+                        jg_textw[i] = kv.second.txt[i].w;
+            auto jg_is_text = [&](std::size_t i) {
+                using K = openads::sql::AggregateKind;
+                return slots[i].is_text && (slots[i].def.kind == K::Min ||
+                                            slots[i].def.kind == K::Max);
+            };
             // SAP's declared width per aggregate (see agg_result_width).
             auto jg_w = [&](std::size_t i) -> std::uint16_t {
+                if (jg_is_text(i))
+                    return static_cast<std::uint16_t>(
+                        jg_textw[i] ? jg_textw[i] : 1);
                 return scriptbridge::agg_result_width(slots[i].def.kind,
                                                       slots[i].src_len);
             };
@@ -28351,9 +28461,10 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     }
                     std::memcpy(fd.data(), nm.data(),
                                 std::min(nm.size(), std::size_t{11}));
-                    fd[11] = 'N';
+                    fd[11] = jg_is_text(i) ? 'C' : 'N';
                     fd[16] = static_cast<std::uint8_t>(jg_w(i));
-                    fd[17] = static_cast<std::uint8_t>(jg_dp(i));
+                    fd[17] = jg_is_text(i)
+                           ? 0 : static_cast<std::uint8_t>(jg_dp(i));
                     jg_file.insert(jg_file.end(), fd.begin(), fd.end());
                 }
             }
@@ -28368,8 +28479,14 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 }
                 jg_file.push_back(' ');
                 for (std::size_t i = 0; i < slots.size(); ++i) {
+                    const std::string* jtv = nullptr;
+                    if (jg_is_text(i))
+                        jtv = (slots[i].def.kind ==
+                               openads::sql::AggregateKind::Min)
+                            ? &acc.txt[i].mn : &acc.txt[i].mx;
                     const auto cell = scriptbridge::agg_cell_text(
-                        slots[i].def.kind, jg_w(i), jg_dp(i), agg_at(acc, i));
+                        slots[i].def.kind, jg_w(i), jg_dp(i),
+                        agg_at(acc, i), jtv);
                     jg_file.insert(jg_file.end(), cell.begin(), cell.end());
                 }
                 ++jg_emitted;
@@ -28407,6 +28524,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 std::int32_t            field_index = -1;
                 std::uint8_t            decimals    = 0;  // source-field dp
                 std::uint16_t           src_len     = 0;  // source-field width
+                bool                    is_text     = false;  // MIN/MAX on text
             };
             std::vector<AggSlot> slots;
             slots.reserve(parsed.value().aggregates.size());
@@ -28427,6 +28545,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                                          sfd.type == FT::Currency)
                                       ? 4 : sfd.decimals;  // money: 4 implied
                         slot.src_len = sfd.length;
+                        slot.is_text =
+                            scriptbridge::agg_source_is_text(sfd.type);
                     }
                 }
                 slots.push_back(std::move(slot));
@@ -28437,6 +28557,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 std::numeric_limits<double>::infinity());
             std::vector<double> maxv(slots.size(),
                 -std::numeric_limits<double>::infinity());
+            // MIN/MAX over a non-numeric column compares decoded text.
+            std::vector<scriptbridge::TextMinMax> jtxt(slots.size());
             std::vector<std::uint64_t> count(slots.size(), 0);
             std::uint64_t row_count = 0;
             std::uint32_t crc2 = ctbl->record_count();
@@ -28452,6 +28574,12 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     auto v = ctbl->read_field(
                         static_cast<std::uint16_t>(slots[i].field_index));
                     if (!v) continue;
+                    if (slots[i].is_text) {
+                        if (v.value().is_null) continue;
+                        ++count[i];
+                        jtxt[i].feed(v.value().as_string);
+                        continue;
+                    }
                     double d = v.value().as_double;
                     ++count[i];
                     sum[i] += d;
@@ -28485,8 +28613,17 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     default: return static_cast<int>(slots[i].decimals);
                 }
             };
-            // SAP's declared width per aggregate (see agg_result_width).
+            auto jagg_is_text = [&](std::size_t i) {
+                using K = openads::sql::AggregateKind;
+                return slots[i].is_text && (slots[i].def.kind == K::Min ||
+                                            slots[i].def.kind == K::Max);
+            };
+            // SAP's declared width per aggregate (see agg_result_width); a
+            // text MIN/MAX sizes to the widest decoded value instead.
             auto jagg_w = [&](std::size_t i) -> std::uint16_t {
+                if (jagg_is_text(i))
+                    return static_cast<std::uint16_t>(
+                        jtxt[i].w ? jtxt[i].w : 1);
                 return scriptbridge::agg_result_width(slots[i].def.kind,
                                                       slots[i].src_len);
             };
@@ -28510,9 +28647,10 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     }
                     std::memcpy(fd.data(), nm.data(),
                                 std::min(nm.size(), std::size_t{11}));
-                    fd[11] = 'N';
+                    fd[11] = jagg_is_text(i) ? 'C' : 'N';
                     fd[16] = static_cast<std::uint8_t>(jagg_w(i));
-                    fd[17] = static_cast<std::uint8_t>(jagg_dp(i));
+                    fd[17] = jagg_is_text(i)
+                           ? 0 : static_cast<std::uint8_t>(jagg_dp(i));
                     agg_file.insert(agg_file.end(), fd.begin(), fd.end());
                 }
             }
@@ -28540,8 +28678,13 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     case K::Max:
                         v = count[i] ? maxv[i] : 0.0; break;
                 }
+                const std::string* atv = nullptr;
+                if (jagg_is_text(i))
+                    atv = (slots[i].def.kind ==
+                           openads::sql::AggregateKind::Min)
+                        ? &jtxt[i].mn : &jtxt[i].mx;
                 const auto cell = scriptbridge::agg_cell_text(
-                    slots[i].def.kind, jagg_w(i), jagg_dp(i), v);
+                    slots[i].def.kind, jagg_w(i), jagg_dp(i), v, atv);
                 agg_file.insert(agg_file.end(), cell.begin(), cell.end());
             }
             agg_file.push_back(0x1A);
@@ -28722,15 +28865,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                                      sfd.type == FT::Currency)
                                   ? 4 : sfd.decimals;      // money: 4 implied
                     slot.src_len = sfd.length;
-                    switch (sfd.type) {
-                        case FT::Numeric:  case FT::Float:   case FT::Integer:
-                        case FT::Double:   case FT::Currency: case FT::ShortInt:
-                        case FT::AutoInc:  case FT::AdtMoney: case FT::Logical:
-                        case FT::RowVersion: case FT::ModTime:
-                            slot.is_text = false; break;
-                        default:
-                            slot.is_text = true;  break;   // Date, Char, Time…
-                    }
+                    slot.is_text =
+                        scriptbridge::agg_source_is_text(sfd.type);
                 }
             }
             slots.push_back(std::move(slot));
@@ -28943,6 +29079,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 std::vector<double>        sum;
                 std::vector<double>        minv;
                 std::vector<double>        maxv;
+                // MIN/MAX over a non-numeric column compares decoded text.
+                std::vector<scriptbridge::TextMinMax> txt;
                 std::vector<std::uint64_t> count;
                 std::uint64_t              row_count = 0;
             };
@@ -28975,6 +29113,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     acc.maxv.assign(slots.size(),
                         -std::numeric_limits<double>::infinity());
                     acc.count.assign(slots.size(), 0);
+                    acc.txt.assign(slots.size(), scriptbridge::TextMinMax{});
                     git = groups.emplace(key, std::move(acc)).first;
                     insertion_order.push_back(key);
                 }
@@ -28989,6 +29128,12 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     auto v = tbl->read_field(
                         static_cast<std::uint16_t>(slots[i].field_index));
                     if (!v) continue;
+                    if (slots[i].is_text) {
+                        if (v.value().is_null) continue;
+                        ++acc.count[i];
+                        acc.txt[i].feed(v.value().as_string);
+                        continue;
+                    }
                     double d = v.value().as_double;
                     ++acc.count[i];
                     acc.sum[i] += d;
@@ -28997,6 +29142,22 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 }
             }
             if (table_handle != 0) c->close_table(table_handle);
+
+            // A text MIN/MAX column must have ONE width across every group, so
+            // take the widest decoded value seen anywhere. Sizing from the
+            // source descriptor would truncate: an ADT date is 4 bytes on disk
+            // but 8 characters decoded.
+            std::vector<std::size_t> textw(slots.size(), 0);
+            for (auto& kv : groups)
+                for (std::size_t i = 0; i < slots.size(); ++i)
+                    if (kv.second.txt[i].w > textw[i])
+                        textw[i] = kv.second.txt[i].w;
+            auto slot_is_text = [&](std::size_t i) {
+                using K = openads::sql::AggregateKind;
+                return slots[i].is_text &&
+                       (slots[i].def.kind == K::Min ||
+                        slots[i].def.kind == K::Max);
+            };
 
             auto agg_at = [&](const GroupAcc& acc, std::size_t si) -> double {
                 using K = openads::sql::AggregateKind;
@@ -29078,11 +29239,17 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                             ++unaliased;
                         }
                         o.name = nm;
-                        o.type = 'N';
-                        o.len = static_cast<std::uint8_t>(
-                            scriptbridge::agg_result_width(
-                                slots[o.idx].def.kind, slots[o.idx].src_len));
-                        o.dec = static_cast<std::uint8_t>(grp_dp(o.idx));
+                        const bool tx_o = slot_is_text(o.idx);
+                        o.type = tx_o ? 'C' : 'N';
+                        o.len = tx_o
+                              ? static_cast<std::uint8_t>(
+                                    textw[o.idx] ? textw[o.idx] : 1)
+                              : static_cast<std::uint8_t>(
+                                    scriptbridge::agg_result_width(
+                                        slots[o.idx].def.kind,
+                                        slots[o.idx].src_len));
+                        o.dec = tx_o ? 0
+                              : static_cast<std::uint8_t>(grp_dp(o.idx));
                     } else {
                         std::int32_t gi = -1;
                         for (std::size_t j = 0; j < gbs.size(); ++j)
@@ -29117,11 +29284,16 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                                ? (i == 0 ? "EXPR"
                                          : "EXPR_" + std::to_string(i))
                                : slots[i].def.alias;
-                        o.type = 'N';
-                        o.len = static_cast<std::uint8_t>(
-                            scriptbridge::agg_result_width(
-                                slots[i].def.kind, slots[i].src_len));
-                        o.dec = static_cast<std::uint8_t>(grp_dp(i));
+                        const bool tx_i = slot_is_text(i);
+                        o.type = tx_i ? 'C' : 'N';
+                        o.len = tx_i
+                              ? static_cast<std::uint8_t>(
+                                    textw[i] ? textw[i] : 1)
+                              : static_cast<std::uint8_t>(
+                                    scriptbridge::agg_result_width(
+                                        slots[i].def.kind, slots[i].src_len));
+                        o.dec = tx_i ? 0
+                              : static_cast<std::uint8_t>(grp_dp(i));
                         gouts.push_back(std::move(o));
                     }
                 }
@@ -29188,9 +29360,14 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 file.push_back(' ');
                 for (const auto& o : gouts) {
                     if (o.is_agg) {
+                        const bool tx = slot_is_text(o.idx);
+                        const std::string* tv = nullptr;
+                        if (tx) tv = (slots[o.idx].def.kind ==
+                                      openads::sql::AggregateKind::Min)
+                                   ? &acc.txt[o.idx].mn : &acc.txt[o.idx].mx;
                         const auto cell = scriptbridge::agg_cell_text(
                             slots[o.idx].def.kind, o.len,
-                            static_cast<int>(o.dec), agg_at(acc, o.idx));
+                            static_cast<int>(o.dec), agg_at(acc, o.idx), tv);
                         file.insert(file.end(), cell.begin(), cell.end());
                     } else {
                         // Group-key column: the stored key part, already

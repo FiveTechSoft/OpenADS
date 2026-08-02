@@ -487,29 +487,35 @@ TEST_CASE("MIN/MAX over date and character columns compare as text") {
     // ADT so the date column is a real 4-byte JDN, which is the case that
     // truncated; NAME exercises the character path.
     UNSIGNED8 tname[32] = "evts";
-    UNSIGNED8 defs[96]  = "WHEN,Date;NAME,Character,20";
+    UNSIGNED8 defs[96]  = "WHEN,Date;NAME,Character,20;GRP,Character,4";
     ADSHANDLE hNew = 0;
     REQUIRE(AdsCreateTable(hConn, tname, nullptr, ADS_ADT, 0, 0, 0, 0,
                            defs, &hNew) == 0);
     {
         UNSIGNED8 fw[8] = "WHEN";
         UNSIGNED8 fn[8] = "NAME";
+        UNSIGNED8 fg[8] = "GRP";
         struct Row { const char* d; const char* n; };
         const Row rows[] = {
             {"20110509", "MIKE"},
             {"20090816", "ALFA"},   // earliest date, and not the min name
             {"20170320", "ZULU"},   // latest date
+            {"",         "BLNK"},   // blank date must not win MIN
         };
         for (const auto& r : rows) {
             REQUIRE(AdsAppendRecord(hNew) == 0);
-            UNSIGNED8 b[32]{};
-            std::memcpy(b, r.d, std::strlen(r.d));
-            REQUIRE(AdsSetString(hNew, fw, b,
-                        static_cast<UNSIGNED32>(std::strlen(r.d))) == 0);
+            if (std::strlen(r.d) > 0) {
+                UNSIGNED8 b[32]{};
+                std::memcpy(b, r.d, std::strlen(r.d));
+                REQUIRE(AdsSetString(hNew, fw, b,
+                            static_cast<UNSIGNED32>(std::strlen(r.d))) == 0);
+            }
             UNSIGNED8 b2[32]{};
             std::memcpy(b2, r.n, std::strlen(r.n));
             REQUIRE(AdsSetString(hNew, fn, b2,
                         static_cast<UNSIGNED32>(std::strlen(r.n))) == 0);
+            UNSIGNED8 b3[8] = "G1";
+            REQUIRE(AdsSetString(hNew, fg, b3, 2) == 0);
             REQUIRE(AdsWriteRecord(hNew) == 0);
         }
     }
@@ -545,6 +551,17 @@ TEST_CASE("MIN/MAX over date and character columns compare as text") {
     // Characters compare as text, and MIN is not simply the first row.
     CHECK(val("SELECT MIN(NAME) FROM evts", "EXPR") == "ALFA");
     CHECK(val("SELECT MAX(NAME) FROM evts", "EXPR") == "ZULU");
+
+    // GROUP BY takes a different materialiser with its own accumulators, so
+    // it is checked separately — all four aggregate paths had the same
+    // double-only bug and were fixed together.
+    CHECK(val("SELECT GRP, MIN(WHEN) FROM evts GROUP BY GRP ORDER BY GRP",
+              "EXPR") == "20090816");
+
+    // A blank value is absent, not a minimum. Row 4 has an empty date; without
+    // the blank guard an empty string sorts below every real date and wins
+    // every MIN, which is how the join paths first showed "" instead of a date.
+    CHECK(val("SELECT MIN(WHEN) FROM evts", "EXPR") == "20090816");
 
     REQUIRE(AdsCloseSQLStatement(hStmt) == 0);
     REQUIRE(AdsDisconnect(hConn) == 0);

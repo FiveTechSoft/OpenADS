@@ -107,9 +107,17 @@ Still open in this area, each a *different* defect from the formatting:
       display format (task #1), which affects every date read, not aggregates.
       `MIN`/`MAX` over a character column now match SAP byte-for-byte
       (`ABAD`/`ZZ TESTPATIENT`) — that was silently broken the same way.
-      Applies to the scalar aggregate path; the grouped and join-aggregate
-      paths keep their double-only accumulators and still need the same
-      treatment.
+      **Extended 2026-08-02 to all four aggregate materialisers** — scalar,
+      single-table GROUP BY, join + GROUP BY, and join scalar — sharing one
+      classifier (`agg_source_is_text`) and one accumulator (`TextMinMax`) so
+      they cannot drift apart. For the grouped paths the result column is
+      sized from the widest decoded value across *every* group, since a column
+      has one width for the whole cursor. A blank value is treated as absent
+      rather than as a minimum: a zero-JDN ADT date is NULL and decodes to "",
+      but a join/group temp stores it as a blank cell with `is_null` unset, so
+      without that guard an empty string won every MIN — which is exactly how
+      the join paths first surfaced `""` instead of a date. SAP agrees: its MIN
+      over a column with blank dates returns the earliest real date.
 - [x] **ADT non-character columns truncated through a materialised cursor —
       FIXED 2026-08-02.** `type_name()` in the static-cursor materialiser
       switched only on DBF *letter* type codes, but an ADT descriptor carries a
