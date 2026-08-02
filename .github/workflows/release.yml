@@ -153,6 +153,10 @@ jobs:
           Copy-Item LICENSE,NOTICE,README.md                $stage/
           if ("${{ matrix.arch }}" -eq "x86") {
               Copy-Item src/openads_ace_x86_stdcall.def      "$stage/"
+              # Ship the 32-bit MinGW import library at the archive root too:
+              # 32-bit Harbour (hbmk2 -comp=mingw, rddads) links it directly.
+              # (Reported by Pritpal Bedi.)
+              Copy-Item dist/import-libs/x86/mingw/libace32.a "$stage/"
           } else {
               Copy-Item src/openads_ace.def                   "$stage/"
           }
