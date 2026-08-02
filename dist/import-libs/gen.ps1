@@ -85,7 +85,9 @@ $exports = & $link -dump -exports "$work\ace32.dll" |
 $exports_cdecl = & $link -dump -exports "$work\ace32.dll" |
     Select-String '^\s+\d+\s+[0-9A-F]+\s+[0-9A-F]+\s+(\S+)' |
     ForEach-Object { $_.Matches[0].Groups[1].Value } |
-    Where-Object { $_ -match '^Ads' }
+    # AdsXxx (rddads) plus the oads_* VFS API (contrib/oads_hb) — MinGW
+    # callers reference both as cdecl _name. (oads_* reported by Pritpal Bedi.)
+    Where-Object { $_ -match '^(Ads|oads_)' }
 @('LIBRARY ace32', 'EXPORTS') + $exports_cdecl | Set-Content "$work\ace32_cdecl.def" -Encoding ascii
 
 Push-Location $work
