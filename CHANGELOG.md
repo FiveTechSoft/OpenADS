@@ -1,4 +1,4 @@
-## Unreleased
+## 1.8.51 - 2026-08-02
 
 ### Fixed — x86 ace32.dll unusable from MinGW-built rddads (reported by Pritpal Bedi)
 
