@@ -1,0 +1,26 @@
+diff --git a/contrib/rddads/ads1.c b/contrib/rddads/ads1.c
+index 4c37b03a7a..f0da2ac24c 100644
+--- a/contrib/rddads/ads1.c
++++ b/contrib/rddads/ads1.c
+@@ -4138,6 +4138,10 @@ static HB_ERRCODE adsOrderListFocus( ADSAREAP pArea, LPDBORDERINFO pOrderInfo )
+                               sizeof( pucTagName ) - 1 );
+          if( ! pucTagName[ 0 ] )
+          {
++            /* OpenADS: tell the engine to drop the active order, else
++               table-handle navigation keeps the last index order */
++            if( pArea->hOrdCurrent )
++               AdsSetIndexOrderByHandle( pArea->hTable, 0 );
+             pArea->hOrdCurrent = 0;
+             return HB_SUCCESS;
+          }
+@@ -4148,6 +4152,10 @@ static HB_ERRCODE adsOrderListFocus( ADSAREAP pArea, LPDBORDERINFO pOrderInfo )
+          u16Order = ( UNSIGNED16 ) hb_itemGetNI( pOrderInfo->itmOrder );
+          if( ! u16Order )
+          {
++            /* OpenADS: tell the engine to drop the active order, else
++               table-handle navigation keeps the last index order */
++            if( pArea->hOrdCurrent )
++               AdsSetIndexOrderByHandle( pArea->hTable, 0 );
+             pArea->hOrdCurrent = 0;
+             return HB_SUCCESS;
+          }
