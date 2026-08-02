@@ -241,6 +241,14 @@ drivers::IIndex* find_index_for_field(Table& t, const std::string& field) {
     std::string want = upper(field);
     for (auto* idx : t.all_indexes()) {
         if (idx == nullptr) continue;
+        // A CONDITIONAL tag (FOR clause) holds only the rows that satisfy
+        // its own predicate, so a range scan over it answers "rows matching
+        // the leaf AND the FOR clause" — the leaf's own bitmap would come
+        // back missing every row the tag excludes, silently. Opening a .dbf
+        // auto-binds every tag in the production .cdx (M-AOF.6), so such a
+        // tag reaches all_indexes() without the caller asking for it. Leave
+        // those leaves on the full-scan path.
+        if (!idx->condition().empty()) continue;
         std::string e = upper(idx->expression());
         if (e == want) return idx;
     }
@@ -259,8 +267,21 @@ std::string pad_key(std::string v, std::uint16_t klen) {
 // string literals fall through to the full-scan path.
 std::optional<std::string>
 encode_char_key(const Value& v, std::uint16_t klen) {
-    if (auto p = std::get_if<std::string>(&v)) return pad_key(*p, klen);
-    return std::nullopt;
+    auto p = std::get_if<std::string>(&v);
+    if (p == nullptr) return std::nullopt;
+    // The two evaluation paths normalise differently: the full scan compares
+    // rtrim(field) against the literal verbatim, the index path compares
+    // space-padded keys. They agree only while the literal fits inside the
+    // key and carries no trailing blank of its own. A WIDER literal would be
+    // truncated by pad_key — `CLI = "0001XX"` on a C(6) field is false for
+    // every row, but truncated to "0001  " it matches. A blank-tailed
+    // literal diverges the other way: rtrim(field) never ends in a blank, so
+    // the scan path says no where the padded compare said yes. The bitmap is
+    // authoritative (nothing re-checks it per record), so in both cases fall
+    // back to the scan instead of answering from the index.
+    if (p->size() > klen) return std::nullopt;
+    if (!p->empty() && p->back() == ' ') return std::nullopt;
+    return pad_key(*p, klen);
 }
 
 // Drive a seek + walk loop: starting from `start`, advance with
