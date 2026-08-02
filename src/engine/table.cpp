@@ -381,6 +381,9 @@ bool Table::key_in_bottom_scope_(const std::string& key) const {
 void Table::set_recno_sequence(std::vector<std::uint32_t> seq) {
     recno_sequence_ = std::move(seq);
     sequence_idx_   = -1;
+    // Installed, even when empty: an empty visible set means "no rows",
+    // not "walk everything". See Table::recno_sequence_active().
+    recno_sequence_active_ = true;
 }
 
 util::Result<void> Table::goto_top() {
@@ -399,7 +402,10 @@ util::Result<void> Table::goto_top() {
     if (driver_->record_count() == 0) {
         state_ = State::Limbo; recno_ = 0; return {};
     }
-    if (!recno_sequence_.empty()) {
+    if (recno_sequence_active_) {
+        if (recno_sequence_.empty()) {
+            state_ = State::Limbo; recno_ = 0; return {};
+        }
         sequence_idx_ = 0;
         std::uint32_t r = recno_sequence_.front();
         return load_record_(r);
@@ -492,7 +498,10 @@ util::Result<void> Table::goto_bottom() {
     if (driver_->record_count() == 0) {
         state_ = State::Limbo; recno_ = 0; return {};
     }
-    if (!recno_sequence_.empty()) {
+    if (recno_sequence_active_) {
+        if (recno_sequence_.empty()) {
+            state_ = State::Limbo; recno_ = 0; return {};
+        }
         sequence_idx_ = static_cast<std::int64_t>(recno_sequence_.size() - 1);
         return load_record_(recno_sequence_.back());
     }
@@ -685,7 +694,7 @@ util::Result<void> Table::skip(std::int32_t delta) {
     //     cached EOF fence is about to fire (natural order) or when the
     //     index walk runs off the end (peer may have grown the bag).
     // SQL materialised sequences stay a frozen snapshot.
-    if (!recno_sequence_.empty()) {
+    if (recno_sequence_active_) {
         if (delta == 0) {
             if (state_ == State::Bof) sequence_idx_ = -1;
             else if (state_ == State::Eof)

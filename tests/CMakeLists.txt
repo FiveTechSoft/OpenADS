@@ -117,6 +117,7 @@ add_executable(openads_unit_tests
     unit/abi_scope_partial_key_test.cpp
     unit/abi_seek_last_partial_test.cpp
     unit/abi_aof_index_agreement_test.cpp
+    unit/abi_aof_empty_result_test.cpp
     unit/abi_prefix_seek_deleted_test.cpp
     unit/cdx_reindex_char_test.cpp
     unit/cdx_prev_empty_leaf_test.cpp
