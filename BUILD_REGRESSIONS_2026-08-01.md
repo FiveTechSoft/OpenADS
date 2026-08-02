@@ -1,5 +1,28 @@
 # Failing tests on `main` — bisected report, 2026-08-01
 
+> ## ✅ RESOLVED 2026-08-02 — all 11 cases pass on `94015803` (v1.8.51)
+>
+> Re-verified after pulling 15 commits: full suite **5/5 ctest, 0 failures**;
+> the savepoint / rollback / CDX / ADT-scope / trigger clusters are **113/113**.
+> Both parity gates unchanged (pmsys 41/1, mp 30/25).
+>
+> Credit goes to **`3d42427b` "fix(engine): settle dirty tables at tx/index
+> boundaries; parse binary field types from strings"** (MiMo V2.5 Free), which
+> targets exactly the coalescing boundary this report identified — dirty records
+> are now settled before a transaction or index operation needs them. Several
+> PR merges (#156/#157/#158) landed in the same window.
+>
+> Kept for the record: the bisection method and the per-problem breakdown below
+> are still the right reference if write coalescing is revisited, since the
+> failure shape (a deferred write outliving the point where rollback, index sync
+> or a trigger rejection must act on it) is inherent to that optimisation.
+>
+> **No action needed. Nothing was filed upstream.**
+
+---
+
+## Original report (2026-08-01)
+
 `main` (`4a610e86`, v1.8.46) fails **11 unit-test cases**. Both clusters bisect
 to two commits in the 30 Jul batch. Nothing before that batch is implicated:
 its parent `4fc5b66c` passes every affected test.
