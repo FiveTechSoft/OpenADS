@@ -157,6 +157,10 @@ jobs:
               # 32-bit Harbour (hbmk2 -comp=mingw, rddads) links it directly.
               # (Reported by Pritpal Bedi.)
               Copy-Item dist/import-libs/x86/mingw/libace32.a "$stage/"
+              # Harbour HB_FUNC wrappers for the oads_* VFS API — compiled
+              # into the app, not shipped in the DLL. (Pritpal Bedi.)
+              New-Item -ItemType Directory "$stage/contrib/oads_hb" -Force | Out-Null
+              Copy-Item contrib/oads_hb/oads_hb.c,contrib/oads_hb/README.md "$stage/contrib/oads_hb/"
           } else {
               Copy-Item src/openads_ace.def                   "$stage/"
           }
