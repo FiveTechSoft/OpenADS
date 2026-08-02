@@ -23343,6 +23343,34 @@ inline bool agg_source_is_text(openads::drivers::DbfFieldType t) {
     }
 }
 
+// Value of an aggregate's argument for the current row. Normally the plain
+// column, but SUM(a * b) evaluates `a <op> b` instead — same shape and same
+// arithmetic as a projection-level $ARITH_ item, so only the accumulation
+// differs. `rhs_fi` is ignored when the RHS is a literal.
+inline double agg_arg_value(openads::engine::Table& t,
+                            std::int32_t lhs_fi, std::int32_t rhs_fi,
+                            const openads::sql::Aggregate& def) {
+    if (lhs_fi < 0) return 0.0;
+    auto lv = t.read_field(static_cast<std::uint16_t>(lhs_fi));
+    double a = lv ? lv.value().as_double : 0.0;
+    if (!def.arg_expr) return a;
+    double b = 0.0;
+    if (def.arg_expr->rhs_is_literal) {
+        b = def.arg_expr->rhs_number;
+    } else if (rhs_fi >= 0) {
+        auto rv = t.read_field(static_cast<std::uint16_t>(rhs_fi));
+        b = rv ? rv.value().as_double : 0.0;
+    }
+    using AO = openads::sql::ArithOp;
+    switch (def.arg_expr->op) {
+        case AO::Add: return a + b;
+        case AO::Sub: return a - b;
+        case AO::Mul: return a * b;
+        case AO::Div: return (b != 0.0) ? a / b : 0.0;
+    }
+    return a;
+}
+
 // Running MIN/MAX over decoded text, plus the widest value seen (the result
 // column is sized from this: an ADT date is 4 bytes on disk but 8 characters
 // decoded, so the source descriptor's width would truncate it).
@@ -28840,6 +28868,13 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             std::int32_t            field_index = -1;   // -1 for COUNT(*)
             std::uint8_t            decimals    = 0;    // source-field dp
             std::uint16_t           src_len     = 0;    // source-field width
+            std::int32_t            rhs_field   = -1;   // SUM(a * b): b
+            // Effective scale/width of the ARGUMENT. For a bare column these
+            // are the source's; for `a <op> b` they follow the operation —
+            // SAP renders SUM(Real * PRICE) with 4 decimals for two N(..,2)
+            // columns, so multiplication adds the scales.
+            std::uint8_t            arg_dec     = 0;
+            std::uint16_t           arg_len     = 0;
             // MIN/MAX over a non-numeric column (a date, a name) has to
             // compare the DECODED TEXT, not as_double. Accumulating a date
             // as a double gave 0 for every row, so MIN(PAY_DATE) reported
@@ -28867,6 +28902,47 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     slot.src_len = sfd.length;
                     slot.is_text =
                         scriptbridge::agg_source_is_text(sfd.type);
+                    // SUM(a * b): resolve the right-hand column too. An
+                    // arithmetic argument is always numeric, so it never
+                    // takes the text MIN/MAX path.
+                    if (a.arg_expr && !a.arg_expr->rhs_is_literal) {
+                        slot.rhs_field =
+                            tbl->field_index(a.arg_expr->rhs_column);
+                        if (slot.rhs_field < 0) {
+                            if (table_handle != 0)
+                                c->close_table(table_handle);
+                            return fail(openads::AE_COLUMN_NOT_FOUND,
+                                        a.arg_expr->rhs_column.c_str());
+                        }
+                    }
+                    if (a.arg_expr) slot.is_text = false;
+                    slot.arg_dec = slot.decimals;
+                    slot.arg_len = slot.src_len;
+                    if (a.arg_expr) {
+                        std::uint8_t  rdec = 0;
+                        std::uint16_t rlen = 1;   // a literal is one column
+                        if (!a.arg_expr->rhs_is_literal &&
+                            slot.rhs_field >= 0) {
+                            const auto& rfd = tbl->field_descriptor(
+                                static_cast<std::uint16_t>(slot.rhs_field));
+                            rdec = rfd.decimals;
+                            rlen = rfd.length;
+                        }
+                        using AO = openads::sql::ArithOp;
+                        if (a.arg_expr->op == AO::Mul ||
+                            a.arg_expr->op == AO::Div) {
+                            slot.arg_dec = static_cast<std::uint8_t>(
+                                std::min<int>(slot.decimals + rdec, 15));
+                        } else {
+                            slot.arg_dec = std::max(slot.decimals, rdec);
+                        }
+                        // Generous on purpose: the result must never be
+                        // truncated. SAP's exact declared width follows its
+                        // own numeric-promotion rules and is a known
+                        // divergence — measurements in TODO.parity.md.
+                        slot.arg_len = static_cast<std::uint16_t>(
+                            std::min<int>(slot.src_len + rlen, 200));
+                    }
                 }
             }
             slots.push_back(std::move(slot));
@@ -29565,6 +29641,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             std::numeric_limits<double>::infinity());
         std::vector<double> maxv(slots.size(),
             -std::numeric_limits<double>::infinity());
+        // COUNT(DISTINCT col): the distinct values seen, per slot.
+        std::vector<std::unordered_set<std::string>> distinct_seen(
+            slots.size());
         // Parallel text accumulators for MIN/MAX over a non-numeric column.
         // Dates decode to "YYYYMMDD", which orders lexicographically exactly
         // as it does chronologically, so a plain string compare is correct.
@@ -29588,6 +29667,15 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 auto v = tbl->read_field(
                     static_cast<std::uint16_t>(slots[i].field_index));
                 if (!v) continue;
+                if (slots[i].def.distinct) {
+                    // COUNT(DISTINCT col) counts values, not rows. A blank IS
+                    // a distinct value to SAP: COUNT(DISTINCT insurance) over
+                    // mp returns 58 and only 57 of those are non-blank. Only
+                    // NULL is excluded.
+                    if (v.value().is_null) continue;
+                    distinct_seen[i].insert(v.value().as_string);
+                    continue;
+                }
                 ++count[i];
                 if (slots[i].is_text) {
                     // Skip NULLs so they cannot win a MIN as an empty string.
@@ -29598,7 +29686,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     if (maxsv[i].empty() || sv > maxsv[i]) maxsv[i] = sv;
                     continue;
                 }
-                double d = v.value().as_double;
+                double d = scriptbridge::agg_arg_value(
+                    *tbl, slots[i].field_index, slots[i].rhs_field,
+                    slots[i].def);
                 sum[i] += d;
                 if (d < minv[i]) minv[i] = d;
                 if (d > maxv[i]) maxv[i] = d;
@@ -29630,7 +29720,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 case K::CountStar: case K::Count: return 0;
                 // AVG keeps the SOURCE column's decimals (oracle
                 // 2026-07-21: money -> 4dp, integer -> 0dp; not 6).
-                default: return static_cast<int>(slots[i].decimals);
+                default: return static_cast<int>(slots[i].arg_dec);
             }
         };
         // SAP's declared width per aggregate (see agg_result_width). A
@@ -29646,7 +29736,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             if (agg_is_text(i))
                 return static_cast<std::uint16_t>(textw[i] ? textw[i] : 1);
             return scriptbridge::agg_result_width(slots[i].def.kind,
-                                                  slots[i].src_len);
+                                                  slots[i].arg_len);
         };
         std::uint16_t rec_len = 1;
         for (std::size_t i = 0; i < slots.size(); ++i)
@@ -29682,6 +29772,12 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             switch (slots[i].def.kind) {
                 case openads::sql::AggregateKind::CountStar:
                 case openads::sql::AggregateKind::Count:
+                    if (slots[i].def.distinct) {
+                        std::snprintf(buf, sizeof(buf), "%llu",
+                            static_cast<unsigned long long>(
+                                distinct_seen[i].size()));
+                        break;
+                    }
                     // M10.54 — when this slot has a FILTER, count[i]
                     // already excludes filter-failing rows; use it
                     // even for CountStar.

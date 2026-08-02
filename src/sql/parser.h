@@ -97,10 +97,18 @@ struct OrderBy {
 // M10.10 — `COUNT(*) / COUNT(col) / SUM / AVG / MIN / MAX(col)`.
 enum class AggregateKind { CountStar, Count, Sum, Avg, Min, Max };
 
+struct ArithExpr;   // defined below; an aggregate may take `a <op> b`
+
 struct Aggregate {
     AggregateKind kind;
     std::string   column;   // empty for CountStar
     std::string   alias;    // optional AS <name>
+    // COUNT(DISTINCT col) — count distinct values rather than rows.
+    bool          distinct = false;
+    // SUM(a * b) etc. When set, `column` is the LHS and the argument is
+    // evaluated per row instead of read from a single field. shared_ptr for
+    // the same reason as `filter`: Aggregate is copied into slot defs.
+    std::shared_ptr<ArithExpr> arg_expr;
     // M10.54 — optional `FILTER (WHERE <expr>)` on an aggregate
     // call. Per-row filter; rows that fail are skipped from this
     // aggregate's accumulation. shared_ptr to keep Aggregate

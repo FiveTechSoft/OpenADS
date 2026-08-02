@@ -127,9 +127,58 @@ Still open in this area, each a *different* defect from the formatting:
       `"2009"` instead of `"20090816"` — while the same column read correctly
       without `TOP`. Numerics survived only by luck, ADT type 2 being ASCII
       already. Now mirrors the CTAS path, which always had both switch blocks.
-- [ ] **Aggregate over an *expression*** — `Sum([real] * units)` raises 2115;
-      only a bare column parses (`agg_inline_sumbyclaim`).
-- [ ] **`COUNT(DISTINCT col)`** raises 2115 (`agg_distinct_ins`).
+- [x] **Aggregate over an *expression* — FIXED 2026-08-02.** The parser
+      accepted only `*` or a bare identifier inside an aggregate, so
+      `Sum([real] * units)` hit "expected ')' to close aggregate" (2115). An
+      aggregate argument may now be `a <op> b` (column or literal RHS), reusing
+      the same shape and arithmetic as a projection-level `$ARITH_` item, so
+      only the accumulation differs. The result's SCALE follows the operation:
+      multiplication adds the operand scales — SAP renders
+      `SUM(Real * PRICE)` with 4 decimals for two `N(..,2)` columns — addition
+      keeps the wider one. Values now match SAP on `SUM(Real * units)`,
+      `SUM(UNITS * UNITS)` and `SUM(Real)`.
+- [x] **`COUNT(DISTINCT col)` — FIXED 2026-08-02.** Parser accepts the
+      `DISTINCT` keyword; the accumulator keeps a per-slot set of decoded
+      values. A blank IS a distinct value to SAP — `COUNT(DISTINCT insurance)`
+      over mp returns 58 where only 57 are non-blank — so only NULL is
+      excluded. Byte-identical to SAP.
+
+- [ ] **GROUP BY does not complete on a large table (PRE-EXISTING, found
+      2026-08-02).** `SELECT Sum(col), ClaimKey FROM prclines GROUP BY ClaimKey`
+      over all 623k rows produces nothing in minutes and sits at 100% CPU in
+      ~20 MB — too little memory for ~500k accumulating groups, so it looks
+      like a loop rather than heavy work. **Not caused by aggregate-expression
+      support**: verified by stashing that work and rebuilding — the previous
+      build hangs identically on a plain bare-column `Sum()`. It only became
+      visible because `agg_inline_sumbyclaim` used to fail instantly with 2115
+      and now reaches the grouped path. The same query bounded by a `WHERE`
+      returns correctly and instantly, so the logic is right and the scale is
+      the problem. The mp gate case is bounded with a `WHERE` so it cannot hang
+      the gate.
+
+Two residual divergences in this area, both measured, neither guessed at:
+
+- [ ] **Declared width of an arithmetic aggregate result.** OpenADS uses
+      `lhs_width + rhs_width` (generous, never truncates). SAP follows its own
+      numeric-promotion rules, measured on mp with `Real N(10,2)`,
+      `PRICE N(10,2)`, `UNITS N(6,0)`:
+      | expression | SAP width |
+      |---|---|
+      | `SUM(Real)` | 20 |
+      | `SUM(Real * UNITS)` | 25 |
+      | `SUM(Real * PRICE)` | 28 |
+      | `SUM(UNITS * UNITS)` | 21 |
+      | `SUM(Real + PRICE)` | 21 |
+      | `SUM(Real * 2)` | 21 |
+      No single formula fits all six (`*` needs −1 for one pair and −2 for
+      another; `+` and a literal RHS behave differently again), so the rule was
+      not guessed. Values are correct; only the padding differs.
+- [ ] **Accumulation precision for a multi-column product.**
+      `SUM(Real * PRICE)` → SAP `12243628033.2000`, OpenADS
+      `12243628033.2047`. SAP declares scale 4 but its digits end in `.2000`,
+      i.e. it appears to accumulate at scale 2 and display at 4, while OpenADS
+      accumulates at full double precision. Only shows when BOTH operands carry
+      a scale.
 - [ ] **Join naming** — the `R_` prefix and the select-list-spelling rule (SAP:
       output name is the identifier as written, duplicates get `_1`, `_2`…).
       Verified against SAP with three probes; see backlog item 2.

@@ -1378,12 +1378,43 @@ util::Result<SelectStmt> parse_select(const std::string& sql) {
                     }
                     agg.kind = AggregateKind::CountStar;
                 } else {
+                    // COUNT(DISTINCT col) — SAP counts distinct values.
+                    if (c.match_keyword("DISTINCT")) agg.distinct = true;
                     std::string col = c.read_identifier();
                     if (col.empty()) {
                         return util::Error{7200, 0,
                             "expected column name inside aggregate", sql};
                     }
                     agg.column = std::move(col);
+                    // SUM(a * b) — an aggregate may take an arithmetic
+                    // expression, not just a bare column. Same shape as the
+                    // projection-level $ARITH_ item, so the per-row evaluation
+                    // is identical; only the accumulation differs.
+                    if (c.peek_char('+') || c.peek_char('-') ||
+                        c.peek_char('*') || c.peek_char('/')) {
+                        auto ae = std::make_shared<ArithExpr>();
+                        ae->lhs_column = agg.column;
+                        if      (c.match_char('+')) ae->op = ArithOp::Add;
+                        else if (c.match_char('-')) ae->op = ArithOp::Sub;
+                        else if (c.match_char('*')) ae->op = ArithOp::Mul;
+                        else                      { c.match_char('/');
+                                                    ae->op = ArithOp::Div; }
+                        auto n = c.read_numeric_literal();
+                        if (n) {
+                            ae->rhs_is_literal = true;
+                            ae->rhs_number     = n.value();
+                        } else {
+                            std::string rid = c.read_identifier();
+                            if (rid.empty()) {
+                                return util::Error{7200, 0,
+                                    "expected number or column on RHS of "
+                                    "aggregate argument", sql};
+                            }
+                            ae->rhs_is_literal = false;
+                            ae->rhs_column     = std::move(rid);
+                        }
+                        agg.arg_expr = std::move(ae);
+                    }
                 }
                 if (!c.match_char(')')) {
                     return util::Error{7200, 0,
