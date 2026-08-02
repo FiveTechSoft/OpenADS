@@ -1,3 +1,41 @@
+## 1.8.50 - 2026-08-01
+
+Three community PRs landed plus the ADI keycount walk fix. Everything
+since **v1.8.49**.
+
+### Merged PRs (thanks @russimicro)
+
+- **PR #156 — an empty visible set is not the absence of one**: an AOF
+  matching zero rows installed an empty `recno_sequence_`, which
+  `goto_top`/`goto_bottom`/`skip` read as "no sequence" and navigated in
+  index order ignoring the filter — an empty AOF result returned the
+  whole table. New `recno_sequence_active_` flag; empty-but-active means
+  Limbo/Eof. Complements PR #158.
+- **PR #157 — AdsSeekLast positions on the last entry of the key group**:
+  the local seek path called `seek_key(key, soft, last=false)` and
+  returned the FIRST row of the group; it now passes `find_last=true`
+  (remote/SQL paths already did).
+- **PR #158 — the AOF index path checks the index it picked**: AOF field
+  leaves no longer use conditional (FOR-clause) tags, which only hold a
+  subset of rows, and literals that are wider than the index key or end
+  in a blank fall back to the full scan instead of a wrong padded
+  comparison. Lands together with PR #156.
+
+### Fixed — issue #149: AdsGetKeyCount over ADI returned 1 on a 20-row table
+
+`AdiIndex::ordered_recnos_cached()` collected one recno per leaf, so a
+dense 20-key leaf produced a 1-entry cache. The walk now drives through
+`navigate_leftmost_()`/`next()`, collecting every entry of every leaf —
+fixing ADI `OrdKeyNo`/`AdsGetRelKeyPos` along the way. The NTX/ADI
+branches of `AdsGetKeyCount` also honour SET DELETED now, matching the
+CDX branch.
+
+### Tests
+
+- Full suite: **1273 passed, 0 failed** (1273 = 1267 + 3 PR tests + ADI
+  keycount tests + the AOF agreement tests).
+- `tests/e2e/b_big_e2e.prg`: 23/23 PASS on x64+x86, local+remote.
+
 ## 1.8.49 - 2026-08-01
 
 The pre-existing unit failures are gone: the suite is green again
