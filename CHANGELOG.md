@@ -1,3 +1,31 @@
+## 1.8.52 - 2026-08-03
+
+### Added — `legacy_paths` server mode for zero-change ERP ports (requested by Pritpal Bedi)
+
+`openads_serverd --legacy-paths` (or `legacy_paths = 1` in `openads.ini`)
+lets a legacy DBFCDX application that opens tables by absolute local path
+(`USE "E:\CREATIVE.RAM\C0000001\B5643DS1.dbf"`) run **unchanged** against a
+single remote server instance. When enabled, every client-supplied path —
+table open/create, index bags, memos, remote file functions, and the
+Connect dir itself — is resolved against the `--data` roots
+case-insensitively and ignoring the drive letter:
+
+- a path starting with a data root is prefix-stripped and re-joined under
+  that root (`C:/TEMP/Sub/t.dbf` with `--data C:\temp` → `C:\temp\Sub\t.dbf`);
+- any other absolute path loses its drive letter and is joined under the
+  root (`E:\CREATIVE.RAM\...` → `<root>\CREATIVE.RAM\...`), so several
+  client folders on the same disk are served by one root;
+- relative paths behave exactly as before.
+
+The resolver is host-independent (`platform::resolve_client_path` in
+`src/platform/fs_sandbox.cpp`), so Windows clients work against Windows,
+Linux, or macOS servers — this also closes the #133-class gap in
+`Connection::resolve_table_file`, which previously used
+`std::filesystem` absolute detection and mishandled drive-letter paths on
+POSIX servers. Default is OFF (strict SAP-compatible resolution). New unit
+tests in `tests/unit/fs_sandbox_test.cpp` and
+`tests/unit/session_connection_test.cpp`.
+
 ## 1.8.51 - 2026-08-02
 
 ### Fixed — x86 ace32.dll unusable from MinGW-built rddads (reported by Pritpal Bedi)

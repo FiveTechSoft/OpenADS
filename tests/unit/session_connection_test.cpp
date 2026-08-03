@@ -76,3 +76,75 @@ TEST_CASE("Connection opens a CDX-typed table by relative name") {
     std::error_code ec;
     fs::remove_all(dir, ec);
 }
+
+// openads_serverd --legacy-paths: a legacy ERP opens tables by absolute
+// local path (USE "E:\CLIENT\FILE.DBF"). With legacy mode on, the
+// connection strips the drive letter and matches its own data directory
+// case-insensitively, so the same USE line resolves to the real file.
+TEST_CASE("Connection legacy_paths resolves a foreign-drive absolute path") {
+    auto dir = tmp_dir("legacy");
+    fs::create_directories(dir / "Sub");
+    write_minimal_dbf(dir / "Sub" / "data.dbf");
+    {
+        auto opened = Connection::open(dir.string());
+        REQUIRE(opened.has_value());
+        Connection c = std::move(opened).value();
+        c.set_legacy_paths(true);
+
+        // Spell the very same file through a drive letter that does not
+        // exist on this machine — the verbatim-open probe must miss and
+        // the legacy prefix-strip (drive-insensitive) must land it.
+        const std::string abs = (dir / "Sub" / "data.dbf").generic_string();
+        std::string foreign = "E:";
+        foreign += (abs.size() >= 2 && abs[1] == ':') ? abs.substr(2) : abs;
+        const std::string want =
+            fs::weakly_canonical(dir / "Sub" / "data.dbf").generic_string();
+
+        auto type = TableType::Cdx;
+        CHECK(fs::path(c.resolve_table_file(foreign, type))
+                  .generic_string() == want);
+
+        // Same path with legacy mode OFF folds the whole remainder under
+        // the data directory and does NOT find the file.
+        auto opened2 = Connection::open(dir.string());
+        REQUIRE(opened2.has_value());
+        Connection c2 = std::move(opened2).value();
+        auto type2 = TableType::Cdx;
+        const std::string off = c2.resolve_table_file(foreign, type2);
+        CHECK(off != want);
+        CHECK_FALSE(fs::exists(off));
+
+        // End to end: the foreign path opens the table.
+        auto th = c.open_table(foreign, TableType::Cdx);
+        REQUIRE(th.has_value());
+        auto* table = c.lookup_table(th.value());
+        REQUIRE(table != nullptr);
+        CHECK(table->record_count() == 1);
+        c.close_table(th.value());
+    }
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("Connection legacy_paths folds an unknown absolute path under root") {
+    auto dir = tmp_dir("legacyfold");
+    fs::create_directories(dir / "CLIENTFOLD");
+    write_minimal_dbf(dir / "CLIENTFOLD" / "fold.dbf");
+    {
+        auto opened = Connection::open(dir.string());
+        REQUIRE(opened.has_value());
+        Connection c = std::move(opened).value();
+        c.set_legacy_paths(true);
+
+        // No root prefix in common: drive dropped, remainder joined —
+        // this is what serves several ERP client folders from one root.
+        auto type = TableType::Cdx;
+        const std::string want =
+            fs::weakly_canonical(dir / "CLIENTFOLD" / "fold.dbf")
+                .generic_string();
+        CHECK(fs::path(c.resolve_table_file("E:\\CLIENTFOLD\\fold.dbf", type))
+                  .generic_string() == want);
+    }
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}

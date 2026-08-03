@@ -88,6 +88,32 @@ AdsConnect60("tcp://dbhost:6262/apps/sales/sales.add",
              user, pass, ADS_REMOTE_SERVER, &hConn);
 ```
 
+### Legacy absolute paths (`legacy_paths`)
+
+ERP apps that open tables by absolute local path — `USE "E:\CLIENT\FILE.DBF"`
+in Harbour/xHarbour, or full paths from X#/xBase++ — can run **unchanged**
+against a single server instance. Start the server with the legacy resolver:
+
+```text
+openads_serverd --data E:\ --legacy-paths --port 6262
+# or in openads.ini:  legacy_paths = 1
+```
+
+With `legacy_paths` on, every client-supplied path (tables, indexes, memos,
+the connect dir itself, and remote file functions) is resolved against the
+`--data` roots case-insensitively and **ignoring the drive letter**:
+
+- A path that starts with a data root is stripped and re-joined under that
+  root: `C:/TEMP/Sub/t.dbf` with `--data C:\temp` serves `C:\temp\Sub\t.dbf`.
+- Any other absolute path loses its drive letter and is joined under the
+  root: `E:\CREATIVE.RAM\C0000001\B5643DS1.dbf` serves
+  `<root>\CREATIVE.RAM\C0000001\B5643DS1.dbf` — so several client folders on
+  the same disk are all served by one root, and the same app binary still
+  runs against local DBFCDX.
+
+Default is **off** (strict SAP-compatible resolution). This works for Windows
+clients against Windows, Linux, or macOS servers.
+
 Other clients: the PHP extension mirrors the old `php_advantage` API
 (`bindings/php_ext/`), and a portable FFI binding is in `bindings/php/`.
 
@@ -108,6 +134,8 @@ in front (see [`tls-deployment.md`](tls-deployment.md)).
 - [ ] Drop `ace64.dll`/`ace32.dll` next to your app (or relink with `lib/`).
 - [ ] Back up SAP-built `.cdx` files if you may need to roll back to SAP ACE.
 - [ ] Smoke-test reads/writes/index seeks against a **copy** of the data.
+- [ ] App opens tables by absolute local path (`USE "E:\CLIENT\FILE.DBF"`)?
+      Enable `legacy_paths = 1` (see above) — no source changes needed.
 - [ ] Verify accented text (code-page caveat above).
 - [ ] Use Studio (`openads-studio`) for day-to-day admin.
 - [ ] Set up auto-start (wizard, or [`service-deployment.md`](service-deployment.md)).

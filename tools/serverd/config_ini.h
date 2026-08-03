@@ -39,6 +39,13 @@ struct IniConfig {
     // Keys: EnableFileFunc / enable_file_func (0/1/true/false).
     bool          has_enable_file_func = false;
     bool          enable_file_func     = false;
+    // Legacy ERP path resolution for ALL client-supplied paths: strip a
+    // matching data= prefix case-insensitively and ignoring the drive
+    // letter, else fold the drive and join the remainder under data=.
+    // Lets apps that open "E:\CLIENT\FILE.DBF" run unchanged against one
+    // server instance. Keys: legacy_paths / legacy-paths (0/1/true/false).
+    bool          has_legacy_paths = false;
+    bool          legacy_paths     = false;
     // SAP-style error log settings (ads_err.dbf): directory and max size
     // in kilobytes. Accepted keys: error_log_path (alias:
     // error_assert_logs, SAP's registry/ini name) and error_log_max.

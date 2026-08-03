@@ -75,6 +75,15 @@ public:
     void set_enable_file_func(bool on) { enable_file_func_ = on; }
     bool enable_file_func() const noexcept { return enable_file_func_; }
 
+    // --legacy-paths / openads.ini legacy_paths=1: resolve client-supplied
+    // paths (any file type) with case-insensitive, drive-letter-ignoring
+    // prefix stripping against the --data roots, so a legacy ERP that
+    // opens tables by absolute local path (USE "E:\CLIENT\FILE.DBF") runs
+    // unchanged against a single server instance. Default OFF keeps the
+    // strict SAP-compatible resolution. See platform::resolve_client_path.
+    void set_legacy_paths(bool on) { legacy_paths_ = on; }
+    bool legacy_paths() const noexcept { return legacy_paths_; }
+
     // Enterprise: cap on concurrent session threads (0 = unlimited). Overrides
     // the env-loaded EnterpriseConfig value; call before start(). Production
     // reads OPENADS_SERVER_MAX_SESSIONS; this exists mainly for tests.
@@ -171,6 +180,7 @@ private:
     // Data root directory: relative client paths are resolved under it.
     std::string                                   data_dir_;
     bool                                          enable_file_func_ = false;
+    bool                                          legacy_paths_ = false;
 
     // M12.9 — credential map (user -> password). Protected by creds_mu_
     // because add_credential() may run while sessions authenticate.

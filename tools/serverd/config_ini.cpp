@@ -108,6 +108,15 @@ bool parse_ini(const std::string& text, IniConfig& out, std::string& error) {
             }
             out.enable_file_func =
                 (v == "1" || v == "true" || v == "yes" || v == "on");
+        } else if (key == "legacypaths" || key == "legacy_paths" ||
+                   key == "legacy-paths") {
+            out.has_legacy_paths = true;
+            std::string v = val;
+            for (char& c : v) {
+                if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+            }
+            out.legacy_paths =
+                (v == "1" || v == "true" || v == "yes" || v == "on");
         } else if (key == "error_log_path" || key == "error-log-path" ||
                    key == "error_assert_logs") {
             out.error_log_path = val;

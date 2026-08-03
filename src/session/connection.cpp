@@ -8,6 +8,7 @@
 #include "drivers/fpt/fpt_memo.h"
 #include "drivers/ntx/ntx_driver.h"
 #include "platform/dll.h"
+#include "platform/fs_sandbox.h"
 #include "platform/path.h"
 
 #include <cstring>
@@ -201,7 +202,15 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
     // pins that case). Paths outside data_dir_ keep folding so DbCreate
     // cannot write next to the application.
     fs::path rel = fs::path(effective);
-    if (rel.is_absolute() || rel.has_root_directory()) {
+    // Legacy mode adds host-independent absolute detection: a Windows
+    // client path like "E:\CLIENT\F.DBF" is not absolute to
+    // std::filesystem on a POSIX server (#133), yet it must still enter
+    // the fold/prefix-strip path instead of joining verbatim under
+    // data_dir_.
+    const bool client_absolute =
+        rel.is_absolute() || rel.has_root_directory() ||
+        (legacy_paths_ && platform::is_client_absolute(effective));
+    if (client_absolute) {
         if (!for_create) {
             std::error_code ec;
             fs::path cand = rel;
@@ -266,7 +275,21 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
                 return platform::resolve_case_insensitive(rel.string());
             }
         }
-        rel = rel.relative_path();
+        if (legacy_paths_) {
+            // Legacy ERP mode (server --legacy-paths): strip a matching
+            // data-root prefix case-insensitively and ignoring the drive
+            // letter ("C:/TEMP/Sub/t.dbf" with root "c:\temp" resolves to
+            // "<root>/Sub/t.dbf"); when no root prefix matches, drop the
+            // drive/root and join the remainder under data_dir_.
+            if (auto r = platform::resolve_client_path({data_dir_},
+                                                       effective)) {
+                rel = fs::path(*r);
+            } else {
+                rel = fs::path(platform::fold_absolute_to_relative(effective));
+            }
+        } else {
+            rel = rel.relative_path();
+        }
     }
     fs::path full = fs::path(data_dir_) / rel;
     // Auto-append .dbf when the caller (typically rddads / Clipper)

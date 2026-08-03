@@ -135,6 +135,14 @@ public:
     void set_show_deleted(bool v) noexcept { show_deleted_ = v; }
     bool owns_table_ptr(const engine::Table* t) const;
 
+    // Legacy ERP path mode (server --legacy-paths): resolve_table_file
+    // routes client-absolute paths through platform::resolve_client_path
+    // (case-insensitive, drive-letter-ignoring prefix strip against the
+    // connection's data directory) instead of the plain root fold, so
+    // remote sessions mirror what the network Connect jail accepted.
+    bool legacy_paths() const noexcept { return legacy_paths_; }
+    void set_legacy_paths(bool v) noexcept { legacy_paths_ = v; }
+
     // Application ID set via sp_SetApplicationID / read back with
     // sp_GetApplicationID. Free-form client-supplied label; empty until set.
     const std::string& application_id() const noexcept { return app_id_; }
@@ -225,6 +233,7 @@ private:
     std::array<std::uint8_t, 32>                               encryption_key_pbkdf2_{};
     bool                                                       encryption_key_set_ = false;
     bool                                                       show_deleted_ = true;
+    bool                                                       legacy_paths_ = false;
     // M11.7 — string compare collation (default = byte-exact).
     Collation                                                  collation_ =
         Collation::Binary;

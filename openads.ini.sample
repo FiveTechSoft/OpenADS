@@ -28,6 +28,19 @@ data = .
 # Default 0 = denied. WARNING: enables client read/write/delete under data=.
 # EnableFileFunc = 0
 
+# Legacy ERP path resolution (porting DBFCDX apps to remote ADS with no
+# code changes). Default 0 = strict SAP-compatible resolution.
+# When 1, every client-supplied path (tables, indexes, memos, file funcs,
+# the connect dir itself) is resolved against the data= roots
+# case-insensitively and ignoring the drive letter: a path that starts
+# with a data= root is stripped and re-joined under that root
+# ("C:/TEMP/Sub/t.dbf" with data=C:\temp serves "<data>\Sub\t.dbf"), and
+# any other absolute path loses its drive letter and is joined under the
+# root ("E:\CLIENT\F.DBF" serves "<data>\CLIENT\F.DBF"). One server
+# instance then serves every client folder, and the same app binary still
+# runs against local DBFCDX.
+# legacy_paths = 0
+
 # Studio web console: set a port to expose the browser admin UI / REST API.
 # Leave commented out to disable it.
 # http_port = 6263

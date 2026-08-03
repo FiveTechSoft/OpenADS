@@ -965,10 +965,22 @@ DispatchResult Session::dispatch(const Frame& f) {
             // so one server can serve DDs living under different
             // drives/shares; the client path just has to fall under any one
             // of them.
+            //
+            // --legacy-paths: route through platform::resolve_client_path
+            // instead — case-insensitive, drive-letter-ignoring prefix
+            // strip ("C:/TEMP" maps onto root "c:\temp"), drive fold for
+            // foreign absolute paths ("E:\CLIENT" -> "<root>/CLIENT"), and
+            // an empty/drive-root dir maps to the first root itself, so a
+            // legacy ERP connect string needs no server-side spelling.
             std::string resolved = dir;
             if (!srv_->data_dir_.empty()) {
                 auto roots = openads::platform::split_data_roots(srv_->data_dir_);
-                auto jail = openads::platform::resolve_under_any_root(roots, dir);
+                std::optional<std::string> jail;
+                if (srv_->legacy_paths()) {
+                    jail = openads::platform::resolve_client_path(roots, dir);
+                } else {
+                    jail = openads::platform::resolve_under_any_root(roots, dir);
+                }
                 if (!jail) {
                     reply = err("Connect: path outside data directory",
                                 openads::AE_ACCESS_DENIED);
@@ -1045,6 +1057,10 @@ DispatchResult Session::dispatch(const Frame& f) {
             }
             sess_conn_ = std::make_unique<openads::session::Connection>(
                 std::move(co).value());
+            // --legacy-paths: the session's table opens must resolve
+            // client-absolute paths the same way the Connect jail above
+            // accepted the connect dir.
+            sess_conn_->set_legacy_paths(srv_->legacy_paths());
             session_user_ = user;
             session_password_ = pw;
             srv_->set_session_user(sid_, user, dir);
@@ -4122,6 +4138,15 @@ std::string Session::resolve_index_bag_path(const std::string& bag) const {
             fs::create_directories(p.parent_path(), ec);
             return openads::platform::resolve_case_insensitive(p.string());
         }
+        if (srv_ && srv_->legacy_paths()) {
+            // --legacy-paths: prefix-strip a matching root (case- and
+            // drive-insensitive) before falling back to the plain fold.
+            if (auto r = openads::platform::resolve_client_path({root}, s)) {
+                std::error_code ec;
+                fs::create_directories(fs::path(*r).parent_path(), ec);
+                return *r;
+            }
+        }
         rel = openads::platform::fold_absolute_to_relative(s);
     }
     auto resolved = openads::platform::resolve_under_root(root, rel);
@@ -4142,12 +4167,22 @@ std::optional<std::string> Session::resolve_fs_client_path(
     if (!sess_conn_) return std::nullopt;
     // Prefer the session connection data directory (already jailed at
     // Connect time). Fall back to server multi-root list.
+    // --legacy-paths: use the prefix-stripping resolver so absolute
+    // client paths ("C:/TEMP/...") map onto the root instead of
+    // folding to "<root>/TEMP/...".
     if (!sess_conn_->data_dir().empty()) {
+        if (srv_ && srv_->legacy_paths()) {
+            return openads::platform::resolve_client_path(
+                {sess_conn_->data_dir()}, client_path);
+        }
         return openads::platform::resolve_fs_path(sess_conn_->data_dir(),
                                                     client_path);
     }
     if (srv_ && !srv_->data_dir_.empty()) {
         auto roots = openads::platform::split_data_roots(srv_->data_dir_);
+        if (srv_->legacy_paths()) {
+            return openads::platform::resolve_client_path(roots, client_path);
+        }
         return openads::platform::resolve_fs_path(roots, client_path);
     }
     return std::nullopt;

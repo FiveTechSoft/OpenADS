@@ -62,6 +62,10 @@ void usage(const char* argv0) {
         "               (default = current working directory)\n"
         "  --enable-file-func   allow remote oads_*/Ads* filesystem ops\n"
         "               under --data (default OFF; see EnableFileFunc)\n"
+        "  --legacy-paths       resolve client-absolute paths against\n"
+        "               --data roots case-insensitively, ignoring the\n"
+        "               drive letter — lets legacy ERP apps that USE\n"
+        "               \"E:\\CLIENT\\FILE.DBF\" run unchanged (default OFF)\n"
         "  --http-user  user:password — register a Studio login\n"
         "               (repeatable; if none given, console is open)\n"
         "  --auth-user  user:password — require this login for TCP\n"
@@ -88,6 +92,7 @@ struct Args {
     std::uint16_t http_port   = 0;
     std::string   data_dir    = ".";
     bool          enable_file_func = false;
+    bool          legacy_paths     = false;
     // ads_err.dbf error log overrides; empty/0 keeps mgmt::ErrorLog's
     // defaults (OPENADS_ERROR_LOG_PATH env, then the SAP default paths).
     std::string   error_log_path;
@@ -111,6 +116,8 @@ bool parse_args(int argc, char** argv, Args& out) {
         else if (a == "--data"      && i + 1 < argc) out.data_dir = argv[++i];
         else if (a == "--enable-file-func") out.enable_file_func = true;
         else if (a == "--disable-file-func") out.enable_file_func = false;
+        else if (a == "--legacy-paths") out.legacy_paths = true;
+        else if (a == "--disable-legacy-paths") out.legacy_paths = false;
         else if (a == "--error-log-path" && i + 1 < argc)
             out.error_log_path = argv[++i];
         else if (a == "--error-log-max"  && i + 1 < argc)
@@ -156,6 +163,7 @@ void apply_ini(const openads::serverd::IniConfig& cfg, Args& out) {
     if (cfg.has_http_port) out.http_port = cfg.http_port;
     if (cfg.has_data)      out.data_dir  = cfg.data_dir;
     if (cfg.has_enable_file_func) out.enable_file_func = cfg.enable_file_func;
+    if (cfg.has_legacy_paths)     out.legacy_paths     = cfg.legacy_paths;
     if (cfg.has_error_log_path) out.error_log_path   = cfg.error_log_path;
     if (cfg.has_error_log_max)  out.error_log_max_kb = cfg.error_log_max_kb;
     for (const auto& u : cfg.http_users) out.http_users.push_back(u);
@@ -265,6 +273,7 @@ int run_server(const Args& args, bool console) {
     if (!args.data_dir.empty() && args.data_dir != ".")
         srv.set_data_dir(args.data_dir);
     srv.set_enable_file_func(args.enable_file_func);
+    srv.set_legacy_paths(args.legacy_paths);
     for (const auto& u : args.auth_users)
         srv.add_credential(u.first, u.second);
 
