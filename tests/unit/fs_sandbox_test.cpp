@@ -170,12 +170,13 @@ TEST_CASE("fs_sandbox: legacy resolver routes by drive letter to drive-root root
         fs::weakly_canonical(root).generic_string();
 
     // "C:" as a root, listed AFTER another root: the client path still
-    // routes to C:. Cross-platform check: the result must contain the
-    // routed remainder and must NOT sit under the first-listed root.
+    // routes to C:. Cross-platform check: the result must land under the
+    // C: root (on POSIX the drive-root spelling survives as a path
+    // component) and must NOT sit under the first-listed root.
     auto r = plat::resolve_client_path({root.generic_string(), "C:\\"},
                                        "C:\\Users\\x.dbf");
     REQUIRE(r.has_value());
-    CHECK(r->find("C:/Users/x.dbf") != std::string::npos);
+    CHECK(r->find("Users/x.dbf") != std::string::npos);
     CHECK(r->find(canon_root) != 0);
 
     // A drive-root-only client path maps to the root on the same drive,

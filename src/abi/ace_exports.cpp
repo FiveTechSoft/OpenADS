@@ -16001,7 +16001,7 @@ UNSIGNED32 ENTRYPOINT AdsGetIndexHandle(ADSHANDLE hTable, UNSIGNED8* pucName,
         if (dot2 != std::string::npos) tag = tag.substr(0, dot2);
         for (auto& [h, si] : postgres_indexes_map()) {
             if (si && si->parent == st && si->column == tag) {
-                *phIndex = h;
+                *phIndex = static_cast<ADSHANDLE>(h);
                 return ok();
             }
         }
