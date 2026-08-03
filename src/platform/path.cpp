@@ -100,7 +100,14 @@ std::optional<std::string> resolve_under_root(const std::string& root,
     if (ec) root_canon = root_p.lexically_normal();
 
     const std::string canon_s = canon.generic_string();
-    const std::string root_s  = root_canon.generic_string();
+    std::string root_s  = root_canon.generic_string();
+    // A drive-root ("C:\") canonicalizes with a trailing slash ("C:/"),
+    // which breaks the boundary check below for everything under it —
+    // "--data E:\" rejected every path. Strip it ("C:"), so the next
+    // char of a jailed child is the expected '/'. A POSIX "/" root
+    // strips to empty, which path_has_prefix treats as accept-all —
+    // exactly what "--data /" means.
+    while (!root_s.empty() && root_s.back() == '/') root_s.pop_back();
     if (!path_has_prefix(canon_s, root_s)) return std::nullopt;
     return canon_s;
 }

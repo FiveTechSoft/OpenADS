@@ -4911,6 +4911,18 @@ void set_connection_show_deleted(ADSHANDLE hConnect, bool visible) {
     }
 }
 
+// Server --legacy-paths: the network Session's lazy ABI connection must
+// resolve client-absolute paths (e.g. remote AdsCreateTable of
+// "E:\CLIENT\F.DBF") exactly like the session's engine Connection —
+// otherwise a POSIX server creates a literal "E:\..." file under the
+// data root and the follow-up open fails (found by live verification
+// against a Linux server, Pritpal Bedi's ERP scenario).
+void set_connection_legacy_paths(ADSHANDLE hConnect, bool on) {
+    if (openads::session::Connection* c = lookup_connection(hConnect)) {
+        c->set_legacy_paths(on);
+    }
+}
+
 void register_builtin_backends() {
 #if defined(OPENADS_WITH_SQLITE)
     register_backend_table_ops(openads::session::HandleKind::SqliteTable,

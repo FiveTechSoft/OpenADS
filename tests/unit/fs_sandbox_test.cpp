@@ -158,3 +158,39 @@ TEST_CASE("fs_sandbox: legacy resolver tries roots in order") {
     fs::remove_all(root_a, ec);
     fs::remove_all(root_b, ec);
 }
+
+TEST_CASE("fs_sandbox: legacy resolver routes by drive letter to drive-root roots") {
+    namespace plat = openads::platform;
+    // Whole-filesystem server: --data "C:\;D:\;E:\". A drive-root root's
+    // drive letter is its identity — "C:\..." must land under the C:
+    // root even when another root is listed first.
+    auto root = fs::temp_directory_path() / "oads_legacy_drv";
+    fs::create_directories(root);
+    const std::string canon_root =
+        fs::weakly_canonical(root).generic_string();
+
+    // "C:" as a root, listed AFTER another root: the client path still
+    // routes to C:. Cross-platform check: the result must contain the
+    // routed remainder and must NOT sit under the first-listed root.
+    auto r = plat::resolve_client_path({root.generic_string(), "C:\\"},
+                                       "C:\\Users\\x.dbf");
+    REQUIRE(r.has_value());
+    CHECK(r->find("C:/Users/x.dbf") != std::string::npos);
+    CHECK(r->find(canon_root) != 0);
+
+    // A drive-root-only client path maps to the root on the same drive,
+    // not blindly to the first root.
+    auto r2 = plat::resolve_client_path({root.generic_string(), "C:\\"},
+                                        "c:/");
+    REQUIRE(r2.has_value());
+    CHECK(*r2 != canon_root);
+
+    // An unmatched drive still folds under the first root.
+    auto r3 = plat::resolve_client_path({root.generic_string(), "C:\\"},
+                                        "Z:/foo/bar.dbf");
+    REQUIRE(r3.has_value());
+    CHECK(*r3 == canon_root + "/foo/bar.dbf");
+
+    std::error_code ec;
+    fs::remove_all(root, ec);
+}

@@ -1,3 +1,31 @@
+## 1.8.53 - 2026-08-03
+
+### Fixed — `legacy_paths`: remote create/reindex used the un-flagged ABI twin connection (found by live verification against a Linux server)
+
+A remote `AdsCreateTable` (and reindex/SQL) routes through the session's
+lazy ABI connection, which never received the legacy flag: on a POSIX
+server a client-absolute path was not recognized as absolute, so
+`E:\CREATIVE.RAM\C0000001\TEST.dbf` was created as a **literal file
+named `E:\...`** under the data root and the follow-up open failed
+(5103). New `openads::abi::set_connection_legacy_paths` bridge
+propagates the server flag to the ABI twin at connect time.
+
+### Added — `legacy_paths`: drive-letter routing for whole-filesystem servers
+
+With several drive roots (`--data "C:\;D:\;E:\"`), a drive-root entry now
+routes by its drive letter (case-insensitively) instead of being skipped:
+`E:\...` resolves under the `E:` root, `D:\...` under `D:`, and a
+drive-root-only connect dir (`E:/`) maps to the matching root rather
+than blindly to the first one. Requested by Pritpal Bedi.
+
+### Fixed — `--data` given a drive root ("E:\") rejected every path
+
+`platform::resolve_under_root` compared against the canonical root
+`"E:/"` with its trailing slash, so the boundary check failed for every
+child path and the Connect jail denied all access. The trailing slash is
+now stripped before the prefix check (a POSIX `--data /` root strips to
+empty = whole filesystem, as intended).
+
 ## 1.8.52 - 2026-08-03
 
 ### Added — `legacy_paths` server mode for zero-change ERP ports (requested by Pritpal Bedi)

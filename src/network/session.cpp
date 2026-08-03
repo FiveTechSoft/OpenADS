@@ -31,6 +31,7 @@
 
 namespace openads::abi {
 void set_connection_show_deleted(ADSHANDLE hConnect, bool visible);
+void set_connection_legacy_paths(ADSHANDLE hConnect, bool on);
 }
 
 namespace openads::network {
@@ -360,6 +361,11 @@ bool Session::ensure_abi_conn() {
     UNSIGNED32 rc = AdsConnect60(srvbuf.data(), ADS_LOCAL_SERVER,
                                  user, pw, 0, &abi_conn_);
     if (rc == 0 && abi_conn_ != 0) {
+        // --legacy-paths: the ABI twin must fold client-absolute paths
+        // (CreateTable/Reindex/SQL go through it) the same way the
+        // session's engine Connection does.
+        openads::abi::set_connection_legacy_paths(abi_conn_,
+                                                  srv_->legacy_paths());
         // Force canonical YYYYMMDD for all date field reads performed
         // through ABI handles on the server (pack_row, GetField, etc).
         // This makes AdsGetJulian / date FieldGet return usable values

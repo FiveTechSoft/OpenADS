@@ -111,6 +111,12 @@ the connect dir itself, and remote file functions) is resolved against the
   the same disk are all served by one root, and the same app binary still
   runs against local DBFCDX.
 
+Whole-filesystem access on a Windows server: list the drive roots,
+`--data "C:\;D:\;E:\"` (ini: `data = C:\;D:\;E:\`). A drive-root entry
+routes by its drive letter — `E:\...` lands under the `E:` root, `D:\...`
+under `D:` — and files that exist are always opened verbatim first, so a
+server with the same drive layout as the clients needs no folding at all.
+
 Default is **off** (strict SAP-compatible resolution). This works for Windows
 clients against Windows, Linux, or macOS servers.
 

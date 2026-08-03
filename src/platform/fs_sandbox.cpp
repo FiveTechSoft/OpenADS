@@ -79,6 +79,16 @@ std::string lower_copy(std::string s) {
     return s;
 }
 
+// Uppercase drive letter of a drive-letter path, 0 when there is none.
+char drive_letter_of(const std::string& p) {
+    if (p.size() >= 2 &&
+        ((p[0] >= 'A' && p[0] <= 'Z') || (p[0] >= 'a' && p[0] <= 'z')) &&
+        p[1] == ':') {
+        return static_cast<char>(p[0] >= 'a' ? p[0] - 'a' + 'A' : p[0]);
+    }
+    return 0;
+}
+
 } // namespace
 
 bool is_client_absolute(const std::string& p) {
@@ -102,16 +112,38 @@ std::optional<std::string> resolve_client_path(
         return resolve_under_any_root(roots, client_path);
     }
 
+    const char client_drive = drive_letter_of(client_path);
     const std::string pc = norm_remainder(client_path, false);
     if (pc.empty()) {
-        // Drive root only ("E:/"): the data root itself.
+        // Drive root only ("E:/"): prefer a root that IS the matching
+        // drive root ("E:\"), else fall back to the first root. A
+        // subdirectory root on the same drive does not claim the whole
+        // drive.
+        if (client_drive != 0) {
+            for (const auto& root : roots) {
+                if (drive_letter_of(root) == client_drive &&
+                    norm_remainder(root, true).empty()) {
+                    return resolve_under_root(root, ".");
+                }
+            }
+        }
         return resolve_under_root(roots.front(), ".");
     }
     const std::string want = lower_copy(pc);
 
     for (const auto& root : roots) {
         const std::string r = lower_copy(norm_remainder(root, true));
-        if (r.empty()) continue;   // drive-root root: the fold below covers it
+        if (r.empty()) {
+            // Drive-root root ("E:\" or "/"): the drive letter is its
+            // whole identity — route by it (case-insensitively) instead
+            // of ignoring it, so E:\... lands under the E: root and
+            // D:\... under D:. A client path with no drive letter never
+            // matches here; the fold below handles it.
+            if (client_drive != 0 && drive_letter_of(root) == client_drive) {
+                return resolve_under_root(root, pc);
+            }
+            continue;
+        }
         if (want == r) return resolve_under_root(root, ".");
         if (want.size() > r.size() && want.compare(0, r.size(), r) == 0 &&
             want[r.size()] == '/') {

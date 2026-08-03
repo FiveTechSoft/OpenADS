@@ -148,3 +148,33 @@ TEST_CASE("Connection legacy_paths folds an unknown absolute path under root") {
     std::error_code ec;
     fs::remove_all(dir, ec);
 }
+
+// Regression for the live-verified Linux-server bug: a remote
+// AdsCreateTable routes through the session's lazy ABI connection, which
+// never received the legacy flag — on a POSIX server the client-absolute
+// path was not recognized as absolute and a literal "E:\..." file was
+// created under the data root. With legacy on, a create spelled through
+// a foreign drive letter must resolve to the same file a later open of
+// the same name finds.
+TEST_CASE("Connection legacy_paths create resolves a foreign-drive path") {
+    auto dir = tmp_dir("legacycreate");
+    {
+        auto opened = Connection::open(dir.string());
+        REQUIRE(opened.has_value());
+        Connection c = std::move(opened).value();
+        c.set_legacy_paths(true);
+
+        const std::string abs = (dir / "newtable.dbf").generic_string();
+        std::string foreign = "E:";
+        foreign += (abs.size() >= 2 && abs[1] == ':') ? abs.substr(2) : abs;
+        const std::string want =
+            fs::weakly_canonical(dir / "newtable.dbf").generic_string();
+
+        auto type = TableType::Cdx;
+        CHECK(fs::path(c.resolve_table_file(foreign, type,
+                                            /*for_create=*/true))
+                  .generic_string() == want);
+    }
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
