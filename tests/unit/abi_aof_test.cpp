@@ -253,6 +253,11 @@ TEST_CASE("AdsGetLastTableUpdate: returns the DBF header date string") {
         CHECK(std::string(reinterpret_cast<char*>(buf)) == "2024-01-31");
         CHECK(len == 10);
 
+        // The date format is process-global - restore SAP's default so
+        // later tests (abi_date_format_test) see it.
+        UNSIGNED8 def_fmt[] = "MM/DD/CCYY";
+        CHECK(AdsSetDateFormat(def_fmt) == 0);
+
         AdsCloseTable(hT);
         AdsDisconnect(hConn);
     }
@@ -302,6 +307,10 @@ TEST_CASE("AdsCreateTable: stamps the header last-update with today's date") {
         CHECK(AdsGetLastTableUpdate(hT, buf, &len) == 0);
         CHECK(std::string(reinterpret_cast<char*>(buf)) == expected);
         CHECK(len == 10);
+
+        // Restore the process-global date format (see above).
+        UNSIGNED8 def_fmt[] = "MM/DD/CCYY";
+        CHECK(AdsSetDateFormat(def_fmt) == 0);
 
         AdsCloseTable(hT);
         AdsDisconnect(hConn);

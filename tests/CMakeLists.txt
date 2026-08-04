@@ -201,6 +201,7 @@ add_executable(openads_unit_tests
     unit/abi_sql_orderby_test.cpp
     unit/abi_sql_orderby_types_test.cpp
     unit/abi_sql_dml_test.cpp
+    unit/abi_date_format_test.cpp
     unit/abi_sql_projection_test.cpp
     unit/abi_sql_temp_names_test.cpp
     unit/abi_sql_ddl_test.cpp

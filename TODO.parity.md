@@ -391,11 +391,21 @@ Fix is the one task #2 already prescribes — materialise into an **ADT** temp
 `build_memory_result()` generally, not just the proc `__output` path.
 
 ## A. S4 polish (cosmetic — tracked as tasks #1–3)
-- [ ] **#1 Date display format** — `AdsGetString` on date cols returns raw
-      `YYYYMMDD`; SAP formats per connection date format (default `MM/DD/YYYY`).
-      Highest-value but riskiest (touches every string-read path). FIRST do a
-      DA-Web/OpenERP impact check — do those apps depend on raw `YYYYMMDD`?
-      Ref: memory `project_oa_date_string_gap.md`.
+- [x] **#1 Date display format** — **FIXED 2026-08-04**. The premise was
+      wrong: probing SAP showed `AdsGetSTRING` returns raw `YYYYMMDD` on SAP
+      too — only `AdsGetFIELD` / `AdsGetDate` format (default `MM/DD/CCYY`).
+      OA now matches: GetField/GetDate format Date + Timestamp (12-hour,
+      2-digit hour), GetString stays raw (php_ads reads exclusively through
+      it — zero DA-Web/OpenERP impact, audited), default + SetDateFormat
+      normalisation (`YYYY`→`CCYY`) match SAP, `AdsSetDate`/`AdsSetTimeStamp`
+      parse per the format (both wrote garbage before), `AdsSetEmpty` on an
+      ADT date stored spaces = year 1470954 (now JDN 0), and date-sourced
+      MIN/MAX aggregate columns are declared DATE in their temps so they
+      format too. mp gate 30→31 (`agg_mixed_aggs`); rules + deliberate
+      deviations in `docs/date-display-format.md`; guarded by
+      `abi_date_format_test.cpp`. Found while probing: SAP renders a blank
+      LOGICAL as `""` where OA says `"F"` (`SELECT * FROM admit` isClosed) —
+      separate small family, still open.
 - [ ] **#2 `_spout_` >10-char output column names** — see **backlog item 2** at
       the top of this file. Re-confirmed open 2026-07-30; the v1.8.40 truncation
       fix covered only the static-cursor path, not procedure output. No longer

@@ -129,6 +129,26 @@ using openads::session::Connection;
 using openads::session::Handle;
 using openads::session::HandleKind;
 
+// S5 — SAP display formatting for Date / Timestamp fields. Defined with the
+// date-format machinery near AdsSetDateFormat (bottom of file); declared
+// here because AdsGetField sits much earlier in this TU.
+//
+// SAP's rule, probed against ace64.dll (see docs/date-display-format.md):
+// AdsGetFIELD returns the value FORMATTED per the connection date format
+// ("01/15/2024", blank "  /  /    "); AdsGetSTRING returns the raw
+// storage text ("20240115") regardless of format. The two entry points
+// intentionally differ — do not "unify" them.
+std::string format_date_display(const std::string& raw);
+std::string format_timestamp_display(const std::string& raw);
+// Inverse direction: parse text laid out per the CURRENT date format into
+// compact "YYYYMMDD" ("03/07/2025" -> "20250307" under MM/DD/CCYY); empty
+// result = text does not match the format. AdsSetDate / AdsSetTimeStamp
+// route through this, mirroring SAP's format-driven parses.
+std::string parse_date_by_format(const std::string& text);
+// AdsGetString delegates remote/backend handles through AdsGetField; this
+// flag keeps that delegated read RAW so GetString semantics hold there too.
+extern thread_local bool g_field_read_raw;
+
 // SAP ACE defines ADSHANDLE as 32-bit on all platforms while the internal
 // registry Handle is 64-bit; centralise the (value-preserving) narrowing.
 ADSHANDLE to_ads_handle(Handle h) { return static_cast<ADSHANDLE>(h); }
@@ -5696,15 +5716,25 @@ UNSIGNED32 materialise_temp_adt_open(Connection* c,
                 const std::uint16_t sl = cols[i].len ? cols[i].len : 1;
                 if (kinds[i] == TempCellKind::Date) {
                     // Through the production encoder — same blank-safety
-                    // and JDN math as every other ADT date write.
-                    openads::drivers::DbfField df;
-                    df.type          = openads::drivers::DbfFieldType::AdtDate;
-                    df.record_offset = dst_off;
-                    df.length        = 4;
-                    (void)openads::drivers::encode_field_string(
-                        df, rec.data(), rec.size(),
-                        std::string(reinterpret_cast<const char*>(src + so),
-                                    sl));
+                    // and JDN math as every other ADT date write. A cell
+                    // that is not 8 digits (blank group, the "0" sentinel
+                    // an empty aggregate renders) stays the zero JDN the
+                    // record was initialised with — a blank date.
+                    std::string cell(
+                        reinterpret_cast<const char*>(src + so), sl);
+                    bool date8 = cell.size() >= 8;
+                    for (std::size_t k = 0; date8 && k < 8; ++k)
+                        date8 = std::isdigit(
+                            static_cast<unsigned char>(cell[k])) != 0;
+                    if (date8) {
+                        openads::drivers::DbfField df;
+                        df.type =
+                            openads::drivers::DbfFieldType::AdtDate;
+                        df.record_offset = dst_off;
+                        df.length        = 4;
+                        (void)openads::drivers::encode_field_string(
+                            df, rec.data(), rec.size(), cell);
+                    }
                 } else {
                     std::memcpy(rec.data() + dst_off, src + so, dst_lens[i]);
                 }
@@ -10158,6 +10188,10 @@ UNSIGNED32 ENTRYPOINT AdsGetField(ADSHANDLE hTable, UNSIGNED8* pucField,
             std::string val = rt->current_row[fi];
             if (rt->fields[fi].type == ADS_STRING)
                 val = pad_char_field(std::move(val), rt->fields[fi].length);
+            else if (!g_field_read_raw && rt->fields[fi].type == ADS_DATE)
+                val = format_date_display(val);
+            else if (!g_field_read_raw && rt->fields[fi].type == ADS_TIMESTAMP)
+                val = format_timestamp_display(val);
             openads::abi::copy_to_caller(pucBuf, pulLen, val);
             return ok();
         }
@@ -10197,8 +10231,22 @@ UNSIGNED32 ENTRYPOINT AdsGetField(ADSHANDLE hTable, UNSIGNED8* pucField,
     // ABI callers expect the full fixed-width value.
     std::string val = v.value().as_string;
     const auto& fd = t->field_descriptor(idx);
-    if (fd.type == openads::drivers::DbfFieldType::Character)
+    if (fd.type == openads::drivers::DbfFieldType::Character) {
         val = pad_char_field(std::move(val), fd.length);
+    } else if (!g_field_read_raw &&
+               (fd.type == openads::drivers::DbfFieldType::Date ||
+                fd.type == openads::drivers::DbfFieldType::AdtDate)) {
+        // SAP: AdsGetField formats dates per the connection date format
+        // ("01/15/2024"; blank "  /  /    "); AdsGetString stays raw
+        // "YYYYMMDD". php_ads and the engine internals read via
+        // GetString / as_string, so this formatting is display-only.
+        val = format_date_display(v.value().is_null ? std::string() : val);
+    } else if (!g_field_read_raw &&
+               fd.type == openads::drivers::DbfFieldType::AdtTimestamp) {
+        // SAP: "MM/DD/CCYY hh:mm:ss AM" (12-hour, 2-digit hour, len 22).
+        val = format_timestamp_display(
+            v.value().is_null ? std::string() : val);
+    }
     openads::abi::copy_to_caller(pucBuf, pulLen, val);
     return ok();
 }
@@ -11299,6 +11347,16 @@ void compact_ace_date_value(const UNSIGNED8* value, UNSIGNED16 len,
     if (out == nullptr) return;
     std::string s(value ? reinterpret_cast<const char*>(value) : "",
                   value ? static_cast<std::size_t>(len) : 0u);
+    // SAP's AdsSetDate parses the text against the CURRENT date format
+    // ("03/07/2025" under MM/DD/CCYY -> 2025-03-07); try that first.
+    // Everything below is the permissive OpenADS superset kept for
+    // existing callers: ISO "yyyy-mm-dd" and raw "YYYYMMDD" still land
+    // (SAP rejects raw with 5080 — documented deviation, php and the
+    // remote twin write raw).
+    if (std::string byfmt = parse_date_by_format(s); !byfmt.empty()) {
+        *out = std::move(byfmt);
+        return;
+    }
     if (s.size() == 10 && s[4] == '-' && s[7] == '-') {
         *out = s.substr(0, 4) + s.substr(5, 2) + s.substr(8, 2);
         return;
@@ -11412,7 +11470,14 @@ UNSIGNED32 ENTRYPOINT AdsGetString(ADSHANDLE hTable, UNSIGNED8* pucField,
     if (delegate) {
         UNSIGNED32 raw_len = (pulLen && *pulLen > 0) ? *pulLen : 65536;
         std::vector<UNSIGNED8> tmp(raw_len + 1, 0);
-        if (AdsGetField(hTable, pucField, tmp.data(), &raw_len, usOption) != 0)
+        // AdsGetString promises the RAW storage text (dates "YYYYMMDD"),
+        // while AdsGetField formats per the date format — suppress the
+        // formatting for the length of this delegated read.
+        g_field_read_raw = true;
+        UNSIGNED32 frc = AdsGetField(hTable, pucField, tmp.data(),
+                                     &raw_len, usOption);
+        g_field_read_raw = false;
+        if (frc != 0)
             return fail(openads::AE_COLUMN_NOT_FOUND, "");
         // Trim trailing spaces (ADS_TRIM behaviour) then copy to caller.
         std::string s(reinterpret_cast<char*>(tmp.data()), raw_len);
@@ -11437,7 +11502,19 @@ UNSIGNED32 ENTRYPOINT AdsGetString(ADSHANDLE hTable, UNSIGNED8* pucField,
     }
     auto v = t->read_field(idx);
     if (!v) return fail(v.error());
-    const std::string& s = v.value().as_string;
+    std::string s = v.value().as_string;
+    // SAP returns the raw-width blank ("        ", len 8) for an empty
+    // DATE read through GetString, not an empty string. Timestamps stay
+    // as decoded — SAP raises 5066 for GetString on those, but php_ads
+    // depends on the raw "YYYYMMDDhhmmss" (documented deviation).
+    {
+        const auto& fdd = t->field_descriptor(idx);
+        if (s.empty() &&
+            (fdd.type == openads::drivers::DbfFieldType::Date ||
+             fdd.type == openads::drivers::DbfFieldType::AdtDate)) {
+            s.assign(8, ' ');
+        }
+    }
     UNSIGNED32 cap = *pulLen;
     UNSIGNED32 n   = cap > 0 ? std::min<UNSIGNED32>(cap - 1,
                                 static_cast<UNSIGNED32>(s.size()))
@@ -23739,6 +23816,16 @@ inline bool agg_source_is_text(openads::drivers::DbfFieldType t) {
     }
 }
 
+// A date-sourced MIN/MAX result must be declared DATE in the temp, not
+// CHARACTER: SAP renders it through the connection date format
+// ("01/18/0203"), which AdsGetField only applies to Date-typed columns.
+// The accumulated cell text stays the raw "YYYYMMDD" — the temp
+// materialiser converts a 'D' column's text cell to the binary JDN.
+inline bool agg_source_is_date(openads::drivers::DbfFieldType t) {
+    using FT = openads::drivers::DbfFieldType;
+    return t == FT::Date || t == FT::AdtDate;
+}
+
 // Value of an aggregate's argument for the current row. Normally the plain
 // column, but SUM(a * b) evaluates `a <op> b` instead — same shape and same
 // arithmetic as a projection-level $ARITH_ item, so only the accumulation
@@ -27368,6 +27455,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             std::uint8_t  dec = 0;      // source decimals (money: 4)
             std::uint16_t src_len = 0;  // source-field width
             bool          is_text = false;  // MIN/MAX compares text
+            bool          is_date = false;  // date-sourced
         };
         struct NKeyCol {
             std::size_t   ti = 0;
@@ -27395,6 +27483,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                              ? 4 : sfd.decimals;
                     slot.src_len = sfd.length;
                     slot.is_text = scriptbridge::agg_source_is_text(sfd.type);
+                    slot.is_date = scriptbridge::agg_source_is_date(sfd.type);
                 }
                 nslots.push_back(std::move(slot));
             }
@@ -27786,7 +27875,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         }
                         o.name = nm;
                         const bool tx_n = nslot_is_text(o.idx);
-                        o.type = tx_n ? 'C' : 'N';
+                        o.type = tx_n
+                               ? (nslots[o.idx].is_date ? 'D' : 'C')
+                               : 'N';
                         o.len  = tx_n
                                ? static_cast<std::uint16_t>(
                                      ntextw[o.idx] ? ntextw[o.idx] : 1)
@@ -28518,6 +28609,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 std::uint8_t            decimals    = 0;  // source-field dp
                 std::uint16_t           src_len     = 0;  // source-field width
                 bool                    is_text     = false;  // MIN/MAX on text
+                bool                    is_date     = false;  // date-sourced
             };
             std::vector<AggSlot> slots;
             slots.reserve(parsed.value().aggregates.size());
@@ -28541,6 +28633,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         slot.src_len = sfd.length;
                         slot.is_text =
                             scriptbridge::agg_source_is_text(sfd.type);
+                        slot.is_date =
+                            scriptbridge::agg_source_is_date(sfd.type);
                     }
                 }
                 slots.push_back(std::move(slot));
@@ -28788,7 +28882,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         ++unaliased;
                     }
                     jg_cols.push_back({std::move(nm),
-                                       jg_is_text(i) ? 'C' : 'N',
+                                       jg_is_text(i)
+                                           ? (slots[i].is_date ? 'D' : 'C')
+                                           : 'N',
                                        jg_w(i),
                                        jg_is_text(i)
                                            ? std::uint8_t{0}
@@ -28835,6 +28931,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 std::uint8_t            decimals    = 0;  // source-field dp
                 std::uint16_t           src_len     = 0;  // source-field width
                 bool                    is_text     = false;  // MIN/MAX on text
+                bool                    is_date     = false;  // date-sourced
             };
             std::vector<AggSlot> slots;
             slots.reserve(parsed.value().aggregates.size());
@@ -28857,6 +28954,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         slot.src_len = sfd.length;
                         slot.is_text =
                             scriptbridge::agg_source_is_text(sfd.type);
+                        slot.is_date =
+                            scriptbridge::agg_source_is_date(sfd.type);
                     }
                 }
                 slots.push_back(std::move(slot));
@@ -28940,7 +29039,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         ++unaliased;
                     }
                     jcolspecs.push_back({std::move(nm),
-                                         jagg_is_text(i) ? 'C' : 'N',
+                                         jagg_is_text(i)
+                                             ? (slots[i].is_date ? 'D' : 'C')
+                                             : 'N',
                                          jagg_w(i),
                                          jagg_is_text(i)
                                              ? std::uint8_t{0}
@@ -29143,6 +29244,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             // as a double gave 0 for every row, so MIN(PAY_DATE) reported
             // "0" instead of the earliest date.
             bool                    is_text     = false;
+            bool                    is_date     = false;  // date-sourced
         };
         std::vector<AggSlot> slots;
         slots.reserve(parsed.value().aggregates.size());
@@ -29165,6 +29267,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     slot.src_len = sfd.length;
                     slot.is_text =
                         scriptbridge::agg_source_is_text(sfd.type);
+                    slot.is_date =
+                        scriptbridge::agg_source_is_date(sfd.type);
                     // SUM(a * b): resolve the right-hand column too. An
                     // arithmetic argument is always numeric, so it never
                     // takes the text MIN/MAX path.
@@ -29579,7 +29683,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         }
                         o.name = nm;
                         const bool tx_o = slot_is_text(o.idx);
-                        o.type = tx_o ? 'C' : 'N';
+                        o.type = tx_o
+                               ? (slots[o.idx].is_date ? 'D' : 'C')
+                               : 'N';
                         o.len = tx_o
                               ? static_cast<std::uint8_t>(
                                     textw[o.idx] ? textw[o.idx] : 1)
@@ -29629,7 +29735,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                                          : "EXPR_" + std::to_string(i))
                                : slots[i].def.alias;
                         const bool tx_i = slot_is_text(i);
-                        o.type = tx_i ? 'C' : 'N';
+                        o.type = tx_i
+                               ? (slots[i].is_date ? 'D' : 'C')
+                               : 'N';
                         o.len = tx_i
                               ? static_cast<std::uint8_t>(
                                     textw[i] ? textw[i] : 1)
@@ -29975,7 +30083,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     ++unaliased;
                 }
                 acols.push_back({std::move(nm),
-                                 agg_is_text(i) ? 'C' : 'N',
+                                 agg_is_text(i)
+                                     ? (slots[i].is_date ? 'D' : 'C')
+                                     : 'N',
                                  agg_w(i),
                                  agg_is_text(i)
                                      ? std::uint8_t{0}
@@ -32378,17 +32488,23 @@ UNSIGNED32 ENTRYPOINT AdsExecuteSQLDirectW(ADSHANDLE hStatement, UNSIGNED16* pwc
 
 // ---- Date display format (AdsSetDateFormat / AdsGetDateFormat) -------------
 //
-// ACE keeps one process-wide date display string. The historical
-// default here is "yyyy-mm-dd"; AdsSetDateFormat overrides it (ADS
-// itself uses "MM/DD/CCYY" out of the box, but changing our default
-// would shift every existing caller, so the override is opt-in).
+// ACE keeps one process-wide date display string. SAP's default is
+// "MM/DD/CCYY" (probed: AdsGetDateFormat on a fresh ace64.dll), and ours
+// now matches. The format drives AdsGetFIELD / AdsGetDate display and
+// AdsSetDate parsing; AdsGetSTRING deliberately stays raw "YYYYMMDD" —
+// SAP behaves the same way, and php_ads' date handling depends on it
+// (see docs/date-display-format.md before changing ANY of this).
 //
 // This file is largely one big `extern "C"` block; these helpers
 // return std::string / a small struct, so they need C++ linkage.
 extern "C++" {
 namespace {
 
-std::string g_date_format = "yyyy-mm-dd";
+std::string g_date_format = "MM/DD/CCYY";
+
+// AdsGetString's delegated remote/backend reads set this so the shared
+// AdsGetField path skips display formatting (declared near the top).
+thread_local bool g_field_read_raw = false;
 
 // Connection-wide settings stored so their Set/Get pairs round-trip.
 // AdsSetDefault / AdsGetDefault, AdsSetSearchPath / AdsGetSearchPath and
@@ -32428,6 +32544,137 @@ std::string format_ace_date(const std::string& fmt, int y, int m, int d) {
         else { out.push_back(up[i]); ++i; }
     }
     return out;
+}
+
+// The format with every digit position blanked — SAP renders an empty
+// date through AdsGetField as "  /  /    " (separators kept, digits
+// spaces), NOT as an empty string.
+std::string blank_ace_date(const std::string& fmt) {
+    std::string up;
+    up.reserve(fmt.size());
+    for (char c : fmt)
+        up.push_back(static_cast<char>(std::toupper(
+            static_cast<unsigned char>(c))));
+    std::string out;
+    out.reserve(fmt.size());
+    for (std::size_t i = 0; i < up.size(); ) {
+        auto at = [&](const char* tok) {
+            std::size_t L = std::strlen(tok);
+            return up.compare(i, L, tok) == 0;
+        };
+        if (at("CCYY") || at("YYYY")) { out += "    "; i += 4; }
+        else if (at("YY") || at("MM") || at("DD")) { out += "  "; i += 2; }
+        else { out.push_back(up[i]); ++i; }
+    }
+    return out;
+}
+
+// SAP display rule for AdsGetField / AdsGetDate on a DATE column,
+// probed against ace64.dll (docs/date-display-format.md):
+//   raw "20240115" -> "01/15/2024" (per the current format)
+//   blank          -> "  /  /    "
+// `raw` is the engine's internal decode ("YYYYMMDD", or empty/blanks).
+std::string format_date_display(const std::string& raw) {
+    if (raw.size() == 8) {
+        bool digits = true;
+        for (char c : raw)
+            digits = digits && std::isdigit(static_cast<unsigned char>(c));
+        if (digits) {
+            const int y = std::stoi(raw.substr(0, 4));
+            const int m = std::stoi(raw.substr(4, 2));
+            const int d = std::stoi(raw.substr(6, 2));
+            return format_ace_date(g_date_format, y, m, d);
+        }
+    }
+    return blank_ace_date(g_date_format);
+}
+
+// Parse `text` positionally against the CURRENT date format. Returns the
+// compact "YYYYMMDD", or an empty string when the text does not fit the
+// format (wrong length, non-digits in digit positions, month/day out of
+// range). A 2-digit year resolves through the epoch the way DBF readers
+// do: >= (epoch % 100) -> epoch century, else the next one.
+std::string parse_date_by_format(const std::string& text) {
+    std::string up;
+    up.reserve(g_date_format.size());
+    for (char c : g_date_format)
+        up.push_back(static_cast<char>(std::toupper(
+            static_cast<unsigned char>(c))));
+    if (text.size() != up.size()) {
+        // A 2-digit-year format is 2 shorter than its 4-digit twin; no
+        // other length mismatch can fit.
+        return std::string();
+    }
+    int y = -1, m = -1, d = -1;
+    std::size_t i = 0, t = 0;
+    auto digits = [&](std::size_t n, int* out_v) {
+        int v = 0;
+        for (std::size_t k = 0; k < n; ++k) {
+            const char c = t + k < text.size() ? text[t + k] : '\0';
+            if (!std::isdigit(static_cast<unsigned char>(c))) return false;
+            v = v * 10 + (c - '0');
+        }
+        *out_v = v;
+        t += n;
+        return true;
+    };
+    while (i < up.size()) {
+        auto at = [&](const char* tok) {
+            return up.compare(i, std::strlen(tok), tok) == 0;
+        };
+        if (at("CCYY") || at("YYYY")) {
+            if (!digits(4, &y)) return std::string();
+            i += 4;
+        } else if (at("YY")) {
+            int yy = 0;
+            if (!digits(2, &yy)) return std::string();
+            const int epoch = static_cast<int>(openads::engine::epoch());
+            const int cut   = epoch % 100;
+            y = (yy >= cut ? epoch - cut : epoch - cut + 100) + yy;
+            i += 2;
+        } else if (at("MM")) {
+            if (!digits(2, &m)) return std::string();
+            i += 2;
+        } else if (at("DD")) {
+            if (!digits(2, &d)) return std::string();
+            i += 2;
+        } else {
+            if (t >= text.size() || text[t] != up[i]) return std::string();
+            ++t; ++i;
+        }
+    }
+    if (y < 0 || m < 1 || m > 12 || d < 1 || d > 31) return std::string();
+    char out[16];
+    std::snprintf(out, sizeof(out), "%04d%02d%02d", y, m, d);
+    return out;
+}
+
+// SAP display rule for AdsGetField on a TIMESTAMP column:
+//   "<formatted date> hh:mm:ss AM|PM" — 12-hour clock, 2-digit hour
+//   ("01/15/2024 01:45:59 PM", len 22 under the default format), and a
+//   blank timestamp renders as "  /  /     12:00:00 AM".
+// `raw` is the engine's internal decode ("YYYYMMDDhhmmss", or empty).
+std::string format_timestamp_display(const std::string& raw) {
+    int hh = 0, mi = 0, ss = 0;
+    std::string date_part;
+    bool have = raw.size() >= 14;
+    if (have)
+        for (std::size_t i = 0; i < 14; ++i)
+            have = have && std::isdigit(static_cast<unsigned char>(raw[i]));
+    if (have) {
+        date_part = format_date_display(raw.substr(0, 8));
+        hh = std::stoi(raw.substr(8, 2));
+        mi = std::stoi(raw.substr(10, 2));
+        ss = std::stoi(raw.substr(12, 2));
+    } else {
+        date_part = blank_ace_date(g_date_format);
+    }
+    const char* ampm = hh < 12 ? "AM" : "PM";
+    int h12 = hh % 12;
+    if (h12 == 0) h12 = 12;
+    char t[16];
+    std::snprintf(t, sizeof(t), " %02d:%02d:%02d %s", h12, mi, ss, ampm);
+    return date_part + t;
 }
 
 // Read the DBF header's "last updated" stamp (header bytes 1..3 are
@@ -33509,8 +33756,20 @@ UNSIGNED32 ENTRYPOINT AdsRegisterCallbackFunction(void*) { ADS_STUB(openads::AE_
 UNSIGNED32 ENTRYPOINT AdsRegisterCallbackFunction101(void*, SIGNED64) { ADS_STUB(openads::AE_SUCCESS); }
 UNSIGNED32 ENTRYPOINT AdsRegisterProgressCallback(void*) { ADS_STUB(openads::AE_SUCCESS); }
 UNSIGNED32 ENTRYPOINT AdsSetDateFormat(UNSIGNED8* pucFormat) {
-    if (pucFormat != nullptr && pucFormat[0] != 0)
-        g_date_format.assign(reinterpret_cast<const char*>(pucFormat));
+    if (pucFormat != nullptr && pucFormat[0] != 0) {
+        // SAP normalises the stored format: uppercase, and a 4-digit year
+        // is always kept as CCYY (probed: SetDateFormat("DD.MM.YYYY")
+        // reads back "DD.MM.CCYY").
+        std::string f(reinterpret_cast<const char*>(pucFormat));
+        for (auto& c : f)
+            c = static_cast<char>(std::toupper(
+                static_cast<unsigned char>(c)));
+        for (std::size_t p = f.find("YYYY"); p != std::string::npos;
+             p = f.find("YYYY", p + 4)) {
+            f.replace(p, 4, "CCYY");
+        }
+        g_date_format = std::move(f);
+    }
     return openads::AE_SUCCESS;
 }
 UNSIGNED32 ENTRYPOINT AdsSetDateFormat60(ADSHANDLE /*hConnect*/,
@@ -35119,8 +35378,46 @@ UNSIGNED32 ENTRYPOINT AdsSetTime(ADSHANDLE hObj, UNSIGNED8* pId, UNSIGNED8* pucV
 UNSIGNED32 ENTRYPOINT AdsSetTimeStamp(ADSHANDLE hObj, UNSIGNED8* pId, UNSIGNED8* pucBuf,
                            UNSIGNED32 ulLen) {
     UNSIGNED8 nm[64];
+    // Normalise the text to the compact "YYYYMMDDhhmmss" the engine's
+    // encoder expects. SAP parses "<date per current format> hh:mm:ss"
+    // (24-hour on input); forwarding the text verbatim let a formatted
+    // timestamp through to the raw encoder, which mis-sliced it and
+    // wrote garbage (probed: read back as a negative epoch).
+    std::string s(pucBuf ? reinterpret_cast<const char*>(pucBuf) : "",
+                  pucBuf ? static_cast<std::size_t>(ulLen) : 0u);
+    std::string date8, time6 = "000000";
+    std::string date_text = s, time_text;
+    const auto sp = s.find(' ');
+    if (sp != std::string::npos) {
+        date_text = s.substr(0, sp);
+        time_text = s.substr(sp + 1);
+    }
+    if (std::string byfmt = parse_date_by_format(date_text); !byfmt.empty()) {
+        date8 = std::move(byfmt);
+    } else if (date_text.size() == 10 && date_text[4] == '-' &&
+               date_text[7] == '-') {
+        date8 = date_text.substr(0, 4) + date_text.substr(5, 2) +
+                date_text.substr(8, 2);
+    } else if (s.size() >= 14) {
+        bool digits = true;
+        for (std::size_t i = 0; i < 14; ++i)
+            digits = digits && std::isdigit(static_cast<unsigned char>(s[i]));
+        if (digits) {   // already compact "YYYYMMDDhhmmss"
+            date8 = s.substr(0, 8);
+            time6 = s.substr(8, 6);
+            time_text.clear();
+        }
+    }
+    if (!date8.empty() && time_text.size() >= 8 &&
+        time_text[2] == ':' && time_text[5] == ':') {
+        time6 = time_text.substr(0, 2) + time_text.substr(3, 2) +
+                time_text.substr(6, 2);
+    }
+    std::string compact = date8.empty() ? s : date8 + time6;
+    std::vector<UNSIGNED8> bytes(compact.begin(), compact.end());
+    bytes.push_back(0);
     return AdsSetString(hObj, as_field(resolve_field_id(hObj, pId, nm, sizeof(nm))),
-                        pucBuf, ulLen);
+                        bytes.data(), static_cast<UNSIGNED32>(compact.size()));
 }
 // Raw-bytes sibling of AdsSetTimeStamp, following the AdsSetFieldRaw /
 // AdsGetFieldRaw convention already used elsewhere in this file: bypass

@@ -266,7 +266,13 @@ TEST_CASE("M12 wrapper setters delegate to existing global settings") {
     UNSIGNED8 out[32] = {0};
     UNSIGNED16 len = sizeof(out);
     REQUIRE(AdsGetDateFormat(out, &len) == 0);
-    CHECK(std::string(reinterpret_cast<char*>(out), len) == "YYYY-MM-DD");
+    // SAP normalises a 4-digit year to CCYY on the way in (probed:
+    // SetDateFormat("DD.MM.YYYY") reads back "DD.MM.CCYY").
+    CHECK(std::string(reinterpret_cast<char*>(out), len) == "CCYY-MM-DD");
+    // The format is process-global — restore SAP's default so tests that
+    // run later see it.
+    UNSIGNED8 def[16] = "MM/DD/CCYY";
+    REQUIRE(AdsSetDateFormat(def) == 0);
 
     REQUIRE(AdsSetExact22(0, 1) == 0);
     UNSIGNED16 exact = 0;

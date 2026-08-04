@@ -674,6 +674,20 @@ util::Result<void> encode_field_string(const DbfField& f,
     }
     std::uint8_t* dst = rec + f.record_offset;
 
+    // ADT binary-encoded date/timestamp: an EMPTY or all-blank string is a
+    // blank value and must store the ADT empty marker (0). Without this,
+    // a short string fell through to the generic branch below, which
+    // SPACE-pads — 0x20202020 read back as JDN 538976288, i.e. the year
+    // 1470954 (AdsSetEmpty on a date produced exactly that garbage).
+    if ((f.type == DbfFieldType::AdtDate ||
+         f.type == DbfFieldType::AdtTimestamp) &&
+        value.find_first_not_of(' ') == std::string::npos) {
+        const std::size_t n = std::min<std::size_t>(f.length,
+            f.type == DbfFieldType::AdtDate ? 4u : 8u);
+        std::memset(dst, 0, n);
+        return {};
+    }
+
     // ADT binary-encoded date/timestamp: parse string and write raw LE.
     if (f.type == DbfFieldType::AdtDate && f.length >= 4 && value.size() >= 8) {
         // An EMPTY date arrives as 8 blanks (that is what AdsSetJulian(0) and a
