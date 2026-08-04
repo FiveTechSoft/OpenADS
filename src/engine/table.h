@@ -99,6 +99,16 @@ public:
         return ri_snapshot_;
     }
 
+    // Cached DD alias for this table's path (empty = not a DD table),
+    // resolved once on first use. snapshot_ri_pks runs on EVERY
+    // navigation; re-resolving the alias each time called
+    // fs::weakly_canonical once per DD table per Skip (~7 ms on a
+    // 95-table DD), which turned a 382K-row cursor walk into a 45-minute
+    // hang. A table's path never changes after open, so the alias can't
+    // either. Same held-on-the-Table reasoning as ri_snapshot() above.
+    bool& ri_alias_cached() noexcept { return ri_alias_cached_; }
+    std::string& ri_alias_cache() noexcept { return ri_alias_cache_; }
+
     // Set between AdsAppendRecord and the matching AdsWriteRecord so the
     // write knows it is an INSERT (RI insert-check) rather than an UPDATE
     // (RI cascade/restrict). Held on the Table — not a global Table*-keyed
@@ -562,6 +572,8 @@ private:
     openads::session::Connection*                 owner_ = nullptr;
     std::uint16_t                                 char_type_ = 1;  // ADS_ANSI
     std::unordered_map<std::string, std::string>  ri_snapshot_;
+    bool                                          ri_alias_cached_ = false;
+    std::string                                   ri_alias_cache_;
     bool                                          pending_append_ = false;
     bool                                          deferred_flush_ = false;
     bool                                          record_dirty_   = false;

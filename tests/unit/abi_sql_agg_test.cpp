@@ -567,3 +567,94 @@ TEST_CASE("MIN/MAX over date and character columns compare as text") {
     REQUIRE(AdsDisconnect(hConn) == 0);
     fs::remove_all(dir, ec);
 }
+
+// SUM(a * b) must evaluate the EXPRESSION in every aggregate materialiser.
+// The scalar path got agg_arg_value() when arithmetic aggregates landed;
+// the grouped and join paths kept reading only the bare left column, so
+// SUM([real] * units) silently summed SUM(real). The mp gate never saw it
+// because its bounded group's units were all 1 — it surfaced the day the
+// unbounded 382K-group query first completed. Fixture rows use qty 2 and 3
+// so the bare-column wrong answer (15.50 / 19.50) cannot collide with the
+// right one.
+TEST_CASE("SUM(a*b) evaluates the expression in grouped and join paths") {
+    fs::path dir = fs::temp_directory_path() / "openads_agg_expr_paths";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir, ec);
+
+    UNSIGNED8 srv[260] = {0};
+    std::memcpy(srv, dir.string().c_str(), dir.string().size());
+    ADSHANDLE hConn = 0;
+    REQUIRE(AdsConnect60(srv, ADS_LOCAL_SERVER,
+                         nullptr, nullptr, 0, &hConn) == 0);
+
+    auto set_s = [](ADSHANDLE h, const char* f, const char* v) {
+        UNSIGNED8 fb[32] = {0};
+        std::strncpy(reinterpret_cast<char*>(fb), f, sizeof(fb) - 1);
+        UNSIGNED8 vb[32] = {0};
+        std::strncpy(reinterpret_cast<char*>(vb), v, sizeof(vb) - 1);
+        REQUIRE(AdsSetString(h, fb, vb,
+                             static_cast<UNSIGNED32>(std::strlen(v))) == 0);
+    };
+    {
+        UNSIGNED8 t[] = "lines.adt";
+        UNSIGNED8 d[] = "Grp,Character,2;Amt,AsciiNumeric,10,2;"
+                        "Qty,AsciiNumeric,4";
+        ADSHANDLE h = 0;
+        REQUIRE(AdsCreateTable(hConn, t, nullptr, ADS_ADT, ADS_ANSI,
+                               0, 0, 0, d, &h) == 0);
+        const struct { const char* g; const char* a; const char* q; } rows[] =
+            {{"A", "10.00", "2"}, {"A", "5.50", "3"}, {"B", "4.00", "1"}};
+        for (const auto& r : rows) {
+            REQUIRE(AdsAppendRecord(h) == 0);
+            set_s(h, "Grp", r.g);
+            set_s(h, "Amt", r.a);
+            set_s(h, "Qty", r.q);
+            REQUIRE(AdsWriteRecord(h) == 0);
+        }
+        REQUIRE(AdsCloseTable(h) == 0);
+    }
+    {
+        UNSIGNED8 t[] = "grps.adt";
+        UNSIGNED8 d[] = "Grp,Character,2;Label,Character,8";
+        ADSHANDLE h = 0;
+        REQUIRE(AdsCreateTable(hConn, t, nullptr, ADS_ADT, ADS_ANSI,
+                               0, 0, 0, d, &h) == 0);
+        for (const char* g : {"A", "B"}) {
+            REQUIRE(AdsAppendRecord(h) == 0);
+            set_s(h, "Grp", g);
+            set_s(h, "Label", g);
+            REQUIRE(AdsWriteRecord(h) == 0);
+        }
+        REQUIRE(AdsCloseTable(h) == 0);
+    }
+
+    ADSHANDLE hStmt = 0;
+    REQUIRE(AdsCreateSQLStatement(hConn, &hStmt) == 0);
+    auto val = [&](const char* sql, const char* col) {
+        UNSIGNED8 sb[256] = {0};
+        std::memcpy(sb, sql, std::strlen(sql));
+        ADSHANDLE hc = 0;
+        REQUIRE(AdsExecuteSQLDirect(hStmt, sb, &hc) == 0);
+        REQUIRE(AdsGotoTop(hc) == 0);
+        std::string s = read_col(hc, col);
+        AdsCloseTable(hc);
+        auto b = s.find_first_not_of(' ');
+        return b == std::string::npos ? std::string() : s.substr(b);
+    };
+
+    // Expression totals: 10*2 + 5.50*3 + 4*1 = 40.50; A = 36.50, B = 4.00.
+    // The bare-column regression answers 19.50 / 15.50 / 4.00 instead.
+    CHECK(val("SELECT SUM(Amt * Qty) AS T FROM lines", "T") == "40.50");
+    CHECK(val("SELECT SUM(Amt * Qty) AS T, Grp FROM lines "
+              "GROUP BY Grp", "T") == "36.50");                 // group A
+    CHECK(val("SELECT SUM(Amt * Qty) AS T FROM lines l "
+              "INNER JOIN grps g ON l.Grp = g.Grp", "T") == "40.50");
+    CHECK(val("SELECT SUM(Amt * Qty) AS T FROM lines l "
+              "INNER JOIN grps g ON l.Grp = g.Grp "
+              "GROUP BY l.Grp", "T") == "36.50");               // group A
+
+    REQUIRE(AdsCloseSQLStatement(hStmt) == 0);
+    REQUIRE(AdsDisconnect(hConn) == 0);
+    fs::remove_all(dir, ec);
+}

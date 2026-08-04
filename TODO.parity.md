@@ -152,18 +152,29 @@ Still open in this area, each a *different* defect from the formatting:
       over mp returns 58 where only 57 are non-blank — so only NULL is
       excluded. Byte-identical to SAP.
 
-- [ ] **GROUP BY does not complete on a large table (PRE-EXISTING, found
-      2026-08-02).** `SELECT Sum(col), ClaimKey FROM prclines GROUP BY ClaimKey`
-      over all 623k rows produces nothing in minutes and sits at 100% CPU in
-      ~20 MB — too little memory for ~500k accumulating groups, so it looks
-      like a loop rather than heavy work. **Not caused by aggregate-expression
-      support**: verified by stashing that work and rebuilding — the previous
-      build hangs identically on a plain bare-column `Sum()`. It only became
-      visible because `agg_inline_sumbyclaim` used to fail instantly with 2115
-      and now reaches the grouped path. The same query bounded by a `WHERE`
-      returns correctly and instantly, so the logic is right and the scale is
-      the problem. The mp gate case is bounded with a `WHERE` so it cannot hang
-      the gate.
+- [x] **GROUP BY does not complete on a large table — FIXED 2026-08-04.**
+      Root cause was nowhere near the grouped walk: `snapshot_ri_pks` runs on
+      EVERY navigation, and on a DD connection it re-resolved the table's DD
+      alias each time — `ri_alias_for_path` called `fs::weakly_canonical`
+      (a filesystem syscall) once per DD table per call, ~7 ms per `AdsSkip`
+      on the 95-table mp DD. The engine built all 382K groups in FOUR seconds;
+      the "hang" was the CLIENT's row loop at 7 ms/row ≈ 45 minutes. Fixed
+      twice over: the alias is cached on the Table (`ri_alias_cached()` —
+      the path never changes after open), and `ri_alias_for_path` gained a
+      basename pre-filter so non-matching entries (every SQL temp) cost pure
+      string compares. Skip went 7,032 µs → 2.8 µs; the full unbounded
+      382K-group query now completes in ~7 s end-to-end and is
+      **value-identical to SAP on all 381,977 rows** (declared width of the
+      arithmetic column still diverges — tracked below).
+      **Completing it exposed a value bug the bounded gate case had masked:**
+      the grouped, join, join+GROUP-BY and N-way aggregate paths evaluated
+      only the bare left column of `SUM(a * b)` — `SUM([real] * units)`
+      summed `SUM(real)` (9,779 of 381,977 groups wrong; the gate's group
+      happened to have units = 1). All four paths now evaluate the
+      expression (the scalar path always did), with the op-following result
+      scale. Guarded by *"SUM(a*b) evaluates the expression in grouped and
+      join paths"* in `abi_sql_agg_test.cpp`, verified to fail (3 asserts)
+      with the fix reverted.
 
 Two residual divergences in this area, both measured, neither guessed at:
 

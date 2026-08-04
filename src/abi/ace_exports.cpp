@@ -3636,24 +3636,38 @@ Connection* conn_for_table(Table* t) {
 }
 
 // Find the DD alias for a table given its resolved absolute path.
+//
+// PERF: fs::weakly_canonical is a filesystem syscall. Doing it once per DD
+// table on every call made this ~7 ms on a 95-table DD — and callers run
+// per NAVIGATION (snapshot_ri_pks) and per WRITE (RI enforcement), which
+// turned large cursor walks into apparent hangs. Two defences:
+//  - a case-insensitive BASENAME pre-filter, so entries that cannot match
+//    (every SQL temp, most tables) are rejected with pure string compares
+//    and only basename collisions pay the canonicalisation;
+//  - hot callers additionally cache the result on the Table
+//    (ri_alias_cached / ri_alias_cache) — the path never changes after
+//    open, so the alias can't either.
 std::string ri_alias_for_path(Connection* conn, const std::string& abs_path) {
     namespace fs = std::filesystem;
     auto* dd = conn->dd();
     if (!dd) return {};
     std::error_code ec;
-    auto cb = fs::weakly_canonical(fs::path(abs_path), ec).string();
+    auto lower = [](std::string v) {
+        for (auto& ch : v)
+            ch = static_cast<char>(std::tolower(
+                static_cast<unsigned char>(ch)));
+        return v;
+    };
+    const std::string want_base =
+        lower(fs::path(abs_path).filename().string());
+    std::string cb;   // canonical abs_path, computed on first basename hit
     for (auto& [alias, rel] : dd->tables()) {
+        if (lower(fs::path(rel).filename().string()) != want_base) continue;
+        if (cb.empty())
+            cb = lower(fs::weakly_canonical(fs::path(abs_path), ec).string());
         fs::path full = fs::path(conn->data_dir()) / rel;
-        auto ca = fs::weakly_canonical(full, ec).string();
-        if (ca.size() != cb.size()) continue;
-        bool eq = true;
-        for (std::size_t i = 0; i < ca.size(); ++i) {
-            if (std::tolower(static_cast<unsigned char>(ca[i])) !=
-                std::tolower(static_cast<unsigned char>(cb[i]))) {
-                eq = false; break;
-            }
-        }
-        if (eq) return alias;
+        auto ca = lower(fs::weakly_canonical(full, ec).string());
+        if (ca == cb) return alias;
     }
     return {};
 }
@@ -3828,12 +3842,22 @@ void snapshot_ri_pks(Table* t) {
         if (t) t->ri_snapshot().clear();
         return;
     }
+    // Runs on EVERY navigation (Skip/GoTop/GoBottom/GoTo) — resolve the
+    // DD alias once per Table, not once per step. Without the cache a
+    // 382K-row cursor walk on a DD connection took ~45 minutes (7 ms of
+    // fs::weakly_canonical calls per Skip); see ri_alias_for_path.
+    if (!t->ri_alias_cached()) {
+        Connection* cfa = conn_for_table(t);
+        t->ri_alias_cache() =
+            cfa ? ri_alias_for_path(cfa, t->path()) : std::string();
+        t->ri_alias_cached() = true;
+    }
+    const std::string& alias = t->ri_alias_cache();
+    if (alias.empty()) return;
     Connection* conn = conn_for_table(t);
     if (!conn) return;
     auto* dd = conn->dd();
     if (!dd || dd->ri().empty()) return;
-    std::string alias = ri_alias_for_path(conn, t->path());
-    if (alias.empty()) return;
     const auto& parent_rules = dd->ri_by_parent_table(alias);
     if (parent_rules.empty()) return;
     auto& snap = t->ri_snapshot();
@@ -27456,6 +27480,11 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             std::uint16_t src_len = 0;  // source-field width
             bool          is_text = false;  // MIN/MAX compares text
             bool          is_date = false;  // date-sourced
+            // SUM(a * b): the right-hand column may live in a DIFFERENT
+            // joined table than the left one.
+            std::size_t   rhs_ti = 0;
+            std::int32_t  rhs_fi = -1;
+            std::uint8_t  arg_dec = 0;  // op-following result scale
         };
         struct NKeyCol {
             std::size_t   ti = 0;
@@ -27484,6 +27513,35 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     slot.src_len = sfd.length;
                     slot.is_text = scriptbridge::agg_source_is_text(sfd.type);
                     slot.is_date = scriptbridge::agg_source_is_date(sfd.type);
+                    // SUM(a * b): resolve the right-hand column (any joined
+                    // table) and let the result scale follow the operation.
+                    // Reading only the left column summed SUM(a * b) as
+                    // SUM(a) - same defect the 2-table paths had.
+                    slot.arg_dec = slot.dec;
+                    if (a.arg_expr) {
+                        slot.is_text = false;
+                        std::uint8_t rdec = 0;
+                        if (!a.arg_expr->rhs_is_literal) {
+                            if (!resolve(std::string(),
+                                         a.arg_expr->rhs_column,
+                                         slot.rhs_ti, slot.rhs_fi)) {
+                                close_all();
+                                return fail(openads::AE_COLUMN_NOT_FOUND,
+                                            a.arg_expr->rhs_column.c_str());
+                            }
+                            rdec = tbls[slot.rhs_ti]->driver()->fields()[
+                                static_cast<std::size_t>(slot.rhs_fi)]
+                                .decimals;
+                        }
+                        using AO = openads::sql::ArithOp;
+                        if (a.arg_expr->op == AO::Mul ||
+                            a.arg_expr->op == AO::Div) {
+                            slot.arg_dec = static_cast<std::uint8_t>(
+                                std::min<int>(slot.dec + rdec, 15));
+                        } else {
+                            slot.arg_dec = std::max(slot.dec, rdec);
+                        }
+                    }
                 }
                 nslots.push_back(std::move(slot));
             }
@@ -27746,6 +27804,25 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         continue;
                     }
                     double d = v.value().as_double;
+                    if (nslots[i2].def.arg_expr) {
+                        double b2 = 0.0;
+                        if (nslots[i2].def.arg_expr->rhs_is_literal) {
+                            b2 = nslots[i2].def.arg_expr->rhs_number;
+                        } else if (nslots[i2].rhs_fi >= 0) {
+                            auto rv = tbls[nslots[i2].rhs_ti]->read_field(
+                                static_cast<std::uint16_t>(
+                                    nslots[i2].rhs_fi));
+                            b2 = rv ? rv.value().as_double : 0.0;
+                        }
+                        using AO = openads::sql::ArithOp;
+                        switch (nslots[i2].def.arg_expr->op) {
+                            case AO::Add: d = d + b2; break;
+                            case AO::Sub: d = d - b2; break;
+                            case AO::Mul: d = d * b2; break;
+                            case AO::Div: d = b2 != 0.0 ? d / b2 : 0.0;
+                                          break;
+                        }
+                    }
                     ++acc.cnt[i2];
                     acc.sum[i2] += d;
                     if (d < acc.minv[i2]) acc.minv[i2] = d;
@@ -27831,8 +27908,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 switch (nslots[i].def.kind) {
                     case K::CountStar: case K::Count: return 0;
                     // AVG keeps the SOURCE column's decimals (oracle
-                    // 2026-07-21: money -> 4dp, integer -> 0dp; not 6).
-                    default: return static_cast<int>(nslots[i].dec);
+                    // 2026-07-21: money -> 4dp, integer -> 0dp; not 6);
+                    // an arithmetic argument follows the operation.
+                    default: return static_cast<int>(nslots[i].arg_dec);
                 }
             };
             auto ci_eq_n = [](const std::string& x, const std::string& y) {
@@ -28610,6 +28688,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 std::uint16_t           src_len     = 0;  // source-field width
                 bool                    is_text     = false;  // MIN/MAX on text
                 bool                    is_date     = false;  // date-sourced
+                std::int32_t            rhs_field   = -1;     // SUM(a * b): b
+                std::uint8_t            arg_dec     = 0;      // op-following dp
             };
             std::vector<AggSlot> slots;
             slots.reserve(parsed.value().aggregates.size());
@@ -28635,6 +28715,39 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                             scriptbridge::agg_source_is_text(sfd.type);
                         slot.is_date =
                             scriptbridge::agg_source_is_date(sfd.type);
+                    }
+                    // SUM(a * b): resolve the right-hand column against the
+                    // merged cursor too (R_ fallback included), and let the
+                    // result scale follow the operation like the
+                    // single-table path does. Reading only the left column
+                    // summed SUM([real] * units) as SUM(real) - masked in
+                    // the gate by a group whose units were all 1.
+                    if (a.arg_expr && !a.arg_expr->rhs_is_literal) {
+                        slot.rhs_field = jcol_index(a.arg_expr->rhs_column);
+                        if (slot.rhs_field < 0) {
+                            c->close_table(cth_h);
+                            return fail(openads::AE_COLUMN_NOT_FOUND,
+                                        a.arg_expr->rhs_column.c_str());
+                        }
+                    }
+                    if (a.arg_expr) slot.is_text = false;
+                    slot.arg_dec = slot.decimals;
+                    if (a.arg_expr) {
+                        std::uint8_t rdec = 0;
+                        if (!a.arg_expr->rhs_is_literal &&
+                            slot.rhs_field >= 0) {
+                            rdec = ctbl->field_descriptor(
+                                static_cast<std::uint16_t>(slot.rhs_field))
+                                .decimals;
+                        }
+                        using AO = openads::sql::ArithOp;
+                        if (a.arg_expr->op == AO::Mul ||
+                            a.arg_expr->op == AO::Div) {
+                            slot.arg_dec = static_cast<std::uint8_t>(
+                                std::min<int>(slot.decimals + rdec, 15));
+                        } else {
+                            slot.arg_dec = std::max(slot.decimals, rdec);
+                        }
                     }
                 }
                 slots.push_back(std::move(slot));
@@ -28771,7 +28884,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         acc.txt[i].feed(v.value().as_string);
                         continue;
                     }
-                    double d = v.value().as_double;
+                    double d = scriptbridge::agg_arg_value(
+                        *ctbl, slots[i].field_index, slots[i].rhs_field,
+                        slots[i].def);
                     ++acc.count[i];
                     acc.sum[i] += d;
                     if (d < acc.minv[i]) acc.minv[i] = d;
@@ -28844,8 +28959,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 switch (slots[i].def.kind) {
                     case K::CountStar: case K::Count: return 0;
                     // AVG keeps the SOURCE column's decimals (oracle
-                    // 2026-07-21: money -> 4dp, integer -> 0dp; not 6).
-                    default: return static_cast<int>(slots[i].decimals);
+                    // 2026-07-21: money -> 4dp, integer -> 0dp; not 6);
+                    // an arithmetic argument follows the operation.
+                    default: return static_cast<int>(slots[i].arg_dec);
                 }
             };
             // A text MIN/MAX column is one width for every group: the widest
@@ -28932,6 +29048,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 std::uint16_t           src_len     = 0;  // source-field width
                 bool                    is_text     = false;  // MIN/MAX on text
                 bool                    is_date     = false;  // date-sourced
+                std::int32_t            rhs_field   = -1;     // SUM(a * b): b
+                std::uint8_t            arg_dec     = 0;      // op-following dp
             };
             std::vector<AggSlot> slots;
             slots.reserve(parsed.value().aggregates.size());
@@ -28956,6 +29074,39 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                             scriptbridge::agg_source_is_text(sfd.type);
                         slot.is_date =
                             scriptbridge::agg_source_is_date(sfd.type);
+                    }
+                    // SUM(a * b): resolve the right-hand column against the
+                    // merged cursor too (R_ fallback included), and let the
+                    // result scale follow the operation like the
+                    // single-table path does. Reading only the left column
+                    // summed SUM([real] * units) as SUM(real) - masked in
+                    // the gate by a group whose units were all 1.
+                    if (a.arg_expr && !a.arg_expr->rhs_is_literal) {
+                        slot.rhs_field = jcol_index(a.arg_expr->rhs_column);
+                        if (slot.rhs_field < 0) {
+                            c->close_table(cth_h);
+                            return fail(openads::AE_COLUMN_NOT_FOUND,
+                                        a.arg_expr->rhs_column.c_str());
+                        }
+                    }
+                    if (a.arg_expr) slot.is_text = false;
+                    slot.arg_dec = slot.decimals;
+                    if (a.arg_expr) {
+                        std::uint8_t rdec = 0;
+                        if (!a.arg_expr->rhs_is_literal &&
+                            slot.rhs_field >= 0) {
+                            rdec = ctbl->field_descriptor(
+                                static_cast<std::uint16_t>(slot.rhs_field))
+                                .decimals;
+                        }
+                        using AO = openads::sql::ArithOp;
+                        if (a.arg_expr->op == AO::Mul ||
+                            a.arg_expr->op == AO::Div) {
+                            slot.arg_dec = static_cast<std::uint8_t>(
+                                std::min<int>(slot.decimals + rdec, 15));
+                        } else {
+                            slot.arg_dec = std::max(slot.decimals, rdec);
+                        }
                     }
                 }
                 slots.push_back(std::move(slot));
@@ -28989,7 +29140,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         jtxt[i].feed(v.value().as_string);
                         continue;
                     }
-                    double d = v.value().as_double;
+                    double d = scriptbridge::agg_arg_value(
+                        *ctbl, slots[i].field_index, slots[i].rhs_field,
+                        slots[i].def);
                     ++count[i];
                     sum[i] += d;
                     if (d < minv[i]) minv[i] = d;
@@ -29008,8 +29161,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 switch (slots[i].def.kind) {
                     case K::CountStar: case K::Count: return 0;
                     // AVG keeps the SOURCE column's decimals (oracle
-                    // 2026-07-21: money -> 4dp, integer -> 0dp; not 6).
-                    default: return static_cast<int>(slots[i].decimals);
+                    // 2026-07-21: money -> 4dp, integer -> 0dp; not 6);
+                    // an arithmetic argument follows the operation.
+                    default: return static_cast<int>(slots[i].arg_dec);
                 }
             };
             auto jagg_is_text = [&](std::size_t i) {
@@ -29577,7 +29731,14 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         acc.txt[i].feed(v.value().as_string);
                         continue;
                     }
-                    double d = v.value().as_double;
+                    // SUM(a * b): evaluate the expression like the scalar
+                    // path does. Reading only the bare left column summed
+                    // SUM([real] * units) as SUM(real) — invisible in the
+                    // gate's bounded group, whose units were all 1, and
+                    // caught the day the unbounded query first completed.
+                    double d = scriptbridge::agg_arg_value(
+                        *tbl, slots[i].field_index, slots[i].rhs_field,
+                        slots[i].def);
                     ++acc.count[i];
                     acc.sum[i] += d;
                     if (d < acc.minv[i]) acc.minv[i] = d;
@@ -29636,8 +29797,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 switch (slots[i].def.kind) {
                     case K::CountStar: case K::Count: return 0;
                     // AVG keeps the SOURCE column's decimals (oracle
-                    // 2026-07-21: money -> 4dp, integer -> 0dp; not 6).
-                    default: return static_cast<int>(slots[i].decimals);
+                    // 2026-07-21: money -> 4dp, integer -> 0dp; not 6);
+                    // an arithmetic argument follows the operation.
+                    default: return static_cast<int>(slots[i].arg_dec);
                 }
             };
             // Ordered output columns from the projection: an `$AGG_<n>`
