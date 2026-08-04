@@ -1,3 +1,66 @@
+## 1.8.55 - 2026-08-04
+
+### Added — SAP date display format: AdsGetField formats, AdsGetString stays raw
+
+Probing SAP's `ace64.dll` showed that date/timestamp columns do **not**
+share one string path: `AdsGetField` (and `AdsGetDate`) return the value
+laid out per the current date format, while `AdsGetString` always returns
+the raw storage text. That split is now the OpenADS spec:
+
+- **AdsGetField / AdsGetDate** — Date → formatted (default `MM/DD/CCYY`,
+  blank → `"  /  /    "`); Timestamp → `"MM/DD/CCYY hh:mm:ss AM/PM"`
+  (len 22, 12-hour clock).
+- **AdsGetString** — raw `"YYYYMMDD"` (len 8) regardless of format;
+  blank date = 8 spaces (was `""`).
+- Default format is SAP's `MM/DD/CCYY` (was `yyyy-mm-dd`).
+  `AdsSetDateFormat` normalises like SAP (`YYYY` stored as `CCYY`).
+- Date-sourced MIN/MAX aggregate columns are declared DATE in their
+  materialised temps so results format like SAP.
+
+Write-side fixes verified against SAP:
+
+- `AdsSetDate` parses text laid out per the current format (2-digit years
+  resolve through the epoch); raw `YYYYMMDD` and ISO still accepted.
+- `AdsSetTimeStamp` normalises `"<date per format> hh:mm:ss"` to the
+  compact form the encoder expects.
+- `AdsSetEmpty` on an ADT Date/Timestamp stores the zero JDN (was
+  space-pad, which read back as year 1470954).
+
+Engine internals (index keys, WHERE, text MIN/MAX, temp cells) keep raw
+`YYYYMMDD`. php_ads and paths that read only through `AdsGetString`
+remain byte-stable. Guarded by `abi_date_format_test.cpp`. See
+`docs/date-display-format.md`.
+
+### Added — Join / union / aggregate temps are ADT (full-length column names)
+
+The seven materialising SQL paths that could not be answered by a live
+cursor (`_join_`, `_mjoin_`, `_uni_`, `_agg_`, `_grp_`, `_jagg_`,
+`_jgrp_`) each hand-assembled a raw DBF temp whose descriptor caps
+column names at 11 bytes. AS aliases, `R_<name>` spellings, and ADT
+source columns were silently truncated (`Number_Of_Relations` →
+`Number_Of_R`). Those temps now share one ADT materialiser
+(`materialise_temp_adt` / `_open`):
+
+- Skeleton comes from `AdsCreateTable`'s ADS_ADT path (single source of
+  truth for header/descriptor layout).
+- Pre-formatted text cells write verbatim; Date cells convert
+  `"YYYYMMDD"` → 4-byte JDN; numerics stay AsciiNumeric so N(x,y) scale
+  is preserved (avoids the #146 trap).
+- Records stream in one file append with a single record-count patch
+  (no per-row lock/header rewrite).
+- Temps register in `materialised_cursor_temps()` so closing the cursor
+  deletes them (DBF-era paths leaked one temp file per query).
+
+Also fixed: aggregate / GROUP BY over a right-side join column raised
+2121 (`Column not found: UNITS`) where SAP answers — `jcol_index()` now
+resolves as written, by the `R_` spelling, and with the table qualifier
+stripped. Group-key columns take their AS alias like SAP. Guarded by
+`abi_sql_temp_names_test.cpp`. See `docs/materialised-cursor-temps.md`.
+
+### Tests
+
+- Full suite: **1287 passed, 0 failed** (14 skipped).
+
 ## 1.8.54 - 2026-08-04
 
 ### Fixed — Connect refused when the data root is not writable (e.g. `--data "C:\"`)
