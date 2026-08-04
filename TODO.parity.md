@@ -73,9 +73,10 @@ group-key columns take their `AS` alias / written spelling like SAP
 (`Insurance AS Insurance_Carrier_Group` byte-matches now). Temps are also
 deleted when their cursor closes — the DBF-era paths leaked one per query.
 Guarded by `abi_sql_temp_names_test.cpp` (fails 17 assertions with the fix
-reverted); doc: `docs/materialised-cursor-temps.md`. Still on DBF: the
-script/proc engine-internal cursors (`_scr_`, `_call_`, `_case_`) — `_case_`
-also carries CASE/window output and truncates at 11.
+reverted); doc: `docs/materialised-cursor-temps.md`. **2026-08-05: the last
+three (`_scr_`, `_call_`, `_case_`) converted too — every SQL result
+materialiser is now ADT.** CASE/window/fn aliases keep full names (were cut
+at 11); `_scr_`/`_call_` temps now delete on close.
 
 ### ✅ Numeric presentation in joins + aggregates — FIXED 2026-07-30
 

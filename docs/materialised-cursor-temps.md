@@ -23,13 +23,20 @@ first.** The relevant code is `exec_sql_direct_impl()` in
 | Single-table GROUP BY | `_grp_*` | `materialise_temp_adt()` | **ADT** ✅ |
 | Join + aggregate | `_jagg_*` | `materialise_temp_adt()` | **ADT** ✅ |
 | Join + GROUP BY | `_jgrp_*` | `materialise_temp_adt()` | **ADT** ✅ |
-| Script/proc engine-internal cursors | `_scr_*`, `_call_*`, `_case_*` | inline | **DBF** ⚠️ still truncates |
+| CASE / scalar-fn / window projections | `_case_*` | `materialise_temp_adt()` | **ADT** ✅ |
+| Script engine-internal cursors | `_scr_*` | `materialise_temp_adt()` | **ADT** ✅ |
+| Registered-proc call result | `_call_*` | `materialise_temp_adt()` | **ADT** ✅ |
+
+**Every SQL result materialiser is now ADT** (2026-08-05). The remaining
+`stamp_dbf_header_today` users are genuine DBF *table creation* paths
+(AdsCreateTable's CDX/VFP branches and friends), not result cursors.
 
 When hunting for a stray materialiser, don't grep for temp-name prefixes —
 grep for `push_back(0x1A)` (the DBF EOF marker) and `stamp_dbf_header_today`.
 That is how `_jgrp_` was nearly missed in the conversion: it only surfaced
 because a DD-connection probe still truncated where the free-table unit test
-passed.
+passed. (`_case_` truncated at 11, not 10 — an 11-byte memcpy without the
+NUL — so "grep for resize(10)" also misses this class.)
 
 A plain `SELECT ... [WHERE ...]` does **not** materialise — it stays a live
 cursor. That asymmetry is why a bug here often looks like "the query works until

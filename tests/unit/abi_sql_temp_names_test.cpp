@@ -215,6 +215,26 @@ TEST_CASE("join/union/aggregate temps keep column names longer than 10 chars") {
         REQUIRE(AdsCloseTable(hCur) == 0);
     }
 
+    SUBCASE("CASE projection: long alias survives (_case_ path)") {
+        ADSHANDLE hCur = run(
+            "SELECT CASE WHEN Total_Amount_Billed > 6 THEN 'HIGH' "
+            "ELSE 'LOW' END AS Billing_Level_Classification, "
+            "Claim_Reference_Number FROM claims");
+        // The DBF-era temp truncated the alias at 11 ("Billing_Lev").
+        CHECK(field_name(hCur, 1) == "Billing_Level_Classification");
+        CHECK(field_name(hCur, 2) == "Claim_Reference_Number");
+        REQUIRE(AdsGotoTop(hCur) == 0);
+        CHECK(field_text(hCur, "Billing_Level_Classification").find("HIGH")
+              != std::string::npos);
+        REQUIRE(AdsCloseTable(hCur) == 0);
+    }
+
+    // (The _scr_ engine-internal script cursor is not reachable from a
+    // top-level free-table SELECT — a script's last SELECT re-enters the
+    // SQL dispatcher, which requires FROM. Its ADT conversion rides the
+    // same materialise_temp_adt() helper and is covered by the script and
+    // trigger suites.)
+
     SUBCASE("temps are deleted when their cursor closes (DBF era leaked)") {
         ADSHANDLE hCur = run(
             "SELECT SUM(Total_Amount_Billed) AS Total_Amount_For_All_Claims "

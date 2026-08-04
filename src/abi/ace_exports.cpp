@@ -23636,15 +23636,15 @@ inline openads::util::Result<void> run_top_level_script(
         return {};
     }
 
-    // Engine-internal cursor: materialize rows into a temp DBF.
+    // Engine-internal cursor: materialize rows into a temp ADT (full-length
+    // column names — the DBF this used to write truncated them to 10).
     std::size_t nc = cur->field_count();
     if (nc == 0) return {};
-    if (nc > 64) nc = 64;                 // DBF sanity cap
+    if (nc > 64) nc = 64;                 // sanity cap
     std::vector<std::string> names;
     for (std::size_t k = 0; k < nc; ++k) {
         std::string nm = cur->field_name(k);
         if (nm.empty()) nm = nc == 1 ? "EXPR" : "COL" + std::to_string(k + 1);
-        if (nm.size() > 10) nm.resize(10);   // DBF field-name limit
         names.push_back(std::move(nm));
     }
     std::vector<std::vector<std::string>> rows;
@@ -23656,67 +23656,29 @@ inline openads::util::Result<void> run_top_level_script(
         if (rows.size() >= 65000) break;  // DBF row sanity cap
     }
 
-    namespace fs = std::filesystem;
-    char nb[64];
-    std::snprintf(nb, sizeof(nb), "_scr_%llx.dbf",
-                  static_cast<unsigned long long>(
-                      openads::platform::monotonic_nanos()));
-    fs::path dbf = fs::path(c->data_dir()) / nb;
-    constexpr std::size_t kW = 254;       // every column CHAR(254)
-    std::vector<std::uint8_t> file;
-    std::array<std::uint8_t, 32> hdr{};
-    hdr[0] = 0x03;
-    stamp_dbf_header_today(hdr.data());
-    std::uint32_t nrec = static_cast<std::uint32_t>(rows.size());
-    hdr[4] = static_cast<std::uint8_t>( nrec        & 0xFFu);
-    hdr[5] = static_cast<std::uint8_t>((nrec >>  8) & 0xFFu);
-    hdr[6] = static_cast<std::uint8_t>((nrec >> 16) & 0xFFu);
-    hdr[7] = static_cast<std::uint8_t>((nrec >> 24) & 0xFFu);
-    std::uint16_t hl = static_cast<std::uint16_t>(32 + 32 * nc + 1);
-    std::uint16_t rl = static_cast<std::uint16_t>(1 + kW * nc);
-    hdr[8]  = static_cast<std::uint8_t>( hl       & 0xFFu);
-    hdr[9]  = static_cast<std::uint8_t>((hl >> 8) & 0xFFu);
-    hdr[10] = static_cast<std::uint8_t>( rl       & 0xFFu);
-    hdr[11] = static_cast<std::uint8_t>((rl >> 8) & 0xFFu);
-    file.insert(file.end(), hdr.begin(), hdr.end());
-    for (std::size_t k = 0; k < nc; ++k) {
-        std::array<std::uint8_t, 32> fd{};
-        std::memcpy(fd.data(), names[k].c_str(),
-                    names[k].size() < 11 ? names[k].size() : 10);
-        fd[11] = 'C';
-        fd[16] = static_cast<std::uint8_t>(kW);
-        file.insert(file.end(), fd.begin(), fd.end());
-    }
-    file.push_back(0x0D);
+    constexpr std::uint16_t kW = 254;     // every column CHAR(254)
+    std::vector<TempColSpec> scols;
+    scols.reserve(nc);
+    for (auto& nm : names) scols.push_back({nm, 'C', kW, 0});
+    std::vector<std::uint8_t> rowbuf;
+    rowbuf.reserve(rows.size() * nc * kW);
     for (const auto& row : rows) {
-        file.push_back(' ');
         for (std::size_t k = 0; k < nc; ++k) {
             const std::string& v = row[k];
             for (std::size_t i = 0; i < kW; ++i)
-                file.push_back(i < v.size()
+                rowbuf.push_back(i < v.size()
                     ? static_cast<std::uint8_t>(v[i]) : ' ');
         }
     }
-    file.push_back(0x1A);
-    {
-        std::ofstream f(dbf, std::ios::binary);
-        if (!f)
-            return openads::util::Error{openads::AE_INTERNAL_ERROR, 0,
-                "script result temp DBF open failed", ""};
-        f.write(reinterpret_cast<const char*>(file.data()),
-                static_cast<std::streamsize>(file.size()));
+    ADSHANDLE gh_scr = 0;
+    UNSIGNED32 mrc = materialise_temp_adt(c, "_scr_", scols, rowbuf,
+                                          static_cast<std::size_t>(nc) * kW,
+                                          &gh_scr);
+    if (mrc != openads::AE_SUCCESS) {
+        return openads::util::Error{static_cast<int>(mrc), 0,
+            "script result temp materialise failed", ""};
     }
-    auto th = c->open_table(dbf.filename().string(),
-                            openads::engine::TableType::Cdx,
-                            openads::engine::OpenMode::Read);
-    if (!th) return th.error();
-    openads::engine::Table* tbl = c->lookup_table(th.value());
-    if (!tbl)
-        return openads::util::Error{openads::AE_INTERNAL_ERROR, 0,
-            "script result post-open", ""};
-    auto& s = state();
-    std::lock_guard<std::recursive_mutex> lk(s.mu);
-    *phCursor = to_ads_handle(s.registry.register_object(HandleKind::Table, tbl));
+    *phCursor = gh_scr;
     return {};
 }
 
@@ -25827,52 +25789,15 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         if (!out) return fail(out.error());
         std::string& s_out = out.value();
 
-        // Build a 1-row temp DBF with one C(255) column = "RESULT".
-        namespace fs = std::filesystem;
-        char nb[64];
-        std::snprintf(nb, sizeof(nb), "_call_%llx.dbf",
-                      static_cast<unsigned long long>(
-                          openads::platform::monotonic_nanos()));
-        fs::path dbf = fs::path(c->data_dir()) / nb;
-        std::vector<std::uint8_t> file;
-        std::array<std::uint8_t, 32> hdr{};
-        hdr[0] = 0x03;
-        stamp_dbf_header_today(hdr.data());
-        hdr[4] = 1;
-        std::uint16_t hl = 32 + 32 + 1;
-        std::uint16_t rl = 1 + 255;
-        hdr[8]  = static_cast<std::uint8_t>( hl       & 0xFFu);
-        hdr[9]  = static_cast<std::uint8_t>((hl >> 8) & 0xFFu);
-        hdr[10] = static_cast<std::uint8_t>( rl       & 0xFFu);
-        hdr[11] = static_cast<std::uint8_t>((rl >> 8) & 0xFFu);
-        file.insert(file.end(), hdr.begin(), hdr.end());
-        std::array<std::uint8_t, 32> fd{};
-        std::memcpy(fd.data(), "RESULT", 6);
-        fd[11] = 'C'; fd[16] = 255;
-        file.insert(file.end(), fd.begin(), fd.end());
-        file.push_back(0x0D);
-        file.push_back(' ');
-        for (std::size_t i = 0; i < 255; ++i) {
-            file.push_back(i < s_out.size()
-                ? static_cast<std::uint8_t>(s_out[i]) : ' ');
-        }
-        file.push_back(0x1A);
-        {
-            std::ofstream f(dbf, std::ios::binary);
-            if (!f) return fail(openads::AE_INTERNAL_ERROR,
-                "EXECUTE PROCEDURE temp DBF open failed");
-            f.write(reinterpret_cast<const char*>(file.data()),
-                    static_cast<std::streamsize>(file.size()));
-        }
-        std::string rel = dbf.filename().string();
-        auto th = c->open_table(rel, openads::engine::TableType::Cdx,
-                                openads::engine::OpenMode::Read);
-        if (!th) return fail(th.error());
-        openads::engine::Table* tbl = c->lookup_table(th.value());
-        if (!tbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
-        ADSHANDLE gh = to_ads_handle(s.registry.register_object(HandleKind::Table, tbl));
-        *phCursor = gh;
-        return ok();
+        // 1-row temp with one C(255) column "RESULT", via the shared ADT
+        // temp helper (registers delete-on-close; the DBF this used to
+        // write leaked).
+        std::vector<TempColSpec> rcols;
+        rcols.push_back({"RESULT", 'C', 255, 0});
+        std::vector<std::uint8_t> rrow(255, ' ');
+        std::memcpy(rrow.data(), s_out.data(),
+                    std::min<std::size_t>(s_out.size(), 255));
+        return materialise_temp_adt(c, "_call_", rcols, rrow, 255, phCursor);
     }
 
     // S4 — MERGE, UPSERT form (master_merge.htm): probe the ON condition;
@@ -31917,36 +31842,18 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             }
         }
 
-        // Build temp DBF.
-        namespace fs = std::filesystem;
-        char nb[64];
-        std::snprintf(nb, sizeof(nb), "_case_%llx.dbf",
-                      static_cast<unsigned long long>(
-                          openads::platform::monotonic_nanos()));
-        fs::path dbf = fs::path(c->data_dir()) / nb;
-        std::vector<std::uint8_t> file;
-        std::array<std::uint8_t, 32> hdr{};
-        hdr[0] = 0x03;
-        stamp_dbf_header_today(hdr.data());
-        std::uint16_t hl = static_cast<std::uint16_t>(
-            32 + 32 * outs.size() + 1);
-        std::uint32_t rl = 1;
-        for (auto& o : outs) rl += o.length;
-        hdr[8]  = static_cast<std::uint8_t>( hl       & 0xFFu);
-        hdr[9]  = static_cast<std::uint8_t>((hl >> 8) & 0xFFu);
-        hdr[10] = static_cast<std::uint8_t>( rl       & 0xFFu);
-        hdr[11] = static_cast<std::uint8_t>((rl >> 8) & 0xFFu);
-        file.insert(file.end(), hdr.begin(), hdr.end());
+        // Materialise through the shared ADT temp helper
+        // (docs/materialised-cursor-temps.md): the DBF this used to write
+        // truncated CASE / window / fn aliases at 11 characters. `file`
+        // holds ROW IMAGES only.
+        std::vector<TempColSpec> ccols;
+        std::size_t crow_stride = 0;
+        ccols.reserve(outs.size());
         for (auto& o : outs) {
-            std::array<std::uint8_t, 32> fd{};
-            std::memcpy(fd.data(), o.name.data(),
-                        std::min(o.name.size(), std::size_t{11}));
-            fd[11] = static_cast<std::uint8_t>(o.raw_type);
-            fd[16] = o.length;
-            fd[17] = o.decimals;
-            file.insert(file.end(), fd.begin(), fd.end());
+            ccols.push_back({o.name, o.raw_type, o.length, o.decimals});
+            crow_stride += o.length;
         }
-        file.push_back(0x0D);
+        std::vector<std::uint8_t> file;
 
         std::uint32_t emitted = 0;
         auto trim_left = [](std::string sl) {
@@ -31963,7 +31870,6 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         };
         for (std::uint32_t r : walk_seq) {
             if (auto g = tbl->goto_record(r); !g) continue;
-            file.push_back(' ');
             for (auto& o : outs) {
                 std::string val;
                 bool from_synth = false;
@@ -32393,27 +32299,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             }
             ++emitted;
         }
-        file.push_back(0x1A);
-        file[4] = static_cast<std::uint8_t>( emitted        & 0xFFu);
-        file[5] = static_cast<std::uint8_t>((emitted >>  8) & 0xFFu);
-        file[6] = static_cast<std::uint8_t>((emitted >> 16) & 0xFFu);
-        file[7] = static_cast<std::uint8_t>((emitted >> 24) & 0xFFu);
-        {
-            std::ofstream out(dbf, std::ios::binary);
-            if (!out) return fail(openads::AE_INTERNAL_ERROR,
-                "case temp DBF open for write failed");
-            out.write(reinterpret_cast<const char*>(file.data()),
-                      static_cast<std::streamsize>(file.size()));
-        }
-        std::string rel = dbf.filename().string();
-        auto cth = c->open_table(rel, openads::engine::TableType::Cdx,
-                                 openads::engine::OpenMode::Read);
-        if (!cth) return fail(cth.error());
-        openads::engine::Table* ctbl = c->lookup_table(cth.value());
-        if (!ctbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
-        ADSHANDLE gh_case = to_ads_handle(s.registry.register_object(HandleKind::Table, ctbl));
-        *phCursor = gh_case;
-        return ok();
+        (void)emitted;
+        return materialise_temp_adt(c, "_case_", ccols, file,
+                                    crow_stride, phCursor);
     }
 
     // RCB 07/16/2026: column-level permission enforcement. If the connected
