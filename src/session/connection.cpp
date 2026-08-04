@@ -157,12 +157,29 @@ util::Result<Connection> Connection::open(const std::string& data_dir) {
 
     fs::path log_path = fs::path(actual_dir) / "openads.txlog";
     auto lr = c.tx_log_.open(log_path.string());
-    if (!lr) return lr.error();
-
-    fs::path map_path = fs::path(actual_dir) / "openads.lsnmap";
-    if (auto mr = c.lsn_map_.open(map_path.string()); !mr) return mr.error();
-
-    if (auto rr = c.recover_orphan_tx_(); !rr) return rr.error();
+    bool journal_ok = lr.has_value();
+    if (!journal_ok) {
+        // The data directory is not writable — e.g. --data "C:\" on
+        // Windows, where a non-elevated process cannot create files at a
+        // system drive root. The connection must still succeed: tables
+        // in *subdirectories* remain fully usable; only transactions are
+        // unavailable (begin_transaction fails cleanly with a clear
+        // error instead of the whole Connect being refused).
+        std::fprintf(stderr,
+            "[openads] tx journal not writable in '%s' — transactions "
+            "disabled for this connection\n", actual_dir.c_str());
+    }
+    if (journal_ok) {
+        fs::path map_path = fs::path(actual_dir) / "openads.lsnmap";
+        if (auto mr = c.lsn_map_.open(map_path.string()); !mr) {
+            std::fprintf(stderr,
+                "[openads] tx recovery map not writable in '%s' — orphan "
+                "recovery skipped for this connection\n",
+                actual_dir.c_str());
+        } else if (auto rr = c.recover_orphan_tx_(); !rr) {
+            return rr.error();
+        }
+    }
     return c;
 }
 
@@ -505,6 +522,14 @@ util::Result<void> Connection::begin_tx() {
     // not become undoable now. Writeback with tx_ inactive skips
     // note_before_image entirely.
     if (auto s = settle_dirty_tables_(); !s) return s.error();
+    if (!tx_log_.is_open()) {
+        // Data directory is not writable (see Connection::open) — the
+        // journal could not be created, so transactions are unavailable
+        // on this connection.
+        return util::Error{5000, 0,
+            "transactions unavailable: tx journal not writable in data "
+            "directory", data_dir_};
+    }
     std::uint64_t tid = next_tx_id_++;
     tx_.activate(tid, &tx_log_);
     tx_nest_depth_ = 1;

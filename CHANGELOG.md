@@ -1,3 +1,19 @@
+## 1.8.54 - 2026-08-04
+
+### Fixed — Connect refused when the data root is not writable (e.g. `--data "C:\"`)
+
+`Connection::open` created the transaction journal (`openads.txlog` /
+`openads.lsnmap`) in the data directory and failed the whole Connect when
+it could not — and a non-elevated Windows process cannot create files at
+a drive root, so `openads_serverd --data "C:\"` (Pritpal Bedi's
+whole-drive ERP setup) rejected every `AdsConnect60` with
+"Connect: connection open failed" regardless of how the `tcp://` dir was
+spelled (`C:/`, `c:\`, …). The connection now succeeds without
+journaling: tables in writable subdirectories are fully usable,
+`AdsBeginTransaction` fails cleanly with a clear error on such
+connections, and orphan-transaction recovery runs only when the journal
+actually opened.
+
 ## 1.8.53 - 2026-08-03
 
 ### Fixed — `legacy_paths`: remote create/reindex used the un-flagged ABI twin connection (found by live verification against a Linux server)

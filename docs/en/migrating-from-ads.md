@@ -116,6 +116,10 @@ Whole-filesystem access on a Windows server: list the drive roots,
 routes by its drive letter — `E:\...` lands under the `E:` root, `D:\...`
 under `D:` — and files that exist are always opened verbatim first, so a
 server with the same drive layout as the clients needs no folding at all.
+When the data root itself is not writable (a drive root for a
+non-elevated server process), connections still succeed — only
+transaction journaling is disabled (a notice is logged); tables in
+writable subfolders work normally.
 
 Default is **off** (strict SAP-compatible resolution). This works for Windows
 clients against Windows, Linux, or macOS servers.
