@@ -63,10 +63,19 @@ Guarded by `abi_script_proc_test.cpp` *"script proc: `__output` keeps column
 names longer than 10 chars"*, verified to fail with the fix reverted. mp gate
 `sp_GetPhysicalPath` now passes on the column name, not just the path.
 
-**Still open — the same truncation remains in the join / union / aggregate
-materialisers** (joins additionally rename right-side columns `R_*`, itself a
-consequence of squeezing `R_` + the source name into 10 bytes). Same root cause,
-same fix, same doc: `docs/materialised-cursor-temps.md`.
+**✅ FIXED 2026-08-03 — the join / union / aggregate materialisers no longer
+truncate.** All seven (`_join_`, `_mjoin_`, `_uni_`, `_agg_`, `_grp_`,
+`_jagg_`, `_jgrp_`)
+now share `materialise_temp_adt()`, which builds an ADT temp with the callers'
+cell bytes verbatim; the merged `R_<name>` spelling is untruncated, the N-way
+join no longer dedups two long names agreeing in their first 10 chars, and
+group-key columns take their `AS` alias / written spelling like SAP
+(`Insurance AS Insurance_Carrier_Group` byte-matches now). Temps are also
+deleted when their cursor closes — the DBF-era paths leaked one per query.
+Guarded by `abi_sql_temp_names_test.cpp` (fails 17 assertions with the fix
+reverted); doc: `docs/materialised-cursor-temps.md`. Still on DBF: the
+script/proc engine-internal cursors (`_scr_`, `_call_`, `_case_`) — `_case_`
+also carries CASE/window output and truncates at 11.
 
 ### ✅ Numeric presentation in joins + aggregates — FIXED 2026-07-30
 

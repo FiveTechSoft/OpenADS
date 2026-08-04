@@ -5456,17 +5456,308 @@ materialised_cursor_temps() {
 // so temps written by an older build are still cleaned up. If a new
 // materialising path introduces another on-disk format, add its extensions here
 // too — anything missing leaks one file per query into the data directory.
+void remove_temp_table_files(const std::string& stem) {
+    std::error_code ec;
+    for (const char* ext : {".adt", ".adm", ".adi",
+                            ".dbf", ".cdx", ".fpt", ".dbt", ".ntx"}) {
+        std::filesystem::remove(std::filesystem::path(stem + ext), ec);
+    }
+}
+
 void drop_materialised_cursor_temp(ADSHANDLE h) {
     auto& m = materialised_cursor_temps();
     auto it = m.find(h);
     if (it == m.end()) return;
     const std::string stem = it->second;
     m.erase(it);
-    std::error_code ec;
-    for (const char* ext : {".adt", ".adm", ".adi",
-                            ".dbf", ".cdx", ".fpt", ".dbt", ".ntx"}) {
-        std::filesystem::remove(std::filesystem::path(stem + ext), ec);
+    remove_temp_table_files(stem);
+}
+
+// ─── Shared materialiser for join / union / aggregate temp cursors ─────────
+//
+// >>> Before changing ANY of this, read docs/materialised-cursor-temps.md. <<<
+// >>> Do NOT switch these temps back to DBF, and do not "simplify" the     <<<
+// >>> AsciiNumeric mapping to plain Numeric. OpenADS is not a DBF-only     <<<
+// >>> engine: result-column names longer than 10 characters (SAP's own     <<<
+// >>> catalogs use them), AS aliases, and merged R_<name> spellings all    <<<
+// >>> require the ADT container, and N(x,y) scale survives ONLY through   <<<
+// >>> ADT type 2. Both halves have been regressed before (#136, #146);    <<<
+// >>> the doc records the failures each regression caused.                <<<
+//
+// Every SELECT that cannot be answered by a live cursor materialises its
+// result into a temp table. Seven paths (2-table join, N-way join, UNION,
+// scalar / grouped / join / join+GROUP-BY aggregates) used to hand-assemble
+// a raw DBF here, which silently truncated every result-column name
+// (constraint 2 in the doc) — including `AS` aliases and the merged `R_<name>`
+// spellings. They now share this one materialiser, which builds an ADT temp:
+//
+//  - The SKELETON (400-byte header + 200-byte descriptors) comes from
+//    AdsCreateTable's own ADS_ADT path, so there is exactly one place in the
+//    tree that knows the ADT container layout. This helper only appends
+//    records and patches the record count, reading hdr_len / rec_len back
+//    from the file it was just handed.
+//  - Cells arrive PRE-FORMATTED from the callers (fixed-width text, the same
+//    bytes the DBF temps stored), and are written verbatim: Character and
+//    AsciiNumeric cells are raw ASCII in both containers, so read-back is
+//    byte-identical to the DBF-era temps. Only Date cells change shape —
+//    8-char "YYYYMMDD" text is encoded to the 4-byte JDN through the same
+//    encode_field_string the write path uses everywhere else (blank-safe:
+//    8 blanks store JDN 0), and decodes back to "YYYYMMDD".
+//  - Numeric columns are declared AsciiNumeric (ADT type 2), NEVER the
+//    letter 'N': the letter maps to binary INTEGER / DOUBLE via
+//    adt_spec_for, which re-renders values and drops the declared scale
+//    (constraint 3 — the #146 trap).
+//  - Records are streamed in ONE file append and the count patched once,
+//    instead of per-record append_record_raw (lock + header rewrite per
+//    row), because a join over a 600K-row table lands here.
+//
+// The temp is registered in materialised_cursor_temps(), so closing the
+// cursor deletes it — the DBF-era paths never registered theirs and leaked
+// one file per query into the data directory.
+struct TempColSpec {
+    std::string   name;   // FULL-length result-column name (the point of ADT)
+    char          type;   // DBF letter OR raw ADT type code from the source
+    std::uint16_t len;    // width of the caller's fixed-width text cell
+    std::uint8_t  dec;
+};
+
+enum class TempCellKind : std::uint8_t { Text, Num, Date, Logic };
+
+// Classify a source type for the temp's declared column type. Letters and
+// raw ADT codes are disjoint (letters are all >= 0x41, ADT codes top out at
+// 22), same reasoning as type_name() in the _srt_ path. Anything unknown
+// degrades to Character, which stores the caller's text cell verbatim —
+// the same net behaviour the DBF temps had for exotic types.
+TempCellKind temp_cell_kind(char t) {
+    switch (t) {
+        case 'N': case 'F': case 'I': case 'B': case 'Y':
+        case 'S': case 'A': case '$': case '#':
+            return TempCellKind::Num;
+        case 'D': return TempCellKind::Date;
+        case 'L': return TempCellKind::Logic;
+        case 'C': case 'W': case 'V': case 'M': case 'Q':
+        case 'T': case 'Z': case 'P':
+            return TempCellKind::Text;
+        default: break;
     }
+    switch (static_cast<unsigned char>(t)) {
+        case  1: return TempCellKind::Logic;
+        case  2: case 10: case 11: case 12: case 15: case 18:
+            return TempCellKind::Num;
+        case  3: return TempCellKind::Date;
+        default: break;
+    }
+    return TempCellKind::Text;
+}
+
+// An ADT temp materialised and OPENED on `c`, but not yet registered as a
+// user-visible cursor. The join paths need this split: the merged temp is
+// an intermediate the outer WHERE / ORDER BY / aggregate stages keep
+// working on, and only the final survivor becomes the caller's cursor.
+struct MaterialisedTemp {
+    Handle                  th   = 0;        // close with c->close_table
+    openads::engine::Table* tbl  = nullptr;
+    std::string             stem;            // for remove_temp_table_files
+};
+
+// `rows` is the concatenation of fixed-width row images (NO deletion-flag
+// byte — pure cells, `row_stride` bytes each, in `cols` order). Creates,
+// fills and opens the temp; does NOT register a cursor handle.
+UNSIGNED32 materialise_temp_adt_open(Connection* c,
+                                     const char* prefix,
+                                     const std::vector<TempColSpec>& cols,
+                                     const std::vector<std::uint8_t>& rows,
+                                     std::size_t row_stride,
+                                     MaterialisedTemp* out) {
+    namespace fs = std::filesystem;
+    if (cols.empty() || row_stride == 0 || rows.size() % row_stride != 0) {
+        return fail(openads::AE_INTERNAL_ERROR, "temp materialise: bad shape");
+    }
+    // The skeleton goes through AdsCreateTable, which takes a connection
+    // HANDLE; the callers hold the Connection*. Recover the handle so the
+    // create resolves against the same data directory the reopen uses.
+    ADSHANDLE conn_h = 0;
+    state().registry.for_each_handle([&](Handle h, HandleKind k, void* p) {
+        if (k != HandleKind::Connection) return;
+        if (static_cast<Connection*>(p) == c)
+            conn_h = to_ads_handle(h);
+    });
+    if (conn_h == 0) return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
+    // Column plan: defs string for the skeleton + src/dst cell geometry.
+    std::string defs;
+    std::size_t src_sum = 0;
+    std::vector<TempCellKind> kinds;
+    std::vector<std::uint16_t> dst_lens;
+    kinds.reserve(cols.size());
+    dst_lens.reserve(cols.size());
+    for (const auto& col : cols) {
+        const TempCellKind k = temp_cell_kind(col.type);
+        const std::uint16_t sl = col.len ? col.len : 1;
+        std::uint16_t dl = sl;
+        if (!defs.empty()) defs.push_back(';');
+        defs += col.name;
+        switch (k) {
+            case TempCellKind::Num:
+                defs += ",AsciiNumeric," + std::to_string(sl);
+                if (col.dec > 0) defs += "," + std::to_string(col.dec);
+                break;
+            case TempCellKind::Date:
+                defs += ",Date";
+                dl = 4;
+                break;
+            case TempCellKind::Logic:
+                defs += ",Logical";
+                dl = 1;
+                break;
+            case TempCellKind::Text:
+                defs += ",Character," + std::to_string(sl);
+                break;
+        }
+        kinds.push_back(k);
+        dst_lens.push_back(dl);
+        src_sum += sl;
+    }
+    if (src_sum != row_stride) {
+        return fail(openads::AE_INTERNAL_ERROR,
+                    "temp materialise: cols do not tile the row stride");
+    }
+
+    char nb[64];
+    std::snprintf(nb, sizeof(nb), "%s%llx", prefix,
+                  static_cast<unsigned long long>(
+                      openads::platform::monotonic_nanos()));
+    const std::string tmp_name = nb;
+
+    std::vector<UNSIGNED8> name_buf(tmp_name.size() + 1, 0);
+    std::memcpy(name_buf.data(), tmp_name.data(), tmp_name.size());
+    std::vector<UNSIGNED8> def_buf(defs.size() + 1, 0);
+    std::memcpy(def_buf.data(), defs.data(), defs.size());
+    ADSHANDLE hNew = 0;
+    UNSIGNED32 crc = AdsCreateTable(conn_h, name_buf.data(), nullptr,
+                                    ADS_ADT, 0, 0, 0, 0,
+                                    def_buf.data(), &hNew);
+    if (crc != openads::AE_SUCCESS) return crc;
+    AdsCloseTable(hNew);
+
+    // Locate the file the create path actually wrote. This must mirror
+    // AdsCreateTable's own resolution EXACTLY: the connection resolver may
+    // hand back a default extension that is not ".adt" (an extensionless
+    // temp name resolves to "<name>.dbf" — the ADT container still goes
+    // there; only the file NAME is legacy). Guessing "<stem>.adt" here left
+    // the skeleton orphaned and the reopen failing.
+    fs::path adt;
+    {
+        auto rt = openads::engine::TableType::Adt;
+        adt = fs::path(c->resolve_table_file(tmp_name, rt,
+                                             /*for_create=*/true));
+        if (!adt.has_extension()) adt.replace_extension(".adt");
+    }
+    fs::path stem = adt;
+    stem.replace_extension();
+    {
+        std::fstream f(adt, std::ios::in | std::ios::out | std::ios::binary);
+        if (!f) return fail(openads::AE_INTERNAL_ERROR,
+                            "temp materialise: reopen of created ADT failed");
+        auto rd32 = [&](std::streamoff off) -> std::uint32_t {
+            std::uint8_t b[4] = {0, 0, 0, 0};
+            f.seekg(off);
+            f.read(reinterpret_cast<char*>(b), 4);
+            return static_cast<std::uint32_t>(b[0]) |
+                   (static_cast<std::uint32_t>(b[1]) << 8) |
+                   (static_cast<std::uint32_t>(b[2]) << 16) |
+                   (static_cast<std::uint32_t>(b[3]) << 24);
+        };
+        const std::uint32_t hdr_len = rd32(32);
+        const std::uint32_t rec_len = rd32(36);
+        // Guard against the mapping here drifting from adt_spec_for: the
+        // record length the skeleton declares must equal 5-byte prefix +
+        // the cells this helper is about to write.
+        std::uint32_t expect = 5;
+        for (auto dl : dst_lens) expect += dl;
+        if (rec_len != expect) {
+            f.close();
+            std::error_code ec;
+            fs::remove(adt, ec);
+            return fail(openads::AE_INTERNAL_ERROR,
+                        "temp materialise: rec_len mismatch vs skeleton");
+        }
+
+        const std::size_t nrows = rows.size() / row_stride;
+        std::vector<std::uint8_t> obuf;
+        obuf.reserve(nrows * rec_len);
+        std::vector<std::uint8_t> rec(rec_len);
+        for (std::size_t r = 0; r < nrows; ++r) {
+            std::fill(rec.begin(), rec.end(), 0);
+            rec[0] = 0x04;   // ADT active-record flag (0x05 = deleted)
+            const std::uint8_t* src = rows.data() + r * row_stride;
+            std::size_t so = 0;
+            std::uint16_t dst_off = 5;
+            for (std::size_t i = 0; i < cols.size(); ++i) {
+                const std::uint16_t sl = cols[i].len ? cols[i].len : 1;
+                if (kinds[i] == TempCellKind::Date) {
+                    // Through the production encoder — same blank-safety
+                    // and JDN math as every other ADT date write.
+                    openads::drivers::DbfField df;
+                    df.type          = openads::drivers::DbfFieldType::AdtDate;
+                    df.record_offset = dst_off;
+                    df.length        = 4;
+                    (void)openads::drivers::encode_field_string(
+                        df, rec.data(), rec.size(),
+                        std::string(reinterpret_cast<const char*>(src + so),
+                                    sl));
+                } else {
+                    std::memcpy(rec.data() + dst_off, src + so, dst_lens[i]);
+                }
+                so      += sl;
+                dst_off = static_cast<std::uint16_t>(dst_off + dst_lens[i]);
+            }
+            obuf.insert(obuf.end(), rec.begin(), rec.end());
+        }
+        f.seekp(static_cast<std::streamoff>(hdr_len));
+        f.write(reinterpret_cast<const char*>(obuf.data()),
+                static_cast<std::streamsize>(obuf.size()));
+        // Patch the record count (header bytes 24-27, LE u32).
+        std::uint8_t cnt[4] = {
+            static_cast<std::uint8_t>( nrows        & 0xFFu),
+            static_cast<std::uint8_t>((nrows >>  8) & 0xFFu),
+            static_cast<std::uint8_t>((nrows >> 16) & 0xFFu),
+            static_cast<std::uint8_t>((nrows >> 24) & 0xFFu)};
+        f.seekp(24);
+        f.write(reinterpret_cast<const char*>(cnt), 4);
+        if (!f) return fail(openads::AE_INTERNAL_ERROR,
+                            "temp materialise: short write");
+    }
+
+    auto cth = c->open_table(tmp_name, openads::engine::TableType::Adt,
+                             openads::engine::OpenMode::Read);
+    if (!cth) return fail(cth.error());
+    openads::engine::Table* ctbl = c->lookup_table(cth.value());
+    if (!ctbl) return fail(openads::AE_INTERNAL_ERROR,
+                           "temp materialise: post-open");
+    out->th   = cth.value();
+    out->tbl  = ctbl;
+    out->stem = stem.string();
+    return ok();
+}
+
+// Convenience wrapper for the paths whose temp IS the final result:
+// materialise, open, register the cursor handle, and tie the temp's on-disk
+// lifetime to it (cleanup happens in drop_materialised_cursor_temp).
+UNSIGNED32 materialise_temp_adt(Connection* c,
+                                const char* prefix,
+                                const std::vector<TempColSpec>& cols,
+                                const std::vector<std::uint8_t>& rows,
+                                std::size_t row_stride,
+                                ADSHANDLE* phCursor) {
+    MaterialisedTemp mt;
+    UNSIGNED32 rc = materialise_temp_adt_open(c, prefix, cols, rows,
+                                              row_stride, &mt);
+    if (rc != openads::AE_SUCCESS) return rc;
+    ADSHANDLE gh = to_ads_handle(
+        state().registry.register_object(HandleKind::Table, mt.tbl));
+    materialised_cursor_temps()[gh] = mt.stem;
+    *phCursor = gh;
+    return ok();
 }
 
 openads::util::Result<Table> build_connect101_options_table(
@@ -26624,7 +26915,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                             schema.push_back(mt->field_descriptor(k));
                         }
                     }
-                    rec_len = 1;
+                    rec_len = 0;
                     for (auto& fd : schema) rec_len += fd.length;
                 }
 
@@ -26660,8 +26951,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 for (std::uint32_t r : recnos) {
                     if (auto g = mt->goto_record(r); !g) continue;
                     std::vector<std::uint8_t> rec(rec_len);
-                    rec[0] = ' ';
-                    std::size_t off = 1;
+                    std::size_t off = 0;
                     for (std::size_t i = 0; i < schema.size(); ++i) {
                         std::string sval;
                         if (col_src[i] >= 0) {
@@ -26669,8 +26959,10 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                                 static_cast<std::uint16_t>(col_src[i]));
                             if (v) sval = v.value().as_string;
                         }
-                        std::uint8_t L = static_cast<std::uint8_t>(schema[i].length);
-                        for (std::uint8_t k = 0; k < L; ++k) {
+                        // uint16 — an ADT character column can exceed 255
+                        // bytes; the old uint8 cast mis-tiled the row.
+                        std::uint16_t L = schema[i].length;
+                        for (std::uint16_t k = 0; k < L; ++k) {
                             rec[off + k] = k < sval.size()
                                 ? static_cast<std::uint8_t>(sval[k]) : ' ';
                         }
@@ -26689,33 +26981,25 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
 
             std::uint16_t nfields = static_cast<std::uint16_t>(schema.size());
 
-            // Pre-build merged DBF header.
-            std::vector<std::uint8_t> file;
-            std::array<std::uint8_t, 32> hdr{};
-            hdr[0] = 0x03;
-            stamp_dbf_header_today(hdr.data());
-            std::uint16_t header_len = static_cast<std::uint16_t>(
-                32 + 32 * nfields + 1);
-            hdr[8]  = static_cast<std::uint8_t>( header_len       & 0xFFu);
-            hdr[9]  = static_cast<std::uint8_t>((header_len >> 8) & 0xFFu);
-            hdr[10] = static_cast<std::uint8_t>( rec_len          & 0xFFu);
-            hdr[11] = static_cast<std::uint8_t>((rec_len    >> 8) & 0xFFu);
-            file.insert(file.end(), hdr.begin(), hdr.end());
+            // Column specs for the shared ADT temp helper
+            // (docs/materialised-cursor-temps.md). The old DBF emit also
+            // copied fd.raw_type VERBATIM into the descriptor — an ADT
+            // source leaked its numeric type code (1-22) into a DBF byte,
+            // producing a descriptor no reader could classify; the helper's
+            // dual-range mapping normalises those.
+            (void)nfields;
+            std::vector<TempColSpec> uspecs;
+            uspecs.reserve(schema.size());
             for (auto& fd : schema) {
-                std::array<std::uint8_t, 32> bytes{};
-                std::memcpy(bytes.data(), fd.name.data(),
-                            std::min(fd.name.size(), std::size_t{11}));
-                bytes[11] = static_cast<std::uint8_t>(fd.raw_type);
-                bytes[16] = static_cast<std::uint8_t>(fd.length);
-                bytes[17] = fd.decimals;
-                file.insert(file.end(), bytes.begin(), bytes.end());
+                uspecs.push_back({fd.name, fd.raw_type,
+                                  fd.length, fd.decimals});
             }
-            file.push_back(0x0D);
+            std::vector<std::uint8_t> file;
 
             // M10.28 — apply ORDER BY (from last member) to merged rows.
             if (final_order) {
                 std::int32_t fi = -1;
-                std::uint16_t off = 1;
+                std::uint16_t off = 0;
                 std::uint16_t flen = 0;
                 bool numeric = false;
                 for (std::size_t i = 0; i < schema.size(); ++i) {
@@ -26758,40 +27042,12 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     });
             }
 
-            // Materialise rows into the file buffer.
+            // Materialise rows into the row-image buffer.
             for (auto& rec : rows) {
                 file.insert(file.end(), rec.begin(), rec.end());
             }
-
-            file.push_back(0x1A);
-            std::uint32_t emitted = static_cast<std::uint32_t>(rows.size());
-            file[4] = static_cast<std::uint8_t>( emitted        & 0xFFu);
-            file[5] = static_cast<std::uint8_t>((emitted >>  8) & 0xFFu);
-            file[6] = static_cast<std::uint8_t>((emitted >> 16) & 0xFFu);
-            file[7] = static_cast<std::uint8_t>((emitted >> 24) & 0xFFu);
-
-            namespace fs = std::filesystem;
-            char nb[64];
-            std::snprintf(nb, sizeof(nb), "_uni_%llx.dbf",
-                          static_cast<unsigned long long>(
-                              openads::platform::monotonic_nanos()));
-            fs::path uni_dbf = fs::path(c->data_dir()) / nb;
-            {
-                std::ofstream out(uni_dbf, std::ios::binary);
-                if (!out) return fail(openads::AE_INTERNAL_ERROR,
-                    "union temp DBF: open for write failed");
-                out.write(reinterpret_cast<const char*>(file.data()),
-                          static_cast<std::streamsize>(file.size()));
-            }
-            std::string rel = uni_dbf.filename().string();
-            auto uth = c->open_table(rel, openads::engine::TableType::Cdx,
-                                     openads::engine::OpenMode::Read);
-            if (!uth) return fail(uth.error());
-            openads::engine::Table* utbl = c->lookup_table(uth.value());
-            if (!utbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
-            ADSHANDLE gh = to_ads_handle(s.registry.register_object(HandleKind::Table, utbl));
-            *phCursor = gh;
-            return ok();
+            return materialise_temp_adt(c, "_uni_", uspecs, file,
+                                        rec_len, phCursor);
         }
     }
 
@@ -27054,7 +27310,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             const auto& f =
                 tbls[ti]->driver()->fields()[static_cast<std::size_t>(fi)];
             auto ofld = scriptbridge::join_out_field(f);
-            if (ofld.name.size() > 10) ofld.name.resize(10);
+            // Full-length names — the ADT temp carries them whole. (The
+            // DBF-era resize(10) here also made two long names that agree
+            // in their first 10 chars dedup into ONE output column.)
             if (!seen.insert(lc(ofld.name)).second) return;  // first-wins
             outcols.push_back(OutCol{
                 ti, static_cast<std::uint16_t>(fi), std::move(ofld)});
@@ -27150,7 +27408,6 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 kc.ofld = scriptbridge::join_out_field(
                     tbls[kc.ti]->driver()->fields()[
                         static_cast<std::size_t>(kc.fi)]);
-                if (kc.ofld.name.size() > 10) kc.ofld.name.resize(10);
                 nkeys.push_back(std::move(kc));
             }
         }
@@ -27319,37 +27576,28 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             recs[i] = 0;
         }
 
-        // --- 8. Output DBF header + field descriptors (plain-projection
-        //         mode; aggregate mode writes its own file after the walk).
-        std::uint32_t out_rlen = 1;
+        // --- 8. Output column specs (plain-projection mode; aggregate mode
+        //         builds its own from nouts after the walk). `file` holds
+        //         ROW IMAGES only; the on-disk container comes from the
+        //         shared ADT temp helper at step 10
+        //         (docs/materialised-cursor-temps.md).
+        std::uint32_t out_rlen = 0;
         for (const auto& oc : outcols) out_rlen += oc.fld.length;
-        if (out_rlen > 0xFFFF) {
+        if (out_rlen + 5 > 0xFFFF) {
             close_all();
             return fail(openads::AE_INTERNAL_ERROR,
                         "multi-table join: record exceeds 64 KiB");
         }
         std::vector<std::uint8_t> file;
+        std::vector<TempColSpec> mspecs;
+        std::size_t mstride = 0;
         if (!nway_agg) {
-            std::uint16_t out_hlen = static_cast<std::uint16_t>(
-                32 + 32 * outcols.size() + 1);
-            std::array<std::uint8_t, 32> hdr{};
-            hdr[0] = 0x03;
-            stamp_dbf_header_today(hdr.data());
-            hdr[8]  = static_cast<std::uint8_t>( out_hlen       & 0xFFu);
-            hdr[9]  = static_cast<std::uint8_t>((out_hlen >> 8) & 0xFFu);
-            hdr[10] = static_cast<std::uint8_t>( out_rlen       & 0xFFu);
-            hdr[11] = static_cast<std::uint8_t>((out_rlen >> 8) & 0xFFu);
-            file.insert(file.end(), hdr.begin(), hdr.end());
+            mspecs.reserve(outcols.size());
             for (const auto& oc : outcols) {
-                std::array<std::uint8_t, 32> fd{};
-                std::size_t nn = std::min<std::size_t>(oc.fld.name.size(), 10);
-                std::memcpy(fd.data(), oc.fld.name.data(), nn);
-                fd[11] = static_cast<std::uint8_t>(oc.fld.raw_type);
-                fd[16] = static_cast<std::uint8_t>(oc.fld.length);
-                fd[17] = oc.fld.decimals;
-                file.insert(file.end(), fd.begin(), fd.end());
+                mspecs.push_back({oc.fld.name, oc.fld.raw_type,
+                                  oc.fld.length, oc.fld.decimals});
             }
-            file.push_back(0x0D);
+            mstride = out_rlen;
         }
 
         // --- 9. Left-deep nested-loop join walk. Plain mode emits the
@@ -27417,8 +27665,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 return;
             }
             std::vector<std::uint8_t> rec(out_rlen, ' ');
-            rec[0] = ' ';
-            std::size_t off = 1;
+            std::size_t off = 0;
             for (const auto& oc : outcols) {
                 std::string s = scriptbridge::join_cell_text(
                     *tbls[oc.ti], oc.src_fi, oc.fld);
@@ -27518,7 +27765,14 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             std::vector<NOut> nouts;
             {
                 std::size_t unal = 0;
+                std::size_t pj_pos = 0;
                 for (const auto& pj : st.projection) {
+                    // Positional AS alias (see the single-table GROUP BY
+                    // path — same constraint-4 rule).
+                    const std::string* pj_alias = nullptr;
+                    for (const auto& pa : st.projection_aliases)
+                        if (pa.first == pj_pos) { pj_alias = &pa.second; break; }
+                    ++pj_pos;
                     NOut o;
                     if (pj.rfind("$AGG_", 0) == 0) {
                         o.is_agg = true;
@@ -27556,7 +27810,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         o.is_agg = false;
                         o.idx = static_cast<std::size_t>(gi);
                         const auto& kf = nkeys[o.idx].ofld;
-                        o.name = kf.name;
+                        o.name = pj_alias ? *pj_alias : pj;
                         o.type = kf.raw_type
                                ? static_cast<char>(kf.raw_type) : 'C';
                         o.len  = kf.length;
@@ -27644,35 +27898,17 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 ngroup_order.push_back(std::string());
             }
 
-            std::uint16_t agg_hlen = static_cast<std::uint16_t>(
-                32 + 32 * nouts.size() + 1);
-            std::uint32_t agg_rlen = 1;
-            for (const auto& o : nouts) agg_rlen += o.len;
-            {
-                std::array<std::uint8_t, 32> hdr{};
-                hdr[0] = 0x03;
-                stamp_dbf_header_today(hdr.data());
-                hdr[8]  = static_cast<std::uint8_t>( agg_hlen       & 0xFFu);
-                hdr[9]  = static_cast<std::uint8_t>((agg_hlen >> 8) & 0xFFu);
-                hdr[10] = static_cast<std::uint8_t>( agg_rlen       & 0xFFu);
-                hdr[11] = static_cast<std::uint8_t>((agg_rlen >> 8) & 0xFFu);
-                file.insert(file.end(), hdr.begin(), hdr.end());
-                for (const auto& o : nouts) {
-                    std::array<std::uint8_t, 32> fd{};
-                    std::memcpy(fd.data(), o.name.data(),
-                                std::min(o.name.size(), std::size_t{11}));
-                    fd[11] = static_cast<std::uint8_t>(o.type);
-                    fd[16] = static_cast<std::uint8_t>(o.len);
-                    fd[17] = o.dec;
-                    file.insert(file.end(), fd.begin(), fd.end());
-                }
-                file.push_back(0x0D);
+            mspecs.clear();
+            mspecs.reserve(nouts.size());
+            mstride = 0;
+            for (const auto& o : nouts) {
+                mspecs.push_back({o.name, o.type, o.len, o.dec});
+                mstride += o.len;
             }
             std::sort(ngroup_order.begin(), ngroup_order.end());
             for (const auto& key : ngroup_order) {
                 auto& acc = ngroups[key];
                 if (st.having && !eval_nhaving(*st.having, acc)) continue;
-                file.push_back(' ');
                 for (const auto& o : nouts) {
                     if (o.is_agg) {
                         const std::string* ntv = nullptr;
@@ -27696,38 +27932,12 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             }
         }
 
-        file.push_back(0x1A);
-        file[4] = static_cast<std::uint8_t>( emitted        & 0xFFu);
-        file[5] = static_cast<std::uint8_t>((emitted >>  8) & 0xFFu);
-        file[6] = static_cast<std::uint8_t>((emitted >> 16) & 0xFFu);
-        file[7] = static_cast<std::uint8_t>((emitted >> 24) & 0xFFu);
-
+        (void)emitted;
         close_all();
 
-        // --- 10. Write temp DBF, reopen as cursor, register, return. ---
-        namespace fs = std::filesystem;
-        char nb[64];
-        std::snprintf(nb, sizeof(nb), "_mjoin_%llx.dbf",
-                      static_cast<unsigned long long>(
-                          openads::platform::monotonic_nanos()));
-        fs::path mj = fs::path(c->data_dir()) / nb;
-        {
-            std::ofstream out(mj, std::ios::binary);
-            if (!out)
-                return fail(openads::AE_INTERNAL_ERROR,
-                            "multi-table join temp DBF: open for write failed");
-            out.write(reinterpret_cast<const char*>(file.data()),
-                      static_cast<std::streamsize>(file.size()));
-        }
-        std::string rel = mj.filename().string();
-        auto cth = c->open_table(rel, openads::engine::TableType::Cdx,
-                                 openads::engine::OpenMode::Read);
-        if (!cth) return fail(cth.error());
-        openads::engine::Table* ctbl = c->lookup_table(cth.value());
-        if (!ctbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
-        ADSHANDLE gh = to_ads_handle(s.registry.register_object(HandleKind::Table, ctbl));
-        *phCursor = gh;
-        return ok();
+        // --- 10. Materialise into the temp cursor and register it. ---
+        return materialise_temp_adt(c, "_mjoin_", mspecs, file,
+                                    mstride, phCursor);
     }
 
     if (parsed.value().inner_join) {
@@ -27896,9 +28106,10 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 oc.src_idx    = static_cast<std::uint16_t>(i);
                 oc.from_right = true;
                 oc.fld        = scriptbridge::join_out_field(rfields[i]);
-                std::string nm = "R_" + oc.fld.name;
-                if (nm.size() > 10) nm.resize(10);
-                oc.fld.name = std::move(nm);
+                // Full-length merged name — the ADT temp carries it whole.
+                // (The DBF-era truncation to 10 chars here made a long
+                // right-side column unreachable by its R_ form.)
+                oc.fld.name = "R_" + oc.fld.name;
                 if (rfields[i].type ==
                     openads::drivers::DbfFieldType::CiCharacter)
                     join_ci_cols.insert(lower_nm(oc.fld.name));
@@ -27907,36 +28118,23 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             }
         }
 
-        std::uint16_t header_len = static_cast<std::uint16_t>(
-            32 + 32 * merged.size() + 1);
-        std::uint32_t merged_rec = 1;
+        std::uint32_t merged_rec = 0;
         for (const auto& f : merged) merged_rec += f.length;
-        if (merged_rec > 0xFFFF) {
+        if (merged_rec + 5 > 0xFFFF) {
             c->close_table(lh.value()); c->close_table(rh.value());
             return fail(openads::AE_INTERNAL_ERROR,
                         "joined record exceeds 64 KiB");
         }
 
-        // Lay out file bytes: header + field-desc + records + EOF.
-        std::vector<std::uint8_t> file;
-        std::array<std::uint8_t, 32> hdr{};
-        hdr[0] = 0x03;
-        stamp_dbf_header_today(hdr.data());
-        hdr[8]  = static_cast<std::uint8_t>( header_len       & 0xFFu);
-        hdr[9]  = static_cast<std::uint8_t>((header_len >> 8) & 0xFFu);
-        hdr[10] = static_cast<std::uint8_t>( merged_rec       & 0xFFu);
-        hdr[11] = static_cast<std::uint8_t>((merged_rec >> 8) & 0xFFu);
-        file.insert(file.end(), hdr.begin(), hdr.end());
+        // Merged column specs + row images for the shared ADT temp helper
+        // (docs/materialised-cursor-temps.md — the DBF this used to write
+        // truncated every merged name, R_ prefix included, to 10 chars).
+        std::vector<TempColSpec> jtcols;
+        jtcols.reserve(merged.size());
         for (const auto& f : merged) {
-            std::array<std::uint8_t, 32> fd{};
-            std::size_t n = std::min<std::size_t>(f.name.size(), 10);
-            std::memcpy(fd.data(), f.name.data(), n);
-            fd[11] = static_cast<std::uint8_t>(f.raw_type);
-            fd[16] = static_cast<std::uint8_t>(f.length);
-            fd[17] = f.decimals;
-            file.insert(file.end(), fd.begin(), fd.end());
+            jtcols.push_back({f.name, f.raw_type, f.length, f.decimals});
         }
-        file.push_back(0x0D);
+        std::vector<std::uint8_t> file;
 
         // Helper: emit one merged record from the DECODED field values of
         // the currently-positioned source rows (driver-abstracted — works
@@ -27945,7 +28143,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         std::uint32_t emitted = 0;
         auto emit_merged = [&](bool has_left, bool has_right) {
             std::vector<std::uint8_t> mrec(merged_rec, ' ');
-            std::size_t off = 1;
+            std::size_t off = 0;
             for (const auto& oc : jcols) {
                 const std::uint16_t L = oc.fld.length;
                 const bool present = oc.from_right ? has_right : has_left;
@@ -28020,38 +28218,49 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 }
             }
         }
-        file.push_back(0x1A);
-        // Patch record count (header bytes 4-7).
-        file[4] = static_cast<std::uint8_t>( emitted        & 0xFFu);
-        file[5] = static_cast<std::uint8_t>((emitted >>  8) & 0xFFu);
-        file[6] = static_cast<std::uint8_t>((emitted >> 16) & 0xFFu);
-        file[7] = static_cast<std::uint8_t>((emitted >> 24) & 0xFFu);
-
+        (void)emitted;
         c->close_table(lh.value());
         c->close_table(rh.value());
 
-        // Write temp DBF.
-        namespace fs = std::filesystem;
-        char namebuf[64];
-        std::snprintf(namebuf, sizeof(namebuf), "_join_%llx.dbf",
-                      static_cast<unsigned long long>(
-                          openads::platform::monotonic_nanos()));
-        fs::path tmp_dbf = fs::path(c->data_dir()) / namebuf;
+        // Materialise + open the merged cursor; NOT yet the user-visible
+        // handle — WHERE / ORDER BY / aggregates below keep refining it.
+        MaterialisedTemp jtmp;
         {
-            std::ofstream out(tmp_dbf, std::ios::binary);
-            if (!out) return fail(openads::AE_INTERNAL_ERROR,
-                                  "join temp DBF open failed");
-            out.write(reinterpret_cast<const char*>(file.data()),
-                      static_cast<std::streamsize>(file.size()));
+            UNSIGNED32 mrc = materialise_temp_adt_open(
+                c, "_join_", jtcols, file, merged_rec, &jtmp);
+            if (mrc != openads::AE_SUCCESS) return mrc;
         }
+        const Handle cth_h = jtmp.th;
+        openads::engine::Table* ctbl = jtmp.tbl;
+        // Delete the merged temp's files on every exit except the one that
+        // registers it as the user-visible cursor (which hands lifetime to
+        // materialised_cursor_temps). Error paths close the table first, so
+        // the removal succeeds; the join+aggregate branch closes it and
+        // returns a different temp as the cursor, so the merged one goes.
+        struct JoinTempGuard {
+            std::string stem;
+            bool        keep = false;
+            ~JoinTempGuard() { if (!keep) remove_temp_table_files(stem); }
+        } jtmp_guard{jtmp.stem, false};
 
-        std::string rel = tmp_dbf.filename().string();
-        auto cth = c->open_table(rel,
-                                 openads::engine::TableType::Cdx,
-                                 openads::engine::OpenMode::Read);
-        if (!cth) return fail(cth.error());
-        openads::engine::Table* ctbl = c->lookup_table(cth.value());
-        if (!ctbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
+        // Resolve a column reference against the merged cursor: as written,
+        // by its merged `R_<name>` spelling, and with the table qualifier
+        // stripped (the merged temp is single-table, so `l.UNITS` must find
+        // `R_UNITS`). Without the fallbacks, an aggregate or GROUP BY over
+        // a right-side column raised 2121 where SAP answers.
+        auto jcol_index = [&](const std::string& col) -> std::int32_t {
+            std::int32_t fi = ctbl->field_index(col);
+            if (fi < 0) fi = ctbl->field_index("R_" + col);
+            if (fi < 0) {
+                const auto dot = col.rfind('.');
+                if (dot != std::string::npos) {
+                    const std::string bare = col.substr(dot + 1);
+                    fi = ctbl->field_index(bare);
+                    if (fi < 0) fi = ctbl->field_index("R_" + bare);
+                }
+            }
+            return fi;
+        };
 
         // M10.20: apply outer WHERE / ORDER BY against the merged
         // cursor's schema (left names verbatim; right names as
@@ -28316,9 +28525,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 AggSlot slot;
                 slot.def = a;
                 if (a.kind != openads::sql::AggregateKind::CountStar) {
-                    slot.field_index = ctbl->field_index(a.column);
+                    slot.field_index = jcol_index(a.column);
                     if (slot.field_index < 0) {
-                        c->close_table(cth.value());
+                        c->close_table(cth_h);
                         return fail(openads::AE_COLUMN_NOT_FOUND,
                                     a.column.c_str());
                     }
@@ -28346,9 +28555,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             std::vector<GBCol> gbs;
             gbs.reserve(parsed.value().group_by.size());
             for (auto& gname : parsed.value().group_by) {
-                std::int32_t fi = ctbl->field_index(gname);
+                std::int32_t fi = jcol_index(gname);
                 if (fi < 0) {
-                    c->close_table(cth.value());
+                    c->close_table(cth_h);
                     return fail(openads::AE_COLUMN_NOT_FOUND, gname.c_str());
                 }
                 const auto& fd = ctbl->field_descriptor(
@@ -28403,7 +28612,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 };
                 auto vr = validate(*parsed.value().having);
                 if (!vr) {
-                    c->close_table(cth.value());
+                    c->close_table(cth_h);
                     return fail(vr.error());
                 }
             }
@@ -28475,7 +28684,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     if (d > acc.maxv[i]) acc.maxv[i] = d;
                 }
             }
-            c->close_table(cth.value());
+            c->close_table(cth_h);
 
             auto agg_at = [&](const GroupAcc& acc, std::size_t si) -> double {
                 using K = openads::sql::AggregateKind;
@@ -28528,16 +28737,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 }
             };
 
-            namespace fs = std::filesystem;
-            char namebuf4[64];
-            std::snprintf(namebuf4, sizeof(namebuf4), "_jgrp_%llx.dbf",
-                          static_cast<unsigned long long>(
-                              openads::platform::monotonic_nanos()));
-            fs::path grp_dbf = fs::path(c->data_dir()) / namebuf4;
-            std::vector<std::uint8_t> jg_file;
-            std::array<std::uint8_t, 32> jg_hdr{};
-            jg_hdr[0] = 0x03;
-            stamp_dbf_header_today(jg_hdr.data());
+            // Materialised through the shared ADT temp helper
+            // (docs/materialised-cursor-temps.md): the DBF this used to
+            // write truncated aliases to 11 chars.
             // SAP parity (oracle-verified 07/18/2026): the result carries
             // ONLY the projected aggregates — group keys are not emitted
             // unless projected. Columns are typed N(20,dp) (dp from the
@@ -28573,35 +28775,29 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 return scriptbridge::agg_result_width(slots[i].def.kind,
                                                       slots[i].src_len);
             };
-            std::uint16_t jg_hlen = static_cast<std::uint16_t>(
-                32 + 32 * slots.size() + 1);
-            std::uint32_t jg_rlen = 1;
-            for (std::size_t i = 0; i < slots.size(); ++i) jg_rlen += jg_w(i);
-            jg_hdr[8]  = static_cast<std::uint8_t>( jg_hlen       & 0xFFu);
-            jg_hdr[9]  = static_cast<std::uint8_t>((jg_hlen >> 8) & 0xFFu);
-            jg_hdr[10] = static_cast<std::uint8_t>( jg_rlen       & 0xFFu);
-            jg_hdr[11] = static_cast<std::uint8_t>((jg_rlen >> 8) & 0xFFu);
-            jg_file.insert(jg_file.end(), jg_hdr.begin(), jg_hdr.end());
+            std::size_t jg_stride = 0;
+            std::vector<TempColSpec> jg_cols;
+            jg_cols.reserve(slots.size());
             {
                 std::size_t unaliased = 0;
                 for (std::size_t i = 0; i < slots.size(); ++i) {
-                    std::array<std::uint8_t, 32> fd{};
                     std::string nm = slots[i].def.alias;
                     if (nm.empty()) {
                         nm = unaliased == 0
                            ? "EXPR" : "EXPR_" + std::to_string(unaliased);
                         ++unaliased;
                     }
-                    std::memcpy(fd.data(), nm.data(),
-                                std::min(nm.size(), std::size_t{11}));
-                    fd[11] = jg_is_text(i) ? 'C' : 'N';
-                    fd[16] = static_cast<std::uint8_t>(jg_w(i));
-                    fd[17] = jg_is_text(i)
-                           ? 0 : static_cast<std::uint8_t>(jg_dp(i));
-                    jg_file.insert(jg_file.end(), fd.begin(), fd.end());
+                    jg_cols.push_back({std::move(nm),
+                                       jg_is_text(i) ? 'C' : 'N',
+                                       jg_w(i),
+                                       jg_is_text(i)
+                                           ? std::uint8_t{0}
+                                           : static_cast<std::uint8_t>(
+                                                 jg_dp(i))});
+                    jg_stride += jg_cols.back().len;
                 }
             }
-            jg_file.push_back(0x0D);
+            std::vector<std::uint8_t> jg_file;
 
             std::sort(insertion_order.begin(), insertion_order.end());
             std::uint32_t jg_emitted = 0;
@@ -28610,7 +28806,6 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 if (parsed.value().having) {
                     if (!eval_having(*parsed.value().having, acc)) continue;
                 }
-                jg_file.push_back(' ');
                 for (std::size_t i = 0; i < slots.size(); ++i) {
                     const std::string* jtv = nullptr;
                     if (jg_is_text(i))
@@ -28624,27 +28819,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 }
                 ++jg_emitted;
             }
-            jg_file.push_back(0x1A);
-            jg_file[4] = static_cast<std::uint8_t>( jg_emitted        & 0xFFu);
-            jg_file[5] = static_cast<std::uint8_t>((jg_emitted >>  8) & 0xFFu);
-            jg_file[6] = static_cast<std::uint8_t>((jg_emitted >> 16) & 0xFFu);
-            jg_file[7] = static_cast<std::uint8_t>((jg_emitted >> 24) & 0xFFu);
-            {
-                std::ofstream out(grp_dbf, std::ios::binary);
-                if (!out) return fail(openads::AE_INTERNAL_ERROR,
-                    "join+group temp DBF: open for write failed");
-                out.write(reinterpret_cast<const char*>(jg_file.data()),
-                          static_cast<std::streamsize>(jg_file.size()));
-            }
-            std::string rel4 = grp_dbf.filename().string();
-            auto gth = c->open_table(rel4, openads::engine::TableType::Cdx,
-                                     openads::engine::OpenMode::Read);
-            if (!gth) return fail(gth.error());
-            openads::engine::Table* gtbl = c->lookup_table(gth.value());
-            if (!gtbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
-            ADSHANDLE gh = to_ads_handle(s.registry.register_object(HandleKind::Table, gtbl));
-            *phCursor = gh;
-            return ok();
+            (void)jg_emitted;
+            return materialise_temp_adt(c, "_jgrp_", jg_cols, jg_file,
+                                        jg_stride, phCursor);
         }
 
         // M10.23 — JOIN + aggregate. Walk the merged cursor (already
@@ -28665,9 +28842,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 AggSlot slot;
                 slot.def = a;
                 if (a.kind != openads::sql::AggregateKind::CountStar) {
-                    slot.field_index = ctbl->field_index(a.column);
+                    slot.field_index = jcol_index(a.column);
                     if (slot.field_index < 0) {
-                        c->close_table(cth.value());
+                        c->close_table(cth_h);
                         return fail(openads::AE_COLUMN_NOT_FOUND, a.column.c_str());
                     }
                     {
@@ -28720,21 +28897,11 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     if (d > maxv[i]) maxv[i] = d;
                 }
             }
-            c->close_table(cth.value());
+            c->close_table(cth_h);
 
-            namespace fs = std::filesystem;
-            char namebuf2[64];
-            std::snprintf(namebuf2, sizeof(namebuf2), "_jagg_%llx.dbf",
-                          static_cast<unsigned long long>(
-                              openads::platform::monotonic_nanos()));
-            fs::path agg_dbf = fs::path(c->data_dir()) / namebuf2;
-            std::vector<std::uint8_t> agg_file;
-            std::array<std::uint8_t, 32> agg_hdr{};
-            agg_hdr[0] = 0x03;
-            stamp_dbf_header_today(agg_hdr.data());
-            agg_hdr[4] = 1;
-            std::uint16_t agg_hlen = static_cast<std::uint16_t>(
-                32 + 32 * slots.size() + 1);
+            // Materialised through the shared ADT temp helper
+            // (docs/materialised-cursor-temps.md): the DBF this used to
+            // write truncated aliases to 10 chars.
             // SAP parity: columns typed N(20,dp), named alias / EXPR /
             // EXPR_1 / … (same rules as the grouped paths).
             auto jagg_dp = [&](std::size_t i) -> int {
@@ -28760,35 +28927,30 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 return scriptbridge::agg_result_width(slots[i].def.kind,
                                                       slots[i].src_len);
             };
-            std::uint16_t agg_rlen = 1;
-            for (std::size_t i = 0; i < slots.size(); ++i)
-                agg_rlen = static_cast<std::uint16_t>(agg_rlen + jagg_w(i));
-            agg_hdr[8]  = static_cast<std::uint8_t>( agg_hlen       & 0xFFu);
-            agg_hdr[9]  = static_cast<std::uint8_t>((agg_hlen >> 8) & 0xFFu);
-            agg_hdr[10] = static_cast<std::uint8_t>( agg_rlen       & 0xFFu);
-            agg_hdr[11] = static_cast<std::uint8_t>((agg_rlen >> 8) & 0xFFu);
-            agg_file.insert(agg_file.end(), agg_hdr.begin(), agg_hdr.end());
+            std::size_t jrow_stride = 0;
+            std::vector<TempColSpec> jcolspecs;
+            jcolspecs.reserve(slots.size());
             {
                 std::size_t unaliased = 0;
                 for (std::size_t i = 0; i < slots.size(); ++i) {
-                    std::array<std::uint8_t, 32> fd{};
                     std::string nm = slots[i].def.alias;
                     if (nm.empty()) {
                         nm = unaliased == 0
                            ? "EXPR" : "EXPR_" + std::to_string(unaliased);
                         ++unaliased;
                     }
-                    std::memcpy(fd.data(), nm.data(),
-                                std::min(nm.size(), std::size_t{11}));
-                    fd[11] = jagg_is_text(i) ? 'C' : 'N';
-                    fd[16] = static_cast<std::uint8_t>(jagg_w(i));
-                    fd[17] = jagg_is_text(i)
-                           ? 0 : static_cast<std::uint8_t>(jagg_dp(i));
-                    agg_file.insert(agg_file.end(), fd.begin(), fd.end());
+                    jcolspecs.push_back({std::move(nm),
+                                         jagg_is_text(i) ? 'C' : 'N',
+                                         jagg_w(i),
+                                         jagg_is_text(i)
+                                             ? std::uint8_t{0}
+                                             : static_cast<std::uint8_t>(
+                                                   jagg_dp(i))});
+                    jrow_stride += jcolspecs.back().len;
                 }
             }
-            agg_file.push_back(0x0D);
-            agg_file.push_back(' ');
+            std::vector<std::uint8_t> agg_file;
+            agg_file.reserve(jrow_stride);
             for (std::size_t i = 0; i < slots.size(); ++i) {
                 double v = 0.0;
                 using K = openads::sql::AggregateKind;
@@ -28820,26 +28982,15 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     slots[i].def.kind, jagg_w(i), jagg_dp(i), v, atv);
                 agg_file.insert(agg_file.end(), cell.begin(), cell.end());
             }
-            agg_file.push_back(0x1A);
-            {
-                std::ofstream out(agg_dbf, std::ios::binary);
-                if (!out) return fail(openads::AE_INTERNAL_ERROR,
-                                      "join+agg temp DBF: open for write failed");
-                out.write(reinterpret_cast<const char*>(agg_file.data()),
-                          static_cast<std::streamsize>(agg_file.size()));
-            }
-            std::string rel2 = agg_dbf.filename().string();
-            auto ath = c->open_table(rel2, openads::engine::TableType::Cdx,
-                                     openads::engine::OpenMode::Read);
-            if (!ath) return fail(ath.error());
-            openads::engine::Table* atbl = c->lookup_table(ath.value());
-            if (!atbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
-            ADSHANDLE gh = to_ads_handle(s.registry.register_object(HandleKind::Table, atbl));
-            *phCursor = gh;
-            return ok();
+            return materialise_temp_adt(c, "_jagg_", jcolspecs, agg_file,
+                                        jrow_stride, phCursor);
         }
 
         ADSHANDLE gh = to_ads_handle(s.registry.register_object(HandleKind::Table, ctbl));
+        // The merged temp IS the user-visible cursor from here on: hand its
+        // on-disk lifetime to the cursor handle.
+        jtmp_guard.keep = true;
+        materialised_cursor_temps()[gh] = jtmp.stem;
         // Apply the SELECT projection to the joined cursor (previously
         // ignored — a join always exposed every merged column). Left
         // columns resolve by name; a right-table column that collides
@@ -28850,9 +29001,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             for (const auto& col : parsed.value().projection) {
                 std::int32_t fidx = ctbl->field_index(col);
                 if (fidx < 0) {
-                    std::string rn = "R_" + col;
-                    if (rn.size() > 10) rn.resize(10);
-                    fidx = ctbl->field_index(rn);
+                    // Full-length lookup — the ADT temp carries the whole
+                    // merged name (no DBF 10-char truncation any more).
+                    fidx = ctbl->field_index("R_" + col);
                 }
                 if (fidx < 0)
                     return fail(openads::AE_COLUMN_NOT_FOUND, col.c_str());
@@ -29368,16 +29519,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 return 0.0;
             };
 
-            namespace fs = std::filesystem;
-            char namebuf3[64];
-            std::snprintf(namebuf3, sizeof(namebuf3), "_grp_%llx.dbf",
-                          static_cast<unsigned long long>(
-                              openads::platform::monotonic_nanos()));
-            fs::path grp_dbf = fs::path(c->data_dir()) / namebuf3;
-            std::vector<std::uint8_t> file;
-            std::array<std::uint8_t, 32> hdr{};
-            hdr[0] = 0x03;
-            stamp_dbf_header_today(hdr.data());
+            // Materialised through the shared ADT temp helper
+            // (docs/materialised-cursor-temps.md): the DBF this used to
+            // write truncated aliases and group-key names to 10 chars.
             // SAP parity: aggregate columns are N(20,dp), named alias /
             // EXPR / EXPR_1 / …; group-key columns are emitted in their
             // SELECT-list position (`SELECT col, COUNT(*) … GROUP BY col`)
@@ -29414,7 +29558,14 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             std::vector<GOut> gouts;
             {
                 std::size_t unaliased = 0;
+                std::size_t pj_pos = 0;
                 for (const auto& pj : parsed.value().projection) {
+                    // Positional AS alias for this projection item (an
+                    // aggregate's alias travels in def.alias instead).
+                    const std::string* pj_alias = nullptr;
+                    for (const auto& pa : parsed.value().projection_aliases)
+                        if (pa.first == pj_pos) { pj_alias = &pa.second; break; }
+                    ++pj_pos;
                     GOut o;
                     if (pj.rfind("$AGG_", 0) == 0) {
                         o.is_agg = true;
@@ -29453,7 +29604,12 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         }
                         o.is_agg = false;
                         o.idx = static_cast<std::size_t>(gi);
-                        o.name = gbs[o.idx].name;
+                        // SAP names a group-key column from the SELECT
+                        // list: an AS alias wins, else the spelling as
+                        // written (constraint 4 in
+                        // docs/materialised-cursor-temps.md). The DBF-era
+                        // truncation used to mask this.
+                        o.name = pj_alias ? *pj_alias : pj;
                         o.type = gbs[o.idx].raw_type
                                ? static_cast<char>(gbs[o.idx].raw_type)
                                : 'C';
@@ -29486,26 +29642,14 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     }
                 }
             }
-            std::uint16_t header_len = static_cast<std::uint16_t>(
-                32 + 32 * gouts.size() + 1);
-            std::uint32_t rec_len = 1;
-            for (const auto& o : gouts) rec_len += o.len;
-            hdr[8]  = static_cast<std::uint8_t>( header_len       & 0xFFu);
-            hdr[9]  = static_cast<std::uint8_t>((header_len >> 8) & 0xFFu);
-            hdr[10] = static_cast<std::uint8_t>( rec_len          & 0xFFu);
-            hdr[11] = static_cast<std::uint8_t>((rec_len    >> 8) & 0xFFu);
-            file.insert(file.end(), hdr.begin(), hdr.end());
-
+            std::size_t grow_stride = 0;
+            std::vector<TempColSpec> gcols;
+            gcols.reserve(gouts.size());
             for (const auto& o : gouts) {
-                std::array<std::uint8_t, 32> fd{};
-                std::memcpy(fd.data(), o.name.data(),
-                            std::min(o.name.size(), std::size_t{11}));
-                fd[11] = static_cast<std::uint8_t>(o.type);
-                fd[16] = o.len;
-                fd[17] = o.dec;
-                file.insert(file.end(), fd.begin(), fd.end());
+                gcols.push_back({o.name, o.type, o.len, o.dec});
+                grow_stride += gcols.back().len;
             }
-            file.push_back(0x0D);
+            std::vector<std::uint8_t> grows;
 
             std::function<bool(const openads::sql::HavingExpr&,
                                const GroupAcc&)> eval_having;
@@ -29545,7 +29689,6 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 if (parsed.value().having) {
                     if (!eval_having(*parsed.value().having, acc)) continue;
                 }
-                file.push_back(' ');
                 for (const auto& o : gouts) {
                     if (o.is_agg) {
                         const bool tx = slot_is_text(o.idx);
@@ -29556,40 +29699,22 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         const auto cell = scriptbridge::agg_cell_text(
                             slots[o.idx].def.kind, o.len,
                             static_cast<int>(o.dec), agg_at(acc, o.idx), tv);
-                        file.insert(file.end(), cell.begin(), cell.end());
+                        grows.insert(grows.end(), cell.begin(), cell.end());
                     } else {
                         // Group-key column: the stored key part, already
                         // padded to gbs[idx].length at accumulation time.
                         std::string kp = o.idx < acc.key_parts.size()
                                        ? acc.key_parts[o.idx] : std::string();
                         for (std::uint8_t b = 0; b < o.len; ++b)
-                            file.push_back(b < kp.size()
+                            grows.push_back(b < kp.size()
                                 ? static_cast<std::uint8_t>(kp[b]) : ' ');
                     }
                 }
                 ++emitted;
             }
-            file.push_back(0x1A);
-            file[4] = static_cast<std::uint8_t>( emitted        & 0xFFu);
-            file[5] = static_cast<std::uint8_t>((emitted >>  8) & 0xFFu);
-            file[6] = static_cast<std::uint8_t>((emitted >> 16) & 0xFFu);
-            file[7] = static_cast<std::uint8_t>((emitted >> 24) & 0xFFu);
-            {
-                std::ofstream out(grp_dbf, std::ios::binary);
-                if (!out) return fail(openads::AE_INTERNAL_ERROR,
-                                      "group-by temp DBF: open for write failed");
-                out.write(reinterpret_cast<const char*>(file.data()),
-                          static_cast<std::streamsize>(file.size()));
-            }
-            std::string rel3 = grp_dbf.filename().string();
-            auto gth = c->open_table(rel3, openads::engine::TableType::Cdx,
-                                     openads::engine::OpenMode::Read);
-            if (!gth) return fail(gth.error());
-            openads::engine::Table* gtbl = c->lookup_table(gth.value());
-            if (!gtbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
-            ADSHANDLE gh = to_ads_handle(s.registry.register_object(HandleKind::Table, gtbl));
-            *phCursor = gh;
-            return ok();
+            (void)emitted;
+            return materialise_temp_adt(c, "_grp_", gcols, grows,
+                                        grow_stride, phCursor);
         }
 
         // M10.54 — compile each slot's optional FILTER. Subset:
@@ -29808,22 +29933,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         }
         if (table_handle != 0) c->close_table(table_handle);
 
-        // Write a 1-row temp DBF with one C(30) field per aggregate
-        // and the formatted result in each slot.
-        namespace fs = std::filesystem;
-        fs::path tmp_dbf = fs::path(c->data_dir());
-        char namebuf[64];
-        std::snprintf(namebuf, sizeof(namebuf), "_agg_%llx.dbf",
-                      static_cast<unsigned long long>(
-                          openads::platform::monotonic_nanos()));
-        tmp_dbf /= namebuf;
-        std::vector<std::uint8_t> file;
-        std::array<std::uint8_t, 32> hdr{};
-        hdr[0] = 0x03;
-        stamp_dbf_header_today(hdr.data());
-        hdr[4] = 1;
-        std::uint16_t header_len = static_cast<std::uint16_t>(
-            32 + 32 * slots.size() + 1);
+        // Materialise the 1-row result through the shared ADT temp helper
+        // (docs/materialised-cursor-temps.md): the DBF this used to write
+        // truncated any alias over 10 characters.
         // SAP parity: columns typed N(20,dp), named alias / EXPR / EXPR_1 /
         // … (oracle-verified naming; unaliased aggregates count up).
         auto agg_dp = [&](std::size_t i) -> int {
@@ -29850,35 +29962,29 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             return scriptbridge::agg_result_width(slots[i].def.kind,
                                                   slots[i].arg_len);
         };
-        std::uint16_t rec_len = 1;
-        for (std::size_t i = 0; i < slots.size(); ++i)
-            rec_len = static_cast<std::uint16_t>(rec_len + agg_w(i));
-        hdr[8]  = static_cast<std::uint8_t>( header_len       & 0xFFu);
-        hdr[9]  = static_cast<std::uint8_t>((header_len >> 8) & 0xFFu);
-        hdr[10] = static_cast<std::uint8_t>( rec_len          & 0xFFu);
-        hdr[11] = static_cast<std::uint8_t>((rec_len    >> 8) & 0xFFu);
-        file.insert(file.end(), hdr.begin(), hdr.end());
+        std::size_t arow_stride = 0;
+        std::vector<TempColSpec> acols;
+        acols.reserve(slots.size());
         {
             std::size_t unaliased = 0;
             for (std::size_t i = 0; i < slots.size(); ++i) {
-                std::array<std::uint8_t, 32> fd{};
                 std::string nm = slots[i].def.alias;
                 if (nm.empty()) {
                     nm = unaliased == 0
                        ? "EXPR" : "EXPR_" + std::to_string(unaliased);
                     ++unaliased;
                 }
-                std::memcpy(fd.data(), nm.data(),
-                            std::min(nm.size(), std::size_t{11}));
-                fd[11] = agg_is_text(i) ? 'C' : 'N';
-                fd[16] = static_cast<std::uint8_t>(agg_w(i));
-                fd[17] = agg_is_text(i)
-                       ? 0 : static_cast<std::uint8_t>(agg_dp(i));
-                file.insert(file.end(), fd.begin(), fd.end());
+                acols.push_back({std::move(nm),
+                                 agg_is_text(i) ? 'C' : 'N',
+                                 agg_w(i),
+                                 agg_is_text(i)
+                                     ? std::uint8_t{0}
+                                     : static_cast<std::uint8_t>(agg_dp(i))});
+                arow_stride += acols.back().len;
             }
         }
-        file.push_back(0x0D);
-        file.push_back(' ');
+        std::vector<std::uint8_t> arow;
+        arow.reserve(arow_stride);
         for (std::size_t i = 0; i < slots.size(); ++i) {
             char buf[32] = {0};
             switch (slots[i].def.kind) {
@@ -29943,28 +30049,10 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             std::vector<std::uint8_t> cell(w, ' ');
             std::size_t n = std::min<std::size_t>(std::strlen(buf), w);
             std::memcpy(cell.data() + (is_count ? 0 : (w - n)), buf, n);
-            file.insert(file.end(), cell.begin(), cell.end());
+            arow.insert(arow.end(), cell.begin(), cell.end());
         }
-        file.push_back(0x1A);
-        {
-            std::ofstream out(tmp_dbf, std::ios::binary);
-            if (!out) return fail(openads::AE_INTERNAL_ERROR,
-                                  "aggregate temp DBF: open for write failed");
-            out.write(reinterpret_cast<const char*>(file.data()),
-                      static_cast<std::streamsize>(file.size()));
-            // Explicit close before re-opening for read.
-        }
-
-        // Open the temp DBF as the cursor.
-        std::string rel = tmp_dbf.filename().string();
-        auto cth = c->open_table(rel, openads::engine::TableType::Cdx,
-                                 openads::engine::OpenMode::Read);
-        if (!cth) return fail(cth.error());
-        openads::engine::Table* ctbl = c->lookup_table(cth.value());
-        if (!ctbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
-        ADSHANDLE gh = to_ads_handle(s.registry.register_object(HandleKind::Table, ctbl));
-        *phCursor = gh;
-        return ok();
+        return materialise_temp_adt(c, "_agg_", acols, arow,
+                                    arow_stride, phCursor);
     }
 
     // Compile the WHERE expression tree into a row-predicate closure

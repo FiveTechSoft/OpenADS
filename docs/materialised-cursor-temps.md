@@ -8,27 +8,63 @@ scenario breaks, and both have already been regressed once.
 
 **If you are about to change the format of a materialised temp, read this
 first.** The relevant code is `exec_sql_direct_impl()` in
-`src/abi/ace_exports.cpp` (search for `_srt_`).
+`src/abi/ace_exports.cpp` (search for `materialise_temp_adt` and `_srt_`).
 
 ## What materialises, and where
 
-| Path | Temp | Site | Format |
+| Path | Temp | Builder | Format |
 |---|---|---|---|
-| Single-table `SELECT` with `ORDER BY` / `DISTINCT` / `LIMIT` / `TOP` | `_srt_*` | `exec_sql_direct_impl()` | **ADT** ✅ |
+| Single-table `SELECT` with `ORDER BY` / `DISTINCT` / `LIMIT` / `TOP` | `_srt_*` | inline (`AdsCreateTable` + row copy) | **ADT** ✅ |
 | `EXECUTE PROCEDURE` declared outputs (`__output`) | `_spout_*` | `run_dd_procedure()` | **ADT** ✅ |
-| Joins (2-table and N-way), unions, aggregates | various | same file | **DBF** ⚠️ still truncates |
+| 2-table join (INNER/LEFT/RIGHT/FULL) | `_join_*` | `materialise_temp_adt_open()` | **ADT** ✅ |
+| N-way join (3+ tables), with or without GROUP BY | `_mjoin_*` | `materialise_temp_adt()` | **ADT** ✅ |
+| UNION / UNION ALL | `_uni_*` | `materialise_temp_adt()` | **ADT** ✅ |
+| Scalar aggregates | `_agg_*` | `materialise_temp_adt()` | **ADT** ✅ |
+| Single-table GROUP BY | `_grp_*` | `materialise_temp_adt()` | **ADT** ✅ |
+| Join + aggregate | `_jagg_*` | `materialise_temp_adt()` | **ADT** ✅ |
+| Join + GROUP BY | `_jgrp_*` | `materialise_temp_adt()` | **ADT** ✅ |
+| Script/proc engine-internal cursors | `_scr_*`, `_call_*`, `_case_*` | inline | **DBF** ⚠️ still truncates |
+
+When hunting for a stray materialiser, don't grep for temp-name prefixes —
+grep for `push_back(0x1A)` (the DBF EOF marker) and `stamp_dbf_header_today`.
+That is how `_jgrp_` was nearly missed in the conversion: it only surfaced
+because a DD-connection probe still truncated where the free-table unit test
+passed.
 
 A plain `SELECT ... [WHERE ...]` does **not** materialise — it stays a live
 cursor. That asymmetry is why a bug here often looks like "the query works until
 I add ORDER BY".
 
-**The two fixed paths were fixed separately, months apart, for the same root
-cause.** Fixing one and assuming the other was covered is exactly how the
-`__output` truncation survived: `sp_GetPhysicalPath` was still returning
-`databasepa` after the `_srt_` path was corrected. The join/union/aggregate
-materialisers are still on DBF — same constraint matrix applies when you get to
-them (joins additionally rename right-side columns `R_*`, itself a consequence
-of squeezing `R_` + the source name into 10 bytes).
+**Do not convert any of these back to DBF, and do not add a new materialising
+path that writes a DBF.** OpenADS is not a DBF-only engine: the DBF descriptor's
+11-byte name slot cannot carry SAP-length column names (constraint 2), and its
+own binary numeric types cannot carry N(x,y) scale the way ADT type 2 does
+(constraint 3). The seven join/union/aggregate paths were all converted together
+precisely because fixing one and assuming the others were covered is how the
+`__output` truncation survived its first fix: `sp_GetPhysicalPath` was still
+returning `databasepa` after the `_srt_` path was corrected.
+
+All seven share `materialise_temp_adt()` / `materialise_temp_adt_open()`, which:
+
+- gets the **container skeleton from `AdsCreateTable`'s own ADS_ADT path** —
+  exactly one place in the tree knows the ADT header/descriptor layout;
+- takes the callers' **pre-formatted text cells verbatim** (Character and
+  AsciiNumeric are raw ASCII in both containers, so read-back is
+  byte-identical to what the DBF temps produced);
+- converts only **Date** cells ("YYYYMMDD" text → 4-byte JDN) through the
+  production `encode_field_string`, blank-safe;
+- declares numerics as **AsciiNumeric (ADT type 2), never letter 'N'** — the
+  letter maps to binary INTEGER/DOUBLE via `adt_spec_for` and silently
+  re-renders values (the #146 trap);
+- streams all records in **one file append** (a join can land here with a
+  600K-row table; per-record appends pay a lock + header rewrite each);
+- **registers the temp for cleanup** in `materialised_cursor_temps()` — the
+  DBF-era paths never did, and leaked one temp file per query.
+
+The conversion also retired two side-effects of the 10-byte name slot: the
+merged `R_<name>` spelling is no longer truncated (a long right-side column
+was unreachable by its R_ form), and the N-way join no longer dedups two
+distinct long columns that agree in their first 10 characters into one.
 
 ## The four constraints, and the format they force
 
@@ -180,6 +216,12 @@ table's, or they fail with 5063. `resolve_field_index_h()` does this.
   last subcase is the materialised one; the earlier subcases pass on the live
   cursor alone, so **a change that breaks only the temp still fails there** —
   that subcase is the guard, do not fold it into the others.
+- `tests/unit/abi_sql_temp_names_test.cpp` —
+  *"join/union/aggregate temps keep column names longer than 10 chars"* guards
+  the `materialise_temp_adt()` conversion across all seven paths: long merged
+  `R_` names, `AS` aliases through scalar / grouped / join / join+GROUP-BY
+  aggregates and UNION, an N(10,2) value and an ADT date round-tripping the
+  temp, and the delete-on-close of the temp files.
 
 Each was verified to fail with its fix reverted — they guard, they do not merely
 pass. If one fails with a truncated name or a re-rendered number, a materialising
