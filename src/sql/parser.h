@@ -194,6 +194,9 @@ struct ArithExpr {
     std::string   lhs_column;     // always a column name
     bool          rhs_is_literal = false;
     double        rhs_number     = 0.0;
+    std::string   rhs_text;       // the literal AS WRITTEN ("2.50" keeps
+                                  // its scale; SAP sizes the result from
+                                  // the written digits, not the value)
     std::string   rhs_column;     // when !rhs_is_literal
     std::string   alias;          // optional column alias
 };

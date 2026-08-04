@@ -270,8 +270,13 @@ public:
             return util::Error{7200, 0, "expected numeric literal", ""};
         }
         std::string tok(s_.substr(start, pos_ - start));
+        last_numeric_text_ = tok;
         return std::strtod(tok.c_str(), nullptr);
     }
+
+    // The exact characters the last read_numeric_literal() consumed —
+    // "2.50" is N(4,2) to SAP's width rules, which the double cannot say.
+    const std::string& last_numeric_text() const { return last_numeric_text_; }
 
     bool peek_char(char c) {
         skip_ws();
@@ -298,6 +303,7 @@ public:
 private:
     const std::string& s_;
     std::size_t        pos_ = 0;
+    std::string last_numeric_text_;
 };
 
 util::Result<std::unique_ptr<WhereExpr>>
@@ -1403,6 +1409,7 @@ util::Result<SelectStmt> parse_select(const std::string& sql) {
                         if (n) {
                             ae->rhs_is_literal = true;
                             ae->rhs_number     = n.value();
+                            ae->rhs_text       = c.last_numeric_text();
                         } else {
                             std::string rid = c.read_identifier();
                             if (rid.empty()) {
@@ -1475,6 +1482,7 @@ util::Result<SelectStmt> parse_select(const std::string& sql) {
                     auto n = c.read_numeric_literal();
                     if (n) {
                         a.rhs_is_literal = true;
+                        a.rhs_text       = c.last_numeric_text();
                         a.rhs_number     = n.value();
                     } else {
                         std::string id = c.read_identifier();

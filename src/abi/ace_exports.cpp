@@ -23854,9 +23854,17 @@ inline bool agg_source_is_date(openads::drivers::DbfFieldType t) {
 // column, but SUM(a * b) evaluates `a <op> b` instead — same shape and same
 // arithmetic as a projection-level $ARITH_ item, so only the accumulation
 // differs. `rhs_fi` is ignored when the RHS is a literal.
+// `arg_dec` = the argument's declared scale (agg_arg_shape). Division is
+// the one operation whose exact result can exceed its declared scale, and
+// SAP TRUNCATES each row's quotient at that scale toward zero BEFORE
+// accumulating - oracle-probed: SUM(A/U) over rows dividing to 0.4166666...
+// and 0.6666666... answers 1.0833332 (per-row truncation), not 1.0833333
+// (truncation of the exact sum). Add/Sub/Mul of fixed-scale operands are
+// exact within their declared scale, so they pass through untouched.
 inline double agg_arg_value(openads::engine::Table& t,
                             std::int32_t lhs_fi, std::int32_t rhs_fi,
-                            const openads::sql::Aggregate& def) {
+                            const openads::sql::Aggregate& def,
+                            int arg_dec) {
     if (lhs_fi < 0) return 0.0;
     auto lv = t.read_field(static_cast<std::uint16_t>(lhs_fi));
     double a = lv ? lv.value().as_double : 0.0;
@@ -23873,7 +23881,8 @@ inline double agg_arg_value(openads::engine::Table& t,
         case AO::Add: return a + b;
         case AO::Sub: return a - b;
         case AO::Mul: return a * b;
-        case AO::Div: return (b != 0.0) ? a / b : 0.0;
+        case AO::Div: return (b != 0.0)
+                          ? avg_truncate(a / b, arg_dec) : 0.0;
     }
     return a;
 }
@@ -23912,6 +23921,94 @@ inline std::uint16_t agg_result_width(openads::sql::AggregateKind k,
         default:                           // Avg / Min / Max
             return src_len ? src_len : 20;
     }
+}
+
+// ── SAP's declared shape for an ARITHMETIC aggregate argument ──────────────
+//
+// Oracle-derived from 45 probes against ace64.dll (scratch table wprobe on
+// the mp sandbox, 2026-08-05; the raw measurements are in TODO.parity.md
+// history). SAP sizes `SUM(a <op> b)` from an (integer-digits, scale) pair
+// computed per operand and combined per operation — every probe fits:
+//
+//   operand N(L,s):   ip = L - s - (s ? 1 : 0)
+//   operand INTEGER:  ip = 11, s = 0        (int32 digits + sign)
+//   literal:          ip = int_digits + 1,  s = fractional digits AS
+//                     WRITTEN ("2.50" is (2,2)) — hence ArithExpr::rhs_text
+//   a * b:   ip = ip1 + ip2 - 1             s = s1 + s2
+//   a ± b:   ip = max(ip1, ip2) + 1         s = max(s1, s2)
+//   a / b:   ip = ip1 + s2 + min(s1, 2)     s = s1 + ip2 - 1
+//
+//   declared length  L = ip + s + (s ? 1 : 0)
+//   SUM width = L + 10 · AVG/MIN/MAX width = L · displayed scale = s
+//   (agg_result_width applies the SUM/AVG rule when handed this L.)
+//
+// The div ip term (min(s1,2)) is the empirical fit over five probes —
+// division inside aggregates is rare; re-probe before "simplifying" it.
+struct AggArgShape {
+    std::uint16_t len = 0;   // declared length of the argument expression
+    std::uint8_t  dec = 0;   // its scale
+};
+
+inline void agg_operand_ip_s(const openads::drivers::DbfField& f,
+                             int* ip, int* s) {
+    using FT = openads::drivers::DbfFieldType;
+    if (f.type == FT::Integer || f.type == FT::AutoInc ||
+        f.type == FT::ShortInt) {
+        *ip = 11; *s = 0;
+        return;
+    }
+    if (f.type == FT::Currency || f.type == FT::AdtMoney) {
+        // SAP types money arithmetic as MONEY (rendered unpadded) — a known
+        // divergence; treat as N(len,4) so at least the scale matches.
+        *s = 4; *ip = std::max<int>(1, f.length - 5);
+        return;
+    }
+    *s  = f.decimals;
+    *ip = std::max<int>(1, f.length - f.decimals - (f.decimals ? 1 : 0));
+}
+
+inline AggArgShape agg_arg_shape(const openads::drivers::DbfField& lhs,
+                                 const openads::sql::Aggregate& def,
+                                 const openads::drivers::DbfField* rhs) {
+    int ip1 = 0, s1 = 0;
+    agg_operand_ip_s(lhs, &ip1, &s1);
+    if (!def.arg_expr) {
+        AggArgShape out;
+        out.len = lhs.length;
+        out.dec = static_cast<std::uint8_t>(s1);
+        return out;
+    }
+    int ip2 = 0, s2 = 0;
+    if (def.arg_expr->rhs_is_literal) {
+        const std::string& t = def.arg_expr->rhs_text;
+        auto dot = t.find('.');
+        int intd = static_cast<int>(dot == std::string::npos ? t.size() : dot);
+        if (!t.empty() && (t[0] == '+' || t[0] == '-')) --intd;
+        if (intd < 1) intd = 1;
+        ip2 = intd + 1;
+        s2  = dot == std::string::npos
+            ? 0 : static_cast<int>(t.size() - dot - 1);
+    } else if (rhs != nullptr) {
+        agg_operand_ip_s(*rhs, &ip2, &s2);
+    }
+    using AO = openads::sql::ArithOp;
+    int ip = 0, s = 0;
+    switch (def.arg_expr->op) {
+        case AO::Mul: ip = ip1 + ip2 - 1;            s = s1 + s2;       break;
+        case AO::Add:
+        case AO::Sub: ip = std::max(ip1, ip2) + 1;   s = std::max(s1, s2);
+                                                     break;
+        case AO::Div: ip = ip1 + s2 + std::min(s1, 2);
+                      s  = s1 + ip2 - 1;             break;
+    }
+    if (s < 0) s = 0;
+    if (s > 18) s = 18;
+    if (ip < 1) ip = 1;
+    AggArgShape out;
+    out.len = static_cast<std::uint16_t>(
+        std::min<int>(ip + s + (s ? 1 : 0), 200));
+    out.dec = static_cast<std::uint8_t>(s);
+    return out;
 }
 
 // Formats one aggregate cell to SAP's presentation. COUNT is integral and
@@ -27485,6 +27582,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             std::size_t   rhs_ti = 0;
             std::int32_t  rhs_fi = -1;
             std::uint8_t  arg_dec = 0;  // op-following result scale
+            std::uint16_t arg_len = 0;  // SAP arg width
         };
         struct NKeyCol {
             std::size_t   ti = 0;
@@ -27517,30 +27615,29 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     // table) and let the result scale follow the operation.
                     // Reading only the left column summed SUM(a * b) as
                     // SUM(a) - same defect the 2-table paths had.
-                    slot.arg_dec = slot.dec;
-                    if (a.arg_expr) {
-                        slot.is_text = false;
-                        std::uint8_t rdec = 0;
-                        if (!a.arg_expr->rhs_is_literal) {
-                            if (!resolve(std::string(),
-                                         a.arg_expr->rhs_column,
-                                         slot.rhs_ti, slot.rhs_fi)) {
-                                close_all();
-                                return fail(openads::AE_COLUMN_NOT_FOUND,
-                                            a.arg_expr->rhs_column.c_str());
-                            }
-                            rdec = tbls[slot.rhs_ti]->driver()->fields()[
-                                static_cast<std::size_t>(slot.rhs_fi)]
-                                .decimals;
+                    if (a.arg_expr) slot.is_text = false;
+                    if (a.arg_expr && !a.arg_expr->rhs_is_literal) {
+                        if (!resolve(std::string(),
+                                     a.arg_expr->rhs_column,
+                                     slot.rhs_ti, slot.rhs_fi)) {
+                            close_all();
+                            return fail(openads::AE_COLUMN_NOT_FOUND,
+                                        a.arg_expr->rhs_column.c_str());
                         }
-                        using AO = openads::sql::ArithOp;
-                        if (a.arg_expr->op == AO::Mul ||
-                            a.arg_expr->op == AO::Div) {
-                            slot.arg_dec = static_cast<std::uint8_t>(
-                                std::min<int>(slot.dec + rdec, 15));
-                        } else {
-                            slot.arg_dec = std::max(slot.dec, rdec);
+                    }
+                    {
+                        // SAP's declared shape for the argument (see
+                        // agg_arg_shape). The rhs may live in a different
+                        // joined table than the lhs.
+                        const openads::drivers::DbfField* rfd = nullptr;
+                        if (a.arg_expr && !a.arg_expr->rhs_is_literal &&
+                            slot.rhs_fi >= 0) {
+                            rfd = &tbls[slot.rhs_ti]->driver()->fields()[
+                                static_cast<std::size_t>(slot.rhs_fi)];
                         }
+                        auto shp = scriptbridge::agg_arg_shape(sfd, a, rfd);
+                        slot.arg_dec = shp.dec;
+                        slot.arg_len = shp.len;
                     }
                 }
                 nslots.push_back(std::move(slot));
@@ -27754,6 +27851,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         struct NAcc {
             std::vector<std::string>   key_parts;
             std::vector<double>        sum, minv, maxv;
+            std::vector<double>        sumc;   // Kahan compensation
             // MIN/MAX over a non-numeric column compares decoded text.
             std::vector<scriptbridge::TextMinMax> txt;
             std::vector<std::uint64_t> cnt;
@@ -27778,6 +27876,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     NAcc acc;
                     acc.key_parts = std::move(parts);
                     acc.sum.assign(nslots.size(), 0.0);
+                acc.sumc.assign(nslots.size(), 0.0);
+                    acc.sumc.assign(nslots.size(), 0.0);
                     acc.minv.assign(nslots.size(),
                         std::numeric_limits<double>::infinity());
                     acc.maxv.assign(nslots.size(),
@@ -27819,12 +27919,21 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                             case AO::Add: d = d + b2; break;
                             case AO::Sub: d = d - b2; break;
                             case AO::Mul: d = d * b2; break;
-                            case AO::Div: d = b2 != 0.0 ? d / b2 : 0.0;
-                                          break;
+                            case AO::Div:
+                                d = b2 != 0.0
+                                  ? scriptbridge::avg_truncate(
+                                        d / b2, nslots[i2].arg_dec)
+                                  : 0.0;
+                                break;
                         }
                     }
                     ++acc.cnt[i2];
-                    acc.sum[i2] += d;
+                    {   // Kahan-compensated accumulation (see GroupAcc note)
+                        const double y2 = d - acc.sumc[i2];
+                        const double t2 = acc.sum[i2] + y2;
+                        acc.sumc[i2] = (t2 - acc.sum[i2]) - y2;
+                        acc.sum[i2] = t2;
+                    }
                     if (d < acc.minv[i2]) acc.minv[i2] = d;
                     if (d > acc.maxv[i2]) acc.maxv[i2] = d;
                 }
@@ -27961,7 +28070,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                                      ntextw[o.idx] ? ntextw[o.idx] : 1)
                                : scriptbridge::agg_result_width(
                                      nslots[o.idx].def.kind,
-                                     nslots[o.idx].src_len);
+                                     nslots[o.idx].arg_len);
                         o.dec  = static_cast<std::uint8_t>(ndp(o.idx));
                     } else {
                         std::int32_t gi = -1;
@@ -28057,6 +28166,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             if (st.group_by.empty() && ngroups.empty()) {
                 NAcc acc;
                 acc.sum.assign(nslots.size(), 0.0);
+                acc.sumc.assign(nslots.size(), 0.0);
                 acc.minv.assign(nslots.size(),
                     std::numeric_limits<double>::infinity());
                 acc.maxv.assign(nslots.size(),
@@ -28690,6 +28800,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 bool                    is_date     = false;  // date-sourced
                 std::int32_t            rhs_field   = -1;     // SUM(a * b): b
                 std::uint8_t            arg_dec     = 0;      // op-following dp
+                std::uint16_t           arg_len     = 0;      // SAP arg width
             };
             std::vector<AggSlot> slots;
             slots.reserve(parsed.value().aggregates.size());
@@ -28731,23 +28842,21 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         }
                     }
                     if (a.arg_expr) slot.is_text = false;
-                    slot.arg_dec = slot.decimals;
-                    if (a.arg_expr) {
-                        std::uint8_t rdec = 0;
-                        if (!a.arg_expr->rhs_is_literal &&
+                    {
+                        // SAP's declared shape for the argument (see
+                        // agg_arg_shape).
+                        const openads::drivers::DbfField* rfd = nullptr;
+                        if (a.arg_expr && !a.arg_expr->rhs_is_literal &&
                             slot.rhs_field >= 0) {
-                            rdec = ctbl->field_descriptor(
-                                static_cast<std::uint16_t>(slot.rhs_field))
-                                .decimals;
+                            rfd = &ctbl->field_descriptor(
+                                static_cast<std::uint16_t>(slot.rhs_field));
                         }
-                        using AO = openads::sql::ArithOp;
-                        if (a.arg_expr->op == AO::Mul ||
-                            a.arg_expr->op == AO::Div) {
-                            slot.arg_dec = static_cast<std::uint8_t>(
-                                std::min<int>(slot.decimals + rdec, 15));
-                        } else {
-                            slot.arg_dec = std::max(slot.decimals, rdec);
-                        }
+                        auto shp = scriptbridge::agg_arg_shape(
+                            ctbl->field_descriptor(
+                                static_cast<std::uint16_t>(slot.field_index)),
+                            a, rfd);
+                        slot.arg_dec = shp.dec;
+                        slot.arg_len = shp.len;
                     }
                 }
                 slots.push_back(std::move(slot));
@@ -28827,6 +28936,11 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             struct GroupAcc {
                 std::vector<std::string>   key_parts;
                 std::vector<double>        sum;
+                // Kahan compensation: summing hundreds of
+                // thousands of double-rounded terms drifts the
+                // display digits (SUM(Real*PRICE) read ...2047
+                // where SAP shows ...2000).
+                std::vector<double>        sumc;
                 std::vector<double>        minv;
                 std::vector<double>        maxv;
                 // MIN/MAX over a non-numeric column compares decoded text.
@@ -28859,6 +28973,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     GroupAcc acc;
                     acc.key_parts = std::move(parts);
                     acc.sum.assign(slots.size(), 0.0);
+                    acc.sumc.assign(slots.size(), 0.0);
                     acc.minv.assign(slots.size(),
                         std::numeric_limits<double>::infinity());
                     acc.maxv.assign(slots.size(),
@@ -28886,9 +29001,14 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     }
                     double d = scriptbridge::agg_arg_value(
                         *ctbl, slots[i].field_index, slots[i].rhs_field,
-                        slots[i].def);
+                        slots[i].def, slots[i].arg_dec);
                     ++acc.count[i];
-                    acc.sum[i] += d;
+                    {   // Kahan-compensated accumulation (see GroupAcc note)
+                        const double y2 = d - acc.sumc[i];
+                        const double t2 = acc.sum[i] + y2;
+                        acc.sumc[i] = (t2 - acc.sum[i]) - y2;
+                        acc.sum[i] = t2;
+                    }
                     if (d < acc.minv[i]) acc.minv[i] = d;
                     if (d > acc.maxv[i]) acc.maxv[i] = d;
                 }
@@ -28983,7 +29103,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     return static_cast<std::uint16_t>(
                         jg_textw[i] ? jg_textw[i] : 1);
                 return scriptbridge::agg_result_width(slots[i].def.kind,
-                                                      slots[i].src_len);
+                                                      slots[i].arg_len);
             };
             std::size_t jg_stride = 0;
             std::vector<TempColSpec> jg_cols;
@@ -29050,6 +29170,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 bool                    is_date     = false;  // date-sourced
                 std::int32_t            rhs_field   = -1;     // SUM(a * b): b
                 std::uint8_t            arg_dec     = 0;      // op-following dp
+                std::uint16_t           arg_len     = 0;      // SAP arg width
             };
             std::vector<AggSlot> slots;
             slots.reserve(parsed.value().aggregates.size());
@@ -29090,29 +29211,28 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         }
                     }
                     if (a.arg_expr) slot.is_text = false;
-                    slot.arg_dec = slot.decimals;
-                    if (a.arg_expr) {
-                        std::uint8_t rdec = 0;
-                        if (!a.arg_expr->rhs_is_literal &&
+                    {
+                        // SAP's declared shape for the argument (see
+                        // agg_arg_shape).
+                        const openads::drivers::DbfField* rfd = nullptr;
+                        if (a.arg_expr && !a.arg_expr->rhs_is_literal &&
                             slot.rhs_field >= 0) {
-                            rdec = ctbl->field_descriptor(
-                                static_cast<std::uint16_t>(slot.rhs_field))
-                                .decimals;
+                            rfd = &ctbl->field_descriptor(
+                                static_cast<std::uint16_t>(slot.rhs_field));
                         }
-                        using AO = openads::sql::ArithOp;
-                        if (a.arg_expr->op == AO::Mul ||
-                            a.arg_expr->op == AO::Div) {
-                            slot.arg_dec = static_cast<std::uint8_t>(
-                                std::min<int>(slot.decimals + rdec, 15));
-                        } else {
-                            slot.arg_dec = std::max(slot.decimals, rdec);
-                        }
+                        auto shp = scriptbridge::agg_arg_shape(
+                            ctbl->field_descriptor(
+                                static_cast<std::uint16_t>(slot.field_index)),
+                            a, rfd);
+                        slot.arg_dec = shp.dec;
+                        slot.arg_len = shp.len;
                     }
                 }
                 slots.push_back(std::move(slot));
             }
 
             std::vector<double> sum(slots.size(), 0.0);
+            std::vector<double> sumc(slots.size(), 0.0);  // Kahan comp.
             std::vector<double> minv(slots.size(),
                 std::numeric_limits<double>::infinity());
             std::vector<double> maxv(slots.size(),
@@ -29142,9 +29262,14 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     }
                     double d = scriptbridge::agg_arg_value(
                         *ctbl, slots[i].field_index, slots[i].rhs_field,
-                        slots[i].def);
+                        slots[i].def, slots[i].arg_dec);
                     ++count[i];
-                    sum[i] += d;
+                    {   // Kahan-compensated accumulation
+                        const double y2 = d - sumc[i];
+                        const double t2 = sum[i] + y2;
+                        sumc[i] = (t2 - sum[i]) - y2;
+                        sum[i] = t2;
+                    }
                     if (d < minv[i]) minv[i] = d;
                     if (d > maxv[i]) maxv[i] = d;
                 }
@@ -29178,7 +29303,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     return static_cast<std::uint16_t>(
                         jtxt[i].w ? jtxt[i].w : 1);
                 return scriptbridge::agg_result_width(slots[i].def.kind,
-                                                      slots[i].src_len);
+                                                      slots[i].arg_len);
             };
             std::size_t jrow_stride = 0;
             std::vector<TempColSpec> jcolspecs;
@@ -29437,32 +29562,22 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         }
                     }
                     if (a.arg_expr) slot.is_text = false;
-                    slot.arg_dec = slot.decimals;
-                    slot.arg_len = slot.src_len;
-                    if (a.arg_expr) {
-                        std::uint8_t  rdec = 0;
-                        std::uint16_t rlen = 1;   // a literal is one column
-                        if (!a.arg_expr->rhs_is_literal &&
+                    {
+                        // SAP's declared shape for the argument — oracle-
+                        // derived rules in agg_arg_shape (byte-identical
+                        // widths incl. the bare-column case).
+                        const openads::drivers::DbfField* rfd = nullptr;
+                        if (a.arg_expr && !a.arg_expr->rhs_is_literal &&
                             slot.rhs_field >= 0) {
-                            const auto& rfd = tbl->field_descriptor(
+                            rfd = &tbl->field_descriptor(
                                 static_cast<std::uint16_t>(slot.rhs_field));
-                            rdec = rfd.decimals;
-                            rlen = rfd.length;
                         }
-                        using AO = openads::sql::ArithOp;
-                        if (a.arg_expr->op == AO::Mul ||
-                            a.arg_expr->op == AO::Div) {
-                            slot.arg_dec = static_cast<std::uint8_t>(
-                                std::min<int>(slot.decimals + rdec, 15));
-                        } else {
-                            slot.arg_dec = std::max(slot.decimals, rdec);
-                        }
-                        // Generous on purpose: the result must never be
-                        // truncated. SAP's exact declared width follows its
-                        // own numeric-promotion rules and is a known
-                        // divergence — measurements in TODO.parity.md.
-                        slot.arg_len = static_cast<std::uint16_t>(
-                            std::min<int>(slot.src_len + rlen, 200));
+                        auto shp = scriptbridge::agg_arg_shape(
+                            tbl->field_descriptor(
+                                static_cast<std::uint16_t>(slot.field_index)),
+                            a, rfd);
+                        slot.arg_dec = shp.dec;
+                        slot.arg_len = shp.len;
                     }
                 }
             }
@@ -29674,6 +29789,11 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             struct GroupAcc {
                 std::vector<std::string>   key_parts;
                 std::vector<double>        sum;
+                // Kahan compensation: summing hundreds of
+                // thousands of double-rounded terms drifts the
+                // display digits (SUM(Real*PRICE) read ...2047
+                // where SAP shows ...2000).
+                std::vector<double>        sumc;
                 std::vector<double>        minv;
                 std::vector<double>        maxv;
                 // MIN/MAX over a non-numeric column compares decoded text.
@@ -29705,6 +29825,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     GroupAcc acc;
                     acc.key_parts = std::move(parts);
                     acc.sum.assign(slots.size(), 0.0);
+                    acc.sumc.assign(slots.size(), 0.0);
                     acc.minv.assign(slots.size(),
                         std::numeric_limits<double>::infinity());
                     acc.maxv.assign(slots.size(),
@@ -29738,9 +29859,14 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     // caught the day the unbounded query first completed.
                     double d = scriptbridge::agg_arg_value(
                         *tbl, slots[i].field_index, slots[i].rhs_field,
-                        slots[i].def);
+                        slots[i].def, slots[i].arg_dec);
                     ++acc.count[i];
-                    acc.sum[i] += d;
+                    {   // Kahan-compensated accumulation (see GroupAcc note)
+                        const double y2 = d - acc.sumc[i];
+                        const double t2 = acc.sum[i] + y2;
+                        acc.sumc[i] = (t2 - acc.sum[i]) - y2;
+                        acc.sum[i] = t2;
+                    }
                     if (d < acc.minv[i]) acc.minv[i] = d;
                     if (d > acc.maxv[i]) acc.maxv[i] = d;
                 }
@@ -29854,7 +29980,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                               : static_cast<std::uint8_t>(
                                     scriptbridge::agg_result_width(
                                         slots[o.idx].def.kind,
-                                        slots[o.idx].src_len));
+                                        slots[o.idx].arg_len));
                         o.dec = tx_o ? 0
                               : static_cast<std::uint8_t>(grp_dp(o.idx));
                     } else {
@@ -29905,7 +30031,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                                     textw[i] ? textw[i] : 1)
                               : static_cast<std::uint8_t>(
                                     scriptbridge::agg_result_width(
-                                        slots[i].def.kind, slots[i].src_len));
+                                        slots[i].def.kind, slots[i].arg_len));
                         o.dec = tx_i ? 0
                               : static_cast<std::uint8_t>(grp_dp(i));
                         gouts.push_back(std::move(o));
@@ -30144,6 +30270,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
 
         // Walk matching rows, accumulate per slot.
         std::vector<double> sum(slots.size(), 0.0);
+        std::vector<double> sumc(slots.size(), 0.0);  // Kahan compensation
         std::vector<double> minv(slots.size(),
             std::numeric_limits<double>::infinity());
         std::vector<double> maxv(slots.size(),
@@ -30195,8 +30322,13 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 }
                 double d = scriptbridge::agg_arg_value(
                     *tbl, slots[i].field_index, slots[i].rhs_field,
-                    slots[i].def);
-                sum[i] += d;
+                    slots[i].def, slots[i].arg_dec);
+                {   // Kahan-compensated accumulation
+                    const double y2 = d - sumc[i];
+                    const double t2 = sum[i] + y2;
+                    sumc[i] = (t2 - sum[i]) - y2;
+                    sum[i] = t2;
+                }
                 if (d < minv[i]) minv[i] = d;
                 if (d > maxv[i]) maxv[i] = d;
             }

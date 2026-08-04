@@ -643,6 +643,35 @@ TEST_CASE("SUM(a*b) evaluates the expression in grouped and join paths") {
         return b == std::string::npos ? std::string() : s.substr(b);
     };
 
+    // Raw (untrimmed) reader: the padded cell width IS the declared width.
+    auto raw2 = [&](const char* sql, const char* col) {
+        UNSIGNED8 sb[256] = {0};
+        std::memcpy(sb, sql, std::strlen(sql));
+        ADSHANDLE hc = 0;
+        REQUIRE(AdsExecuteSQLDirect(hStmt, sb, &hc) == 0);
+        REQUIRE(AdsGotoTop(hc) == 0);
+        std::string s2 = read_col(hc, col);
+        AdsCloseTable(hc);
+        return s2;
+    };
+
+    // SAP's declared width, oracle-derived (agg_arg_shape): Amt N(10,2)
+    // ip 7, Qty N(4,0) ip 4 -> product ip 7+4-1 = 10, scale 2 -> len 13;
+    // SUM adds 10 -> 23. Wrong-formula regressions show up as padding.
+    CHECK(raw2("SELECT SUM(Amt * Qty) AS T FROM lines", "T").size() == 23);
+    // Division by the literal 3 (ip 2, s 0): scale = s1 + ip2 - 1 = 3,
+    // ip = ip1 + s2 + min(s1,2) = 9 -> len 13 -> SUM width 23. And SAP
+    // TRUNCATES each row's quotient at the declared scale toward zero
+    // BEFORE accumulating (probe: SUM over quotients 0.4166666... and
+    // 0.6666666... answers 1.0833332, the sum of the truncations):
+    //   10.00/3 -> 3.333, 5.50/3 -> 1.833, 4.00/3 -> 1.333, sum 6.499.
+    {
+        std::string cell = raw2("SELECT SUM(Amt / 3) AS T FROM lines", "T");
+        CHECK(cell.size() == 23);
+        CHECK(cell.find("6.499") != std::string::npos);
+        CHECK(cell.find("6.500") == std::string::npos);
+    }
+
     // Expression totals: 10*2 + 5.50*3 + 4*1 = 40.50; A = 36.50, B = 4.00.
     // The bare-column regression answers 19.50 / 15.50 / 4.00 instead.
     CHECK(val("SELECT SUM(Amt * Qty) AS T FROM lines", "T") == "40.50");

@@ -178,27 +178,30 @@ Still open in this area, each a *different* defect from the formatting:
 
 Two residual divergences in this area, both measured, neither guessed at:
 
-- [ ] **Declared width of an arithmetic aggregate result.** OpenADS uses
-      `lhs_width + rhs_width` (generous, never truncates). SAP follows its own
-      numeric-promotion rules, measured on mp with `Real N(10,2)`,
-      `PRICE N(10,2)`, `UNITS N(6,0)`:
-      | expression | SAP width |
-      |---|---|
-      | `SUM(Real)` | 20 |
-      | `SUM(Real * UNITS)` | 25 |
-      | `SUM(Real * PRICE)` | 28 |
-      | `SUM(UNITS * UNITS)` | 21 |
-      | `SUM(Real + PRICE)` | 21 |
-      | `SUM(Real * 2)` | 21 |
-      No single formula fits all six (`*` needs −1 for one pair and −2 for
-      another; `+` and a literal RHS behave differently again), so the rule was
-      not guessed. Values are correct; only the padding differs.
-- [ ] **Accumulation precision for a multi-column product.**
-      `SUM(Real * PRICE)` → SAP `12243628033.2000`, OpenADS
-      `12243628033.2047`. SAP declares scale 4 but its digits end in `.2000`,
-      i.e. it appears to accumulate at scale 2 and display at 4, while OpenADS
-      accumulates at full double precision. Only shows when BOTH operands carry
-      a scale.
+- [x] **Declared width of an arithmetic aggregate result — FIXED 2026-08-05.**
+      The six original measurements DID fit one rule once recast as an
+      (integer-digits, scale) pair per operand; 45 fresh oracle probes (a
+      scratch `wprobe` table with varied N(L,s) shapes, literals, integer
+      columns, all four operators) pinned it completely — including division,
+      whose scale is `s1 + ip2 - 1` and whose `ip` carries an empirical
+      `min(s1, 2)` term. Implemented as `scriptbridge::agg_arg_shape()` and
+      wired through all five aggregate materialisers; the parser now keeps a
+      literal's text as written (`"2.50"` is N(4,2) to SAP, which the parsed
+      double cannot say). 39/39 probe expressions byte-identical;
+      `agg_inline_sumbyclaim` flipped the gate to 32 identical. Full rules in
+      the `agg_arg_shape` comment block.
+- [x] **Accumulation precision — FIXED 2026-08-05.** Two distinct causes:
+      *division* results can exceed their declared scale, and SAP truncates
+      each row's quotient at that scale toward zero BEFORE accumulating
+      (probe: quotients 0.4166666… + 0.6666666… sum to `1.0833332`, not
+      `...33`) — now mirrored in `agg_arg_value`; and summing 623K
+      double-rounded products drifts the display digits
+      (`SUM(Real * PRICE)` read `...2047` vs SAP `...2000`) — the five
+      accumulate loops now use Kahan-compensated summation. The unbounded
+      382K-group query is byte-identical to SAP across all rows INCLUDING
+      padding. Found on the way: OA rejects `INSERT INTO t VALUES (...)`
+      without a column list (2115) — SAP accepts it; still open, listed in
+      section B.
 - [x] **Result-column naming** — *done*. Turned out to be wider than the `R_`
       prefix: the select-list-spelling rule applies to **every** SELECT, not
       just joins, and `AS` aliases were being ignored outright on the join
@@ -428,6 +431,10 @@ Fix is the one task #2 already prescribes — materialise into an **ADT** temp
       `SELECT COUNT(*), SUM(x) AS s, MIN(y)` column naming matches SAP.
 
 ## B. VERIFIED OPEN 2026-07-26 (was "needs verification")
+- [ ] **`INSERT INTO t VALUES (...)` without a column list is rejected**
+      (2115 "expected '(' to open INSERT column list"); SAP accepts the
+      form and binds values in declared-column order. Found 2026-08-05
+      while building the width-probe fixtures.
 - [ ] **Catalog column-name + column-SET divergence** — CONFIRMED across all
       five DD catalogs on pmsys. OA invents its own names AND omits/renames
       columns; a SAP-compatible client filtering by SAP column names breaks
