@@ -146,6 +146,9 @@ public:
     // connections become visible.  Called by the server before answering
     // GetRecordCount and by AdsRefreshRecord.
     void refresh_record_count_from_disk() noexcept {
+        // A refresh is the moment another station's appends and deletes
+        // become visible, so any cached live count taken before it is stale.
+        bump_live_gen();
         driver_->refresh_record_count_from_disk();
     }
     // Clipper / SAP-ACE convention: phantom position past last
@@ -235,6 +238,16 @@ public:
     // through goto_record() turned into one block read per record, on every
     // call, with no reuse between calls.
     util::Result<bool> deleted_at(std::uint32_t recno);
+
+    // Bumped whenever the set of live records can have changed: a delete, a
+    // recall, an append, a zap/pack, or a refresh that saw another station's
+    // work. Callers that cache a live-record count (AdsGetKeyCount, whose
+    // count costs one deleted_at per index entry) keep this value alongside
+    // the cached number and recount only when it moves. Without that cache a
+    // TXBrowse over a 34k-row table spent ~15 ms per paint counting the same
+    // rows again.
+    std::uint64_t live_gen() const noexcept { return live_gen_; }
+    void bump_live_gen() noexcept { ++live_gen_; }
 
     // True only when a concrete record is loaded (not BOF/EOF/Limbo).
     bool positioned() const noexcept { return state_ == State::Positioned; }
@@ -581,6 +594,7 @@ private:
     // current row; applied once by commit_dirty_record().
     std::vector<std::pair<drivers::IIndex*, std::string>> index_snap_;
     bool                                          cache_enabled_  = false;
+    std::uint64_t                                 live_gen_       = 0;
     bool                                          last_seek_found_ = false;
     bool                                          aof_active_      = false;
     bool                                          transaction_free_ = false;
