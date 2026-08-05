@@ -2,8 +2,9 @@
 
 Living checklist of SAP-parity gaps. Two S4 gates now run:
 `tools/qa-diff/s4_parity.ps1` (pmsys, 41/1 — the 1 is sandbox counter drift, not
-a defect) and `tools/qa-diff/s4_parity_mp.ps1` (mp, 29/26). This file tracks
-what's left and what still needs verification against current code.
+a defect) and `tools/qa-diff/s4_parity_mp.ps1` (mp, 32/23 as of 2026-08-05).
+This file tracks what's left and what still needs verification against
+current code.
 
 ---
 
@@ -262,22 +263,25 @@ OpenADS gap (test-case bugs already fixed). Grouped by root cause:
       `users.dbf` 18 physical / 8 deleted → SAP 18, OA 10; `provider.dbf`
       20/4 → SAP 20, OA 16; `Forms.dbf` 64/0 → both 64 (control). Invisible on
       pmsys because it is ADT-only. Affects every DBF table with deletions.
-- [ ] **SQL feature gaps** *(5 cases)* — `Length()` raises 2158 (unknown
-      function) even on a literal, though it is a documented SAP scalar;
-      `COUNT(DISTINCT col)` raises 2115; an aggregate over an *expression*
-      (`Sum(Real * UNITS)`) raises 2115 — only bare column args parse;
-      `SELECT ... FROM <view>` raises 5004 for both mp views, so plain
-      single-table view resolution is broken (not just views-inside-joins).
-- [ ] **Join column resolution** *(1 case remaining)* — a 2-table join on
-      `ADM_NUM` still returns "Column not found: ADM_NUM". The **result
-      naming** half of this item is fixed: `R_UNITS` / `R_Status` and the
+- [ ] **SQL feature gaps** *(2 of 5 cases remain)* — `Length()` raises 2158
+      (unknown function) even on a literal, though it is a documented SAP
+      scalar; `SELECT ... FROM <view>` raises 5004 for both mp views, so
+      plain single-table view resolution is broken (not just
+      views-inside-joins). ~~COUNT(DISTINCT col)~~ and ~~aggregates over an
+      expression~~ were fixed 2026-08-02 (and the full shape/width/precision
+      story 2026-08-05).
+- [x] **Join column resolution — FIXED 2026-08-04** (`jcol_index`: merged
+      R_ fallback + qualifier strip at every aggregate/GROUP BY/WHERE
+      resolution site). The **result naming** half was fixed earlier: `R_UNITS` / `R_Status` and the
       lowercased left-side names are gone, and the rule turned out to apply to
       every SELECT rather than only joins — see the backlog entry above.
-- [ ] **Numeric / date string formatting** *(3 cases)* — SAP pads and formats to
-      the declared field width (`"                 0.00"`, `"  0"`) while OA
-      returns `"0"`; date columns inside aggregates come back `"0"` from OA vs
-      `"01/18/0203"` from SAP. Same family as task #1 below, now with a second
-      corpus confirming it.
+- [ ] **Numeric string formatting** *(date half FIXED)* — the date parts
+      closed 2026-08-04 (display format) and 2026-08-05 (aggregate widths):
+      date columns inside aggregates now render `"01/18/0203"` like SAP.
+      Remaining: the plain-DBF-read padding family (`ntx_provider DOCT_NO`
+      `"0"` vs `"  0"` — see the item above) and the blank-LOGICAL rendering
+      (`""` on SAP vs `"F"` on OA, found 2026-08-04 via `SELECT * FROM
+      admit`).
 - [ ] **DD catalog divergence** — fully diagnosed below. Trigger ordering also
       differs under `ORDER BY Trig_TableName, Name`.
 
@@ -368,10 +372,9 @@ Found while doing it, **not fixed**:
 
 - [ ] **`AdsSetString` into an ADT DOUBLE stores the text verbatim**
       → **backlog item 3** (top of file).
-- [ ] **The other materialisers still truncate to 10 chars** — joins (which also
-      rename right-side columns `R_*`), unions, aggregates and the `sp_`
-      `__output` path each build their own DBF temp.
-      → tracked as **backlog item 2** at the top of this file.
+- [x] **The other materialisers still truncate to 10 chars** — FIXED: all
+      eleven SQL result materialisers converted to ADT (joins/unions/
+      aggregates 2026-08-03, `_scr_`/`_call_`/`_case_` 2026-08-05).
 
 Original report, kept for context:
 
@@ -417,13 +420,8 @@ Fix is the one task #2 already prescribes — materialise into an **ADT** temp
       `abi_date_format_test.cpp`. Found while probing: SAP renders a blank
       LOGICAL as `""` where OA says `"F"` (`SELECT * FROM admit` isClosed) —
       separate small family, still open.
-- [ ] **#2 `_spout_` >10-char output column names** — see **backlog item 2** at
-      the top of this file. Re-confirmed open 2026-07-30; the v1.8.40 truncation
-      fix covered only the static-cursor path, not procedure output. No longer
-      "low risk / cosmetic": the same DBF-temp root cause silently undoes the
-      SAP catalog column names whenever a materialising path is involved, and it
-      trades against numeric scale — read `docs/materialised-cursor-temps.md`
-      before touching it.
+- [x] **#2 `_spout_` >10-char output column names** — FIXED 2026-07-30
+      (section 2 above); the remaining materialisers followed 2026-08-03/05.
 - [ ] **#3 EXPR_n numbering, mixed aliased/unaliased aggregates** — verify
       `SELECT COUNT(*), SUM(x) AS s, MIN(y)` column naming matches SAP.
 
