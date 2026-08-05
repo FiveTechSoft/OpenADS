@@ -71,7 +71,8 @@ std::string read_subtag_name(platform::File& file, std::uint32_t sub_offset) {
 }
 
 util::Result<std::vector<std::pair<std::string, std::uint32_t>>>
-decode_compact_leaf_static(const CdxIndex::Page& p, std::uint16_t key_size);
+decode_compact_leaf_static(const CdxIndex::Page& p, std::uint16_t key_size,
+                           std::uint8_t trail_byte = ' ');
 
 platform::OpenMode map_mode(IndexOpenMode m) {
     switch (m) {
@@ -150,6 +151,11 @@ LeafLayout compute_layout(std::uint16_t key_len,
 // Static compact-leaf encode/decode helpers parameterised by key_size,
 // so the structure tag (key_size = 10) and sub-tag data leaves share
 // one implementation.
+//
+// `trail_byte` mirrors Harbour dbfcdx `pTag->bTrail`:
+//   ' '  for character keys (trailing spaces elided)
+//   '\0' for numeric / date / logical (trailing NULs elided)
+// Structure-tag leaves always pass the default ' '.
 util::Result<void>
 encode_compact_leaf_static(
     CdxIndex::Page& p,
@@ -157,7 +163,8 @@ encode_compact_leaf_static(
     const std::vector<std::pair<std::string, std::uint32_t>>& keys,
     std::uint32_t   left_sib,
     std::uint32_t   right_sib,
-    std::uint8_t    req_byte_override = 0)
+    std::uint8_t    req_byte_override = 0,
+    std::uint8_t    trail_byte = ' ')
 {
     std::uint32_t max_rec = 0;
     for (const auto& kv : keys) {
@@ -171,13 +178,14 @@ encode_compact_leaf_static(
     const std::uint32_t dup_mask = L.dc_mask;
     const std::uint32_t trl_mask = L.tc_mask;
     const std::uint8_t  key_bytes = L.req_byte;
+    const char          trail_ch  = static_cast<char>(trail_byte);
 
     // Fail loud instead of silently truncating. compute_layout grows the
     // record-number field to fit max_rec, but that width is capped at the
     // 5-byte struct-tag layout (and req_byte_override fixes it outright).
     // If the resulting rn_bits cannot represent the largest recno on this
     // page, `recno & rec_mask` below would drop the high bits and corrupt
-    // the index silently. Refuse the encode instead â€” a 5000 here is far
+    // the index silently. Refuse the encode instead — a 5000 here is far
     // better than an out-of-range recno surfacing on a later ordered walk.
     if (max_rec > rec_mask) {
         return util::Error{5000, 0,
@@ -198,12 +206,13 @@ encode_compact_leaf_static(
     p[23] = key_bytes;
 
     std::uint32_t buf_pos = CDX_PAGE_LEN - CDX_EXT_HEADSIZE;
-    std::string prev(key_size, ' ');
+    std::string prev(key_size, trail_ch);
 
     for (std::size_t i = 0; i < keys.size(); ++i) {
         const auto& [key, recno] = keys[i];
         std::string padded = key;
-        if (padded.size() < key_size) padded.append(key_size - padded.size(), ' ');
+        if (padded.size() < key_size)
+            padded.append(key_size - padded.size(), trail_ch);
         if (padded.size() > key_size) padded.resize(key_size);
 
         std::uint32_t dup = 0;
@@ -211,7 +220,11 @@ encode_compact_leaf_static(
             while (dup < key_size && padded[dup] == prev[dup]) ++dup;
         }
         std::uint32_t trl = 0;
-        while (trl < key_size - dup && padded[key_size - 1 - trl] == ' ') ++trl;
+        while (trl < key_size - dup &&
+               static_cast<std::uint8_t>(padded[key_size - 1 - trl]) ==
+                   trail_byte) {
+            ++trl;
+        }
         std::uint32_t suffix_len = key_size - dup - trl;
 
         if (buf_pos < suffix_len) {
@@ -271,7 +284,8 @@ encode_compact_leaf_static(
 }
 
 util::Result<std::vector<std::pair<std::string, std::uint32_t>>>
-decode_compact_leaf_static(const CdxIndex::Page& p, std::uint16_t key_size) {
+decode_compact_leaf_static(const CdxIndex::Page& p, std::uint16_t key_size,
+                           std::uint8_t trail_byte) {
     std::uint16_t attr = read_u16_le(p.data() + 0);
     if (!(attr & CDX_NODE_LEAF)) {
         return util::Error{6106, 0, "decode_leaf_ on non-leaf page", ""};
@@ -284,12 +298,13 @@ decode_compact_leaf_static(const CdxIndex::Page& p, std::uint16_t key_size) {
     std::uint8_t  trl_bits  = p[22];
     std::uint8_t  key_bytes = p[23];
     (void)p[20];
+    const char trail_ch = static_cast<char>(trail_byte);
 
     std::vector<std::pair<std::string, std::uint32_t>> out;
     out.reserve(nkeys);
 
     std::uint32_t buf_pos = CDX_PAGE_LEN - CDX_EXT_HEADSIZE;
-    std::string   prev(key_size, ' ');
+    std::string   prev(key_size, trail_ch);
 
     for (std::uint16_t i = 0; i < nkeys; ++i) {
         const std::uint8_t* entry = p.data() + CDX_EXT_HEADSIZE + i * key_bytes;
@@ -322,8 +337,11 @@ decode_compact_leaf_static(const CdxIndex::Page& p, std::uint16_t key_size) {
                         p.data() + CDX_EXT_HEADSIZE + buf_pos,
                         suffix_len);
         }
+        // Restore elided trailing bytes with the tag's trail byte
+        // (space for character keys, NUL for FoxNumeric) — Harbour
+        // hb_cdxPageLeafDecode fills with pTag->bTrail.
         for (std::uint32_t t = key_size - trl; t < key_size; ++t) {
-            key[t] = ' ';
+            key[t] = trail_ch;
         }
         prev = key;
         out.emplace_back(key, recno);
@@ -652,7 +670,7 @@ util::Result<std::vector<std::pair<std::string, std::uint32_t>>>
 CdxIndex::decode_leaf_(std::uint32_t page_off) {
     auto page = get_page_(page_off);
     if (!page) return page.error();
-    return decode_compact_leaf_static(*page.value(), key_size_);
+    return decode_compact_leaf_static(*page.value(), key_size_, trail_byte_());
 }
 
 util::Result<void>
@@ -663,7 +681,9 @@ CdxIndex::encode_leaf_(std::uint32_t page_off,
     auto page = get_page_(page_off);
     if (!page) return page.error();
     auto r = encode_compact_leaf_static(*page.value(), key_size_, keys,
-                                        left_sib, right_sib);
+                                        left_sib, right_sib,
+                                        /*req_byte_override=*/0,
+                                        trail_byte_());
     if (!r) return r.error();
     dirty_[page_off] = true;
     return {};
@@ -840,7 +860,9 @@ CdxIndex::seek_key(const std::string& key, bool soft) {
     if (auto r = reload_header_if_changed_(); !r) return r.error();
     if (root_page_ == 0) return SeekOutcome{SeekHit::AfterEnd, 0, false};
     std::string padded = key;
-    if (padded.size() < key_size_) padded.append(key_size_ - padded.size(), ' ');
+    const char pad_ch = static_cast<char>(trail_byte_());
+    if (padded.size() < key_size_)
+        padded.append(key_size_ - padded.size(), pad_ch);
     if (padded.size() > key_size_) padded.resize(key_size_);
 
     // Clipper / DBFCDX partial-seek: compare only over the original
@@ -1121,7 +1143,8 @@ CdxIndex::insert_into_subtree_(std::uint32_t      subtree_root,
         std::uint32_t left_sib  = read_u32_le(pg.value()->data() + 4);
         std::uint32_t right_sib = read_u32_le(pg.value()->data() + 8);
 
-        auto dec = decode_compact_leaf_static(*pg.value(), key_size_);
+        auto dec = decode_compact_leaf_static(*pg.value(), key_size_,
+                                               trail_byte_());
         if (!dec) return dec.error();
         auto keys = std::move(dec).value();
 
@@ -1165,7 +1188,7 @@ CdxIndex::insert_into_subtree_(std::uint32_t      subtree_root,
             return {};
         }
 
-        // Overflow â†’ split. Find the largest mid such that BOTH halves
+        // Overflow → split. Find the largest mid such that BOTH halves
         // re-encode within a 512-byte page. Compact-leaf packing is
         // dup/trl-prefix dependent so a fixed midpoint isn't enough.
         std::size_t mid = keys.size() / 2;
@@ -1174,6 +1197,7 @@ CdxIndex::insert_into_subtree_(std::uint32_t      subtree_root,
         bool placed = false;
         Page tmp_left{};
         Page tmp_right{};
+        const std::uint8_t trl = trail_byte_();
         while (mid > 0 && mid < keys.size()) {
             using diff_t =
                 std::vector<std::pair<std::string, std::uint32_t>>::difference_type;
@@ -1182,9 +1206,9 @@ CdxIndex::insert_into_subtree_(std::uint32_t      subtree_root,
             right_keys.assign(keys.begin() + static_cast<diff_t>(mid),
                               keys.end());
             auto el = encode_compact_leaf_static(tmp_left,  key_size_,
-                                                  left_keys,  0u, 0u);
+                                                  left_keys,  0u, 0u, 0, trl);
             auto er = encode_compact_leaf_static(tmp_right, key_size_,
-                                                  right_keys, 0u, 0u);
+                                                  right_keys, 0u, 0u, 0, trl);
             if (el && er) { placed = true; break; }
             // Shift mid towards center if the imbalance is wrong.
             if (!el && er)        { mid -= 1; }
@@ -1348,7 +1372,9 @@ CdxIndex::insert(std::uint32_t recno, const std::string& key) {
     }
     invalidate_pos_cache();
     std::string padded = key;
-    if (padded.size() < key_size_) padded.append(key_size_ - padded.size(), ' ');
+    const char pad_ch = static_cast<char>(trail_byte_());
+    if (padded.size() < key_size_)
+        padded.append(key_size_ - padded.size(), pad_ch);
     if (padded.size() > key_size_) padded.resize(key_size_);
 
     if (root_page_ == 0) {
@@ -1397,18 +1423,21 @@ CdxIndex::build_bulk(std::vector<std::pair<std::string, std::uint32_t>> keys) {
     }
     invalidate_pos_cache();
 
-    // Pad to key_size_ and sort by (key, recno) â€” the CDX leaf order. Ties
+    // Pad to key_size_ and sort by (key, recno) — the CDX leaf order. Ties
     // on key resolve by recno so a forward seek surfaces the first-inserted
     // recno, matching the incremental insert path (upper_bound on key,recno).
+    // Pad with the tag's trail byte (space for Text, NUL for FoxNumeric)
+    // so bulk packing matches Harbour dbfcdx bTrail semantics.
+    const char pad_ch = static_cast<char>(trail_byte_());
     for (auto& kv : keys) {
         if (kv.first.size() < key_size_)
-            kv.first.append(key_size_ - kv.first.size(), ' ');
+            kv.first.append(key_size_ - kv.first.size(), pad_ch);
         else if (kv.first.size() > key_size_)
             kv.first.resize(key_size_);
     }
     // FoxNumeric / NtxNumeric keys are binary order-preserving encodings
     // that must sort by raw byte order.  OEM collation must NOT be applied
-    // â€” it remaps bytes and destroys the numeric ordering.  (#130)
+    // — it remaps bytes and destroys the numeric ordering.  (#130)
     const bool numeric_keys =
         (key_enc_ == openads::drivers::KeyEncoding::FoxNumeric ||
          key_enc_ == openads::drivers::KeyEncoding::NtxNumeric);
@@ -1447,10 +1476,12 @@ CdxIndex::build_bulk(std::vector<std::pair<std::string, std::uint32_t>> keys) {
         std::vector<std::pair<std::string, std::uint32_t>> cur;
         std::size_t start = 0;
         std::size_t i = 0;
+        const std::uint8_t trl = trail_byte_();
         while (i < keys.size()) {
             cur.push_back(keys[i]);
             auto e = encode_compact_leaf_static(probe, key_size_, cur,
-                                                0xFFFFFFFFu, 0xFFFFFFFFu);
+                                                0xFFFFFFFFu, 0xFFFFFFFFu,
+                                                /*req_byte_override=*/0, trl);
             if (!e) {
                 if (cur.size() == 1) {
                     return util::Error{5000, 0,
@@ -1639,7 +1670,9 @@ CdxIndex::erase(std::uint32_t recno, const std::string& key) {
     if (root_page_ == 0) return util::Error{5044, 0, "CDX empty", ""};
 
     std::string padded = key;
-    if (padded.size() < key_size_) padded.append(key_size_ - padded.size(), ' ');
+    const char pad_ch = static_cast<char>(trail_byte_());
+    if (padded.size() < key_size_)
+        padded.append(key_size_ - padded.size(), pad_ch);
     if (padded.size() > key_size_) padded.resize(key_size_);
 
     // Locate (key, recno) via the same leaf-chain walk seek_key uses.

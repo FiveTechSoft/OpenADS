@@ -243,6 +243,16 @@ private:
     int compare_keys_(const char* a, const char* b,
                       std::size_t len) const noexcept;
 
+    // Harbour dbfcdx `bTrail`: character keys elide trailing spaces;
+    // numeric/date (FoxNumeric / NtxNumeric) elide trailing NUL bytes.
+    // Using the wrong trail byte is the main reason OpenADS numeric
+    // leaves were larger than native DBFCDX for the same key set.
+    std::uint8_t trail_byte_() const noexcept {
+        return (key_enc_ == KeyEncoding::Text)
+            ? static_cast<std::uint8_t>(' ')
+            : static_cast<std::uint8_t>('\0');
+    }
+
     // Allocate a fresh 512-byte page at the next free offset for this
     // CDX file. Compound files host several sub-tags; every sub-tag's
     // CdxIndex shares one allocator keyed by path so their page

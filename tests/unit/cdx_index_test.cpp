@@ -1,13 +1,17 @@
 #include "doctest.h"
 #include "drivers/cdx/cdx_index.h"
+#include "drivers/index_trait.h"
+#include "engine/index_expr.h"
 
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <vector>
 
 namespace fs = std::filesystem;
 using openads::drivers::IndexOpenMode;
+using openads::drivers::KeyEncoding;
 using openads::drivers::SeekHit;
 using openads::drivers::cdx::CdxIndex;
 
@@ -342,6 +346,113 @@ TEST_CASE("CdxIndex unique tag rejects duplicates") {
         auto r = ix.insert(2, "AAAA");
         CHECK_FALSE(r.has_value());
         CHECK(r.error().code == 5044);
+    }
+    fs::remove(p);
+}
+
+// Harbour dbfcdx uses bTrail='\0' for non-character keys so trailing
+// zero bytes of FoxNumeric IEEE doubles are elided. OpenADS used to
+// always trail-pack on spaces only, leaving numeric leaves ~2× bulkier
+// than native DBFCDX for the same key set.
+TEST_CASE("CdxIndex FoxNumeric bulk packs trailing NULs like Harbour DBFCDX") {
+    auto p = fs::temp_directory_path() / "openads_cdx_foxnum_trail.cdx";
+    fs::remove(p);
+
+    std::vector<std::pair<std::string, std::uint32_t>> bulk;
+    bulk.reserve(10);
+    for (std::uint32_t r = 1; r <= 10; ++r) {
+        bulk.emplace_back(openads::engine::fox_numeric_key(
+                              static_cast<double>(r)),
+                          r);
+    }
+
+    {
+        auto created = CdxIndex::create(p.string(), "INS", "INS", 8,
+                                        false, false);
+        REQUIRE(created.has_value());
+        CdxIndex ix = std::move(created).value();
+        ix.set_key_encoding(KeyEncoding::FoxNumeric);
+        REQUIRE(ix.build_bulk(bulk).has_value());
+        REQUIRE(ix.flush().has_value());
+    }
+
+    // Walk order and seek must survive null-trail pack/unpack.
+    {
+        CdxIndex ix;
+        REQUIRE(ix.open(p.string(), IndexOpenMode::Shared).has_value());
+        ix.set_key_encoding(KeyEncoding::FoxNumeric);
+
+        auto first = ix.seek_first();
+        REQUIRE(first.has_value());
+        CHECK(first.value().positioned);
+        CHECK(first.value().recno == 1);
+        CHECK(ix.current_key() == openads::engine::fox_numeric_key(1.0));
+
+        for (std::uint32_t r = 2; r <= 10; ++r) {
+            auto n = ix.next();
+            REQUIRE(n.has_value());
+            CHECK(n.value().positioned);
+            CHECK(n.value().recno == r);
+            CHECK(ix.current_key() ==
+                  openads::engine::fox_numeric_key(static_cast<double>(r)));
+        }
+        auto end = ix.next();
+        REQUIRE(end.has_value());
+        CHECK_FALSE(end.value().positioned);
+
+        auto hit = ix.seek_key(openads::engine::fox_numeric_key(7.0), false);
+        REQUIRE(hit.has_value());
+        CHECK(hit.value().hit == SeekHit::Exact);
+        CHECK(hit.value().recno == 7);
+    }
+
+    // On-disk leaf free space for 10 FoxNumeric keys should match the
+    // Harbour packing density (free >= 440; space-only trail left free~386).
+    {
+        std::ifstream f(p, std::ios::binary);
+        REQUIRE(f.is_open());
+        // Sub-tag data leaf sits at the first data page (offset 2560
+        // for a single-tag bag with one leaf).
+        f.seekg(2560);
+        std::uint8_t leaf[512]{};
+        f.read(reinterpret_cast<char*>(leaf), 512);
+        auto rd16 = [](const std::uint8_t* x) -> std::uint16_t {
+            return static_cast<std::uint16_t>(
+                static_cast<std::uint16_t>(x[0]) |
+                (static_cast<std::uint16_t>(x[1]) << 8));
+        };
+        CHECK(rd16(leaf + 0) == 3u);   // ROOT|LEAF
+        CHECK(rd16(leaf + 2) == 10u);  // 10 keys
+        const std::uint16_t free_spc = rd16(leaf + 12);
+        // Harbour packs the same 10 doubles into free=447; require we
+        // are in that ballpark (not the old free=386 space-only path).
+        CHECK(free_spc >= 440);
+        CHECK(free_spc <= 460);
+    }
+    fs::remove(p);
+}
+
+TEST_CASE("CdxIndex Text keys still trail-pack trailing spaces") {
+    auto p = fs::temp_directory_path() / "openads_cdx_text_trail.cdx";
+    fs::remove(p);
+    {
+        auto created = CdxIndex::create(p.string(), "NM", "NAME", 20,
+                                        false, false);
+        REQUIRE(created.has_value());
+        CdxIndex ix = std::move(created).value();
+        // Default Text encoding — trail byte is space.
+        REQUIRE(ix.insert(1, "Alice").has_value());
+        REQUIRE(ix.insert(2, "Bob").has_value());
+        REQUIRE(ix.flush().has_value());
+    }
+    {
+        CdxIndex ix;
+        REQUIRE(ix.open(p.string(), IndexOpenMode::Shared).has_value());
+        REQUIRE(ix.seek_first().has_value());
+        // Decoded key is space-padded to key length.
+        CHECK(ix.current_key() == "Alice               ");
+        REQUIRE(ix.next().has_value());
+        CHECK(ix.current_key() == "Bob                 ");
     }
     fs::remove(p);
 }
