@@ -263,12 +263,16 @@ OpenADS gap (test-case bugs already fixed). Grouped by root cause:
       `users.dbf` 18 physical / 8 deleted → SAP 18, OA 10; `provider.dbf`
       20/4 → SAP 20, OA 16; `Forms.dbf` 64/0 → both 64 (control). Invisible on
       pmsys because it is ADT-only. Affects every DBF table with deletions.
-- [ ] **SQL feature gaps** *(1 of 5 cases remains)* — `SELECT ... FROM
-      <view>` raises 5004 for both mp views, so plain single-table view
-      resolution is broken (not just views-inside-joins).
-      ~~COUNT(DISTINCT)~~ / ~~expression aggregates~~ fixed 2026-08-02;
-      ~~Length()~~ fixed 2026-08-05 (gate `scalar_length_literal` passes;
-      unaliased scalar fns also gained SAP's EXPR/EXPR_1 naming).
+- [x] **SQL feature gaps — ALL FIVE FIXED.** ~~COUNT(DISTINCT)~~ /
+      ~~expression aggregates~~ 2026-08-02; ~~Length()~~ 2026-08-05;
+      ~~`SELECT ... FROM <view>`~~ 2026-08-05: views resolve via the
+      derived-table machinery, composing outer clauses like SAP
+      (`vw_SumByClaim` + `vw_TestView` gate cases byte-identical).
+      Fixed with it: the SAP binary View decode had sql/comment SWAPPED
+      (every imported view had an empty statement — re-run import_dd to
+      repair converted DDs), and the scalar/grouped aggregate walks
+      ignored a derived cursor's own filter, so a COUNT over any
+      filtered view/derived table counted every row.
 - [x] **Join column resolution — FIXED 2026-08-04** (`jcol_index`: merged
       R_ fallback + qualifier strip at every aggregate/GROUP BY/WHERE
       resolution site). The **result naming** half was fixed earlier: `R_UNITS` / `R_Status` and the
@@ -459,9 +463,11 @@ Fix is the one task #2 already prescribes — materialise into an **ADT** temp
       FOLLOW-UP (minor, import-casing): OA surfaces two grantees lowercased —
       `autotasks`/`rcb` where SAP has `AutoTasks`/`RCB`. Same entities, cosmetic;
       the importer lowercases these user names. Not a row-matrix issue.
-- [ ] **Views inside joins** — single-table view resolution was prototyped
-      (then reverted with the mp10 work); a view used *within* a join is not
-      resolved. Verify + decide scope. Not yet tasked.
+- [ ] **Views inside joins** — single-table view resolution landed
+      2026-08-05 (derived-table route); a view used *within* a JOIN is
+      still not resolved. Also open: aliased views (`FROM v x` with
+      `x.col` qualifiers) and view-name row ordering in `system.views`
+      (SAP shows creation order; OA map order).
 
 ## C. Larger open work (not SQL-parity blocking)
 - [ ] **ACE64 export surface** — 393/578 SAP exports present, 231 missing

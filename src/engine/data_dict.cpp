@@ -1212,10 +1212,18 @@ util::Result<void> DataDict::load_add_binary_(const std::string& buf) {
                 auto jtext = read_am_json(am_buf, rec.more_property);
                 if (!jtext.empty()) json_to_view(jtext, e);
             } else {
+                // SAP binary View record: the SELECT statement is the FIRST
+                // NUL part, the comment second. This was decoded swapped,
+                // which left every imported view with an EMPTY sql and the
+                // statement sitting in `comment` — visible in system.views
+                // (View_Stmt blank, SQL under Comment) and fatal for
+                // `FROM <view>` resolution. Verified against the mp DD:
+                // both views carry the full SELECT as parts[0] and SAP's
+                // own catalog shows their Comment as empty.
                 auto parts = split_nul(rec.property);
                 while (parts.size() < 2) parts.emplace_back();
-                e.comment = parts[0];
-                e.sql     = parts[1];
+                e.sql     = parts[0];
+                e.comment = parts[1];
             }
             views_[e.name] = std::move(e);
 

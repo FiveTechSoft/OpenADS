@@ -292,3 +292,86 @@ TEST_CASE("system.storedprocedures returns >255-byte bodies untruncated") {
     AdsCloseTable(hCur);
     AdsCloseSQLStatement(hStmt);
 }
+
+// S5 — `SELECT ... FROM <view>` resolves the view's stored SELECT as a
+// derived table and composes the outer clauses over it, matching SAP
+// (oracle-probed on the mp corpus: TOP/WHERE/ORDER/COUNT/star over both
+// mp views are byte-identical). Both mp views were unreadable (5004)
+// before this: the SQL branch never consulted dd->views(), and the SAP
+// binary View decode had sql/comment SWAPPED, so every imported view
+// carried an empty statement (system.views showed the SQL under Comment).
+TEST_CASE("SELECT FROM a DD view composes outer clauses like SAP") {
+    PvFixture f;
+
+    ADSHANDLE hStmt = 0;
+    REQUIRE(AdsCreateSQLStatement(f.hConn, &hStmt) == 0);
+    auto exec = [&](const char* text) {
+        UNSIGNED8 sql[256] = {0};
+        std::memcpy(sql, text, std::strlen(text));
+        ADSHANDLE hc = 0;
+        UNSIGNED32 rc = AdsExecuteSQLDirect(hStmt, sql, &hc);
+        REQUIRE(rc == 0);
+        return hc;
+    };
+    auto val = [&](ADSHANDLE hc, const char* col) {
+        UNSIGNED8 fld[32] = {0};
+        std::strncpy(reinterpret_cast<char*>(fld), col, sizeof(fld) - 1);
+        UNSIGNED8 buf[64] = {0};
+        UNSIGNED32 len = sizeof(buf);
+        if (AdsGetString(hc, fld, buf, &len, ADS_NONE) != 0) return std::string("<err>");
+        std::string s(reinterpret_cast<char*>(buf), len);
+        auto b = s.find_first_not_of(' ');
+        return b == std::string::npos ? std::string() : s.substr(b);
+    };
+
+    for (const char* ins : {"INSERT INTO stock VALUES (5)",
+                            "INSERT INTO stock VALUES (15)",
+                            "INSERT INTO stock VALUES (3)"}) {
+        UNSIGNED8 sql[64] = {0};
+        std::memcpy(sql, ins, std::strlen(ins));
+        ADSHANDLE hc = 0;
+        REQUIRE(AdsExecuteSQLDirect(hStmt, sql, &hc) == 0);
+        if (hc) AdsCloseTable(hc);
+    }
+
+    UNSIGNED8 v1[16]  = "v_small";
+    UNSIGNED8 v1s[64] = "SELECT VAL FROM stock WHERE VAL < 10";
+    REQUIRE(AdsDDCreateView(f.hConn, v1, nullptr, v1s) == 0);
+    UNSIGNED8 v2[16]  = "v_total";
+    UNSIGNED8 v2s[64] = "SELECT SUM(VAL) AS Total_Value FROM stock";
+    REQUIRE(AdsDDCreateView(f.hConn, v2, nullptr, v2s) == 0);
+
+    {   // outer ORDER BY composes over the view's WHERE — and the row
+        // the view hides (VAL 15) must NOT appear at the end.
+        ADSHANDLE hc = exec("SELECT * FROM v_small ORDER BY VAL");
+        REQUIRE(AdsGotoTop(hc) == 0);
+        CHECK(val(hc, "VAL") == "3");
+        REQUIRE(AdsSkip(hc, 1) == 0);
+        CHECK(val(hc, "VAL") == "5");
+        REQUIRE(AdsSkip(hc, 1) == 0);
+        UNSIGNED16 eof = 0;
+        REQUIRE(AdsAtEOF(hc, &eof) == 0);
+        CHECK(eof == 1);
+        AdsCloseTable(hc);
+    }
+    {   // outer aggregate over the view
+        ADSHANDLE hc = exec("SELECT COUNT(*) AS n FROM v_small");
+        REQUIRE(AdsGotoTop(hc) == 0);
+        CHECK(val(hc, "n") == "2");
+        AdsCloseTable(hc);
+    }
+    {   // aggregate VIEW: outer projection sees the view's alias
+        ADSHANDLE hc = exec("SELECT Total_Value FROM v_total");
+        REQUIRE(AdsGotoTop(hc) == 0);
+        CHECK(val(hc, "Total_Value") == "23");
+        AdsCloseTable(hc);
+    }
+    {   // case-insensitive view name
+        ADSHANDLE hc = exec("SELECT COUNT(*) AS n FROM V_SMALL");
+        REQUIRE(AdsGotoTop(hc) == 0);
+        CHECK(val(hc, "n") == "2");
+        AdsCloseTable(hc);
+    }
+
+    REQUIRE(AdsCloseSQLStatement(hStmt) == 0);
+}

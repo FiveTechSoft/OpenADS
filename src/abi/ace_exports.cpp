@@ -20577,7 +20577,9 @@ build_system_table(Connection* c, std::string sys_name,
         std::vector<std::vector<std::string>> rows;
         for (const auto& kv : dd->views()) {
             const auto& e = kv.second;
-            rows.push_back({e.name, std::to_string(e.sql.size()),
+            // SAP's View_Stmt_Len includes the terminating NUL (probed:
+            // a 41-char statement reports 42).
+            rows.push_back({e.name, std::to_string(e.sql.size() + 1),
                             e.sql, e.comment, "F"});
         }
         const std::vector<Col> cols = {
@@ -27357,6 +27359,37 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
     auto parsed = openads::sql::parse_select(sql);
     if (!parsed) return fail(parsed.error());
 
+    // S5 — `FROM <view>`: resolve a DD view by substituting its stored
+    // SELECT as a derived table. The existing M10.46 machinery then runs
+    // the view's SQL recursively and applies the outer clauses (WHERE /
+    // ORDER BY / TOP / aggregates / projection) to its cursor — exactly
+    // SAP's composition semantics, oracle-probed on the mp views
+    // (`SELECT TOP 5 Total, ClaimKey FROM SumByClaim ORDER BY ClaimKey`
+    // etc.). UNION members re-enter this dispatcher and resolve views for
+    // free; a view INSIDE a join is still unresolved (TODO.parity.md).
+    if (parsed.value().derived_sql.empty() &&
+        !parsed.value().inner_join &&
+        parsed.value().from_tables.size() < 3 &&
+        !parsed.value().table.empty() &&
+        c->has_dd()) {
+        auto* vdd = c->dd();
+        if (vdd != nullptr && !vdd->views().empty()) {
+            auto up = [](std::string v) {
+                for (auto& ch : v)
+                    ch = static_cast<char>(std::toupper(
+                        static_cast<unsigned char>(ch)));
+                return v;
+            };
+            const std::string want = up(parsed.value().table);
+            for (const auto& kv : vdd->views()) {
+                if (up(kv.first) == want && !kv.second.sql.empty()) {
+                    parsed.value().derived_sql = kv.second.sql;
+                    break;
+                }
+            }
+        }
+    }
+
     // ====================================================================
     // ADS dialect — N-way comma join (3+ tables) with composite keys and
     // `<alias>.*` projection. The single-JoinClause path below handles only
@@ -29908,6 +29941,10 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             for (std::uint32_t r = 1; r <= rcount; ++r) {
                 if (auto g = tbl->goto_record(r); !g) continue;
                 if (tbl->is_deleted()) continue;
+                // A derived-table / VIEW source arrives as a live cursor
+                // with its own filter (the view's WHERE) — rows it hides
+                // must not reach the aggregate.
+                if (!tbl->passes_filter()) continue;
                 if (filter && !filter(*tbl)) continue;
                 std::string key;
                 std::vector<std::string> parts;
@@ -30391,6 +30428,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         for (std::uint32_t r = 1; r <= rcount; ++r) {
             if (auto g = tbl->goto_record(r); !g) continue;
             if (tbl->is_deleted()) continue;
+            // Same rule as the grouped walk: honour a view/derived
+            // cursor's own filter.
+            if (!tbl->passes_filter()) continue;
             if (filter && !filter(*tbl)) continue;
             ++row_count;
             for (std::size_t i = 0; i < slots.size(); ++i) {
