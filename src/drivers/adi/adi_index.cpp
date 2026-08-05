@@ -656,8 +656,8 @@ util::Result<void> AdiIndex::refresh_current_() {
             current_key_.clear();
             return {};
         }
-        cur_recno_   = leaf_entries_[cur_idx_].first;
-        current_key_ = leaf_entries_[cur_idx_].second;
+        cur_recno_   = leaf_entries_[static_cast<std::size_t>(cur_idx_)].first;
+        current_key_ = leaf_entries_[static_cast<std::size_t>(cur_idx_)].second;
         return {};
     }
     cur_recno_ = dense_entry_recno(cur_page_.data(), cur_idx_, entry_size_);
@@ -1247,8 +1247,8 @@ util::Result<SeekOutcome> AdiIndex::seek_key(const std::string& key, bool soft) 
         std::uint32_t rno;
         std::string ckv;
         if (key_in_leaf_) {
-            rno = leaf_entries_[i].first;
-            ckv = leaf_entries_[i].second;
+            rno = leaf_entries_[static_cast<std::size_t>(i)].first;
+            ckv = leaf_entries_[static_cast<std::size_t>(i)].second;
         } else {
             rno = dense_entry_recno(cur_page_.data(), i, entry_size_);
             auto ck = key_for_recno_(rno);
