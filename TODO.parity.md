@@ -22,23 +22,19 @@ shape of the fix, so none of them gets lost. Ordered by value.
 
 ### 1. Column-level permission enforcement — the security item
 
-The **catalog half is done** (`system.permissions` renders SAP's full
-grantee×object matrix incl. the column rows). **Enforcement is not.** OpenADS
-imports table grants *without* the per-column restrictions and enforces
-table-level only, so it hands over columns SAP hides.
+**PLANNED — see `docs/plans/column-level-permissions.md`** (2026-08-05
+survey; implementation deferred behind full SQL-engine parity).
 
-Verified on pmsys: SAP grants the `General` group table access AND restricts it
-to specific columns on 32 tables (`leases`: 23 columns); OpenADS gives the whole
-table. 12/12 sampled tables were under-restrictive. 310 of 389 real grants are
-column-level and never imported — `import_dd` only probes
-Tables/Views/Procs/Functions, never columns.
-
-Reassuring for scoping: the column *dimension* is intact — type 4 is 1081
-columns on both engines for mp (55131/51 = 54050/50 = 1081, matching
-`system.columns`). The matrix is right; only the enforcement is missing.
-
-Work: import column grants → per-column model → enforce at query time
-(projection masking / deny). Detail in `todo.local.md`.
+The old summary here was stale on both counts. Actual state: table-level
+(file-level) enforcement is DONE and covered by ~20 test cases (open gate,
+SQL DML/SELECT gates, metadata visibility, GRANT/REVOKE, groups, adssys
+bypass). The column-level MODEL, the import (`import_dd` step 5c3 reads
+SAP's own `Object_Type = 4` decode), and the *simple single-table SELECT*
+enforcement (projection masking + explicit-column deny, tested) also
+exist. What still bypasses column ACLs: WHERE/ORDER/GROUP on forbidden
+columns, aggregates, ALL join paths, CASE/fn/window, column-level writes,
+the navigational ABI, and column metadata — the plan's gap table G1–G10,
+with the SAP probe matrix to run first.
 
 ### 2. ✅ FIXED 2026-07-30 — `sp_` `__output` no longer truncates to 10 chars
 
