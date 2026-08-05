@@ -97,7 +97,9 @@ TEST_CASE("native AdiIndex handles ESTAELEC compound/computed/conditional tags")
     REQUIRE(!ec);
     UNSIGNED8 dat[] = "estaelec.DAT";
     hT = 0;
-    REQUIRE(AdsOpenTable(hConn, dat, nullptr, ADS_ADT, 0, 0, 0, ADS_DEFAULT, &hT)
+    REQUIRE(AdsOpenTable(hConn, dat, nullptr, ADS_ADT, ADS_ANSI,
+                         ADS_COMPATIBLE_LOCKING, ADS_IGNORERIGHTS,
+                         ADS_EXCLUSIVE, &hT)
             == AE_SUCCESS);
 
     struct Row { const char* con; const char* doc; const char* cli;
@@ -157,7 +159,9 @@ TEST_CASE("native AdiIndex handles ESTAELEC compound/computed/conditional tags")
 
     // Reopen: auto-open must rebind the 5 distinct tags BY NAME.
     hT = 0;
-    REQUIRE(AdsOpenTable(hConn, dat, nullptr, ADS_ADT, 0, 0, 0, ADS_DEFAULT, &hT)
+    REQUIRE(AdsOpenTable(hConn, dat, nullptr, ADS_ADT, ADS_ANSI,
+                         ADS_COMPATIBLE_LOCKING, ADS_IGNORERIGHTS,
+                         ADS_EXCLUSIVE, &hT)
             == AE_SUCCESS);
     UNSIGNED16 nidx2 = 0;
     REQUIRE(AdsGetNumIndexes(hT, &nidx2) == AE_SUCCESS);
@@ -197,7 +201,9 @@ TEST_CASE("native AdiIndex tag ordinals follow creation order (xxBrowse DBSETORD
     fs::rename(dir / "ord.adt", dir / "ord.DAT", ec); REQUIRE(!ec);
     UNSIGNED8 dat[] = "ord.DAT";
     hT = 0;
-    REQUIRE(AdsOpenTable(hConn, dat, nullptr, ADS_ADT, 0, 0, 0, ADS_DEFAULT, &hT)
+    REQUIRE(AdsOpenTable(hConn, dat, nullptr, ADS_ADT, ADS_ANSI,
+                         ADS_COMPATIBLE_LOCKING, ADS_IGNORERIGHTS,
+                         ADS_EXCLUSIVE, &hT)
             == AE_SUCCESS);
     for (int i = 1; i <= 3; ++i) {
         REQUIRE(AdsAppendRecord(hT) == AE_SUCCESS);
@@ -213,7 +219,9 @@ TEST_CASE("native AdiIndex tag ordinals follow creation order (xxBrowse DBSETORD
     REQUIRE(AdsCloseTable(hT) == AE_SUCCESS);
 
     hT = 0;
-    REQUIRE(AdsOpenTable(hConn, dat, nullptr, ADS_ADT, 0, 0, 0, ADS_DEFAULT, &hT)
+    REQUIRE(AdsOpenTable(hConn, dat, nullptr, ADS_ADT, ADS_ANSI,
+                         ADS_COMPATIBLE_LOCKING, ADS_IGNORERIGHTS,
+                         ADS_EXCLUSIVE, &hT)
             == AE_SUCCESS);
     UNSIGNED8 b[260]{}; std::memcpy(b, bag.c_str(), bag.size());
     ADSHANDLE arr[16] = {0}; UNSIGNED16 alen = 16;

@@ -106,7 +106,9 @@ TEST_CASE("ADI->CDX reroute handles ESTAELEC compound/computed/conditional tags"
     REQUIRE(!ec);
     UNSIGNED8 dat[] = "estaelec.DAT";
     hT = 0;
-    REQUIRE(AdsOpenTable(hConn, dat, nullptr, ADS_ADT, 0, 0, 0, ADS_DEFAULT, &hT)
+    REQUIRE(AdsOpenTable(hConn, dat, nullptr, ADS_ADT, ADS_ANSI,
+                         ADS_COMPATIBLE_LOCKING, ADS_IGNORERIGHTS,
+                         ADS_EXCLUSIVE, &hT)
             == AE_SUCCESS);
 
     struct Row { const char* con; const char* doc; const char* cli;
@@ -173,7 +175,9 @@ TEST_CASE("ADI->CDX reroute handles ESTAELEC compound/computed/conditional tags"
     // (AdsOpenIndex path). The 5 orders must persist and stay distinct, addressed
     // by tag NAME (handles are gone after close).
     hT = 0;
-    REQUIRE(AdsOpenTable(hConn, dat, nullptr, ADS_ADT, 0, 0, 0, ADS_DEFAULT, &hT)
+    REQUIRE(AdsOpenTable(hConn, dat, nullptr, ADS_ADT, ADS_ANSI,
+                         ADS_COMPATIBLE_LOCKING, ADS_IGNORERIGHTS,
+                         ADS_EXCLUSIVE, &hT)
             == AE_SUCCESS);
     UNSIGNED16 nidx2 = 0;
     REQUIRE(AdsGetNumIndexes(hT, &nidx2) == AE_SUCCESS);
