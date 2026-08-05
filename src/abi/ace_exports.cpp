@@ -9967,6 +9967,17 @@ SIGNED32 to_julian(int y, int m, int d) {
 // of the same 34,595-row table: 14 ms where key order happened to follow recno,
 // 492 ms where it did not. The count does not depend on the order, so read the
 // records in the order the file stores them.
+// Opt-in switch for the ADI v2 tag layout (compound / computed / FOR tags,
+// dense leaf with front coding). OFF by default, so a deployment that does not
+// ask for it keeps the legacy single-field bag byte for byte. Read on every
+// call — index creation is not a hot path — so a test or an application can turn
+// it on for one process without a restart.
+bool adi_v2_enabled() noexcept {
+    const char* e = std::getenv("OPENADS_ADI_V2");
+    if (e == nullptr || *e == 0) return false;
+    return !(e[0] == '0' && e[1] == 0);
+}
+
 std::uint32_t count_live_recnos(openads::engine::Table* t,
                                 const std::vector<std::uint32_t>& walk) {
     std::vector<std::uint32_t> by_recno(walk);
@@ -13396,7 +13407,19 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
         // uses (STR()/DTOS()/concat → character keys). A BARE numeric/date field
         // keeps the legacy numeric ADI leaf (sign-flipped float keys) so the
         // existing packed-key seeks keep working.
-        const bool use_v2 = is_char_field || is_compound;
+        // v2 is OPT-IN. With the switch off this call behaves exactly as it did
+        // before: a bare field tag takes the legacy layout, and an expression
+        // the legacy format cannot represent is rejected the way it was
+        // rejected before (there is nowhere in a legacy tag header to keep the
+        // expression, so accepting it silently would produce a bag whose tag
+        // says one thing and whose keys say another).
+        const bool v2_on = adi_v2_enabled();
+        if (!v2_on && is_compound) {
+            return fail(openads::AE_COLUMN_NOT_FOUND,
+                        "ADI: a compound / computed index expression needs the "
+                        "v2 tag layout (set OPENADS_ADI_V2=1)");
+        }
+        const bool use_v2 = v2_on && (is_char_field || is_compound);
         openads::drivers::adi::AdiIndex::CreateParams cp{};
         cp.field_num   = static_cast<std::uint8_t>(fidx + 1);
         cp.field_name  = fd.name;

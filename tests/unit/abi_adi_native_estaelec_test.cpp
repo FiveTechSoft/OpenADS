@@ -13,6 +13,7 @@
 // is the target oracle for the AdiIndex rework. As each gap lands the matching
 // CHECK goes green; when ALL pass, drop the should_fail decorator. The CDX mirror
 // (abi_cdx_estaelec_compound_test.cpp) proves the ERP pattern is correct on CDX.
+#include <cstdlib>
 #include "doctest.h"
 #include "openads/ace.h"
 
@@ -20,6 +21,16 @@
 #include <cstring>
 #include <filesystem>
 #include <string>
+
+namespace {
+// The v2 tag layout is opt-in (OPENADS_ADI_V2). These cases exercise it, so
+// they turn it on for their own duration and put it back afterwards — the rest
+// of the suite must keep running against the legacy layout.
+struct AdiV2Scope {
+    AdiV2Scope()  { _putenv_s("OPENADS_ADI_V2", "1"); }
+    ~AdiV2Scope() { _putenv_s("OPENADS_ADI_V2", ""); }
+};
+} // namespace
 
 namespace fs = std::filesystem;
 
@@ -51,6 +62,7 @@ ADSHANDLE make_tag(ADSHANDLE hTable, const char* bag, const char* tag,
 } // namespace
 
 TEST_CASE("native AdiIndex handles ESTAELEC compound/computed/conditional tags") {
+    AdiV2Scope _v2;
     // NO EnvGuard: exercise the genuine AdiIndex path (not the CDX reroute).
     fs::path dir = fs::temp_directory_path() / "openads_adi_native_estaelec";
     std::error_code ec; fs::remove_all(dir, ec); fs::create_directories(dir);
@@ -156,6 +168,7 @@ TEST_CASE("native AdiIndex handles ESTAELEC compound/computed/conditional tags")
 // (reversing ordinals) — add_tag must APPEND so DBSETORDER(1) picks the FIRST
 // created tag, not the last.
 TEST_CASE("native AdiIndex tag ordinals follow creation order (xxBrowse DBSETORDER)") {
+    AdiV2Scope _v2;
     fs::path dir = fs::temp_directory_path() / "openads_adi_ordinal";
     std::error_code ec; fs::remove_all(dir, ec); fs::create_directories(dir);
     UNSIGNED8 srv[260]{};

@@ -358,8 +358,6 @@ private:
     std::uint32_t   cur_recno_ = 0;
     std::string     current_key_;
     Page            cur_page_{};
-
-    bool                                             pos_cache_valid_ = false;
 };
 
 } // namespace openads::drivers::adi

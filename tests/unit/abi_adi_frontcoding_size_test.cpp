@@ -4,6 +4,7 @@
 // layout would — parity with ADS-SAP (~3x smaller). The build must also stay
 // fully navigable (every key visited once, ascending) so the size win is not
 // bought with corruption.
+#include <cstdlib>
 #include "doctest.h"
 #include "openads/ace.h"
 
@@ -12,6 +13,16 @@
 #include <cstring>
 #include <filesystem>
 #include <string>
+
+namespace {
+// The v2 tag layout is opt-in (OPENADS_ADI_V2). These cases exercise it, so
+// they turn it on for their own duration and put it back afterwards — the rest
+// of the suite must keep running against the legacy layout.
+struct AdiV2Scope {
+    AdiV2Scope()  { _putenv_s("OPENADS_ADI_V2", "1"); }
+    ~AdiV2Scope() { _putenv_s("OPENADS_ADI_V2", ""); }
+};
+} // namespace
 
 namespace fs = std::filesystem;
 
@@ -23,6 +34,7 @@ std::string trim_sp(std::string s) {
 } // namespace
 
 TEST_CASE("ADI: front-coded leaf shrinks an index over high-prefix keys") {
+    AdiV2Scope _v2;
     fs::path tmp = fs::temp_directory_path() / "openads_adi_frontcoding";
     { std::error_code ec; fs::create_directories(tmp, ec);
       fs::remove(tmp / "fc.adt", ec); fs::remove(tmp / "fc.adi", ec); }
