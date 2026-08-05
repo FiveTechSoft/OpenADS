@@ -63,6 +63,15 @@ public:
         return false;
     }
 
+    // Drop every record above `recno` in one shot (keep 1..recno), updating
+    // the header count + EOF marker. Used by PACK after the survivors have
+    // been copied down to 1..dst, so it avoids the read-all + zap + re-append
+    // pass. Default rejects with false so drivers that don't implement it fall
+    // back to the legacy save/zap/re-append path.
+    virtual util::Result<bool> truncate_to(std::uint32_t /*recno*/) {
+        return false;
+    }
+
     // VFP autoinc bump (M10.11). Returns the value to use for the
     // pending append (the field's current `autoinc_next`), advances
     // the in-memory counter by `autoinc_step`, and persists the new

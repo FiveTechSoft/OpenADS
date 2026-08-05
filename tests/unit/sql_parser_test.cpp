@@ -410,10 +410,30 @@ TEST_CASE("WHERE: ODBC date escape {d 'YYYY-MM-DD'} parses to digits") {
     CHECK(r.value().where->cmp.literal == "20260101");
 }
 
-TEST_CASE("comma-join: composite (multiple) join keys are rejected") {
+TEST_CASE("comma-join: a composite key parses and is left to the N-way path") {
+    // Used to be rejected outright ("use INNER JOIN ... ON for composite
+    // keys"). That was a two-table-only limit: the single-pair JoinClause
+    // cannot hold two key pairs, but the N-way executor reads the join
+    // equalities straight from the WHERE and handles any number of them --
+    // which is why the identical predicate across THREE tables always worked.
+    // Now the lowering simply declines: the statement parses, inner_join stays
+    // unset, and both equalities stay in the WHERE for the N-way executor.
     auto r = parse_select(
         "SELECT * FROM a, b WHERE a.x = b.y AND a.z = b.w");
-    CHECK_FALSE(r.has_value());   // single-key join only
+    REQUIRE(r.has_value());
+    CHECK_FALSE(r.value().inner_join.has_value());
+    CHECK(r.value().from_tables.size() == 2u);
+    CHECK(r.value().where != nullptr);
+}
+
+TEST_CASE("comma-join: a single key is still lowered into inner_join") {
+    // The simple path must not regress: one equality is still lifted out of
+    // the WHERE into the JoinClause.
+    auto r = parse_select(
+        "SELECT * FROM a, b WHERE a.x = b.y");
+    REQUIRE(r.has_value());
+    REQUIRE(r.value().inner_join.has_value());
+    CHECK(r.value().inner_join->table == "b");
 }
 
 TEST_CASE("comma-join: mixing comma with explicit JOIN is rejected") {

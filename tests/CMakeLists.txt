@@ -118,6 +118,7 @@ add_executable(openads_unit_tests
     unit/abi_seek_last_partial_test.cpp
     unit/abi_aof_index_agreement_test.cpp
     unit/abi_aof_empty_result_test.cpp
+    unit/abi_adi_prefix_seek_multilevel_test.cpp
     unit/abi_prefix_seek_deleted_test.cpp
     unit/cdx_reindex_char_test.cpp
     unit/cdx_prev_empty_leaf_test.cpp
@@ -249,6 +250,7 @@ add_executable(openads_unit_tests
     unit/abi_adi_keycount_test.cpp
     unit/abi_adi_native_estaelec_test.cpp
     unit/abi_adi_reindex_bench_test.cpp
+    unit/abi_keycount_cache_test.cpp
     unit/abi_adi_tagdir_order_test.cpp
     unit/abi_adi_tagdir_wide_page_test.cpp
     unit/abi_cdx_estaelec_compound_test.cpp
