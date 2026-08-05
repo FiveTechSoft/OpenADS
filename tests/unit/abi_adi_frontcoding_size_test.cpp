@@ -19,8 +19,20 @@ namespace {
 // they turn it on for their own duration and put it back afterwards — the rest
 // of the suite must keep running against the legacy layout.
 struct AdiV2Scope {
-    AdiV2Scope()  { _putenv_s("OPENADS_ADI_V2", "1"); }
-    ~AdiV2Scope() { _putenv_s("OPENADS_ADI_V2", ""); }
+    AdiV2Scope() {
+#ifdef _WIN32
+        _putenv_s("OPENADS_ADI_V2", "1");
+#else
+        setenv("OPENADS_ADI_V2", "1", 1);
+#endif
+    }
+    ~AdiV2Scope() {
+#ifdef _WIN32
+        _putenv_s("OPENADS_ADI_V2", "");
+#else
+        unsetenv("OPENADS_ADI_V2");
+#endif
+    }
 };
 } // namespace
 
