@@ -1,3 +1,19 @@
+## 1.8.59 - 2026-08-05
+
+### Performance — legacy ADI CREATE INDEX packs dense leaves full
+
+`AdiIndex::build_bulk` for **legacy** (field-derived, non-v2) tags used to
+fall back to per-record `insert()`, which 50/50-splits full leaves and left
+the bag roughly twice as large as necessary. CREATE INDEX / REINDEX now
+bottom-up packs fixed 2/3-byte dense entries to capacity and builds branch
+levels in one pass — same SAP-compatible on-disk layout, denser bags and
+faster builds.
+
+Measured (10 000 Character(20) keys, structural `.adi`): index file
+**73 216 → 37 376** bytes (~49 % smaller); ADI now undercuts the equivalent
+CDX (51 200) on the same CODE tag. Guarded by
+`abi_adi_legacy_bulk_size_test`.
+
 ## 1.8.58 - 2026-08-05
 
 ### Docs — error log vs transaction journal paths

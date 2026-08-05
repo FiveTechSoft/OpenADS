@@ -180,11 +180,12 @@ public:
     // CREATE INDEX overwrite can rebuild from scratch.
     util::Result<void> clear_data() override;
 
-    // Bulk-load the (v2) tag from a key set in one bottom-up pass (sort → pack
-    // dense leaves → build branch levels), far faster than per-record insert on
-    // a full REINDEX. Only the v2 opaque-key leaf is supported; a legacy
-    // (field-derived) tag falls back to the per-record default. Call clear_data
-    // first / use on a fresh tag.
+    // Bulk-load the tag from a key set in one bottom-up pass (sort → pack dense
+    // leaves → build branch levels), far faster — and denser — than per-record
+    // insert on a full CREATE INDEX / REINDEX. v2 uses front-coded leaves;
+    // legacy field-derived tags pack fixed 2/3-byte dense entries full
+    // (SAP-compatible layout, ~2× smaller bags than the old insert path).
+    // Call clear_data first / use on a fresh tag.
     util::Result<void> build_bulk(
         std::vector<std::pair<std::string, std::uint32_t>> keys) override;
 

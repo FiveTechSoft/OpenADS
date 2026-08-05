@@ -2494,10 +2494,161 @@ util::Result<void> AdiIndex::build_bulk(
         return util::Error{5000, 0, "ADI index is read-only", ""};
 
     if (!key_in_leaf_) {
-        // Legacy field-derived tag has no in-leaf key to bulk-pack; fall back to
-        // the per-record path (the empty tree was already prepared by the caller).
-        for (auto& kv : keys)
-            if (auto e = insert(kv.second, kv.first); !e) return e.error();
+        // Legacy field-derived tag: pack fixed-size dense leaves full (SAP-
+        // compatible 2/3-byte entries). The old path fell back to per-record
+        // insert(), which 50/50-splits full leaves and left the bag ~2× larger
+        // than a bottom-up pack (10k char keys: 143 pages insert vs ~70 packed).
+        const std::uint32_t klen = key_total_len_;
+        auto norm = [this, klen](const std::string& s) {
+            std::string k = s;
+            if (k.size() < klen)
+                k.append(klen - k.size(), char_key_ ? ' ' : '\0');
+            else
+                k.resize(klen);
+            return k;
+        };
+        for (auto& kv : keys) kv.first = norm(kv.first);
+        std::sort(keys.begin(), keys.end(),
+                  [this](const std::pair<std::string, std::uint32_t>& a,
+                         const std::pair<std::string, std::uint32_t>& b) {
+                      int c = compare_keys_(a.first, b.first);
+                      if (c != 0) return c < 0;
+                      return a.second < b.second;
+                  });
+
+        invalidate_pos_cache();
+        ordered_recnos_.clear();
+        pos_of_recno_.clear();
+        ordered_recnos_.reserve(keys.size());
+        for (const auto& kv : keys) {
+            pos_of_recno_[kv.second] =
+                static_cast<std::uint32_t>(ordered_recnos_.size());
+            ordered_recnos_.push_back(kv.second);
+        }
+        pos_cache_valid_ = true;
+
+        if (keys.empty()) return clear_data();
+
+        const std::uint32_t max_ents =
+            (ADI_PAGE_SIZE - ADI_DENSE_ENTRY_START) / entry_size_;
+        if (max_ents < 1)
+            return util::Error{5000, 0, "ADI build_bulk: zero dense capacity", ""};
+
+        std::vector<std::pair<std::size_t, std::size_t>> runs;
+        {
+            const std::size_t n = keys.size();
+            for (std::size_t lo = 0; lo < n; lo += max_ents)
+                runs.push_back({lo, std::min(n, lo + max_ents)});
+        }
+
+        auto write_legacy_leaf = [&](std::uint32_t page_no,
+                                     std::size_t lo, std::size_t hi,
+                                     std::uint32_t lsib, std::uint32_t rsib)
+                -> util::Result<std::string> {
+            Page pg{};
+            write_empty_dense_leaf_page(pg, adt_type_, fld_length_);
+            set_u16_le(pg.data() + 2, static_cast<std::uint16_t>(hi - lo));
+            set_u32_le(pg.data() + 4, lsib);
+            set_u32_le(pg.data() + 8, rsib);
+            std::uint8_t* base = pg.data() + ADI_DENSE_ENTRY_START;
+            for (std::size_t i = lo; i < hi; ++i) {
+                build_dense_entry_(base + (i - lo) * entry_size_,
+                                   keys[i].second, keys[i].first);
+            }
+            if (auto w = write_adi_page_(page_no, pg); !w) return w.error();
+            return keys[hi - 1].first;
+        };
+
+        struct Node { std::string max_key; std::uint32_t page; };
+
+        auto write_branch = [&](std::uint32_t page_no, const std::vector<Node>& lv,
+                                std::size_t lo, std::size_t hi)
+                -> util::Result<std::string> {
+            Page pg{};
+            set_u16_le(pg.data(), ADI_LVL_BRANCH);
+            set_u16_le(pg.data() + 2, static_cast<std::uint16_t>(hi - lo));
+            set_u32_le(pg.data() + 4, ADI_INVALID_PAGE);
+            set_u32_le(pg.data() + 8, ADI_INVALID_PAGE);
+            for (std::size_t i = lo; i < hi; ++i) {
+                std::uint8_t* dst = pg.data() + ADI_TREE_ENTRY_START
+                                  + (i - lo) * branch_entry_sz_;
+                std::memset(dst, 0, branch_entry_sz_);
+                const std::string& k = lv[i].max_key;
+                if (char_key_) {
+                    std::memcpy(dst, k.data(),
+                                std::min<std::size_t>(klen, k.size()));
+                    std::uint8_t* pp = dst + char_key_padded_len_ + 4;
+                    std::uint32_t pno = lv[i].page;
+                    pp[0] = static_cast<std::uint8_t>( pno        & 0xFFu);
+                    pp[1] = static_cast<std::uint8_t>((pno >>  8) & 0xFFu);
+                    pp[2] = static_cast<std::uint8_t>((pno >> 16) & 0xFFu);
+                    pp[3] = static_cast<std::uint8_t>((pno >> 24) & 0xFFu);
+                } else {
+                    std::memcpy(dst, k.data(),
+                                std::min<std::size_t>(8, k.size()));
+                    set_u32_be(dst + 12, lv[i].page);
+                }
+            }
+            if (auto w = write_adi_page_(page_no, pg); !w) return w.error();
+            return lv[hi - 1].max_key;
+        };
+
+        if (runs.size() == 1) {
+            auto mk = write_legacy_leaf(root_page_, 0, keys.size(),
+                                        ADI_INVALID_PAGE, ADI_INVALID_PAGE);
+            if (!mk) return mk.error();
+            cur_pg_ = ADI_INVALID_PAGE; cur_idx_ = -1;
+            return {};
+        }
+
+        std::vector<Node> level;
+        {
+            const std::size_t nleaves = runs.size();
+            std::vector<std::uint32_t> pages(nleaves);
+            for (std::size_t i = 0; i < nleaves; ++i) {
+                auto p = alloc_page_(); if (!p) return p.error();
+                pages[i] = p.value();
+            }
+            level.reserve(nleaves);
+            for (std::size_t i = 0; i < nleaves; ++i) {
+                std::uint32_t lsib = (i == 0) ? ADI_INVALID_PAGE : pages[i - 1];
+                std::uint32_t rsib =
+                    (i + 1 < nleaves) ? pages[i + 1] : ADI_INVALID_PAGE;
+                auto mk = write_legacy_leaf(pages[i], runs[i].first,
+                                            runs[i].second, lsib, rsib);
+                if (!mk) return mk.error();
+                level.push_back({std::move(mk).value(), pages[i]});
+            }
+        }
+
+        const std::uint32_t max_branch =
+            (ADI_PAGE_SIZE - ADI_TREE_ENTRY_START) / branch_entry_sz_;
+        if (max_branch < 2)
+            return util::Error{5000, 0,
+                "ADI build_bulk: branch fanout < 2 (key too wide)", ""};
+
+        while (level.size() > max_branch) {
+            std::vector<Node> next;
+            const std::size_t m = level.size();
+            const std::size_t nbr = (m + max_branch - 1) / max_branch;
+            std::vector<std::uint32_t> pages(nbr);
+            for (std::size_t i = 0; i < nbr; ++i) {
+                auto p = alloc_page_(); if (!p) return p.error();
+                pages[i] = p.value();
+            }
+            next.reserve(nbr);
+            for (std::size_t i = 0; i < nbr; ++i) {
+                std::size_t lo = i * max_branch;
+                std::size_t hi = std::min(m, lo + max_branch);
+                auto mk = write_branch(pages[i], level, lo, hi);
+                if (!mk) return mk.error();
+                next.push_back({std::move(mk).value(), pages[i]});
+            }
+            level = std::move(next);
+        }
+        if (auto top = write_branch(root_page_, level, 0, level.size()); !top)
+            return top.error();
+        cur_pg_ = ADI_INVALID_PAGE; cur_idx_ = -1;
         return {};
     }
 

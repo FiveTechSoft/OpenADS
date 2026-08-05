@@ -247,6 +247,7 @@ add_executable(openads_unit_tests
     unit/abi_adi_dat_extension_path_test.cpp
     unit/abi_adi_estaelec_compound_test.cpp
     unit/abi_adi_frontcoding_size_test.cpp
+    unit/abi_adi_legacy_bulk_size_test.cpp
     unit/abi_adi_keycount_test.cpp
     unit/abi_adi_native_estaelec_test.cpp
     unit/abi_adi_reindex_bench_test.cpp
