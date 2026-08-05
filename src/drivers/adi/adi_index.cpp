@@ -861,6 +861,15 @@ util::Result<SeekOutcome> AdiIndex::seek_key(const std::string& key, bool soft) 
             // components fold to upper on BOTH sides so a mismatched-case
             // search key descends the same subtree as the stored key.
             const std::string fnkey = fold_for_compare_(nkey);
+            // A seek key SHORTER than the index key bounds by prefix, so
+            // compare only the bytes the caller supplied — the same rule
+            // compare_keys_ applies at the dense leaf. Comparing the full
+            // key_total_len_ here read PAST the end of fnkey: with a partial
+            // key whose prefix equalled the separator's, the decision was
+            // then made on whatever followed the string in memory, and the
+            // descent could take the wrong child and miss a key that exists.
+            const std::size_t cmp_len =
+                std::min<std::size_t>(fnkey.size(), key_total_len_);
             int chosen = static_cast<int>(cnt) - 1;
             for (int i = 0; i < static_cast<int>(cnt); ++i) {
                 const std::uint8_t* ek = pg.data() + ADI_TREE_ENTRY_START
@@ -868,8 +877,7 @@ util::Result<SeekOutcome> AdiIndex::seek_key(const std::string& key, bool soft) 
                 const std::string fek = fold_for_compare_(
                     std::string(reinterpret_cast<const char*>(ek),
                                 key_total_len_));
-                if (std::memcmp(fnkey.data(), fek.data(),
-                                key_total_len_) <= 0) {
+                if (std::memcmp(fnkey.data(), fek.data(), cmp_len) <= 0) {
                     chosen = i; break;
                 }
             }
