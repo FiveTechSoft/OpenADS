@@ -1,3 +1,53 @@
+## 1.8.57 - 2026-08-05
+
+### Added — ADI v2 tags (opt-in): compound / computed / FOR on ADT
+
+An OpenADS-proprietary per-tag layout gated by `OPENADS_ADI_V2` (**off by
+default**). With the flag on, `AdsCreateIndex61` can persist compound
+expressions, computed keys (`UPPER(...)`), and `FOR` conditions in a `.adi`
+bag — what SAP's single-field-number format cannot express. Dense leaves use
+front coding; `CREATE INDEX` / `REINDEX` take a bulk path. Legacy bags still
+read and write unchanged when the flag is off. Closes #147, #159.
+
+### Fixed — two-table comma-join accepts a composite key
+
+`SELECT ... FROM a, b WHERE a.k1 = b.k1 AND a.k2 = b.k2` no longer rejects the
+second equality. The same query with `INNER JOIN` already worked; only the
+comma spelling was limited to a single-column key.
+
+### Fixed — ADI multi-level branch descent honours partial seek keys
+
+Branch descent compared the full index key length even for a shorter seek
+key, reading past the end of the caller's buffer. Dense leaves already used
+the prefix rule; the branch path now agrees.
+
+### Performance — AdsGetKeyCount memoises the live-key count
+
+With `SET DELETED ON`, counting live keys cost one full-record `deleted_at()`
+per entry. `AdsGetKeyCount` is what a `TXBrowse` asks on every paint; the
+count is now cached per index and invalidated when the table's live
+generation moves (delete / recall / append / zap / pack / multiuser refresh).
+
+### Performance — ADT sequential read-ahead + shared-lock header refresh
+
+The ADT driver gains a sequential read-ahead block cache (parity with CDX)
+and refreshes the header under a shared lock. Full reindex of a 34k-row ADT
+table measured ~2 min → ~60 s.
+
+### Performance — PACK single-shot trailing truncate
+
+`PACK` scans sequentially through the bulk-read path and truncates once at
+the end, via `IDriver::truncate_to` (default no-op; CDX implements it).
+Avoids quadratic truncate-per-deleted-row behaviour.
+
+### Tests
+
+- `abi_keycount_cache_test`, `abi_adi_prefix_seek_multilevel_test`, composite
+  comma-join in `sql_parser_test`, ADI v2 suite
+  (`abi_adi_native_estaelec_test`, front-coding, multilevel clear, …).
+- Full CI green on Windows x64/x86, Ubuntu clang (+TLS), macOS, Harbour,
+  PHP, SQL live backends.
+
 ## 1.8.56 - 2026-08-05
 
 ### Fixed — CDX numeric leaves pack as densely as Harbour DBFCDX
