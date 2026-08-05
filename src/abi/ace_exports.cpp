@@ -27226,7 +27226,13 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
     // two-table path). Pushing single-table predicates (e.g. the date range)
     // down per level is a future optimisation; correctness first.
     // ====================================================================
-    if (parsed.value().from_tables.size() >= 3) {
+    // Three or more tables always come here. Two tables come here only when
+    // the comma-join lowering declined -- a composite key, which the
+    // single-pair JoinClause cannot express (see parser.cpp). A two-table
+    // comma join with one key still takes the simpler path below.
+    if (parsed.value().from_tables.size() >= 3 ||
+        (parsed.value().from_tables.size() == 2 &&
+         !parsed.value().inner_join.has_value())) {
         auto& st = parsed.value();
         // S4 — aggregates (COUNT/SUM/AVG/MIN/MAX, optional GROUP BY /
         // HAVING) are supported by accumulating during the join walk;
