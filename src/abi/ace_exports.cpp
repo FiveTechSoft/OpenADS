@@ -13465,8 +13465,12 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
             cp.for_expr    = for_expr;
             cp.key_len     = static_cast<std::uint16_t>(klen);
             cp.descending  = descend;
-        } else {
-            klen = 8;  // bare numeric/date → legacy numeric ADI leaf geometry
+        } else if (!is_char_field) {
+            // Bare numeric/date → legacy numeric ADI leaf (8-byte packed keys).
+            // Bare character keeps klen = field length for the legacy char
+            // leaf — do NOT force 8 here or every char key is truncated and
+            // partial seeks miss (OPENADS_ADI_V2 off is the default).
+            klen = 8;
         }
 
         if (exists) {

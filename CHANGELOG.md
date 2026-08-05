@@ -9,6 +9,13 @@ bag — what SAP's single-field-number format cannot express. Dense leaves use
 front coding; `CREATE INDEX` / `REINDEX` take a bulk path. Legacy bags still
 read and write unchanged when the flag is off. Closes #147, #159.
 
+### Fixed — legacy ADI character tags keep full key length when v2 is off
+
+The opt-in v2 gate incorrectly forced `klen = 8` for every non-v2 create,
+including bare character fields. Character keys were truncated to 8 bytes so
+partial seeks and multi-level navigation missed. Bare numeric/date still use
+the 8-byte packed layout; bare character keeps the field width.
+
 ### Fixed — two-table comma-join accepts a composite key
 
 `SELECT ... FROM a, b WHERE a.k1 = b.k1 AND a.k2 = b.k2` no longer rejects the
