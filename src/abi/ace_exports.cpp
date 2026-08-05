@@ -10200,7 +10200,7 @@ UNSIGNED32 ENTRYPOINT AdsGetRecordCount(ADSHANDLE hTable, UNSIGNED16 bFilterOpti
             // de pantalla sobre 34.595 filas.
             const bool hide_del = t && !t->show_deleted_records();
             *pulRecordCount = hide_del
-                ? count_live_recnos(t, adi->ordered_recnos_cached())
+                ? count_live_recnos(t, adi->ordered_recnos_cached(), adi)
                 : static_cast<UNSIGNED32>(adi->ordered_recnos_cached().size());
             return ok();
         }
