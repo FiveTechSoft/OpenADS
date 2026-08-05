@@ -1,3 +1,31 @@
+## 1.8.56 - 2026-08-05
+
+### Fixed — CDX numeric leaves pack as densely as Harbour DBFCDX
+
+Harbour dbfcdx uses a type-dependent trail byte (`bTrail`): character keys
+elide trailing **spaces**, while numeric/date keys elide trailing **NUL**
+bytes. OpenADS always trail-packed on spaces only, so FoxNumeric IEEE
+doubles (which end in many zero bytes) stored nearly full 8-byte keys on
+every entry. The same 10-key numeric leaf went from free space **386** to
+**447** — matching native DBFCDX bit-for-bit density.
+
+- Compact-leaf encode/decode take a `trail_byte` (space for `Text`, NUL for
+  `FoxNumeric` / `NtxNumeric`).
+- Insert, seek, erase, split probes, and `build_bulk` pad and pack with the
+  tag's trail byte.
+- Structure-tag leaves stay space-trailed (tag names are character keys).
+- Guarded by unit tests that assert free ≥ 440 on a 10-key FoxNumeric leaf
+  and full walk/seek round-trip. Character packing is unchanged.
+
+Existing OpenADS numeric bags with `trl=0` still read correctly after
+`FoxNumeric` is marked; run **REINDEX** once to reclaim density on old
+numeric tags.
+
+### Tests
+
+- `*CdxIndex*`, CDX numeric engine, Val() seek, reindex cycle, multi-tag,
+  prefix seek, build_bulk — green on Windows MSVC x64 Release.
+
 ## 1.8.55 - 2026-08-04
 
 ### Added — SAP date display format: AdsGetField formats, AdsGetString stays raw
