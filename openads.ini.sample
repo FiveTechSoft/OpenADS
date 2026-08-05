@@ -52,3 +52,17 @@ data = .
 # every remote connection must supply a matching user/password.
 # Use tls:// in the client URI to protect credentials in transit.
 # auth_user = client:change-me
+
+# Server error log (ads_err.dbf) — SAP-style operational log for SQL
+# failures, remote error frames, and server start/stop. Directory only;
+# the file name is always ads_err.dbf. Alias: error_assert_logs (SAP name).
+# CLI: --error-log-path DIR   Env: OPENADS_ERROR_LOG_PATH=DIR
+# Default: C:\ on Windows, /var/log/advantage on Linux (falls back to a
+# writable location if the default is not writable).
+# error_log_path = C:\OpenADS\logs
+# error_log_max  = 1000
+#
+# Note: the transaction journal (openads.txlog / openads.lsnmap) is NOT
+# controlled here — it always lives under each connection's data=
+# directory. If data= is a drive root (C:\), journaling may be disabled
+# on that connection (tables in subfolders still work). See docs/en/error-log.md.

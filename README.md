@@ -519,6 +519,9 @@ system/com.openads.serverd` and `sudo launchctl bootout system
 
 ### Error log — `ads_err.dbf`
 
+> Full guide (error log vs transaction journal, ini/CLI/env, drive-root
+> data dirs): [`docs/en/error-log.md`](docs/en/error-log.md).
+
 OpenADS keeps a persistent error log in the same spirit as SAP ADS's
 `ads_err` table: a plain **DBF table named `ads_err.dbf`** that any DBF
 tool — or OpenADS itself — can open. Each row records the date, time,

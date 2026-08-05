@@ -113,13 +113,18 @@ cmake --build build/default --target openads_serverd --config Release
 ./build/default/tools/serverd/openads_serverd \
     --port 6262 \
     --http-port 6263 \
-    --data /path/to/your/data
+    --data /path/to/your/data \
+    --error-log-path /path/to/logs
 
 # 3. Open the Studio in any browser
 xdg-open http://localhost:6263/         # Linux
 open       http://localhost:6263/       # macOS
 start      http://localhost:6263/       # Windows
 ```
+
+Server operational log (`ads_err.dbf`) and the distinction from the
+transaction journal (`openads.txlog`): see
+[Error log and journal paths](error-log/).
 
 ## LocalServer Studio (in-process)
 

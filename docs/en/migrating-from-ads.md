@@ -119,7 +119,10 @@ server with the same drive layout as the clients needs no folding at all.
 When the data root itself is not writable (a drive root for a
 non-elevated server process), connections still succeed — only
 transaction journaling is disabled (a notice is logged); tables in
-writable subfolders work normally.
+writable subfolders work normally. Point the **error log** at a
+writable folder separately (`error_log_path` / `--error-log-path`);
+it is not the same as the tx journal. Details:
+[Error log and journal paths](error-log/).
 
 Default is **off** (strict SAP-compatible resolution). This works for Windows
 clients against Windows, Linux, or macOS servers.

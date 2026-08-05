@@ -24,7 +24,8 @@ The binary self-registers via the Service Control Manager:
 openads_serverd --install-service ^
     --port 6262 ^
     --http-port 6263 ^
-    --data C:\app\data
+    --data C:\app\data ^
+    --error-log-path C:\OpenADS\logs
 
 :: Start it via SCM
 sc start openads_serverd
@@ -35,6 +36,12 @@ openads_serverd --uninstall-service
 ```
 
 Run an elevated `cmd` for the install / uninstall steps.
+
+Without `--error-log-path` (or `OPENADS_ERROR_LOG_PATH` /
+`error_log_path` in an ini baked into binPath), the service uses
+the platform default for `ads_err.dbf` — on Windows often
+`C:\ads_err.dbf`. Prefer a dedicated writable folder for production.
+See [Error log and journal paths](error-log/).
 
 The service runs as `SERVICE_WIN32_OWN_PROCESS`. The control
 handler honours `SERVICE_CONTROL_STOP` and
@@ -56,7 +63,8 @@ Type=simple
 User=openads
 ExecStart=/usr/local/bin/openads_serverd \
     --port 6262 --http-port 6263 \
-    --data /var/lib/openads
+    --data /var/lib/openads \
+    --error-log-path /var/log/openads
 Restart=on-failure
 
 # Hardening
@@ -64,7 +72,7 @@ ProtectSystem=strict
 NoNewPrivileges=yes
 PrivateTmp=yes
 RestrictAddressFamilies=AF_INET AF_INET6
-ReadWritePaths=/var/lib/openads
+ReadWritePaths=/var/lib/openads /var/log/openads
 
 [Install]
 WantedBy=multi-user.target

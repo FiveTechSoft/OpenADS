@@ -14,7 +14,7 @@ for the Advantage Client Engine (`ace32.dll` / `ace64.dll` /
 `libace.so`) — Harbour / Clipper applications that link against
 `contrib/rddads` keep working without recompilation.
 
-Current release: **v1.8.21**.
+Current release: **v1.8.58**.
 
 ## What's in here
 
@@ -59,6 +59,9 @@ Current release: **v1.8.21**.
 - **[Service deployment](service-deployment/)** — run
   `openads_serverd` as a Windows Service / systemd unit / macOS
   launchd plist (rc14).
+- **[Error log and journal paths](error-log/)** — `ads_err.dbf`
+  location (`error_log_path` / `--error-log-path` /
+  `OPENADS_ERROR_LOG_PATH`) vs the non-relocatable `openads.txlog`.
 - **[TLS deployment](tls-deployment/)** — terminate HTTPS in
   front of Studio with Caddy / nginx / stunnel / SSH tunnel.
 - **[Ordinal compatibility](ordinal-compat/)** — fix the

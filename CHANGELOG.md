@@ -1,3 +1,16 @@
+## 1.8.58 - 2026-08-05
+
+### Docs — error log vs transaction journal paths
+
+Document where `ads_err.dbf` lives and how to relocate it
+(`error_log_path` / `--error-log-path` / `OPENADS_ERROR_LOG_PATH` /
+`error_log_max`), and that the transaction journal (`openads.txlog`)
+always stays under the connection `data=` directory (including the
+drive-root / non-writable case). New guide `docs/en/error-log.md`;
+links from README, getting-started, service-deployment, and migrating-
+from-ads. `openads.ini.sample` and `openads_serverd --help` list the
+CLI/ini knobs.
+
 ## 1.8.57 - 2026-08-05
 
 ### Added — ADI v2 tags (opt-in): compound / computed / FOR on ADT
