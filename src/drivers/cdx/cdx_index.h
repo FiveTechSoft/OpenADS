@@ -77,7 +77,7 @@ public:
     // root) so a CREATE-INDEX-with-existing-tag can rebuild from
     // scratch on top of an old layout. Old leaves stay on disk
     // (page leak); a future M(cdx-compact) milestone can reclaim.
-    util::Result<void> clear_data();
+    util::Result<void> clear_data() override;
 
     // Overwrite the unique / descend bits in the on-disk sub-tag
     // header. Used when CREATE INDEX overwrites an existing tag
@@ -111,7 +111,7 @@ public:
     // decodes + re-encodes a leaf on every key (~10x slower). Call on a
     // fresh (root_page_ == 0) or clear_data()'d tag, then flush().
     util::Result<void>
-        build_bulk(std::vector<std::pair<std::string, std::uint32_t>> keys);
+        build_bulk(std::vector<std::pair<std::string, std::uint32_t>> keys) override;
 
     // Logical-position cache for O(1) scrollbar / OrdKeyNo / OrdKeyCount.
     // Walks the index ONCE (lazily) into an ordered recno list + a

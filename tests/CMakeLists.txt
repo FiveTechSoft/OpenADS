@@ -243,10 +243,19 @@ add_executable(openads_unit_tests
     unit/abi_adi_multilevel_build_test.cpp
     unit/abi_adt_scope_validation_test.cpp
     unit/abi_adi_smoke_test.cpp
+    unit/abi_adi_clear_multilevel_test.cpp
+    unit/abi_adi_dat_extension_path_test.cpp
+    unit/abi_adi_estaelec_compound_test.cpp
+    unit/abi_adi_frontcoding_size_test.cpp
     unit/abi_adi_keycount_test.cpp
+    unit/abi_adi_native_estaelec_test.cpp
+    unit/abi_adi_reindex_bench_test.cpp
     unit/abi_keycount_cache_test.cpp
     unit/abi_adi_tagdir_order_test.cpp
     unit/abi_adi_tagdir_wide_page_test.cpp
+    unit/abi_cdx_estaelec_compound_test.cpp
+    unit/abi_sql_temp_browse_nav_test.cpp
+    unit/abi_stale_index_walk_test.cpp
     unit/abi_adt_sql_test.cpp
     unit/abi_adt_dat_extension_sql_test.cpp
     unit/openads_sql_c_test.cpp
