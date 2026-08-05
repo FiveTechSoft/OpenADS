@@ -24222,6 +24222,9 @@ inline std::string sql_error_envelope(std::int32_t code,
                 if (p != std::string::npos) loc_token = msg.substr(p + 2);
             }
             break;
+        case 2129:              // INSERT column/value count mismatch
+            state = "S0000";    // (pre-shaped msg; SAP has no location)
+            break;
         case 5000:
             if (msg.rfind("procedure not registered", 0) == 0) {
                 native = 2198;
@@ -26705,6 +26708,25 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         if (!tbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
         sql_dml_hold_write_lock(tbl);
 
+        // `INSERT INTO t VALUES (...)` without a column list: SAP binds
+        // the values positionally in declared-column order (probed).
+        if (ins.value().columns.empty()) {
+            const std::uint16_t inf = tbl->field_count();
+            ins.value().columns.reserve(inf);
+            for (std::uint16_t i = 0; i < inf; ++i)
+                ins.value().columns.push_back(tbl->field_descriptor(i).name);
+        }
+        // SAP raises 2129 when the counts differ in either direction -
+        // exact message probed against ace64.dll. This also guards the
+        // write loop, which indexes vals[i] by column position.
+        auto ins_count_ok =
+            [&](const std::vector<openads::sql::InsertLiteral>& vals) {
+            return vals.size() == ins.value().columns.size();
+        };
+        static constexpr const char* k2129 =
+            "Unequal number of insert columns and insert values or the "
+            "incorrect number of stored procedure input parameters";
+
         // S4 — DD field constraints (oracle-verified): SAP rejects an
         // INSERT that leaves a non-nullable column without a value with
         // 5147, checking fields in ordinal order; a missing column with
@@ -26867,6 +26889,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         auto write_one = [&](const std::vector<openads::sql::InsertLiteral>&
                              vals) -> openads::util::Result<std::monostate>
         {
+            if (!ins_count_ok(vals)) {
+                return openads::util::Error{2129, 0, k2129, ""};
+            }
             if (auto r = tbl->append_record(); !r) return r.error();
             for (std::size_t i = 0; i < ins.value().columns.size(); ++i) {
                 std::int32_t fidx =
@@ -31607,8 +31632,16 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     if (fi < 0) return fail(openads::AE_COLUMN_NOT_FOUND,
                                             fc.column.c_str());
                     o.src_field = fi;
+                    // SAP names an unaliased scalar-fn projection EXPR /
+                    // EXPR_1 / ... (probed: UPPER(Nm), TRIM(Nm) come back
+                    // EXPR, EXPR_1) - not after the argument column.
                     if (!fc.alias.empty()) o.name = fc.alias;
-                    else o.name = fc.column;
+                    else {
+                        o.name = script_expr_seq == 0
+                               ? "EXPR"
+                               : "EXPR_" + std::to_string(script_expr_seq);
+                        ++script_expr_seq;
+                    }
                     o.raw_type = 'C';
                     if (fc.kind == K::Len) {
                         o.length = 10;

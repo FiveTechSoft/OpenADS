@@ -263,13 +263,12 @@ OpenADS gap (test-case bugs already fixed). Grouped by root cause:
       `users.dbf` 18 physical / 8 deleted → SAP 18, OA 10; `provider.dbf`
       20/4 → SAP 20, OA 16; `Forms.dbf` 64/0 → both 64 (control). Invisible on
       pmsys because it is ADT-only. Affects every DBF table with deletions.
-- [ ] **SQL feature gaps** *(2 of 5 cases remain)* — `Length()` raises 2158
-      (unknown function) even on a literal, though it is a documented SAP
-      scalar; `SELECT ... FROM <view>` raises 5004 for both mp views, so
-      plain single-table view resolution is broken (not just
-      views-inside-joins). ~~COUNT(DISTINCT col)~~ and ~~aggregates over an
-      expression~~ were fixed 2026-08-02 (and the full shape/width/precision
-      story 2026-08-05).
+- [ ] **SQL feature gaps** *(1 of 5 cases remains)* — `SELECT ... FROM
+      <view>` raises 5004 for both mp views, so plain single-table view
+      resolution is broken (not just views-inside-joins).
+      ~~COUNT(DISTINCT)~~ / ~~expression aggregates~~ fixed 2026-08-02;
+      ~~Length()~~ fixed 2026-08-05 (gate `scalar_length_literal` passes;
+      unaliased scalar fns also gained SAP's EXPR/EXPR_1 naming).
 - [x] **Join column resolution — FIXED 2026-08-04** (`jcol_index`: merged
       R_ fallback + qualifier strip at every aggregate/GROUP BY/WHERE
       resolution site). The **result naming** half was fixed earlier: `R_UNITS` / `R_Status` and the
@@ -426,10 +425,9 @@ Fix is the one task #2 already prescribes — materialise into an **ADT** temp
       `SELECT COUNT(*), SUM(x) AS s, MIN(y)` column naming matches SAP.
 
 ## B. VERIFIED OPEN 2026-07-26 (was "needs verification")
-- [ ] **`INSERT INTO t VALUES (...)` without a column list is rejected**
-      (2115 "expected '(' to open INSERT column list"); SAP accepts the
-      form and binds values in declared-column order. Found 2026-08-05
-      while building the width-probe fixtures.
+- [x] **`INSERT INTO t VALUES (...)` without a column list — FIXED
+      2026-08-05**: positional bind in declared-column order; count
+      mismatch raises SAP's 2129 byte-identically.
 - [ ] **Catalog column-name + column-SET divergence** — CONFIRMED across all
       five DD catalogs on pmsys. OA invents its own names AND omits/renames
       columns; a SAP-compatible client filtering by SAP column names breaks

@@ -1073,9 +1073,13 @@ util::Result<SelectStmt> parse_select(const std::string& sql) {
                                   upper == "DATE"   || upper == "TIME"   ||
                                   upper == "CURDATE" || upper == "GETDATE")
                                   && c.peek_char('(');
-            bool is_single_arg = (upper == "UPPER" || upper == "LOWER" ||
-                                  upper == "LEN"   || upper == "TRIM"  ||
-                                  upper == "LTRIM" || upper == "RTRIM") &&
+            // LENGTH is SAP's documented name (trims trailing blanks,
+            // oracle-probed); LEN is kept as an OpenADS extension - SAP
+            // itself rejects LEN with 2158.
+            bool is_single_arg = (upper == "UPPER"  || upper == "LOWER" ||
+                                  upper == "LEN"    || upper == "TRIM"  ||
+                                  upper == "LENGTH" ||
+                                  upper == "LTRIM"  || upper == "RTRIM") &&
                                   c.peek_char('(');
             bool is_multi_arg  = (upper == "SUBSTR"   || upper == "CONCAT"  ||
                                   upper == "REPLACE"  || upper == "DATEDIFF" ||
@@ -1117,7 +1121,8 @@ util::Result<SelectStmt> parse_select(const std::string& sql) {
                 ScalarFnCall fn;
                 if      (upper == "UPPER")    fn.kind = ScalarFnKind::Upper;
                 else if (upper == "LOWER")    fn.kind = ScalarFnKind::Lower;
-                else if (upper == "LEN")      fn.kind = ScalarFnKind::Len;
+                else if (upper == "LEN" ||
+                         upper == "LENGTH")   fn.kind = ScalarFnKind::Len;
                 else if (upper == "TRIM")     fn.kind = ScalarFnKind::Trim;
                 else if (upper == "LTRIM")    fn.kind = ScalarFnKind::Ltrim;
                 else if (upper == "RTRIM")    fn.kind = ScalarFnKind::Rtrim;
@@ -2588,25 +2593,28 @@ util::Result<InsertStmt> parse_insert(const std::string& sql) {
         return util::Error{7200, 0, "expected table name", sql};
     }
 
-    // Optional column list. Older xBase apps omit it (column order
-    // matches table definition); we require it for clarity.
-    if (!c.match_char('(')) {
-        return util::Error{7200, 0,
-            "expected '(' to open INSERT column list", sql};
-    }
-    for (;;) {
-        std::string col = c.read_identifier();
-        if (col.empty()) {
-            return util::Error{7200, 0,
-                "expected column name in INSERT list", sql};
+    // Optional column list. SAP accepts `INSERT INTO t VALUES (...)` and
+    // binds the values positionally in declared-column order (oracle-
+    // probed; a count mismatch in either direction raises 2129). An empty
+    // stmt.columns tells the executor to substitute the table's declared
+    // columns.
+    bool had_column_list = false;
+    if (c.match_char('(')) {
+        had_column_list = true;
+        for (;;) {
+            std::string col = c.read_identifier();
+            if (col.empty()) {
+                return util::Error{7200, 0,
+                    "expected column name in INSERT list", sql};
+            }
+            stmt.columns.push_back(std::move(col));
+            if (c.match_char(',')) continue;
+            break;
         }
-        stmt.columns.push_back(std::move(col));
-        if (c.match_char(',')) continue;
-        break;
-    }
-    if (!c.match_char(')')) {
-        return util::Error{7200, 0,
-            "expected ')' to close INSERT column list", sql};
+        if (!c.match_char(')')) {
+            return util::Error{7200, 0,
+                "expected ')' to close INSERT column list", sql};
+        }
     }
 
     // M10.41 — `INSERT INTO t (cols) SELECT ...`. Capture the inner
@@ -2621,7 +2629,10 @@ util::Result<InsertStmt> parse_insert(const std::string& sql) {
         upper_sql.reserve(sql.size());
         for (char ch : sql) upper_sql.push_back(static_cast<char>(
             std::toupper(static_cast<unsigned char>(ch))));
-        std::size_t after_close_paren = sql.find(')', 0);
+        // Without a column list there is no ')' before the SELECT - and a
+        // ')' inside the SELECT must not anchor the scan.
+        std::size_t after_close_paren =
+            had_column_list ? sql.find(')', 0) : 0;
         std::size_t sel = upper_sql.find("SELECT", after_close_paren);
         if (sel == std::string::npos) {
             return util::Error{7200, 0,
@@ -2690,7 +2701,10 @@ util::Result<InsertStmt> parse_insert(const std::string& sql) {
             return util::Error{7200, 0,
                 "expected ')' to close VALUES list", sql};
         }
-        if (stmt.columns.size() != row.size()) {
+        // Without a column list the parser cannot know the table's column
+        // count — the executor substitutes the declared columns and raises
+        // SAP's 2129 on a mismatch there.
+        if (had_column_list && stmt.columns.size() != row.size()) {
             return util::Error{7200, 0,
                 "INSERT column count must match VALUES count", sql};
         }

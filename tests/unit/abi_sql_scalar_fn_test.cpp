@@ -448,3 +448,127 @@ TEST_CASE("ADS dialect: UPPER() in WHERE drives UPDATE / DELETE row scope") {
     REQUIRE(AdsDisconnect(hConn) == 0);
     fs::remove_all(dir, ec);
 }
+
+// SAP's documented name is LENGTH (LEN is an OpenADS extension SAP itself
+// rejects with 2158). Oracle-probed 2026-08-05: trims trailing blanks;
+// unaliased scalar-fn projections are named EXPR / EXPR_1 / ...; literal
+// and nested arguments route through the script engine. All results below
+// byte-match ace64.dll.
+TEST_CASE("LENGTH() — SAP name, trailing-blank trim, EXPR naming") {
+    auto dir = fs::temp_directory_path() / "openads_length_fn";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+
+    write_dbf_typed(dir / "data.dbf",
+        {{"NAME", 'C', 10}},
+        {{"ab"}});
+
+    UNSIGNED8 srv[256];
+    std::memcpy(srv, dir.string().c_str(), dir.string().size() + 1);
+    ADSHANDLE hConn = 0;
+    REQUIRE(AdsConnect60(srv, ADS_LOCAL_SERVER,
+                         nullptr, nullptr, 0, &hConn) == 0);
+    ADSHANDLE hStmt = 0;
+    REQUIRE(AdsCreateSQLStatement(hConn, &hStmt) == 0);
+
+    auto run1 = [&](const char* text, const char* col) {
+        UNSIGNED8 sql[200] = {0};
+        std::memcpy(sql, text, std::strlen(text));
+        ADSHANDLE hc = 0;
+        REQUIRE(AdsExecuteSQLDirect(hStmt, sql, &hc) == 0);
+        REQUIRE(AdsGotoTop(hc) == 0);
+        std::string v = read_field(hc, col);
+        AdsCloseTable(hc);
+        return v;
+    };
+
+    // Column argument: the stored "ab" in C(10) measures 2, not 10 —
+    // LENGTH ignores the trailing pad blanks (SAP-probed).
+    CHECK(run1("SELECT LENGTH(NAME) AS L FROM data.dbf", "L") == "2");
+    // Literal + nested arguments (script-engine route).
+    CHECK(run1("SELECT LENGTH('abc') AS L FROM data.dbf", "L") == "3");
+    CHECK(run1("SELECT LENGTH('ab  ') AS L FROM data.dbf", "L") == "2");
+    CHECK(run1("SELECT LENGTH(TRIM(NAME)) AS L FROM data.dbf", "L") == "2");
+    // Unaliased scalar fns are EXPR / EXPR_1 in SAP — not the column name.
+    CHECK(run1("SELECT LENGTH(NAME) FROM data.dbf", "EXPR") == "2");
+    {
+        UNSIGNED8 sql[200] =
+            "SELECT UPPER(NAME), TRIM(NAME) FROM data.dbf";
+        ADSHANDLE hc = 0;
+        REQUIRE(AdsExecuteSQLDirect(hStmt, sql, &hc) == 0);
+        UNSIGNED8 nm[64] = {0};
+        UNSIGNED16 cap = sizeof(nm);
+        REQUIRE(AdsGetFieldName(hc, 1, nm, &cap) == 0);
+        CHECK(std::string(reinterpret_cast<char*>(nm)) == "EXPR");
+        cap = sizeof(nm); std::memset(nm, 0, sizeof(nm));
+        REQUIRE(AdsGetFieldName(hc, 2, nm, &cap) == 0);
+        CHECK(std::string(reinterpret_cast<char*>(nm)) == "EXPR_1");
+        AdsCloseTable(hc);
+    }
+
+    REQUIRE(AdsCloseSQLStatement(hStmt) == 0);
+    REQUIRE(AdsDisconnect(hConn) == 0);
+    fs::remove_all(dir, ec);
+}
+
+// SAP accepts `INSERT INTO t VALUES (...)` without a column list and binds
+// positionally in declared-column order; a count mismatch in either
+// direction raises 2129 with SAP's exact message (oracle-probed
+// 2026-08-05, byte-identical envelopes).
+TEST_CASE("INSERT without a column list binds positionally; 2129 on mismatch") {
+    auto dir = fs::temp_directory_path() / "openads_ins_nolist";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+
+    write_dbf_typed(dir / "t.dbf",
+        {{"A", 'C', 4}, {"B", 'N', 6}, {"C", 'C', 3}},
+        {});
+
+    UNSIGNED8 srv[256];
+    std::memcpy(srv, dir.string().c_str(), dir.string().size() + 1);
+    ADSHANDLE hConn = 0;
+    REQUIRE(AdsConnect60(srv, ADS_LOCAL_SERVER,
+                         nullptr, nullptr, 0, &hConn) == 0);
+    ADSHANDLE hStmt = 0;
+    REQUIRE(AdsCreateSQLStatement(hConn, &hStmt) == 0);
+
+    auto exec = [&](const char* text) {
+        UNSIGNED8 sql[200] = {0};
+        std::memcpy(sql, text, std::strlen(text));
+        ADSHANDLE hc = 0;
+        UNSIGNED32 rc = AdsExecuteSQLDirect(hStmt, sql, &hc);
+        if (hc) AdsCloseTable(hc);
+        return rc;
+    };
+
+    CHECK(exec("INSERT INTO t VALUES ('aa', 5, 'x')") == 0);
+    {
+        UNSIGNED8 sql[80] = "SELECT * FROM t";
+        ADSHANDLE hc = 0;
+        REQUIRE(AdsExecuteSQLDirect(hStmt, sql, &hc) == 0);
+        REQUIRE(AdsGotoTop(hc) == 0);
+        CHECK(read_field(hc, "A") == "aa");
+        CHECK(read_field(hc, "C") == "x");
+        AdsCloseTable(hc);
+    }
+    // Too few / too many values: SAP 2129 through the 7200 AQE envelope.
+    for (const char* bad : {"INSERT INTO t VALUES ('bb', 6)",
+                            "INSERT INTO t VALUES ('cc', 7, 'y', 'EX')"}) {
+        CHECK(exec(bad) == 7200u);
+        UNSIGNED32 code = 0;
+        UNSIGNED8 msg[400] = {0};
+        UNSIGNED16 mlen = sizeof(msg);
+        AdsGetLastError(&code, msg, &mlen);
+        std::string m(reinterpret_cast<char*>(msg));
+        CHECK(m.find("NativeError = 2129") != std::string::npos);
+        CHECK(m.find("Unequal number of insert columns") != std::string::npos);
+    }
+    // With an explicit list the parser still rejects mismatches early.
+    CHECK(exec("INSERT INTO t (A, B) VALUES ('dd')") == 7200u);
+
+    REQUIRE(AdsCloseSQLStatement(hStmt) == 0);
+    REQUIRE(AdsDisconnect(hConn) == 0);
+    fs::remove_all(dir, ec);
+}
