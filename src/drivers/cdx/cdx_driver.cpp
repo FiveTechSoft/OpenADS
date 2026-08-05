@@ -374,6 +374,31 @@ util::Result<bool> CdxDriver::truncate_trailing(std::uint32_t recno) {
     return true;
 }
 
+util::Result<bool> CdxDriver::truncate_to(std::uint32_t recno) {
+    if (mode_ == DriverOpenMode::ReadOnly) {
+        return util::Error{5000, 0, "table opened read-only", ""};
+    }
+    invalidate_read_cache_();
+    auto lk = acquire_with_retry_(file_, 0, 32);
+    if (!lk) return lk.error();
+    if (auto rh = refresh_record_count_(); !rh) return rh.error();
+    if (recno > rec_count_) return false;   // can't grow; nothing trailing
+    rec_count_ = recno;
+    if (auto r = rewrite_header_(); !r) return r.error();
+    std::uint64_t eof_off = static_cast<std::uint64_t>(hdr_len_) +
+                            static_cast<std::uint64_t>(rec_count_) *
+                            static_cast<std::uint64_t>(rec_len_);
+    std::uint8_t eof = 0x1A;
+    if (auto w = file_.write_at(eof_off, &eof, 1); !w) return w.error();
+    // Physically shrink the file to match the new logical count (the old
+    // zap + re-append PACK path did this implicitly). Without it the .dbf
+    // keeps the stale trailing records on disk; a later physical-order
+    // DBEVAL / reopen that derives the count from file size then walks past
+    // rec_count_ -> ADSCDX/5000 "record number out of range".
+    if (auto tr = file_.truncate(eof_off + 1); !tr) return tr.error();
+    return true;
+}
+
 util::Result<std::uint32_t>
 CdxDriver::bump_autoinc(std::uint16_t field_index) {
     if (field_index >= fields_.size()) {

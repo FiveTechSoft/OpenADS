@@ -464,6 +464,27 @@ util::Result<void> AdtDriver::zap() {
     return file_.sync();
 }
 
+util::Result<bool> AdtDriver::truncate_to(std::uint32_t recno) {
+    if (mode_ == DriverOpenMode::ReadOnly) {
+        return util::Error{5000, 0, "table opened read-only", ""};
+    }
+    // Hold the header region while we refresh the count and shrink the file.
+    auto lk = acquire_with_retry_(file_, 0, 400);
+    if (!lk) return lk.error();
+    if (auto rh = refresh_record_count_(); !rh) return rh.error();
+    if (recno > rec_count_) return false;   // can't grow; nothing trailing to drop
+    rec_count_ = recno;
+    if (auto r = rewrite_header_(); !r) return r.error();
+    // ADT keeps no 0x1A EOF marker (unlike DBF): file size is exactly
+    // hdr_len_ + rec_count_*rec_len_, so shrink to that and a later reopen's
+    // physical count matches the header.
+    std::uint64_t end_off = static_cast<std::uint64_t>(hdr_len_) +
+                            static_cast<std::uint64_t>(rec_count_) *
+                            static_cast<std::uint64_t>(rec_len_);
+    if (auto tr = file_.truncate(end_off); !tr) return tr.error();
+    return true;
+}
+
 util::Result<std::uint32_t>
 AdtDriver::bump_autoinc(std::uint16_t field_index) {
     if (field_index >= fields_.size()) {

@@ -1386,7 +1386,12 @@ util::Result<void> Table::pack() {
     std::uint32_t dst = 0;
     std::uint32_t total = driver_->record_count();
     for (std::uint32_t src = 1; src <= total; ++src) {
-        if (auto g = goto_record(src); !g) return g.error();
+        // Sequential scan: read straight from the driver (read-ahead friendly)
+        // instead of goto_record(), which would reseek the active order on
+        // every record. Nothing here consults the order cursor.
+        auto raw = driver_->read_record_raw(src);
+        if (!raw) return raw.error();
+        load_record_for_bulk_scan(std::move(raw.value()), src);
         if (is_deleted()) continue;
         ++dst;
         if (dst != src) {
@@ -1396,26 +1401,37 @@ util::Result<void> Table::pack() {
             }
         }
     }
-    // 2) Truncate the on-disk record count to `dst` by saving the
-    //    survivors, zapping the driver (DBF-only — does NOT touch
-    //    bound indexes), and re-appending. Pack matches Clipper's
-    //    semantics: indexes are left stale, the caller must REINDEX.
-    std::vector<std::vector<std::uint8_t>> survivors;
-    survivors.reserve(dst);
-    for (std::uint32_t i = 1; i <= dst; ++i) {
-        auto rec = driver_->read_record_raw(i);
-        if (!rec) return rec.error();
-        survivors.push_back(std::move(rec).value());
+    // 2) Drop the trailing stale rows. The copy-down above already placed the
+    //    survivors at recnos 1..dst, so this is a single header/EOF rewrite +
+    //    physical file truncate via truncate_to() — avoiding the read-all + zap
+    //    + re-append pass (a full extra I/O pass, with a per-record flush, that
+    //    dominated PACK on large tables). Drivers without truncate_to fall back
+    //    to that legacy path. Pack matches Clipper's semantics: indexes are
+    //    left stale, the caller must REINDEX.
+    bool truncated = (dst >= total);   // nothing removed → records unchanged
+    if (!truncated) {
+        auto t = driver_->truncate_to(dst);
+        if (!t) return t.error();
+        truncated = t.value();
     }
-    if (auto r = driver_->zap(); !r) return r.error();
-    for (auto& buf : survivors) {
-        auto a = driver_->append_record_raw(buf.data(), buf.size());
-        if (!a) return a.error();
+    if (!truncated) {
+        std::vector<std::vector<std::uint8_t>> survivors;
+        survivors.reserve(dst);
+        for (std::uint32_t i = 1; i <= dst; ++i) {
+            auto rec = driver_->read_record_raw(i);
+            if (!rec) return rec.error();
+            survivors.push_back(std::move(rec).value());
+        }
+        if (auto r = driver_->zap(); !r) return r.error();
+        for (auto& buf : survivors) {
+            auto a = driver_->append_record_raw(buf.data(), buf.size());
+            if (!a) return a.error();
+        }
     }
     record_buf_.assign(driver_->record_length(), 0);
     // Clipper / DBFCDX semantics: PACK rebuilds the controlled indexes so a
     // post-PACK index walk never references a recno beyond the compacted
-    // record count. (zap() above intentionally leaves bound indexes stale —
+    // record count. (the truncate/zap above intentionally leaves bound indexes stale —
     // without this rebuild, dbGoTop+dbSkip over a stale tag walks onto a
     // dropped recno and raises ADSCDX/5000 "record number out of range".)
     // Only needed when records were actually removed: if nothing was deleted
