@@ -243,6 +243,7 @@ add_executable(openads_unit_tests
     unit/abi_adt_scope_validation_test.cpp
     unit/abi_adi_smoke_test.cpp
     unit/abi_adi_keycount_test.cpp
+    unit/abi_keycount_cache_test.cpp
     unit/abi_adi_tagdir_order_test.cpp
     unit/abi_adi_tagdir_wide_page_test.cpp
     unit/abi_adt_sql_test.cpp

@@ -9963,8 +9963,33 @@ SIGNED32 to_julian(int y, int m, int d) {
 // of the same 34,595-row table: 14 ms where key order happened to follow recno,
 // 492 ms where it did not. The count does not depend on the order, so read the
 // records in the order the file stores them.
+// Counting the live entries of an index costs one deleted_at() per entry, and
+// deleted_at() reads the whole record. On a 34.595-row table that is ~15 ms,
+// and AdsGetKeyCount is what a TXBrowse asks on EVERY paint to size its
+// scrollbar -- so the browse paid it again and again for an answer that had
+// not changed. Memoise per index (`owner`), keyed by the table's live
+// generation, which moves on delete / recall / append / zap / pack and on the
+// refresh that makes another station's work visible.
 std::uint32_t count_live_recnos(openads::engine::Table* t,
-                                const std::vector<std::uint32_t>& walk) {
+                                const std::vector<std::uint32_t>& walk,
+                                const void* owner) {
+    struct Cached {
+        const openads::engine::Table* table = nullptr;
+        std::uint64_t                 gen   = 0;
+        std::size_t                   size  = 0;
+        std::uint32_t                 count = 0;
+    };
+    static std::unordered_map<const void*, Cached> cache;
+
+    const std::uint64_t gen = t->live_gen();
+    if (owner != nullptr) {
+        auto it = cache.find(owner);
+        if (it != cache.end() && it->second.table == t &&
+            it->second.gen == gen && it->second.size == walk.size()) {
+            return it->second.count;
+        }
+    }
+
     std::vector<std::uint32_t> by_recno(walk);
     std::sort(by_recno.begin(), by_recno.end());
     std::uint32_t n = 0;
@@ -9972,6 +9997,7 @@ std::uint32_t count_live_recnos(openads::engine::Table* t,
         auto del = t->deleted_at(rn);
         if (del && !del.value()) ++n;
     }
+    if (owner != nullptr) cache[owner] = Cached{t, gen, walk.size(), n};
     return n;
 }
 
@@ -10135,7 +10161,7 @@ UNSIGNED32 ENTRYPOINT AdsGetRecordCount(ADSHANDLE hTable, UNSIGNED16 bFilterOpti
                         live_p);
                 } else if (hide_del) {
                     *pulRecordCount = count_live_recnos(
-                        t, cdx->ordered_recnos_cached());
+                        t, cdx->ordered_recnos_cached(), cdx);
                 } else {
                     *pulRecordCount = static_cast<UNSIGNED32>(
                         cdx->ordered_recnos_cached().size());
@@ -35120,7 +35146,7 @@ UNSIGNED32 ENTRYPOINT AdsGetKeyCount(ADSHANDLE hIndex, UNSIGNED16 /*usFilter*/,
                     sc.bottom.value_or(""),
                     live_p);
             } else if (hide_del) {
-                *pulCount = count_live_recnos(t, cdx->ordered_recnos_cached());
+                *pulCount = count_live_recnos(t, cdx->ordered_recnos_cached(), cdx);
             } else {
                 *pulCount = static_cast<UNSIGNED32>(
                     cdx->ordered_recnos_cached().size());
@@ -35132,7 +35158,7 @@ UNSIGNED32 ENTRYPOINT AdsGetKeyCount(ADSHANDLE hIndex, UNSIGNED16 /*usFilter*/,
                 dynamic_cast<openads::drivers::ntx::NtxIndex*>(ord->index())) {
             const bool hide_del = !t->show_deleted_records();
             if (hide_del) {
-                *pulCount = count_live_recnos(t, ntx->ordered_recnos_cached());
+                *pulCount = count_live_recnos(t, ntx->ordered_recnos_cached(), ntx);
             } else {
                 *pulCount = static_cast<UNSIGNED32>(
                     ntx->ordered_recnos_cached().size());
@@ -35144,7 +35170,7 @@ UNSIGNED32 ENTRYPOINT AdsGetKeyCount(ADSHANDLE hIndex, UNSIGNED16 /*usFilter*/,
                 dynamic_cast<openads::drivers::adi::AdiIndex*>(ord->index())) {
             const bool hide_del = !t->show_deleted_records();
             if (hide_del) {
-                *pulCount = count_live_recnos(t, adi->ordered_recnos_cached());
+                *pulCount = count_live_recnos(t, adi->ordered_recnos_cached(), adi);
             } else {
                 *pulCount = static_cast<UNSIGNED32>(
                     adi->ordered_recnos_cached().size());

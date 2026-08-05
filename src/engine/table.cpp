@@ -965,6 +965,7 @@ Table::read_field(std::uint16_t field_index) {
 }
 
 util::Result<void> Table::append_record() {
+    bump_live_gen();
     if (mode_ == OpenMode::Read) {
         return util::Error{5000, 0, "table opened read-only", ""};
     }
@@ -1254,6 +1255,7 @@ util::Result<void> Table::apply_tx_rollback_append(std::uint32_t recno) {
 }
 
 util::Result<void> Table::mark_deleted() {
+    bump_live_gen();
     if (state_ != State::Positioned) {
         // rddads (Harbour contrib RDD) special-cases 5068 (AE_NO_CURRENT_RECORD)
         // to return blank field values at BOF/EOF; 5026 causes a hard error.
@@ -1267,6 +1269,7 @@ util::Result<void> Table::mark_deleted() {
 }
 
 util::Result<void> Table::recall_deleted() {
+    bump_live_gen();
     if (state_ != State::Positioned) {
         // rddads (Harbour contrib RDD) special-cases 5068 (AE_NO_CURRENT_RECORD)
         // to return blank field values at BOF/EOF; 5026 causes a hard error.
@@ -1293,6 +1296,7 @@ util::Result<bool> Table::deleted_at(std::uint32_t recno) {
 }
 
 util::Result<void> Table::zap() {
+    bump_live_gen();
     if (mode_ == OpenMode::Read) {
         return util::Error{5000, 0, "table opened read-only", ""};
     }
@@ -1371,6 +1375,7 @@ util::Result<void> Table::rollback_appends(std::vector<std::uint32_t> recnos) {
 }
 
 util::Result<void> Table::pack() {
+    bump_live_gen();
     if (mode_ == OpenMode::Read) {
         return util::Error{5000, 0, "table opened read-only", ""};
     }
