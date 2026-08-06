@@ -17,7 +17,7 @@ shape of the fix, so none of them gets lost. Ordered by value.
 |---|---|---|---|
 | 1 | **Column-level permission ENFORCEMENT** | `get_effective_ops()` / query projection | analysed, not started |
 | 2 | ~~`sp_` `__output` truncates column names to 10 chars~~ | `run_dd_procedure()` | ✅ **FIXED 2026-07-30** |
-| 3 | **`AdsSetString` into an ADT DOUBLE stores text verbatim** | ADT write path | ✅ hit while writing a fixture |
+| 3 | ~~`AdsSetString` into an ADT DOUBLE stores text verbatim~~ | ADT write path | ✅ **ALREADY FIXED** (remote-twin encode work); pinned by test 2026-08-06 |
 | 4 | **`DB:Debug` group not imported** | `import_dd` | ✅ mp gate `cat_db_groups` |
 | 5 | **`Ver8L` link not surfaced as a permission object** | permissions matrix builder | ✅ mp gate `cat_perms_links` |
 
@@ -213,14 +213,18 @@ Two residual divergences in this area, both measured, neither guessed at:
 - [ ] **`ntx_provider`** — `DOCT_NO` reads `"0"` vs SAP `"  0"` on a *plain* DBF
       read (no join, no aggregate), so a separate path from everything above.
 
-### 3. `AdsSetString` into an ADT DOUBLE stores the text verbatim
+### 3. ✅ ALREADY FIXED — `AdsSetString` into an ADT DOUBLE parses the text
 
-Does not parse the string, so the value reads back as garbage:
-`"10.50"` → ~`6.01e-154`. Reachable by creating an ADT table with
-`Numeric,12,2` — which `adt_spec_for()` maps to DOUBLE — and writing via
-`AdsSetString`. DBF is unaffected (it stores numerics as ASCII, so the same
-write round-trips). Found while building a test fixture, which had to be
-rewritten to dodge it.
+Verified 2026-08-06: the remote-twin work taught `encode_field_string` to
+parse strings into every ADT/VFP binary numeric type (Double, Integer,
+Currency, ShortInt, AutoInc, Time), which covered the local `AdsSetString`
+path the moment it landed — this item just never got re-checked. The exact
+repro from the original report (ADT `Numeric,12,2` → DOUBLE, AdsSetString
+"10.50") now round-trips as 10.50 through both `AdsGetDouble` and
+`AdsGetString`. Pinned by *"AdsSetString into an ADT DOUBLE parses the
+text"* in `abi_adt_dat_extension_test.cpp`, proven to fail (3 assertions)
+with the parse branch removed.
+
 
 ### 4. `DB:Debug` is not imported
 
@@ -373,8 +377,8 @@ CONTRIBUTING.md and from the code at the decision site. Regression test:
 
 Found while doing it, **not fixed**:
 
-- [ ] **`AdsSetString` into an ADT DOUBLE stores the text verbatim**
-      → **backlog item 3** (top of file).
+- [x] **`AdsSetString` into an ADT DOUBLE** — already fixed by the
+      remote-twin encode work; pinned by test 2026-08-06 (item 3).
 - [x] **The other materialisers still truncate to 10 chars** — FIXED: all
       eleven SQL result materialisers converted to ADT (joins/unions/
       aggregates 2026-08-03, `_scr_`/`_call_`/`_case_` 2026-08-05).

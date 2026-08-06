@@ -91,3 +91,70 @@ TEST_CASE("ADT: a table named .DAT creates, reopens and indexes as ADT") {
     AdsDisconnect(hConn);
     { std::error_code ec; fs::remove_all(tmp, ec); }
 }
+
+// TODO.parity.md backlog item 3 claimed AdsSetString into an ADT DOUBLE
+// stores the text verbatim ("10.50" read back as ~6.01e-154). The repro:
+// an ADT table declared Numeric,12,2 — which adt_spec_for maps to a
+// binary DOUBLE — written via AdsSetString. The remote-twin work later
+// taught encode_field_string to parse strings into every ADT/VFP binary
+// numeric type, which fixed this path too; this test pins the repro so
+// the claim stays verified (and the encode never regresses to memcpy).
+TEST_CASE("AdsSetString into an ADT DOUBLE parses the text (was verbatim)") {
+    namespace fs = std::filesystem;
+    auto dir = fs::temp_directory_path() / "openads_setstr_double";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir, ec);
+
+    UNSIGNED8 srv[260] = {0};
+    std::memcpy(srv, dir.string().c_str(), dir.string().size());
+    ADSHANDLE hConn = 0;
+    REQUIRE(AdsConnect60(srv, ADS_LOCAL_SERVER,
+                         nullptr, nullptr, 0, &hConn) == 0);
+
+    UNSIGNED8 tbl[]  = "dblprobe.adt";
+    UNSIGNED8 defs[] = "V,Numeric,12,2;W,Integer,4";   // V -> ADT DOUBLE
+    ADSHANDLE hT = 0;
+    REQUIRE(AdsCreateTable(hConn, tbl, nullptr, ADS_ADT, ADS_ANSI,
+                           0, 0, 0, defs, &hT) == 0);
+
+    REQUIRE(AdsAppendRecord(hT) == 0);
+    {
+        UNSIGNED8 f[] = "V";
+        UNSIGNED8 v[] = "10.50";
+        REQUIRE(AdsSetString(hT, f, v, 5) == 0);
+    }
+    {
+        UNSIGNED8 f[] = "W";
+        UNSIGNED8 v[] = "42";
+        REQUIRE(AdsSetString(hT, f, v, 2) == 0);
+    }
+    REQUIRE(AdsWriteRecord(hT) == 0);
+    REQUIRE(AdsGotoTop(hT) == 0);
+
+    {   // binary read: the VALUE round-trips, not the bytes of the text
+        UNSIGNED8 f[] = "V";
+        double d = 0.0;
+        REQUIRE(AdsGetDouble(hT, f, &d) == 0);
+        CHECK(d == doctest::Approx(10.50));
+    }
+    {
+        UNSIGNED8 f[] = "W";
+        double d = 0.0;
+        REQUIRE(AdsGetDouble(hT, f, &d) == 0);
+        CHECK(d == doctest::Approx(42.0));
+    }
+    {   // string read renders the number, not verbatim garbage
+        UNSIGNED8 f[] = "V";
+        UNSIGNED8 buf[64] = {0};
+        UNSIGNED32 len = sizeof(buf);
+        REQUIRE(AdsGetString(hT, f, buf, &len, ADS_NONE) == 0);
+        std::string s(reinterpret_cast<char*>(buf), len);
+        CHECK(s.find("10.5") != std::string::npos);
+        CHECK(s.find("e-") == std::string::npos);
+    }
+
+    REQUIRE(AdsCloseTable(hT) == 0);
+    REQUIRE(AdsDisconnect(hConn) == 0);
+    fs::remove_all(dir, ec);
+}
