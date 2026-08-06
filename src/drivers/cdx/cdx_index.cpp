@@ -571,6 +571,14 @@ CdxIndex::open_named(const std::string& path,
     auto sz = file_.size();
     if (!sz) return sz.error();
     file_size_ = sz.value();
+    // Keep the process-wide allocator end at least at the on-disk size so
+    // a freshly opened bag (or a peer tag) never hands out an offset inside
+    // existing pages. create() resets this when truncating; open only raises.
+    {
+        std::lock_guard<std::mutex> lk(g_cdx_alloc_mu);
+        g_cdx_alloc_tail[path_] =
+            std::max(g_cdx_alloc_tail[path_], file_size_);
+    }
 
     // 1) File header (offset 0, 1024 bytes) = structure tag CDXTAGHEADER.
     std::array<std::uint8_t, CDX_HEADER_LEN> file_hdr{};
@@ -2038,9 +2046,15 @@ CdxIndex::create(const std::string& path,
     ix.sub_header_offset_ = CDX_SUB_HEADER_OFFSET;
     ix.file_size_         = CDX_SUB_DATA_BASE;
     {
+        // CreateRW truncates the on-disk file. The process-wide tail map
+        // must be RESET (not max'd) to the new end of data — otherwise a
+        // prior open of the same path (stress recreate, INDEX ON after
+        // DELETE FILE, fresh oa_stress_cdx run) left a large tail and
+        // allocate_page_ would reserve pages far past EOF, growing the
+        // .cdx by 10x+ with huge sparse holes and broken key order.
         std::lock_guard<std::mutex> lk(g_cdx_alloc_mu);
-        g_cdx_alloc_tail[ix.path_] = std::max(g_cdx_alloc_tail[ix.path_],
-            static_cast<std::uint64_t>(CDX_SUB_DATA_BASE));
+        g_cdx_alloc_tail[ix.path_] =
+            static_cast<std::uint64_t>(CDX_SUB_DATA_BASE);
     }
     return ix;
 }

@@ -456,3 +456,66 @@ TEST_CASE("CdxIndex Text keys still trail-pack trailing spaces") {
     }
     fs::remove(p);
 }
+
+// Pritpal Bedi 2026-08-06: after a large bag lived at path P, CREATE INDEX
+// (CreateRW truncate) of a small bag at the same path reused the process-
+// wide page allocator tail and reserved pages far past EOF → .cdx size
+// ballooned ~10x with sparse holes and SKIP walked in erratic order.
+TEST_CASE("CdxIndex create resets page allocator tail after recreate at same path") {
+    auto p = fs::temp_directory_path() / "openads_cdx_alloc_tail_recreate.cdx";
+    fs::remove(p);
+
+    std::uintmax_t big_sz = 0;
+    {
+        auto created = CdxIndex::create(p.string(), "K", "K", 12, false, false);
+        REQUIRE(created.has_value());
+        CdxIndex ix = std::move(created).value();
+        // Enough keys that a sticky process-wide allocator tail would leave
+        // a multi-10 KB gap after recreate (dense pack still > 12 KB).
+        for (std::uint32_t r = 1; r <= 3000; ++r) {
+            char k[16];
+            std::snprintf(k, sizeof(k), "K%06u", r);
+            REQUIRE(ix.insert(r, k).has_value());
+        }
+        REQUIRE(ix.flush().has_value());
+        big_sz = fs::file_size(p);
+        REQUIRE(big_sz > 12 * 1024);
+    }
+
+    // Same process, same path: CreateRW truncates. Insert a handful of keys.
+    std::uintmax_t small_sz = 0;
+    {
+        auto created = CdxIndex::create(p.string(), "K", "K", 12, false, false);
+        REQUIRE(created.has_value());
+        CdxIndex ix = std::move(created).value();
+        for (std::uint32_t r = 1; r <= 10; ++r) {
+            char k[16];
+            std::snprintf(k, sizeof(k), "S%06u", r);
+            REQUIRE(ix.insert(r, k).has_value());
+        }
+        REQUIRE(ix.flush().has_value());
+        small_sz = fs::file_size(p);
+
+        // Key order must be sorted, not erratic.
+        REQUIRE(ix.seek_first().has_value());
+        std::string prev;
+        int n = 0;
+        for (;;) {
+            auto k = ix.current_key();
+            if (n > 0) CHECK(k >= prev);
+            prev = k;
+            ++n;
+            auto nx = ix.next();
+            REQUIRE(nx.has_value());
+            if (!nx.value().positioned) break;
+        }
+        CHECK(n == 10);
+    }
+
+    // Healthy small bag is a few KB. A sticky allocator tail would leave the
+    // bag near `big_sz` (pages reserved from the old EOF onward).
+    MESSAGE("big=" << big_sz << " small=" << small_sz);
+    CHECK(small_sz < 8 * 1024);
+    CHECK(small_sz * 3 < big_sz);
+    fs::remove(p);
+}

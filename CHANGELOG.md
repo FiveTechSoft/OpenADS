@@ -1,3 +1,20 @@
+## 1.8.60 - 2026-08-06
+
+### Fixed — CDX page allocator tail stuck after recreate (erratic order / 10× size)
+
+The process-wide CDX page allocator (`g_cdx_alloc_tail`) used `std::max`
+on `CdxIndex::create()`. CreateRW **truncates** the on-disk bag, but the
+in-memory tail kept the previous (large) end-of-file. The next
+`allocate_page_` then reserved pages far past the new EOF — the `.cdx`
+ballooned ~10× with sparse holes, SKIP walked in erratic order, and
+further index ops often terminated the table.
+
+Reported by Pritpal Bedi on v1.8.59 (stress recreate / fresh index at the
+same path in one process). `create()` now **resets** the tail to the new
+data base; `open_named` still only raises the tail to the on-disk size.
+Regression: `CdxIndex create resets page allocator tail after recreate
+at same path`.
+
 ## 1.8.59 - 2026-08-05
 
 ### Performance — legacy ADI CREATE INDEX packs dense leaves full
