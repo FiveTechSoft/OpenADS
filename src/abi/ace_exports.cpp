@@ -10711,6 +10711,13 @@ UNSIGNED32 ENTRYPOINT AdsAppendRecord(ADSHANDLE hTable) {
         rt->row_valid        = false;               // M12.17
         rt->rec_count_cached = false;
         rt->key_count_cached = false;               // M12.19
+        // Cursor moves onto a new blank; any prior keyno is for a different
+        // row. Leaving keyno_valid set made AdsGetKeyNum/GetRelKeyPos report
+        // the pre-append position until the next nav invalidation — wrong
+        // scrollbar math after TXBrowse:Refresh() following DBAPPEND.
+        rt->keyno_valid      = false;
+        remote_clear_nav_boundaries(rt);
+        rt->invalidate_prefetch();
         auto r = rt->conn->append_blank(rt->id);
         if (!r) return fail(r.error());
         return ok();
@@ -10834,6 +10841,12 @@ UNSIGNED32 ENTRYPOINT AdsAppendRecord(ADSHANDLE hTable) {
 UNSIGNED32 ENTRYPOINT AdsWriteRecord(ADSHANDLE hTable) {
     if (auto* rt = get_remote_table(hTable)) {
         rt->row_valid = false;                      // M12.17 cache invalidation
+        // Key fields may have moved the row in the active order (or this is
+        // the flush of a fresh append). Drop the key position so the next
+        // AdsGetKeyNum / AdsGetRelKeyPos re-seeds via server GetKeyNum (O(1))
+        // instead of serving a stale current_keyno.
+        rt->keyno_valid = false;
+        rt->invalidate_prefetch();
         auto r = rt->conn->flush_table(rt->id);
         if (!r) return fail(r.error());
         return ok();
@@ -11016,6 +11029,9 @@ UNSIGNED32 ENTRYPOINT AdsDeleteRecord(ADSHANDLE hTable) {
         rt->row_valid        = false;               // M12.17
         rt->rec_count_cached = false;
         rt->key_count_cached = false;               // M12.19 (Pack drops the row)
+        rt->keyno_valid      = false;               // order position may shift
+        remote_clear_nav_boundaries(rt);
+        rt->invalidate_prefetch();
         auto r = rt->conn->delete_record(rt->id);
         if (!r) return fail(r.error());
         return ok();
@@ -11179,6 +11195,9 @@ UNSIGNED32 ENTRYPOINT AdsRecallRecord(ADSHANDLE hTable) {
         rt->row_valid        = false;               // M12.17
         rt->rec_count_cached = false;
         rt->key_count_cached = false;               // M12.19
+        rt->keyno_valid      = false;               // order position may shift
+        remote_clear_nav_boundaries(rt);
+        rt->invalidate_prefetch();
         auto r = rt->conn->recall_record(rt->id);
         if (!r) return fail(r.error());
         return ok();

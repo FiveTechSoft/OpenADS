@@ -404,6 +404,9 @@ struct RemoteTable {
     // Logical 1-based key position within the active index order.
     // Updated on remote nav when active_index_id != 0 so AdsGetKeyNum
     // (FWH xBrowse scrollbar) returns a non-zero position over TCP.
+    // Invalidated on Append / Write / Delete / Recall (and on Goto to a
+    // different recno); re-seeded by GoTop/GoBottom/Skip when valid, or
+    // by server GetKeyNum (M12.29) on the next AdsGetKeyNum/GetRelKeyPos.
     std::uint32_t            current_keyno   = 0;
     bool                     keyno_valid     = false;
     // Set when a backward Skip cannot move (top of order). Cleared on

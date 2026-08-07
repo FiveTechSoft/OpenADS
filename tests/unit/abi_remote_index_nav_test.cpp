@@ -6,6 +6,7 @@
 #include "openads/ace.h"
 #include "network/server.h"
 
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -499,6 +500,107 @@ TEST_CASE("remote bookmark restore keeps AdsGetKeyNum coherent") {
     UNSIGNED32 key_after = 0;
     REQUIRE(AdsGetKeyNum(hTable, 0, &key_after) == 0);
     CHECK(key_after == 4u);
+
+    REQUIRE(AdsCloseTable(hTable) == 0);
+    REQUIRE(AdsDisconnect(hConn) == 0);
+    srv.stop();
+}
+
+// After DBAPPEND the client must not keep the pre-append keyno as "valid".
+// Without invalidation, AdsGetKeyNum/GetRelKeyPos after Write served the
+// old scrollbar position; TXBrowse:Refresh() then painted wrong and, when
+// keyno was later wiped by Goto, fell into the O(n) remote_measure_keyno
+// path (~22 s on a 9.5k-row remote table).
+//
+// Pattern under test (MLS2026 / FWH TXBrowse after Add):
+//   seed keyno at bottom → Append+Write a key that sorts FIRST →
+//   GetKeyNum/GetRelKeyPos must re-seed (not return the old bottom) →
+//   xbrowse Save/Skip/Goto(bookmark)/GetRelKeyPos must stay coherent
+//   and finish quickly on loopback (no N-RTT measure storm).
+TEST_CASE("remote append invalidates keyno; Refresh pattern stays O(1)") {
+    using openads::network::Server;
+    using clock = std::chrono::steady_clock;
+
+    auto dir = fs::temp_directory_path() / "openads_remote_append_keyno";
+    make_colonias_dbf_with_prod_index(dir);
+
+    Server srv;
+    REQUIRE(srv.start("127.0.0.1", 0).has_value());
+    const std::uint16_t port = srv.port();
+
+    ADSHANDLE hConn = remote_connect(dir, port);
+    ADSHANDLE hTable = 0;
+    UNSIGNED8 tname[] = "CCOLONIA.DBF";
+    UNSIGNED8 alias[] = "CCOLONIA";
+    REQUIRE(AdsOpenTable(hConn, tname, alias, ADS_CDX, 0, 0, 0, 0, &hTable) == 0);
+
+    // Production bag auto-binds NOMBRE. Force that order explicitly.
+    ADSHANDLE hOrd = 0;
+    REQUIRE(AdsGetIndexHandleByOrder(hTable, 1, &hOrd) == 0);
+    REQUIRE(AdsSetIndexOrderByHandle(hTable, hOrd) == 0);
+
+    REQUIRE(AdsGotoBottom(hTable) == 0);
+    UNSIGNED32 key_bottom = 0;
+    REQUIRE(AdsGetKeyNum(hTable, 0, &key_bottom) == 0);
+    CHECK(key_bottom == 3u);   // three seed rows
+
+    double pos_bottom = 0.0;
+    REQUIRE(AdsGetRelKeyPos(hTable, &pos_bottom) == 0);
+    CHECK(pos_bottom > 0.9);
+
+    // Append a row that sorts FIRST under NOMBRE ("AAA ...").
+    REQUIRE(AdsAppendRecord(hTable) == 0);
+    UNSIGNED8 f_col[] = "COLONIA";
+    UNSIGNED8 f_nom[] = "NOMBRE";
+    UNSIGNED8 f_cp[]  = "CP";
+    const char* new_nom = "AAA first";
+    AdsSetString(hTable, f_col, (UNSIGNED8*)"Nuevo", 5);
+    AdsSetString(hTable, f_nom, (UNSIGNED8*)new_nom,
+                 static_cast<UNSIGNED32>(std::strlen(new_nom)));
+    AdsSetString(hTable, f_cp, (UNSIGNED8*)"00000", 5);
+    REQUIRE(AdsWriteRecord(hTable) == 0);
+
+    // After write the cursor is on the new row. KeyNo must be 1 (first in
+    // NOMBRE order), not the stale bottom keyno (3) from before append.
+    const auto t0 = clock::now();
+    UNSIGNED32 key_new = 0;
+    REQUIRE(AdsGetKeyNum(hTable, 0, &key_new) == 0);
+    CHECK(key_new == 1u);
+
+    double pos_new = -1.0;
+    REQUIRE(AdsGetRelKeyPos(hTable, &pos_new) == 0);
+    CHECK(pos_new == doctest::Approx(0.0).epsilon(1e-9));
+
+    UNSIGNED32 kc = 0;
+    REQUIRE(AdsGetKeyCount(hTable, 0, &kc) == 0);
+    CHECK(kc == 4u);
+
+    // TXBrowse:Refresh() paint: save recno, walk a page, restore, re-query.
+    UNSIGNED32 bookmark = 0;
+    REQUIRE(AdsGetRecordNum(hTable, 0, &bookmark) == 0);
+    REQUIRE(bookmark > 0u);
+
+    for (int i = 0; i < 3; ++i) {
+        REQUIRE(AdsSkip(hTable, 1) == 0);
+    }
+    REQUIRE(AdsGotoRecord(hTable, bookmark) == 0);
+
+    UNSIGNED32 key_restored = 0;
+    REQUIRE(AdsGetKeyNum(hTable, 0, &key_restored) == 0);
+    CHECK(key_restored == 1u);
+
+    double pos_restored = -1.0;
+    REQUIRE(AdsGetRelKeyPos(hTable, &pos_restored) == 0);
+    CHECK(pos_restored == doctest::Approx(0.0).epsilon(1e-9));
+
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        clock::now() - t0)
+                        .count();
+    // Loopback: GetKeyNum + GetRelKeyPos + KeyCount + 3 Skip + Goto +
+    // re-query must be well under a second. The pre-M12.29 O(n) measure
+    // path was ~22 s on large tables; even on 4 rows a multi-second
+    // budget here is only a safety net against a full skip-storm bug.
+    CHECK(ms < 2000);
 
     REQUIRE(AdsCloseTable(hTable) == 0);
     REQUIRE(AdsDisconnect(hConn) == 0);
