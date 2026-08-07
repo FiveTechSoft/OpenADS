@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstring>
 #include <filesystem>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <thread>
@@ -22,13 +23,20 @@ std::unordered_map<std::string, std::uint64_t> g_cdx_alloc_tail;
 // Process-wide per-file CDX write-lock registry (see CDX_WRITE_LOCK_OFF
 // and CdxWriteLockJoin in the header). The OS byte lock is taken once per
 // .cdx per process and shared by every tag instance; `users` counts
-// joined batches, the last release drops the OS lock.
+// joined batches, the last release drops the OS lock. Each entry has its
+// OWN mutex: the (potentially seconds-long, cross-process) OS acquire
+// happens under the per-path mutex only, never under the registry
+// mutex — a contended file must not stall writers of unrelated files
+// (the registry map itself is only used for lookup). Entries are never
+// erased: one small entry per distinct .cdx path per process.
 struct CdxWriteLockEntry {
+    std::mutex                        mu;
     std::size_t                       users = 0;
     std::optional<platform::ByteLock> os_lock;
 };
 std::mutex g_cdx_wl_mu;
-std::unordered_map<std::string, CdxWriteLockEntry> g_cdx_write_locks;
+std::unordered_map<std::string, std::shared_ptr<CdxWriteLockEntry>>
+    g_cdx_write_locks;
 
 util::Result<platform::ByteLock>
 acquire_cdx_os_lock_(platform::File& f, platform::LockKind kind,
@@ -588,12 +596,16 @@ void CdxWriteLockJoin::release() noexcept {
     if (!joined) return;
     joined = false;
     try {
-        std::lock_guard<std::mutex> lk(g_cdx_wl_mu);
-        auto it = g_cdx_write_locks.find(path);
-        if (it == g_cdx_write_locks.end()) return;
-        if (it->second.users > 0 && --it->second.users == 0) {
-            it->second.os_lock.reset();   // drops the OS byte lock
-            g_cdx_write_locks.erase(it);
+        std::shared_ptr<CdxWriteLockEntry> e;
+        {
+            std::lock_guard<std::mutex> lk(g_cdx_wl_mu);
+            auto it = g_cdx_write_locks.find(path);
+            if (it == g_cdx_write_locks.end()) return;
+            e = it->second;
+        }
+        std::lock_guard<std::mutex> elk(e->mu);
+        if (e->users > 0 && --e->users == 0) {
+            e->os_lock.reset();   // drops the OS byte lock
         }
     } catch (...) {
         // noexcept contract: a lock-registry hiccup must never throw
@@ -603,21 +615,24 @@ void CdxWriteLockJoin::release() noexcept {
 
 util::Result<void> CdxIndex::ensure_write_lock_() {
     if (write_lock_join_.joined) return {};
+    std::shared_ptr<CdxWriteLockEntry> e;
     {
         std::lock_guard<std::mutex> lk(g_cdx_wl_mu);
-        auto& e = g_cdx_write_locks[path_];
-        if (e.users == 0) {
-            // First batch in this process: take the OS byte lock. May
-            // wait behind a Harbour peer's write batch (~5 s budget);
-            // other in-process tags simply join below.
-            auto l = acquire_cdx_os_lock_(file_, platform::LockKind::Exclusive);
-            if (!l) {
-                if (e.users == 0) g_cdx_write_locks.erase(path_);
-                return l.error();
-            }
-            e.os_lock = std::move(l).value();
+        auto& slot = g_cdx_write_locks[path_];
+        if (!slot) slot = std::make_shared<CdxWriteLockEntry>();
+        e = slot;
+    }
+    {
+        // Per-path serialization only: a cross-process wait here (Harbour
+        // peer mid-batch) stalls writers of THIS .cdx, never of others.
+        std::lock_guard<std::mutex> elk(e->mu);
+        if (e->users == 0) {
+            auto l = acquire_cdx_os_lock_(file_,
+                                          platform::LockKind::Exclusive);
+            if (!l) return l.error();
+            e->os_lock = std::move(l).value();
         }
-        ++e.users;
+        ++e->users;
     }
     write_lock_join_.path   = path_;
     write_lock_join_.joined = true;
@@ -873,7 +888,8 @@ util::Result<void> CdxIndex::reload_header_if_changed_() {
     {
         std::lock_guard<std::mutex> lk(g_cdx_wl_mu);
         auto it = g_cdx_write_locks.find(path_);
-        holds_batch = (it != g_cdx_write_locks.end() && it->second.users > 0);
+        holds_batch = (it != g_cdx_write_locks.end() &&
+                       it->second->users > 0);
     }
     std::optional<platform::ByteLock> rlk;   // held across the reads below
     if (!holds_batch) {
