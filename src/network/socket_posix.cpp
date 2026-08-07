@@ -73,6 +73,19 @@ static void disable_nagle(int s) {
     (void)::setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
 }
 
+// POSIX raises SIGPIPE when send() targets a peer that already closed —
+// fatal to the whole process, where Windows just fails the call. Linux
+// suppresses it per-call with MSG_NOSIGNAL (see sock_send); macOS has no
+// MSG_NOSIGNAL and needs SO_NOSIGPIPE on the socket instead.
+static void suppress_sigpipe(int s) {
+#ifdef SO_NOSIGPIPE
+    int on = 1;
+    (void)::setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
+#else
+    (void)s;
+#endif
+}
+
 util::Result<Socket> accept_one(Socket& listener) {
     sockaddr_in addr{};
     socklen_t len = sizeof(addr);
@@ -82,6 +95,7 @@ util::Result<Socket> accept_one(Socket& listener) {
         return util::Error{5000, errno, "accept() failed", ""};
     }
     disable_nagle(c);
+    suppress_sigpipe(c);
     Socket out;
     out.handle = static_cast<std::uintptr_t>(c);
     return out;
@@ -102,6 +116,7 @@ util::Result<Socket> connect_tcp(const std::string& host,
         return util::Error{5000, e, "connect() failed", host};
     }
     disable_nagle(s);
+    suppress_sigpipe(s);
     Socket out;
     out.handle = static_cast<std::uintptr_t>(s);
     return out;
@@ -110,7 +125,14 @@ util::Result<Socket> connect_tcp(const std::string& host,
 util::Result<std::size_t> sock_send(Socket& sock,
                                      const std::uint8_t* buf,
                                      std::size_t n) {
+    // MSG_NOSIGNAL: a peer that already closed must yield EPIPE as an
+    // error, never a process-killing SIGPIPE (Windows semantics).
+#ifdef MSG_NOSIGNAL
+    ssize_t sent = ::send(static_cast<int>(sock.handle), buf, n,
+                          MSG_NOSIGNAL);
+#else
     ssize_t sent = ::send(static_cast<int>(sock.handle), buf, n, 0);
+#endif
     if (sent < 0) {
         return util::Error{5000, errno, "send() failed", ""};
     }
