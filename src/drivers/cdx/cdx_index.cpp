@@ -49,6 +49,24 @@ void write_u32_le(std::uint8_t* p, std::uint32_t v) {
     p[3] = static_cast<std::uint8_t>((v >> 24) & 0xFFu);
 }
 
+// Harbour's CDXTAGHEADER stores the update counter at offset 8 in
+// BIG-endian byte order (HB_PUT_BE_UINT32 / HB_GET_BE_UINT32).
+// The B+tree sibling pointers at the same offset within leaf/branch
+// pages are little-endian -- only the header counter uses BE.
+std::uint32_t read_u32_be(const std::uint8_t* p) {
+    return (static_cast<std::uint32_t>(p[0]) << 24) |
+           (static_cast<std::uint32_t>(p[1]) << 16) |
+           (static_cast<std::uint32_t>(p[2]) <<  8) |
+            static_cast<std::uint32_t>(p[3]);
+}
+
+void write_u32_be(std::uint8_t* p, std::uint32_t v) {
+    p[0] = static_cast<std::uint8_t>((v >> 24) & 0xFFu);
+    p[1] = static_cast<std::uint8_t>((v >> 16) & 0xFFu);
+    p[2] = static_cast<std::uint8_t>((v >>  8) & 0xFFu);
+    p[3] = static_cast<std::uint8_t>( v        & 0xFFu);
+}
+
 std::string trim_nul(const std::uint8_t* p, std::size_t n) {
     std::size_t len = 0;
     while (len < n && p[len] != 0) ++len;
@@ -508,7 +526,7 @@ build_subtag_header(std::uint32_t root_page,
     std::array<std::uint8_t, CDX_HEADER_LEN> hdr{};
     write_u32_le(hdr.data() + 0, root_page);
     write_u32_le(hdr.data() + 4, 0xFFFFFFFFu);
-    write_u32_le(hdr.data() + 8, 1);
+    write_u32_be(hdr.data() + 8, 1);
     write_u16_le(hdr.data() + 12, key_size);
     // indexOpt: UNIQUE | COMPACT(0x20) | COMPOUND(0x40). A native FoxPro
     // sub-tag carries 0x60; we previously wrote 0x20 (no COMPOUND).
@@ -632,7 +650,7 @@ CdxIndex::open_named(const std::string& path,
 
     root_page_ = read_u32_le(sub_hdr.data() + 0);
     free_ptr_  = read_u32_le(sub_hdr.data() + 4);
-    counter_   = read_u32_le(sub_hdr.data() + 8);
+    counter_   = read_u32_be(sub_hdr.data() + 8);
     key_size_  = read_u16_le(sub_hdr.data() + 12);
     index_opt_ = sub_hdr[14];
     index_sig_ = sub_hdr[15];
@@ -763,7 +781,7 @@ util::Result<void> CdxIndex::reload_header_if_changed_() {
     }
     const std::uint32_t new_root = read_u32_le(sub_hdr.data() + 0);
     const std::uint32_t new_free = read_u32_le(sub_hdr.data() + 4);
-    const std::uint32_t new_ctr  = read_u32_le(sub_hdr.data() + 8);
+    const std::uint32_t new_ctr  = read_u32_be(sub_hdr.data() + 8);
     if (new_ctr == counter_ && new_root == root_page_ && new_free == free_ptr_) {
         return {};
     }
@@ -1933,7 +1951,7 @@ util::Result<void> CdxIndex::rewrite_header_() {
     if (!got) return got.error();
     write_u32_le(hdr.data() + 0, root_page_);
     write_u32_le(hdr.data() + 4, free_ptr_);
-    write_u32_le(hdr.data() + 8, ++counter_);
+    write_u32_be(hdr.data() + 8, ++counter_);
     auto wrote = file_.write_at(sub_header_offset_, hdr.data(), hdr.size());
     if (!wrote) return wrote.error();
     return {};
@@ -1958,7 +1976,7 @@ CdxIndex::create(const std::string& path,
         std::array<std::uint8_t, CDX_HEADER_LEN> file_hdr{};
         write_u32_le(file_hdr.data() + 0, CDX_STRUCT_ROOT_OFFSET);
         write_u32_le(file_hdr.data() + 4, 0xFFFFFFFFu);
-        write_u32_le(file_hdr.data() + 8, 1);
+        write_u32_be(file_hdr.data() + 8, 1);
         write_u16_le(file_hdr.data() + 12, CDX_STRUCT_KEY_LEN);
         // STRUCTURE(0x80) | COMPOUND(0x40) | COMPACT(0x20). The STRUCTURE
         // bit is mandatory: hb_cdxTagLoad only returns early for the
