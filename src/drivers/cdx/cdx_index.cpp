@@ -1,11 +1,15 @@
-﻿#include "drivers/cdx/cdx_index.h"
+#include "drivers/cdx/cdx_index.h"
 
 #include "engine/oem_collation.h"
+#include "platform/lock.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <mutex>
+#include <optional>
+#include <thread>
 #include <unordered_map>
 
 namespace openads::drivers::cdx {
@@ -14,6 +18,39 @@ namespace {
 
 std::mutex g_cdx_alloc_mu;
 std::unordered_map<std::string, std::uint64_t> g_cdx_alloc_tail;
+
+// Process-wide per-file CDX write-lock registry (see CDX_WRITE_LOCK_OFF
+// and CdxWriteLockJoin in the header). The OS byte lock is taken once per
+// .cdx per process and shared by every tag instance; `users` counts
+// joined batches, the last release drops the OS lock.
+struct CdxWriteLockEntry {
+    std::size_t                       users = 0;
+    std::optional<platform::ByteLock> os_lock;
+};
+std::mutex g_cdx_wl_mu;
+std::unordered_map<std::string, CdxWriteLockEntry> g_cdx_write_locks;
+
+util::Result<platform::ByteLock>
+acquire_cdx_os_lock_(platform::File& f, platform::LockKind kind,
+                     int max_retries = 2000) {
+    // Harbour peers lock with FLX_WAIT (no give-up), so use a generous
+    // budget: a thundering-herd of mixed ADS/DBFCDX writers starves a
+    // short retry loop (observed: 1 lost write in 300 with 200 retries).
+    util::Error last_err{};
+    for (int i = 0; i < max_retries; ++i) {
+        auto lk = platform::ByteLock::try_acquire(f, CDX_WRITE_LOCK_OFF, 1,
+                                                  kind);
+        if (lk) return std::move(lk).value();
+        last_err = lk.error();
+        // Cap the back-off at 5 ms: the default 2000 retries then bound
+        // the total wait to ~10 s of solid contention (Harbour peers
+        // lock with FLX_WAIT and never give up).
+        const auto us = 50 + (i * 25);
+        std::this_thread::sleep_for(std::chrono::microseconds(
+            us > 5000 ? 5000 : us));
+    }
+    return last_err;
+}
 
 constexpr std::uint32_t kCdxEraseDupGuard = 1048576;
 
@@ -547,6 +584,49 @@ build_subtag_header(std::uint32_t root_page,
 
 } // namespace
 
+void CdxWriteLockJoin::release() noexcept {
+    if (!joined) return;
+    joined = false;
+    try {
+        std::lock_guard<std::mutex> lk(g_cdx_wl_mu);
+        auto it = g_cdx_write_locks.find(path);
+        if (it == g_cdx_write_locks.end()) return;
+        if (it->second.users > 0 && --it->second.users == 0) {
+            it->second.os_lock.reset();   // drops the OS byte lock
+            g_cdx_write_locks.erase(it);
+        }
+    } catch (...) {
+        // noexcept contract: a lock-registry hiccup must never throw
+        // through a destructor.
+    }
+}
+
+util::Result<void> CdxIndex::ensure_write_lock_() {
+    if (write_lock_join_.joined) return {};
+    {
+        std::lock_guard<std::mutex> lk(g_cdx_wl_mu);
+        auto& e = g_cdx_write_locks[path_];
+        if (e.users == 0) {
+            // First batch in this process: take the OS byte lock. May
+            // wait behind a Harbour peer's write batch (~5 s budget);
+            // other in-process tags simply join below.
+            auto l = acquire_cdx_os_lock_(file_, platform::LockKind::Exclusive);
+            if (!l) {
+                if (e.users == 0) g_cdx_write_locks.erase(path_);
+                return l.error();
+            }
+            e.os_lock = std::move(l).value();
+        }
+        ++e.users;
+    }
+    write_lock_join_.path   = path_;
+    write_lock_join_.joined = true;
+    // We may have waited behind a peer's batch: adopt its tree state
+    // before mutating. No-op when this instance already holds dirty
+    // pages (reload defers to local state in that case).
+    return reload_header_if_changed_();
+}
+
 util::Result<CdxIndex::Page*> CdxIndex::get_page_(std::uint32_t offset) {
     auto it = page_cache_.find(offset);
     if (it != page_cache_.end()) return &it->second;
@@ -609,6 +689,10 @@ CdxIndex::open_named(const std::string& path,
     if (struct_root == 0) {
         return util::Error{6106, 0, "CDX has no structure tag root", path};
     }
+    // Harbour peer-change counter lives in the FILE header (see
+    // file_counter_ in cdx_index.h); cache it so reload_header_if_changed_
+    // can spot Harbour-side updates that never touch the sub-tag header.
+    file_counter_ = read_u32_be(file_hdr.data() + 8);
 
     // 2) Structure-tag root leaf at struct_root, key_size = 10.
     Page struct_leaf{};
@@ -773,6 +857,30 @@ util::Result<void> CdxIndex::reload_header_if_changed_() {
     for (const auto& kv : dirty_) {
         if (kv.second) return {};
     }
+    // Coordinate with a peer's in-flight write batch: while another
+    // station (Harbour or OpenADS) holds the exclusive write lock, its
+    // freshly-bumped header may momentarily point at pages not yet on
+    // disk. Take a shared lock on the same byte (small retry budget) so
+    // the reads below see the state before or after the batch, never the
+    // middle. Best-effort: on sustained contention fall back to the
+    // unlocked read rather than stall navigation.
+    //
+    // Skip when THIS process holds the batch lock: no peer can be
+    // mid-write then, and on POSIX a same-process shared fcntl lock on
+    // the region would downgrade our own exclusive lock (fcntl locks
+    // merge per process).
+    bool holds_batch = false;
+    {
+        std::lock_guard<std::mutex> lk(g_cdx_wl_mu);
+        auto it = g_cdx_write_locks.find(path_);
+        holds_batch = (it != g_cdx_write_locks.end() && it->second.users > 0);
+    }
+    std::optional<platform::ByteLock> rlk;   // held across the reads below
+    if (!holds_batch) {
+        if (auto l = acquire_cdx_os_lock_(file_, platform::LockKind::Shared, 40))
+            rlk = std::move(l).value();
+        // best-effort: on sustained contention fall back to unlocked reads
+    }
     std::array<std::uint8_t, CDX_HEADER_LEN> sub_hdr{};
     auto got = file_.read_at(sub_header_offset_, sub_hdr.data(), sub_hdr.size());
     if (!got) return got.error();
@@ -782,7 +890,22 @@ util::Result<void> CdxIndex::reload_header_if_changed_() {
     const std::uint32_t new_root = read_u32_le(sub_hdr.data() + 0);
     const std::uint32_t new_free = read_u32_le(sub_hdr.data() + 4);
     const std::uint32_t new_ctr  = read_u32_be(sub_hdr.data() + 8);
-    if (new_ctr == counter_ && new_root == root_page_ && new_free == free_ptr_) {
+    // Harbour DBFCDX leaf-level mutations never touch the sub-tag header —
+    // they only bump the FILE-header version counter (file offset 8, BE)
+    // when releasing the index write lock. Watch it too or peer Harbour
+    // inserts stay invisible to us (the reverse direction of Pritpal's
+    // regression #1).
+    std::uint32_t new_file_ctr = file_counter_;
+    {
+        std::uint8_t fver[4]{};
+        auto fgot = file_.read_at(8, fver, sizeof(fver));
+        if (!fgot) return fgot.error();
+        if (fgot.value() == sizeof(fver)) {
+            new_file_ctr = read_u32_be(fver);
+        }
+    }
+    if (new_ctr == counter_ && new_root == root_page_ && new_free == free_ptr_
+        && new_file_ctr == file_counter_) {
         return {};
     }
     // Peer rewrite: drop every clean page so the next get_page_ re-reads.
@@ -791,6 +914,7 @@ util::Result<void> CdxIndex::reload_header_if_changed_() {
     root_page_ = new_root;
     free_ptr_  = new_free;
     counter_   = new_ctr;
+    file_counter_ = new_file_ctr;
     key_size_  = read_u16_le(sub_hdr.data() + 12);
     if (auto sz = file_.size(); sz) {
         file_size_ = sz.value();
@@ -1396,6 +1520,7 @@ CdxIndex::insert(std::uint32_t recno, const std::string& key) {
     if (mode_ == IndexOpenMode::ReadOnly) {
         return util::Error{5000, 0, "CDX opened read-only", ""};
     }
+    if (auto wl = ensure_write_lock_(); !wl) return wl.error();
     invalidate_pos_cache();
     std::string padded = key;
     const char pad_ch = static_cast<char>(trail_byte_());
@@ -1447,6 +1572,7 @@ CdxIndex::build_bulk(std::vector<std::pair<std::string, std::uint32_t>> keys) {
     if (mode_ == IndexOpenMode::ReadOnly) {
         return util::Error{5000, 0, "CDX opened read-only", ""};
     }
+    if (auto wl = ensure_write_lock_(); !wl) return wl.error();
     invalidate_pos_cache();
 
     // Pad to key_size_ and sort by (key, recno) — the CDX leaf order. Ties
@@ -1693,6 +1819,7 @@ CdxIndex::erase(std::uint32_t recno, const std::string& key) {
     if (mode_ == IndexOpenMode::ReadOnly) {
         return util::Error{5000, 0, "CDX opened read-only", ""};
     }
+    if (auto wl = ensure_write_lock_(); !wl) return wl.error();
     if (root_page_ == 0) return util::Error{5044, 0, "CDX empty", ""};
 
     std::string padded = key;
@@ -1764,7 +1891,12 @@ util::Result<void> CdxIndex::flush() {
     {
         bool any_dirty = false;
         for (const auto& kv : dirty_) { if (kv.second) { any_dirty = true; break; } }
-        if (!any_dirty) return {};
+        if (!any_dirty) {
+            // Header-only mutations (set_options / set_expression) join the
+            // write lock without dirtying pages; don't hold it hostage.
+            write_lock_join_.release();
+            return {};
+        }
     }
     // The page at root_page_ is the B+tree root; native FoxPro / Harbour
     // readers require the ROOT bit (0x01) on it -> 0x03 for a root that is
@@ -1789,7 +1921,12 @@ util::Result<void> CdxIndex::flush() {
     if (sub_header_offset_ != 0) {
         if (auto r = rewrite_header_(); !r) return r.error();
     }
-    return file_.sync();
+    if (auto s = file_.sync(); !s) return s.error();
+    // Batch is durable — release the Harbour-compatible write lock so
+    // peers (HbDBU / other OpenADS processes) can observe the new file
+    // version and start their own batch.
+    write_lock_join_.release();
+    return {};
 }
 
 util::Result<void> CdxIndex::set_options(bool unique, bool descend) {
@@ -1805,6 +1942,7 @@ util::Result<void> CdxIndex::set_options(bool unique, bool descend,
     unique_  = unique;
     descend_ = descend;
     if (new_key_size != 0) key_size_ = new_key_size;
+    if (auto wl = ensure_write_lock_(); !wl) return wl.error();
     index_opt_ = static_cast<std::uint8_t>(
         (unique ? 0x01 : 0x00) | 0x20);
     std::array<std::uint8_t, CDX_HEADER_LEN> hdr{};
@@ -1825,6 +1963,7 @@ util::Result<void> CdxIndex::set_expression(const std::string& key_expr,
         return util::Error{6106, 0,
             "CDX sub-tag header offset uninitialised", ""};
     }
+    if (auto wl = ensure_write_lock_(); !wl) return wl.error();
     // Fail loud rather than silently truncate (write_expr_pool_ clamps with
     // std::min): a clipped key expression is a corrupt index, and a clipped
     // FOR changes which rows are indexed. The former set_condition enforced
@@ -1894,6 +2033,7 @@ util::Result<void> CdxIndex::free_tree_(std::uint32_t off) {
 
 util::Result<void> CdxIndex::clear_data() {
     invalidate_pos_cache();
+    if (auto wl = ensure_write_lock_(); !wl) return wl.error();
     // Reclaim the existing tree's pages onto the free list so the rebuild
     // that follows reuses them; otherwise every CREATE INDEX / reindex
     // leaked a full tree and the .cdx outgrew the table without bound.
@@ -1954,6 +2094,24 @@ util::Result<void> CdxIndex::rewrite_header_() {
     write_u32_be(hdr.data() + 8, ++counter_);
     auto wrote = file_.write_at(sub_header_offset_, hdr.data(), hdr.size());
     if (!wrote) return wrote.error();
+
+    // Bump the FILE-header version counter (file offset 8, big-endian) so
+    // Harbour DBFCDX peers holding the same .cdx discard their page cache
+    // and see this mutation (hb_cdxIndexCheckVersion). Without it a
+    // concurrent Harbour/HbDBU session keeps navigating stale pages and
+    // never sees keys we insert — Pritpal Bedi regression #1. Read-modify-
+    // write (rather than ++file_counter_) merges with bumps Harbour itself
+    // wrote since our last observation. Only bytes 8..11 are touched; the
+    // LE free-list head at offset 4 belongs to Harbour's allocator.
+    std::uint8_t fver[4]{};
+    auto fgot = file_.read_at(8, fver, sizeof(fver));
+    if (!fgot) return fgot.error();
+    if (fgot.value() == sizeof(fver)) {
+        file_counter_ = read_u32_be(fver) + 1;
+        write_u32_be(fver, file_counter_);
+        auto fwrote = file_.write_at(8, fver, sizeof(fver));
+        if (!fwrote) return fwrote.error();
+    }
     return {};
 }
 
@@ -2053,6 +2211,7 @@ CdxIndex::create(const std::string& path,
     ix.root_page_         = 0;
     ix.free_ptr_          = 0xFFFFFFFFu;
     ix.counter_           = 1;
+    ix.file_counter_      = 1;   // matches the file header written above
     ix.key_size_          = key_size;
     ix.index_opt_         = static_cast<std::uint8_t>(
         (unique ? 0x01 : 0x00) | 0x20);
@@ -2122,6 +2281,11 @@ CdxIndex::add_tag(const std::string& path,
     auto fres = platform::File::open(path, platform::OpenMode::OpenExisting);
     if (!fres) return fres.error();
     platform::File file = std::move(fres).value();
+
+    // Serialise the struct-leaf mutation against concurrent writers
+    // (Harbour takes the same byte for its index write batches).
+    auto wl = acquire_cdx_os_lock_(file, platform::LockKind::Exclusive);
+    if (!wl) return wl.error();
 
     auto sz = file.size();
     if (!sz) return sz.error();
@@ -2196,6 +2360,16 @@ CdxIndex::add_tag(const std::string& path,
     auto wrote2 = file.write_at(new_off, sub_hdr.data(), sub_hdr.size());
     if (!wrote2) return wrote2.error();
 
+    // The struct-tag leaf gained an entry — bump the FILE-header version
+    // counter (offset 8, BE) so Harbour peers notice the bag changed.
+    std::uint32_t file_ctr = read_u32_be(fh.data() + 8) + 1;
+    {
+        std::uint8_t fver[4]{};
+        write_u32_be(fver, file_ctr);
+        auto fw = file.write_at(8, fver, sizeof(fver));
+        if (!fw) return fw.error();
+    }
+
     if (auto s = file.sync(); !s) return s.error();
 
     CdxIndex ix;
@@ -2205,6 +2379,7 @@ CdxIndex::add_tag(const std::string& path,
     ix.root_page_         = 0;
     ix.free_ptr_          = 0xFFFFFFFFu;
     ix.counter_           = 1;
+    ix.file_counter_      = file_ctr;
     ix.key_size_          = key_size;
     ix.index_opt_         = static_cast<std::uint8_t>(
         (unique ? 0x01 : 0x00) | 0x20);

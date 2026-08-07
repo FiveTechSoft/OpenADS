@@ -10828,12 +10828,11 @@ UNSIGNED32 ENTRYPOINT AdsAppendRecord(ADSHANDLE hTable) {
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
     auto r = t->append_record();
     if (!r) return fail(r.error());
-    // ACE semantics: a freshly-appended record in a non-exclusive table
-    // is automatically locked. X#'s ADSRDD relies on this — its GoHot
-    // refuses to write a record it sees as unlocked. Best-effort: the
-    // lock layer no-ops in read/exclusive modes, and a lock contention
-    // here doesn't invalidate the append itself.
-    (void)t->try_lock_record_excl(t->recno());
+    // ACE semantics: a freshly-appended record in a non-exclusive table is
+    // automatically locked. Done inside engine append_record() so engine-
+    // level callers (SQL INSERT, server AppendBlank) get it too. X#'s
+    // ADSRDD relies on this — its GoHot refuses to write a record it sees
+    // as unlocked.
     t->set_pending_append(true);
     return ok();
 }

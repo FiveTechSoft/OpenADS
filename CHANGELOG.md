@@ -1,3 +1,44 @@
+## 1.8.64 - 2026-08-07
+
+### Fixed — Harbour DBFCDX interop: shared-index visibility, write guard, locking
+
+Three defects surfaced when a Harbour DBFCDX app (HbDBU, B_BIG) and ADS
+clients share the same DBF+CDX files. Bug reports: Pritpal Bedi.
+
+**Peer index changes invisible mid-session.** Harbour detects peer CDX
+updates only via the **file-header** version counter (file offset 8,
+big-endian — `hb_cdxIndexCheckVersion`); OpenADS bumped only the per-tag
+header counter, which Harbour treats as reserved. An open DBFCDX session
+never saw ADS-appended keys through an active order, and ADS sessions
+missed Harbour's leaf-level inserts. OpenADS now maintains that counter
+on every mutation and watches it for peer changes.
+
+**Writes accepted without a lock.** The GoHot-style write guard consulted
+the `pending_append_` flag, so APPEND → move → REPLACE edited an unlocked
+record. The guard is now purely physical-lock based (Harbour
+`hb_dbfGoHot`): shared-mode writes require RLock / FLock / exclusive, and
+the freshly-appended record keeps working because `append_record()` now
+auto-locks it at engine level (xBase implicit append lock). Applies to
+the remote server path too, where the twin-cursor desync and the
+recno-0 lock translation were fixed along the way.
+
+**Index corruption under mixed ADS/DBFCDX writers.** Lock offsets were
+disjoint: OpenADS used VFPX-ish `0x7FFFFFFE∓recno` while Harbour DBFCDX
+defaults to the **VFP scheme** (`hb_cdxOpen`), and the `.cdx` file had no
+interprocess lock at all. OpenADS now locks the same bytes Harbour does:
+record lock `0x40000000 + header_len + (recno-1)*record_len`, FLock
+`[0x40000001, +0x3ffffffd)`, append/header lock `0x40000000`, and a new
+exclusive CDX batch write lock at `0x7FFFFFFE` held from first mutation
+to flush. FLock subsumes the caller's own record locks (OS bytes
+suspended, registrations kept, re-asserted on unlock) since Windows
+rejects same-handle overlapping byte locks.
+
+**Verification:** Pritpal's exact HbDBU/B_BIG scenario (20/20 both
+orders, in-session and reopen), reverse direction (Harbour appends seen
+by an open ADS session), 3 ADS + 3 DBFCDX concurrent writers landing
+300/300 records **and** index keys on both sides, lock-semantics tests
+local + remote, full suite green.
+
 ## 1.8.63 - 2026-08-07
 
 ### Fixed — remote keyno stale after APPEND / WRITE / DELETE / RECALL

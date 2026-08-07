@@ -556,13 +556,16 @@ TEST_CASE("M12.6 remote append + set_field + delete + recall + flush round-trip"
     while (!s.empty() && s.back() == ' ') s.pop_back();
     CHECK(s == "CCCC");
 
-    // Delete + recall round-trip.
+    // Delete + recall round-trip. Strict GoHot guard: shared-mode writes
+    // require an explicit RLock/FLock (Pritpal Bedi contract).
     REQUIRE(AdsGotoRecord(hTable, 2) == 0);
+    REQUIRE(AdsLockRecord(hTable, 0) == 0);
     REQUIRE(AdsDeleteRecord(hTable) == 0);
     UNSIGNED16 del = 0;
     // is_deleted is read-only / local-only here; verify by reopening
     // the file at the end. For now exercise recall.
     REQUIRE(AdsRecallRecord(hTable) == 0);
+    REQUIRE(AdsUnlockRecord(hTable, 2) == 0);
     (void)del;
 
     REQUIRE(AdsCloseTable(hTable) == 0);

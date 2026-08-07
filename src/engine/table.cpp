@@ -109,6 +109,8 @@ util::Result<Table> Table::open(const std::string& path,
     if (auto r = drv->open(path, dmode); !r) return r.error();
     Table t{std::move(drv), mode, locking, type};
     t.path_ = path;
+    t.locks_.set_record_geometry(t.driver_->header_length(),
+                                 t.driver_->record_length());
     if (t.driver_->record_count() == 0) {
         t.state_ = State::Limbo;
     }
@@ -122,6 +124,8 @@ Table Table::from_driver(std::unique_ptr<drivers::IDriver> drv,
                          LockingMode locking) {
     Table t{std::move(drv), mode, locking, type};
     t.path_ = std::move(path);
+    t.locks_.set_record_geometry(t.driver_->header_length(),
+                                 t.driver_->record_length());
     if (t.driver_->record_count() == 0) {
         t.state_ = State::Limbo;
     }
@@ -301,12 +305,15 @@ util::Result<void> Table::ensure_writable_() {
     }
     // GoHot-equivalent write guard (harbour dbf1.c hb_dbfGoHot).  In shared
     // mode the caller must hold either a file lock (FLock) or a record lock
-    // (RLock) before mutating the current row.  Newly-appended records are
-    // exempt: AdsAppendRecord auto-locks them and sets pending_append_ so
-    // immediate post-append field sets work without an explicit LockRecord
-    // (standard xBase / ACE semantics).  Exclusive and read-only opens
-    // bypass the check — they grant unrestricted access by definition.
-    if (mode_ == OpenMode::Shared && !pending_append_ && !is_table_locked()) {
+    // (RLock) on the CURRENT row before mutating it.  Newly-appended
+    // records pass because AdsAppendRecord physically auto-locks the new
+    // recno (xBase / ACE implicit append lock).  pending_append_ is
+    // deliberately NOT consulted: it stays set until WriteRecord, so an app
+    // could append, move to a victim row, and edit it with no lock at all
+    // (Pritpal Bedi: "Editing succeeds - no alert about LOCK REQUIRED").
+    // Exclusive and read-only opens bypass the check — they grant
+    // unrestricted access by definition.
+    if (mode_ == OpenMode::Shared && !is_table_locked()) {
         if (recno_locks_.find(recno_) == recno_locks_.end()) {
             return util::Error{5035, 0,
                 "write failed — record not locked (RLock or FLock required "
@@ -1032,10 +1039,16 @@ util::Result<void> Table::append_record() {
     record_buf_ = std::move(rec);
     recno_      = new_recno.value();
     state_      = State::Positioned;
-    // Mark the table as "pending append" so that the GoHot write guard in
-    // writeback_record_() allows the caller to set fields on the freshly-
-    // appended record without an explicit LockRecord — standard xBase / ACE
-    // semantics (AdsAppendRecord auto-locks + sets pending_append).
+    // xBase / ACE semantics: a freshly-appended record in a shared table is
+    // automatically locked, so immediate field sets pass the GoHot write
+    // guard (which is physical-lock based — hb_dbfGoHot checks
+    // hb_dbfIsLocked). The lock used to be taken only by the ABI's
+    // AdsAppendRecord; engine-level callers (SQL INSERT, server AppendBlank)
+    // need it too. Best-effort: the lock layer no-ops in read/exclusive
+    // modes, and contention on a brand-new recno cannot occur.
+    (void)try_lock_record_excl(recno_);
+    // Mark the table as "pending append" so AdsWriteRecord classifies the
+    // commit as an insert for RI / trigger handling.
     pending_append_ = true;
     if (tx_ && tx_->active()) {
         tx_->note_append(tid_, recno_);
@@ -1620,6 +1633,16 @@ TableTypeForLock Table::to_lock_type_() const noexcept {
 
 util::Result<void> Table::lock_record_excl(std::uint32_t recno) {
     if (mode_ == OpenMode::Read) return {};
+    if (table_lock_) {
+        // xBase semantics (hb_dbfRawLock REC_LOCK): a record lock while the
+        // table lock is held is a no-op success — the FLock range already
+        // covers every record-lock byte, and taking the OS byte lock would
+        // fail with ERROR_LOCK_VIOLATION against our own FLock. Register a
+        // virtual (offset 0) entry so the write guard / AdsGetNumLocks /
+        // AdsIsRecordLocked still see the recno.
+        recno_locks_.emplace(recno, LockHandle{});
+        return load_record_(recno);
+    }
     auto h = locks_.lock_record_excl(driver_->file(), to_lock_type_(),
                                      locking_, recno);
     if (!h) return h.error();
@@ -1633,6 +1656,10 @@ util::Result<void> Table::lock_record_excl(std::uint32_t recno) {
 
 util::Result<void> Table::try_lock_record_excl(std::uint32_t recno) {
     if (mode_ == OpenMode::Read) return {};
+    if (table_lock_) {
+        recno_locks_.emplace(recno, LockHandle{});
+        return load_record_(recno);
+    }
     auto h = locks_.try_lock_record_excl(driver_->file(), to_lock_type_(),
                                          locking_, recno);
     if (!h) return h.error();
@@ -1653,8 +1680,12 @@ util::Result<void> Table::unlock_record(std::uint32_t recno) {
     }
     auto it = recno_locks_.find(recno);
     if (it != recno_locks_.end()) {
-        if (locks_.unlock_record(driver_->file(), to_lock_type_(), locking_,
-                                 recno)) {
+        if (table_lock_) {
+            // While FLocked no entry holds an OS byte lock (virtual or
+            // suspended) — just drop the registration.
+            recno_locks_.erase(it);
+        } else if (locks_.unlock_record(driver_->file(), to_lock_type_(),
+                                        locking_, recno)) {
             it->second.release();
             recno_locks_.erase(it);
         }
@@ -1662,13 +1693,47 @@ util::Result<void> Table::unlock_record(std::uint32_t recno) {
     return {};
 }
 
+// While the table lock is held, no recno_locks_ entry holds an OS byte
+// lock (the Harbour FLock range covers every record-lock byte, and
+// Windows rejects a same-handle overlap). Re-assert them at OS level.
+// Entries a peer grabbed in the gap are dropped — the lock is genuinely
+// lost, and a later write to it fails the 5035 guard instead of silently
+// proceeding unprotected.
+void Table::reassert_record_locks_() noexcept {
+    std::vector<std::uint32_t> lost;
+    for (auto& [recno, h] : recno_locks_) {
+        auto rh = locks_.try_lock_record_excl(driver_->file(),
+                                              to_lock_type_(), locking_,
+                                              recno);
+        if (rh) h = std::move(rh).value();
+        else    lost.push_back(recno);
+    }
+    for (auto recno : lost) recno_locks_.erase(recno);
+}
+
+// xBase/ACE semantics: FLock subsumes the caller's OWN record locks. The
+// registrations are kept (AdsGetNumLocks keeps counting them and the
+// write guard keeps seeing them); only the OS bytes are released, and
+// re-asserted by unlock_table / on failure here.
+void Table::suspend_own_record_locks_() noexcept {
+    for (auto& [recno, h] : recno_locks_) {
+        if (h.offset() == 0) continue;   // virtual — nothing at OS level
+        locks_.force_unlock_record(driver_->file(), to_lock_type_(),
+                                   locking_, recno);
+        h.release();
+    }
+}
+
 util::Result<void> Table::lock_table_excl() {
     if (mode_ == OpenMode::Read) return {};
+    if (table_lock_) return {};
+    suspend_own_record_locks_();
     auto h = locks_.lock_table_excl(driver_->file(), to_lock_type_(), locking_);
-    if (!h) return h.error();
-    if (!table_lock_) {
-        table_lock_ = std::move(h).value();
+    if (!h) {
+        reassert_record_locks_();   // best-effort restore
+        return h.error();
     }
+    table_lock_ = std::move(h).value();
     return {};
 }
 
@@ -1682,12 +1747,15 @@ std::vector<std::uint32_t> Table::held_record_locks() const {
 
 util::Result<void> Table::try_lock_table_excl() {
     if (mode_ == OpenMode::Read) return {};
+    if (table_lock_) return {};
+    suspend_own_record_locks_();
     auto h = locks_.try_lock_table_excl(driver_->file(), to_lock_type_(),
                                         locking_);
-    if (!h) return h.error();
-    if (!table_lock_) {
-        table_lock_ = std::move(h).value();
+    if (!h) {
+        reassert_record_locks_();   // best-effort restore
+        return h.error();
     }
+    table_lock_ = std::move(h).value();
     return {};
 }
 
@@ -1696,12 +1764,17 @@ util::Result<void> Table::unlock_table() {
     if (record_dirty_) {
         if (auto r = commit_dirty_record(); !r) return r.error();
     }
+    bool released = false;
     if (table_lock_) {
         if (locks_.unlock_table(driver_->file(), to_lock_type_(), locking_)) {
             table_lock_->release();
             table_lock_.reset();
+            released = true;
         }
     }
+    // Record locks registered while FLocked (or suspended by the FLock)
+    // hold no OS byte yet — assert them now.
+    if (released) reassert_record_locks_();
     return {};
 }
 

@@ -29,30 +29,47 @@ platform::OpenMode map_mode(DriverOpenMode m) {
 // each compute `recno = rec_count_ + 1` from their own stale cache,
 // overwrite each other's record, and produce a header whose
 // "record count" lags reality. Holding an exclusive byte-lock on
-// the header (offset 0..31) serialises all appenders against the
-// authoritative state on disk.
+// the header serialises all appenders against the authoritative
+// state on disk.
+//
+// The locked byte is Harbour's DB_DBFLOCK_VFP header/append lock
+// position (DBF_LOCKPOS_VFP = 0x40000000, 1 byte — hb_dbfRawLock
+// APPEND_LOCK/HEADER_LOCK; DBFCDX defaults to the VFP scheme, see
+// hb_cdxOpen), NOT the header bytes themselves: Harbour DBFCDX peers
+// (HbDBU, B_BIG-style DBF apps) take the same byte, so OpenADS and
+// Harbour appends serialise against each other instead of tearing the
+// header (Pritpal Bedi: mixed ADS/DBFCDX corruption). The byte sits past
+// EOF and is never written; locking it does not disturb the file
+// contents.
 //
 // `acquire_with_retry_` retries with a short back-off so well-
 // behaved contention does not spuriously fail; the caller still
-// times out after ~5 s of solid contention. Linux + macOS use
+// times out after ~10 s of solid contention. Linux + macOS use
 // fcntl(F_SETLK), Windows uses LockFileEx — both honour
 // inter-process semantics, so this also fixes the cross-process
 // case (multiple openads_serverd / openads_concurrency_stress
 // invocations against the same DBF).
+constexpr std::uint64_t kHeaderLockOff = 0x40000000ULL;
+constexpr std::uint64_t kHeaderLockLen = 1ULL;
+
 util::Result<platform::ByteLock>
 acquire_with_retry_(platform::File&      f,
                     std::uint64_t        offset,
                     std::uint64_t        length,
                     platform::LockKind   kind = platform::LockKind::Exclusive,
-                    int                  max_retries = 200)
+                    int                  max_retries = 2000)
 {
     util::Error last_err{};
     for (int i = 0; i < max_retries; ++i) {
         auto lk = platform::ByteLock::try_acquire(f, offset, length, kind);
         if (lk) return std::move(lk).value();
         last_err = lk.error();
-        std::this_thread::sleep_for(
-            std::chrono::microseconds(50 + (i * 25)));
+        // Cap the back-off at 5 ms: the default 2000 retries then bound
+        // the total wait to ~10 s of solid contention (Harbour peers
+        // lock with FLX_WAIT and never give up).
+        const auto us = 50 + (i * 25);
+        std::this_thread::sleep_for(std::chrono::microseconds(
+            us > 5000 ? 5000 : us));
     }
     return last_err;
 }
@@ -67,13 +84,12 @@ CdxDriver::open(const std::string& path, DriverOpenMode mode) {
     file_ = std::move(fres).value();
 
     // Coordinate the header read with concurrent appenders. An append
-    // holds an EXCLUSIVE byte-lock on the header (offset 0..31) while it
-    // bumps the record count; on Windows a ReadFile over a region another
-    // handle locked exclusively fails with ERROR_LOCK_VIOLATION. Take a
-    // SHARED lock (retried with back-off) so open waits for any in-flight
-    // append, then reads a consistent header. Concurrent opens share the
-    // lock freely. The lock is released at end of scope.
-    auto hdr_lock = acquire_with_retry_(file_, 0, 32,
+    // holds an EXCLUSIVE byte-lock on the header lock position while it
+    // bumps the record count. Take a SHARED lock on the same byte
+    // (retried with back-off) so open waits for any in-flight append —
+    // Harbour station included — then reads a consistent header.
+    // Concurrent opens share the lock freely; released at end of scope.
+    auto hdr_lock = acquire_with_retry_(file_, kHeaderLockOff, kHeaderLockLen,
                                         platform::LockKind::Shared);
     if (!hdr_lock) return hdr_lock.error();
 
@@ -122,7 +138,7 @@ util::Result<void> CdxDriver::refresh_count_shared_() {
     // then release at end of scope. Modest retry budget keeps the fetch
     // responsive; if the lock can't be taken we still attempt an unlocked
     // refresh so the common single-writer case is never made worse.
-    auto lk = acquire_with_retry_(file_, 0, 32,
+    auto lk = acquire_with_retry_(file_, kHeaderLockOff, kHeaderLockLen,
                                   platform::LockKind::Shared, 40);
     (void)lk;  // hold the shared lock (if acquired) across the refresh
     return refresh_record_count_();
@@ -253,7 +269,7 @@ CdxDriver::append_record_raw(const std::uint8_t* buf, std::size_t n) {
     if (n != rec_len_) {
         return util::Error{5000, 0, "record buffer length mismatch", ""};
     }
-    auto lk = acquire_with_retry_(file_, 0, 32);
+    auto lk = acquire_with_retry_(file_, kHeaderLockOff, kHeaderLockLen);
     if (!lk) return lk.error();
     if (auto rh = refresh_record_count_(); !rh) return rh.error();
     std::uint32_t new_recno = rec_count_ + 1;
@@ -355,7 +371,7 @@ util::Result<bool> CdxDriver::truncate_trailing(std::uint32_t recno) {
     invalidate_read_cache_();
     // Hold the same header lock the append path uses, then re-read the
     // on-disk count so a concurrent append is observed.
-    auto lk = acquire_with_retry_(file_, 0, 32);
+    auto lk = acquire_with_retry_(file_, kHeaderLockOff, kHeaderLockLen);
     if (!lk) return lk.error();
     if (auto rh = refresh_record_count_(); !rh) return rh.error();
     if (recno != rec_count_) {
@@ -379,7 +395,7 @@ util::Result<bool> CdxDriver::truncate_to(std::uint32_t recno) {
         return util::Error{5000, 0, "table opened read-only", ""};
     }
     invalidate_read_cache_();
-    auto lk = acquire_with_retry_(file_, 0, 32);
+    auto lk = acquire_with_retry_(file_, kHeaderLockOff, kHeaderLockLen);
     if (!lk) return lk.error();
     if (auto rh = refresh_record_count_(); !rh) return rh.error();
     if (recno > rec_count_) return false;   // can't grow; nothing trailing

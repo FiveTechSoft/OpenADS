@@ -564,6 +564,15 @@ private:
 
     TableTypeForLock to_lock_type_() const noexcept;
 
+    // xBase/ACE semantics: FLock subsumes the caller's OWN record locks.
+    // suspend_own_record_locks_() releases only the OS bytes (the Harbour
+    // FLock range covers every record-lock byte and Windows rejects a
+    // same-handle overlap); registrations stay for AdsGetNumLocks and the
+    // write guard. reassert_record_locks_() re-acquires the OS bytes when
+    // the table lock goes away.
+    void suspend_own_record_locks_() noexcept;
+    void reassert_record_locks_() noexcept;
+
     std::unique_ptr<drivers::IDriver>             driver_;
     std::unique_ptr<drivers::IMemoStore>          memo_;
     RowPredicate                                  filter_;

@@ -94,12 +94,14 @@ TEST_CASE("remote: record lock is released when the table is closed") {
     ADSHANDLE hTB = open_ordered(hConnB);
     UNSIGNED32 rc = AdsLockRecord(hTB, 5);
     CHECK(rc == 0);   // zombie shadow-handle lock => AE_LOCK_FAILED here
+    if (rc == 0) { (void)AdsUnlockRecord(hTB, 5); }
 
-    // Same story for a table lock.
+    // Same story for a table lock. (B's record lock must go first: with
+    // Harbour-compatible offsets the FLock range covers every record-lock
+    // byte, so a live RLock correctly blocks another station's FLock.)
     ADSHANDLE hTA2 = open_ordered(hConnA);
     REQUIRE(AdsLockTable(hTA2) == 0);
     REQUIRE(AdsCloseTable(hTA2) == 0);
-    if (rc == 0) { (void)AdsUnlockRecord(hTB, 5); }
     UNSIGNED32 rc2 = AdsLockTable(hTB);
     CHECK(rc2 == 0);
 

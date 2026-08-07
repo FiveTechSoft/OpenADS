@@ -52,13 +52,15 @@ TEST_CASE("AdsOpenTable retries past an exclusive header lock (no lock-violation
 
     const auto dbf = (dir / "acct.dbf").string();
 
-    // Hold an exclusive lock on the header, mimicking an in-flight append.
+    // Hold an exclusive lock on the header lock byte, mimicking an
+    // in-flight append. The append serialisation point is Harbour's
+    // DB_DBFLOCK_VFP header position (0x40000000, 1 byte).
     auto lf = openads::platform::File::open(
         dbf, openads::platform::OpenMode::OpenExisting);
     REQUIRE(static_cast<bool>(lf));
     auto file = std::move(lf).value();
     auto lk = openads::platform::ByteLock::try_acquire(
-        file, 0, 32, openads::platform::LockKind::Exclusive);
+        file, 0x40000000ull, 1, openads::platform::LockKind::Exclusive);
     REQUIRE(static_cast<bool>(lk));
 
     // Open the table from another connection while the lock is held.

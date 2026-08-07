@@ -1929,6 +1929,12 @@ DispatchResult Session::dispatch(const Frame& f) {
             }
             auto* tbl = sess_conn_->lookup_table(it->second);
             if (!tbl) { reply = err("Lock: lookup failed"); break; }
+            // ACE convention: recno 0 = the current record. The engine
+            // cursor is the authoritative position (write opcodes sync the
+            // ABI twin to it before guarding), so translate here or the
+            // lock lands on nonexistent record 0 and the write guard
+            // correctly rejects the later write with 5035.
+            if (rn == 0) rn = tbl->recno();
             openads::mgmt::set_current_lock_owner(
                 session_user_.empty() ? "(anonymous)" : session_user_,
                 srv_->conn_no_for_session(sid_));
@@ -2977,6 +2983,19 @@ DispatchResult Session::dispatch(const Frame& f) {
             // When indexes live on the parallel ABI handle, write through
             // AdsSetString so the bag is maintained (see AppendBlank).
             if (auto hit = tbls_h_.find(id); hit != tbls_h_.end()) {
+                // The engine cursor is authoritative: navigation opcodes
+                // (GotoRecord / unordered Skip) move only the engine table,
+                // the twin is synced lazily for ordered walks. Land the
+                // twin on the same row before writing through it —
+                // otherwise the 5035 write guard checks the lock of
+                // whatever record the twin happens to sit on (e.g. a fresh
+                // auto-locked append) and the write lands on the WRONG row.
+                UNSIGNED32 cur = 0;
+                AdsGetRecordNum(hit->second, 0, &cur);
+                UNSIGNED32 eng = tbl->recno();
+                if (eng != 0 && cur != eng) {
+                    (void)AdsGotoRecord(hit->second, eng);
+                }
                 std::vector<UNSIGNED8> fn(fname.begin(), fname.end());
                 fn.push_back(0);
                 std::vector<UNSIGNED8> vv(val.begin(), val.end());
@@ -3042,12 +3061,25 @@ DispatchResult Session::dispatch(const Frame& f) {
             auto* tbl = sess_conn_->lookup_table(it->second);
             if (!tbl) { reply = err("DeleteRecord: lookup failed"); break; }
             if (auto hit = tbls_h_.find(id); hit != tbls_h_.end()) {
+                // Same twin-cursor sync as SetField: the delete must hit the
+                // row the engine cursor sits on, and the write guard must
+                // evaluate that row's lock.
+                UNSIGNED32 cur = 0;
+                AdsGetRecordNum(hit->second, 0, &cur);
+                UNSIGNED32 eng = tbl->recno();
+                if (eng != 0 && cur != eng) {
+                    (void)AdsGotoRecord(hit->second, eng);
+                }
                 UNSIGNED32 rrc = AdsDeleteRecord(hit->second);
                 if (rrc != 0) { reply = err("DeleteRecord", rrc); break; }
                 sync_engine_cursor(id);
             } else {
                 auto r = tbl->mark_deleted();
-                if (!r) { reply = err("DeleteRecord: mark_deleted failed"); break; }
+                if (!r) {
+                    reply = err("DeleteRecord: mark_deleted failed",
+                                static_cast<UNSIGNED32>(r.error().code));
+                    break;
+                }
             }
             reply.opcode = Opcode::DeleteRecordAck;
             break;
@@ -3061,8 +3093,27 @@ DispatchResult Session::dispatch(const Frame& f) {
             }
             auto* tbl = sess_conn_->lookup_table(it->second);
             if (!tbl) { reply = err("RecallRecord: lookup failed"); break; }
-            auto r = tbl->recall_deleted();
-            if (!r) { reply = err("RecallRecord: recall_deleted failed"); break; }
+            if (auto hit = tbls_h_.find(id); hit != tbls_h_.end()) {
+                // Mirror DeleteRecord: locks taken via LockRecord land on
+                // the ABI twin, so recall must go through it too (with the
+                // same cursor sync) or the engine-side guard sees no lock.
+                UNSIGNED32 cur = 0;
+                AdsGetRecordNum(hit->second, 0, &cur);
+                UNSIGNED32 eng = tbl->recno();
+                if (eng != 0 && cur != eng) {
+                    (void)AdsGotoRecord(hit->second, eng);
+                }
+                UNSIGNED32 rrc = AdsRecallRecord(hit->second);
+                if (rrc != 0) { reply = err("RecallRecord", rrc); break; }
+                sync_engine_cursor(id);
+            } else {
+                auto r = tbl->recall_deleted();
+                if (!r) {
+                    reply = err("RecallRecord: recall_deleted failed",
+                                static_cast<UNSIGNED32>(r.error().code));
+                    break;
+                }
+            }
             reply.opcode = Opcode::RecallRecordAck;
             break;
         }
@@ -3104,6 +3155,11 @@ DispatchResult Session::dispatch(const Frame& f) {
             if (auto hit = tbls_h_.find(id); hit != tbls_h_.end()) {
                 (void)AdsFlushFileBuffers(hit->second);
             }
+            // Remote AdsWriteRecord lands here: the append is now committed,
+            // so drop the pending-append marker (mirrors the local
+            // AdsWriteRecord which clears it). Without this the flag stayed
+            // set for the life of the server-side table.
+            tbl->set_pending_append(false);
             auto r = tbl->flush();
             if (!r) { reply = err("FlushTable: flush failed"); break; }
             reply.opcode = Opcode::FlushTableAck;

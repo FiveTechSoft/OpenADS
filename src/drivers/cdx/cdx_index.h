@@ -12,6 +12,46 @@
 
 namespace openads::drivers::cdx {
 
+// Harbour DBFCDX index lock position: DBFCDX defaults to the
+// DB_DBFLOCK_VFP scheme (hb_cdxOpen), whose index lock is 1 byte at
+// IDX_LOCKPOS_VFP = 0x7ffffffe on the .cdx file. Harbour takes it shared
+// for reads and exclusive around a write batch; OpenADS takes it
+// exclusive from the first mutation of a batch until flush(), so mixed
+// OpenADS/Harbour writers — and two OpenADS processes, which previously
+// took no .cdx lock at all — serialise instead of interleaving page
+// writes (Pritpal Bedi: "indexes go corrupt" under mixed access).
+constexpr std::uint64_t CDX_WRITE_LOCK_OFF = 0x7FFFFFFEULL;
+
+// RAII join handle for the process-wide per-file write lock. Several
+// CdxIndex instances (one per tag) share the same .cdx and mutate before
+// any of them flushes, so the OS byte lock is acquired once per file per
+// process and refcounted; the last release() drops the OS lock. Movable,
+// not copyable — moving transfers the join so a moved-from CdxIndex does
+// not double-release.
+struct CdxWriteLockJoin {
+    std::string path;
+    bool        joined = false;
+
+    CdxWriteLockJoin() = default;
+    CdxWriteLockJoin(const CdxWriteLockJoin&) = delete;
+    CdxWriteLockJoin& operator=(const CdxWriteLockJoin&) = delete;
+    CdxWriteLockJoin(CdxWriteLockJoin&& o) noexcept
+        : path(std::move(o.path)), joined(o.joined) { o.joined = false; }
+    CdxWriteLockJoin& operator=(CdxWriteLockJoin&& o) noexcept {
+        if (this != &o) {
+            release();
+            path = std::move(o.path);
+            joined = o.joined;
+            o.joined = false;
+        }
+        return *this;
+    }
+    ~CdxWriteLockJoin() { release(); }
+
+    // Defined in cdx_index.cpp (process-wide registry lives there).
+    void release() noexcept;
+};
+
 constexpr std::uint16_t CDX_PAGE_LEN     = 512;
 constexpr std::uint16_t CDX_HEADER_LEN   = 1024;
 constexpr std::uint16_t CDX_EXT_HEADSIZE = 24;
@@ -259,12 +299,28 @@ private:
     // streams cannot collide.
     std::uint32_t allocate_page_();
 
+    // Acquire the Harbour-compatible exclusive write lock on the .cdx
+    // (first mutation of a batch) and reload peer state before touching
+    // the tree. Released by flush() once dirty pages and headers are on
+    // disk. No-op while already joined.
+    util::Result<void> ensure_write_lock_();
+
+    // Join state for the process-wide per-file write lock.
+    CdxWriteLockJoin                          write_lock_join_;
+
     platform::File                          file_;
     std::string                             path_;
     IndexOpenMode                           mode_      = IndexOpenMode::ReadOnly;
     std::uint32_t                           root_page_ = 0;
     std::uint32_t                           free_ptr_  = 0xFFFFFFFFu;
     std::uint32_t                           counter_   = 0;
+    // Cached copy of the CDX FILE-header version counter (file offset 8,
+    // big-endian). Harbour DBFCDX peers watch ONLY this field (plus the
+    // free pointer at offset 4) to detect peer updates —
+    // hb_cdxIndexCheckVersion() reads 8 bytes at 0x04 on every locked
+    // index op and discards its page cache when the pair moves. The
+    // per-tag header counter at tag+8 is treated as reserved by Harbour.
+    std::uint32_t                           file_counter_ = 0;
     std::uint16_t                           key_size_  = 0;
     std::uint8_t                            index_opt_ = 0;
     std::uint8_t                            index_sig_ = 0x01;
