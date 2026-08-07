@@ -1467,6 +1467,31 @@ DispatchResult Session::dispatch(const Frame& f) {
             write_u32_le(kc, reply.payload);
             break;
         }
+        // M12.29 — server-side key number: position of current record in
+        // the active order's walk. Uses pos_of_recno_cached() on CDX → O(1),
+        // eliminating the O(n) remote_measure_keyno client-side walk that
+        // made TXBrowse:Refresh() take ~22 sec for 9500 records.
+        case Opcode::GetKeyNum: {
+            if (f.payload.size() < 4) { reply = err("GetKeyNum: bad payload"); break; }
+            std::uint32_t id = read_u32_le(f.payload.data());
+            auto it = tbls_.find(id);
+            if (it == tbls_.end() || !sess_conn_) {
+                reply = err("GetKeyNum: bad table id"); break; }
+            ADSHANDLE ht = ensure_abi_handle(id);
+            if (ht != 0) {
+                UNSIGNED32 kn = 0;
+                UNSIGNED32 rrc = AdsGetKeyNum(ht, 0, &kn);
+                if (rrc == 0) {
+                    reply.opcode = Opcode::GetKeyNumAck;
+                    write_u32_le(kn, reply.payload);
+                    break;
+                }
+            }
+            // Fallback: not positioned or no order → key number 0.
+            reply.opcode = Opcode::GetKeyNumAck;
+            write_u32_le(0u, reply.payload);
+            break;
+        }
         case Opcode::AtEOF: {
             if (f.payload.size() < 4) { reply = err("AtEOF: bad payload"); break; }
             std::uint32_t id = read_u32_le(f.payload.data());

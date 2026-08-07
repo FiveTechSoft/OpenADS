@@ -1327,6 +1327,17 @@ UNSIGNED32 remote_query_key_num(openads::network::RemoteTable* rt,
         *pulKeyNum = rt->current_keyno;
         return ok();
     }
+    // M12.29 — prefer server-side key number (O(1)) over the legacy
+    // O(n) client-side walk. The server computes pos_of_recno_cached()
+    // on the CDX index, eliminating the ~22 sec remote_measure_keyno
+    // walk that TXBrowse:Refresh() triggered on every repaint.
+    if (auto knr = rt->conn->key_num(rt->id)) {
+        rt->current_keyno = knr.value();
+        rt->keyno_valid   = true;
+        *pulKeyNum        = rt->current_keyno;
+        return ok();
+    }
+    // Fallback to legacy O(n) walk if server doesn't support GetKeyNum.
     const UNSIGNED32 kn = remote_measure_keyno(rt);
     rt->current_keyno = kn;
     rt->keyno_valid   = true;
@@ -8612,10 +8623,21 @@ UNSIGNED32 ENTRYPOINT AdsGotoRecord(ADSHANDLE hTable, UNSIGNED32 ulRecord) {
     if (auto* rt = get_remote_table(hTable)) {
         rt->found_cached = true; rt->current_found = false;  // M12.21: GoTo clears Found()
         remote_clear_nav_boundaries(rt);
+        // M12.29 — preserve keyno_valid when navigating to the same record.
+        // FWH xbrowse paint saves RecNo(), skips through visible rows, then
+        // GotoRecord(bookmark). The restore-same-record case was destroying
+        // keyno_valid unconditionally, triggering an O(n) remote_measure_keyno
+        // walk on the very next AdsGetRelKeyPos call (~22 sec for 9500 records).
+        const std::uint32_t prev_recno =
+            rt->row_valid ? rt->current_recno : 0u;
         auto r = rt->conn->goto_record(rt, ulRecord);
         if (!r) return fail(r.error());
         if (remote_table_has_index(rt)) {
-            rt->keyno_valid = false;
+            // Only invalidate when the cursor actually moved: same-record
+            // restores (the xbrowse common case) keep the cached key number.
+            if (ulRecord != prev_recno) {
+                rt->keyno_valid = false;
+            }
         } else if (ulRecord > 0u) {
             rt->current_keyno = ulRecord;
             rt->keyno_valid   = true;

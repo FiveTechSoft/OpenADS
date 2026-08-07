@@ -474,6 +474,23 @@ RemoteConnection::key_count(std::uint32_t id) {
     return read_u32_le(rep.value().payload.data());
 }
 
+// M12.29 — server-side key number. The server computes the position of the
+// current record in the active order's walk via pos_of_recno_cached() → O(1),
+// eliminating the O(n) remote_measure_keyno client-side walk.
+util::Result<std::uint32_t> RemoteConnection::key_num(std::uint32_t id) {
+    Frame req;
+    req.opcode = Opcode::GetKeyNum;
+    write_u32_le(id, req.payload);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::GetKeyNumAck ||
+        rep.value().payload.size() < 4) {
+        return util::Error{5000, 0,
+            "GetKeyNum: server error", ""};
+    }
+    return read_u32_le(rep.value().payload.data());
+}
+
 util::Result<bool> RemoteConnection::at_eof(std::uint32_t id) {
     Frame req;
     req.opcode = Opcode::AtEOF;

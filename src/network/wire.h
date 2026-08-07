@@ -211,6 +211,12 @@ enum class Opcode : std::uint8_t {
     // Reply:    [u32 key_count LE]
     GetKeyCount        = 0xB0,
     GetKeyCountAck     = 0xB1,
+    // M12.29 — remote AdsGetKeyNum: current key number in the active
+    // order's walk. Server computes via pos_of_recno_cached() → O(1).
+    // Request:  [table_id u32 LE]
+    // Response: [key_num u32 LE]  (0 = no order / not positioned)
+    GetKeyNum          = 0x03,
+    GetKeyNumAck       = 0x04,
 
     // M12.29 — AdsDD* Data Dictionary property API, phase 1. Previously
     // every AdsDD* getter/setter silently returned empty/no-op over a

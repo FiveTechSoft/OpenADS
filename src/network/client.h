@@ -99,6 +99,9 @@ public:
                                            const std::string& field_name);
     util::Result<std::uint32_t> record_count(std::uint32_t id);
     util::Result<std::uint32_t> key_count(std::uint32_t table_id);
+    // M12.29 — server-side key number: position of current record in the
+    // active order's walk. O(1) via pos_of_recno_cached() on the server.
+    util::Result<std::uint32_t> key_num(std::uint32_t table_id);
     util::Result<bool>          at_eof(std::uint32_t id);
     // M12.14 — remote field metadata + extended cursor state.
     struct FieldDesc {
