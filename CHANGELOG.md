@@ -1,3 +1,26 @@
+## 1.8.65 - 2026-08-07
+
+### Fixed — POSIX follow-ups to the DBFCDX interop release (v1.8.64)
+
+The v1.8.64 interop work passed the full suite on Windows but died on
+Linux/macOS CI (SIGPIPE 40 s into `openads_unit_tests`). Root causes,
+both POSIX-only:
+
+- `sock_send()` without `MSG_NOSIGNAL`: a write to a peer that already
+  closed killed the whole process with SIGPIPE instead of returning an
+  error (e.g. `AdsShowDeleted` fanning out to a stale remote session).
+  Linux now sends with `MSG_NOSIGNAL`; macOS sockets get `SO_NOSIGPIPE`
+  at connect/accept.
+- ADT byte-lock offsets (base `0x8000000000000000`) wrapped **negative**
+  in the signed `off_t` and `fcntl` rejected them with EINVAL — ADT
+  locking was silently disabled on POSIX, which the new physical write
+  guard then surfaced as spurious 5035s. Offsets ≥ 2^63 are folded into
+  the positive range (deterministic across processes).
+
+Also: the CDX write-lock registry no longer holds its global mutex while
+blocking on the cross-process OS lock — each .cdx path serialises on its
+own entry mutex, so one contended file can't stall writers of others.
+
 ## 1.8.64 - 2026-08-07
 
 ### Fixed — Harbour DBFCDX interop: shared-index visibility, write guard, locking
