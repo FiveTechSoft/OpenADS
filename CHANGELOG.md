@@ -1,3 +1,48 @@
+## 1.8.63 - 2026-08-07
+
+### Fixed — remote keyno stale after APPEND / WRITE / DELETE / RECALL
+
+After `DBAPPEND()` the remote client kept the pre-append `current_keyno` as
+valid, so `AdsGetKeyNum` / `AdsGetRelKeyPos` reported the old scrollbar
+position until some later navigation cleared the cache. Combined with
+M12.29 (`GetKeyNum` + same-record `GotoRecord` in **v1.8.62**), this made
+`TXBrowse:Refresh()` after an append paint wrong or, when keyno was later
+wiped, fall into the legacy O(n) skip-storm path.
+
+Remote `AdsAppendRecord` / `AdsWriteRecord` / `AdsDeleteRecord` /
+`AdsRecallRecord` now clear `keyno_valid` (and prefetch / BOF-EOF nav
+flags where the cursor relocates). The next KeyNo / RelKeyPos re-seeds
+via server `GetKeyNum` in O(1).
+
+**Deploy:** matching client `ace64`/`ace32` **and** `openads_serverd`
+(≥ 1.8.62 for the wire opcode; this build for correct post-write keyno).
+
+Regression: `remote append invalidates keyno; Refresh pattern stays O(1)`.
+
+## 1.8.62 - 2026-08-07
+
+### Performance — server-side GetKeyNum + GotoRecord same-record fix
+
+`TXBrowse:Refresh()` after remote APPEND took ~22 s on ~9.5k rows because
+`AdsGotoRecord` always cleared `keyno_valid`, and the next RelKeyPos ran
+`remote_measure_keyno()` (one wire `Skip(1)` per key from top).
+
+- Same-record restore (xbrowse save → skip → Goto bookmark) keeps keyno.
+- New wire opcodes `GetKeyNum` / `GetKeyNumAck` (0x03/0x04): server answers
+  via CDX `pos_of_recno_cached()` → O(1); client falls back to the old walk
+  only if the server lacks the opcode.
+
+Bug report: Pritpal Bedi / MLS2026.
+
+## 1.8.61 - 2026-08-07
+
+### Fixed — CDX header counter endianness for Harbour DBFCDX interop
+
+Harbour stores the CDX tag-header update counter big-endian; OpenADS wrote
+little-endian. Shared bags could GPF on `dbSetOrder`, hide ADS appends from
+DBF order, or look corrupt across RDDs. Counter field is now BE; page
+sibling pointers stay LE.
+
 ## 1.8.60 - 2026-08-06
 
 ### Fixed — CDX page allocator tail stuck after recreate (erratic order / 10× size)
