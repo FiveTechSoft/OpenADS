@@ -1,3 +1,39 @@
+## 1.8.66 - 2026-08-08
+
+### Fixed — multi-tag CDX bags: creation, binding, and the mixed-writer count race
+
+Follow-ups from Pritpal Bedi's 16-instance alternating B_BIG (ADS) /
+DBFCDX test that GPF'd when DBF appended record 151:
+
+**Legacy `AdsCreateIndex` truncated the bag.** Calling it for a second
+tag on an existing `.cdx` recreated the file from scratch — only the
+last tag survived. It now adds the tag to the existing bag (silent
+overwrite when the tag already exists), matching `AdsCreateIndex61` and
+SAP ACE.
+
+**`AdsOpenIndex` bound only one tag when the handle array was NULL or
+short.** ACE semantics: opening a bag opens and MAINTAINS every tag —
+the array only limits how many handles are returned. Apps like B_BIG
+that pass a single handle (or NULL) left the remaining tags stale on
+every ADS write; a Harbour DBFCDX peer then read "Corruption detected"
+or GPF'd the moment it had to rewrite a stale tag's pages (the
+record-151 crash: the first DBF-side split of an ADS-written page).
+All tags are now bound; the array capacity only caps returned handles.
+
+**DBF record-count race under concurrent mixed writers.** Harbour
+derives the count from the FILE SIZE (`hb_dbfCalcRecCount`) and flushes
+the header lazily; OpenADS read the header only. A Harbour append in its
+flush window made OpenADS reuse the same recno — the record was
+overwritten while both keys reached the index (299 rows vs 300 keys).
+`refresh_record_count_` now takes the max of header and size-derived
+counts, and `zap()` truncates the file so size-derived counting never
+resurrects zapped rows.
+
+**Verification:** 40 alternating ADS/DBFCDX runs on a 3-tag bag — 400
+records, all tags walk 400 from Harbour; 3 ADS + 3 DBFCDX concurrent
+writers 300/300 records and keys across 8 consecutive runs; full unit
+suite green.
+
 ## 1.8.65 - 2026-08-07
 
 ### Fixed — POSIX follow-ups to the DBFCDX interop release (v1.8.64)

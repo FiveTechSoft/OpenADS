@@ -311,6 +311,23 @@ util::Result<void> CdxDriver::refresh_record_count_() {
                  (static_cast<std::uint32_t>(hdr_buf[5]) <<  8) |
                  (static_cast<std::uint32_t>(hdr_buf[6]) << 16) |
                  (static_cast<std::uint32_t>(hdr_buf[7]) << 24);
+    // Harbour DBFCDX derives the record count from the FILE SIZE
+    // (hb_dbfCalcRecCount) and flushes the header lazily — a peer's
+    // just-appended record can be on disk while the header still lags.
+    // Reading the header alone then hands the same recno to two writers
+    // (one record overwritten, both keys in the index: 299 rows / 300
+    // keys in the mixed stress test). Take the max of both views; zap()
+    // truncates the file, so the size-derived count can never resurrect
+    // zapped rows.
+    if (!partial_enc_ && rec_len_ != 0) {
+        // (a partially-encrypted table keeps a bitmap past the EOF record,
+        // so its file size does not track the record count)
+        if (auto sz = file_.size(); sz && sz.value() > hdr_len_) {
+            const std::uint32_t size_count = static_cast<std::uint32_t>(
+                (sz.value() - hdr_len_) / rec_len_);
+            if (size_count > rec_count_) rec_count_ = size_count;
+        }
+    }
     return {};
 }
 
@@ -355,11 +372,19 @@ util::Result<void> CdxDriver::zap() {
     invalidate_read_cache_();
     rec_count_ = 0;
     if (auto r = rewrite_header_(); !r) return r.error();
-    // Place an EOF marker right after the field-descriptor block;
-    // the records area on disk may still contain stale bytes but DBF
-    // readers respect the header reccount.
+    // Place an EOF marker right after the field-descriptor block and
+    // TRUNCATE the file: refresh_record_count_() also derives the count
+    // from the file size (Harbour's own convention), and stale record
+    // bytes past the EOF would otherwise resurrect as phantom rows.
     std::uint8_t eof = 0x1A;
     if (auto w = file_.write_at(hdr_len_, &eof, 1); !w) return w.error();
+    if (!partial_enc_) {
+        // (a partially-encrypted table keeps its bitmap at EOF — never cut it)
+        if (auto tr = file_.truncate(
+                static_cast<std::uint64_t>(hdr_len_) + 1); !tr) {
+            return tr.error();
+        }
+    }
     return file_.sync();
 }
 
@@ -381,12 +406,19 @@ util::Result<bool> CdxDriver::truncate_trailing(std::uint32_t recno) {
     }
     rec_count_ = recno - 1;
     if (auto r = rewrite_header_(); !r) return r.error();
-    // EOF marker right after the last surviving record.
+    // EOF marker right after the last surviving record, and physically
+    // shrink the file: refresh_record_count_() also derives the count
+    // from the file size (Harbour's convention), so stale bytes past the
+    // EOF would otherwise resurrect as phantom rows.
     std::uint64_t eof_off = static_cast<std::uint64_t>(hdr_len_) +
                             static_cast<std::uint64_t>(rec_count_) *
                             static_cast<std::uint64_t>(rec_len_);
     std::uint8_t eof = 0x1A;
     if (auto w = file_.write_at(eof_off, &eof, 1); !w) return w.error();
+    // (a partially-encrypted table keeps its bitmap at EOF — never cut it)
+    if (!partial_enc_) {
+        if (auto tr = file_.truncate(eof_off + 1); !tr) return tr.error();
+    }
     return true;
 }
 

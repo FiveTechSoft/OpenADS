@@ -12814,11 +12814,17 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
     // IIndex moves into Table::order_ (becomes default order) only
     // when the table doesn't already have an active order; the rest
     // (and the first tag in the additive case) park as extra views.
-    UNSIGNED16 cap = (pu16ArrayLen != nullptr && *pu16ArrayLen > 0)
-                   ? *pu16ArrayLen : 1;
+    //
+    // ACE semantics: opening a bag opens EVERY tag — the handle array
+    // only limits how many tag handles are RETURNED to the caller, never
+    // how many tags are bound and maintained. Binding just the first tag
+    // when the caller passes a NULL/short array left the remaining tags
+    // stale on every write; a Harbour DBFCDX peer opening the same bag
+    // then hit corrupt trees ("Corruption detected" / GPF on append —
+    // Pritpal Bedi's record-151 crash).
+    UNSIGNED16 cap = (pu16ArrayLen != nullptr) ? *pu16ArrayLen : 0;
     UNSIGNED16 count = 0;
     for (const auto& name : tags) {
-        if (count >= cap) break;
         std::unique_ptr<openads::drivers::IIndex> sub;
         // A rerouted bag was listed through CdxIndex above, so it must be
         // opened through CdxIndex too — handing a CDX-format .adi to the
@@ -12854,7 +12860,8 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
             m[h] = IndexBinding{t, name, std::move(sub), path};
             t->register_extra_index_view(raw);
         }
-        ahIndex[count++] = h;
+        if (count < cap) ahIndex[count] = h;
+        ++count;
     }
     if (pu16ArrayLen != nullptr) *pu16ArrayLen = count;
     return ok();
@@ -13923,11 +13930,42 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex(ADSHANDLE hTable, UNSIGNED8* pucFile,
 
     std::unique_ptr<openads::drivers::IIndex> idx;
     if (path_ends_with_ci(file, ".cdx")) {
-        auto created = openads::drivers::cdx::CdxIndex::create(
-            file, tag, expr, klen, false, false);
-        if (!created) return fail(created.error());
-        idx = std::make_unique<openads::drivers::cdx::CdxIndex>(
-            std::move(created).value());
+        namespace fs2 = std::filesystem;
+        const bool bag_exists = fs2::exists(fs2::path(file));
+        if (!bag_exists) {
+            auto created = openads::drivers::cdx::CdxIndex::create(
+                file, tag, expr, klen, false, false);
+            if (!created) return fail(created.error());
+            idx = std::make_unique<openads::drivers::cdx::CdxIndex>(
+                std::move(created).value());
+        } else {
+            // The bag exists: ADD the tag (SAP ACE semantics) instead of
+            // truncating the bag — the legacy entry point used to recreate
+            // the file unconditionally, silently dropping every previously
+            // created tag (only the last one survived).
+            auto added = openads::drivers::cdx::CdxIndex::add_tag(
+                file, tag, expr, klen, false, false, for_expr);
+            if (!added && added.error().code == 5044) {
+                // Tag already present: silent overwrite (Harbour rddads /
+                // Clipper convention) — reopen, wipe, rebuild below.
+                openads::drivers::cdx::CdxIndex existing;
+                auto reopen = existing.open_named(
+                    file, openads::drivers::IndexOpenMode::Shared, tag);
+                if (!reopen) return fail(reopen.error());
+                if (auto cl = existing.clear_data(); !cl)
+                    return fail(cl.error());
+                if (auto so = existing.set_options(false, false, klen); !so)
+                    return fail(so.error());
+                if (auto se = existing.set_expression(expr, for_expr); !se)
+                    return fail(se.error());
+                idx = std::make_unique<openads::drivers::cdx::CdxIndex>(
+                    std::move(existing));
+            } else {
+                if (!added) return fail(added.error());
+                idx = std::make_unique<openads::drivers::cdx::CdxIndex>(
+                    std::move(added).value());
+            }
+        }
     } else {
         auto created = openads::drivers::ntx::NtxIndex::create(
             file, tag, expr, klen, false, false);
