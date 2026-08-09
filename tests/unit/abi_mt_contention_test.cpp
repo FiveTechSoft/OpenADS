@@ -330,7 +330,8 @@ TEST_CASE("MT: readers always see a consistent walk while writers append") {
     // 2 readers looping ordered walks until told to stop; every walk
     // must be nondecreasing — a torn read would break that.
     for (int t = 0; t < 2; ++t) {
-        pool.emplace_back([&, t] {
+        (void)t;
+        pool.emplace_back([&] {
             ADSHANDLE c = 0;
             std::string d = dir.string();
             if (AdsConnect60(reinterpret_cast<UNSIGNED8*>(d.data()),

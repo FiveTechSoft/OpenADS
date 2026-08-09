@@ -1,4 +1,13 @@
-## 1.8.67 - 2026-08-09
+## 1.8.68 - 2026-08-09
+
+### Fixed — clang -Werror build breaks in the new test files
+
+Two unused-code warnings (lambda capture, helper functions) failed the
+macOS/Linux CI builds of the new test files. No product code changes
+beyond the warning fixes; v1.8.67's POSIX packages were never produced,
+so this release supersedes it. Windows binaries of v1.8.67 were fine.
+
+## 1.8.67 - 2026-08-09 (superseded by 1.8.68 — no POSIX packages)
 
 ### Fixed — CDX B+tree: Harbour-exact (key, recno) ordering and separators
 

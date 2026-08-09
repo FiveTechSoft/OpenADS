@@ -22,11 +22,6 @@ std::string enc8(std::uint32_t v) {
     s[0] = static_cast<char>(0xC0);  // positive-exponent flavour, fixed prefix
     return s;
 }
-std::uint16_t rd16(const std::uint8_t* p) { return p[0] | (p[1] << 8); }
-std::uint32_t rd32le(const std::uint8_t* p) {
-    return (std::uint32_t)p[0] | ((std::uint32_t)p[1] << 8) |
-           ((std::uint32_t)p[2] << 16) | ((std::uint32_t)p[3] << 24);
-}
 } // namespace
 
 TEST_CASE("CDX numeric-style duplicate keys stay ordered across splits (INS repro)") {
