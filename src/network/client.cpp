@@ -175,6 +175,16 @@ bool parse_tls_uri(const std::string& uri,
 
 util::Result<Frame> RemoteConnection::request(const Frame& f) {
     std::lock_guard<std::mutex> lk(mu_);
+    // Fail fast on a disconnected handle. rddads hands us connection
+    // handles that AdsDisconnect already tore down (its "current
+    // connection" can point at a handle another thread just closed);
+    // dereferencing a null transport_ here was an access violation,
+    // and a blocking read on a dead socket hung the caller forever.
+    // SAP ADS returns an error immediately in this state.
+    if (!transport_ || !transport_->valid()) {
+        return util::Error{5036 /* AE_NO_CONNECTION */, 0,
+                           "RemoteConnection: not connected", ""};
+    }
     if (auto r = write_frame(*transport_,f); !r) return r.error();
     auto rep = read_frame(*transport_);
     if (!rep) return rep.error();
@@ -271,6 +281,10 @@ RemoteConnection::connect_with_transport(std::unique_ptr<ITransport> transport,
 }
 
 void RemoteConnection::disconnect() noexcept {
+    // Serialise with request(): resetting transport_ while another
+    // thread is mid-round-trip on this connection made that thread
+    // dereference a null transport_ (AV) or read a corrupted stream.
+    std::lock_guard<std::mutex> lk(mu_);
     if (!transport_ || !transport_->valid()) return;
     Frame req;
     req.opcode = Opcode::Disconnect;

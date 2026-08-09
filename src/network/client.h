@@ -373,6 +373,16 @@ private:
 
     std::unique_ptr<ITransport> transport_;
     std::mutex                  mu_;
+
+public:
+    // Deferred disconnect (MT shared connections). AdsDisconnect on a
+    // connection that still has tables open through it must not kill
+    // those tables out from under other threads using the same handle:
+    // it sets close_pending instead, and the last AdsCloseTable performs
+    // the real disconnect. Both fields are only touched under the ABI
+    // state mutex; disconnect() itself stays unconditional.
+    int  deferred_open_tables = 0;
+    bool close_pending        = false;
 };
 
 // Per-handle wrapper for a remote table. Stores back-pointer to
@@ -380,6 +390,10 @@ private:
 struct RemoteTable {
     RemoteConnection* conn = nullptr;
     std::uint32_t     id   = 0;
+    // True when this table was counted in conn->deferred_open_tables at
+    // AdsOpenTable time; AdsCloseTable decrements only when set (remote
+    // SQL cursors are excluded — AdsDisconnect nulls their conn first).
+    bool              close_counted = false;
     // The table name as passed to open_table (with extension). Served
     // by AdsGetTableFilename so the consuming RDD has something to show.
     std::string       name;

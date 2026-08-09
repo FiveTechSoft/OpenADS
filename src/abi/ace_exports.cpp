@@ -1135,6 +1135,42 @@ openads::network::RemoteConnection* get_remote_connection(ADSHANDLE h) {
         h, HandleKind::RemoteConnection);
 }
 
+// Forward decl: defined further down with the connection-resolution
+// helpers (thread-local rddads default connection).
+ADSHANDLE& rddads_default_connection() noexcept;
+
+// Resolve a caller connection handle — 0 (rddads' "current connection"
+// cleared by a disconnect), a thread-local default that is already
+// disconnected, or a stale handle read from rddads' process-wide slot
+// before another thread's disconnect cleared it — to a live
+// RemoteConnection handle. A valid handle passes through untouched;
+// otherwise the thread-local default (last AdsConnect60 on this thread)
+// wins if live, and failing that any surviving live RemoteConnection is
+// adopted — mirroring SAP ACE's internal default-connection behaviour,
+// where disconnecting one connection must not render the surviving ones
+// unusable. Returns 0 when no live remote connection exists (callers
+// then fail fast or take their local fallback, as appropriate).
+ADSHANDLE resolve_remote_conn_handle(ADSHANDLE h) {
+    auto& s = state();
+    auto live_handle = [&](ADSHANDLE hh) -> ADSHANDLE {
+        if (hh == 0) return 0;
+        if (auto* rc = s.registry.lookup<openads::network::RemoteConnection>(
+                hh, HandleKind::RemoteConnection)) {
+            if (rc->valid()) return hh;
+        }
+        return 0;
+    };
+    if (ADSHANDLE r = live_handle(h)) return r;
+    if (ADSHANDLE r = live_handle(rddads_default_connection())) return r;
+    ADSHANDLE found = 0;
+    s.registry.for_each_handle([&](Handle hh, HandleKind k, void* p) {
+        if (found != 0 || k != HandleKind::RemoteConnection) return;
+        auto* rc = static_cast<openads::network::RemoteConnection*>(p);
+        if (rc != nullptr && rc->valid()) found = to_ads_handle(hh);
+    });
+    return found;
+}
+
 namespace {
 
 Handle handle_for_remote_table(openads::network::RemoteTable* rt) {
@@ -6520,6 +6556,8 @@ extern "C++" void sess_forget_connection(Connection* c);
 }
 
 UNSIGNED32 ENTRYPOINT AdsDisconnect(ADSHANDLE hConnect) {
+    openads::network::RemoteConnection* pending_remote_disconnect = nullptr;
+    bool deferred_close = false;
     {
         auto& s_local = state();
         std::lock_guard<std::recursive_mutex> lk_local(s_local.mu);
@@ -6622,9 +6660,33 @@ UNSIGNED32 ENTRYPOINT AdsDisconnect(ADSHANDLE hConnect) {
                 if (kv.second && kv.second->conn == rc)
                     kv.second->conn = nullptr;
             }
-            rc->disconnect();
-            return ok();
+            if (rc->deferred_open_tables > 0 && rc->valid()) {
+                // Tables opened through this connection are still in use
+                // (MT apps sharing one connection across threads): killing
+                // the socket now would turn their next op into an error.
+                // The last AdsCloseTable performs the real disconnect.
+                rc->close_pending = true;
+                deferred_close    = true;
+            } else {
+                // Disconnect OUTSIDE s.mu: RemoteConnection::disconnect()
+                // serialises with in-flight requests on the connection
+                // mutex, and a request's server handler (in-process
+                // server) re-enters the ABI and takes s.mu — holding both
+                // here could deadlock.
+                pending_remote_disconnect = rc;
+            }
         }
+    }
+    if (pending_remote_disconnect != nullptr) {
+        pending_remote_disconnect->disconnect();
+        if (hConnect == rddads_default_connection())
+            rddads_default_connection() = 0;
+        return ok();
+    }
+    if (deferred_close) {
+        if (hConnect == rddads_default_connection())
+            rddads_default_connection() = 0;
+        return ok();
     }
     auto& s = state();
     std::lock_guard<std::recursive_mutex> lk(s.mu);
@@ -6695,8 +6757,13 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
     auto& s = state();
     std::unique_lock<std::recursive_mutex> lk(s.mu);
     // M12.5 — remote connection handle: route through wire client.
+    // hConnect == 0 (rddads "current connection" cleared by a disconnect)
+    // resolves to a surviving live remote connection; without this the
+    // call silently fell through to a LOCAL cwd auto-connection and
+    // remote apps opened/created tables on the client filesystem.
+    const ADSHANDLE rem_h = resolve_remote_conn_handle(hConnect);
     if (auto* rc = s.registry.lookup<openads::network::RemoteConnection>(
-            hConnect, HandleKind::RemoteConnection)) {
+            rem_h, HandleKind::RemoteConnection)) {
         auto name = openads::abi::to_internal(pucName, 0);
         // Callers (incl. X#'s ADSRDD) commonly pass the bare table name
         // without an extension. Send it through unchanged — the server's
@@ -6721,6 +6788,8 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
         rt->id   = ot.id;
         rt->name = name;
         rt->alias = std::filesystem::path(name).stem().string();
+        rt->close_counted = true;
+        rc->deferred_open_tables += 1;
         Handle gh = s.registry.register_object(
             HandleKind::RemoteTable, rt.get());
         remote_tables.emplace(gh, std::move(rt));
@@ -6787,6 +6856,14 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
             (void)AdsGotoTop(to_ads_handle(gh));
         }
         return ok();
+    }
+    // Explicit handle to a disconnected remote connection, and no live
+    // remote connection to fall back to: fail fast (SAP ADS semantics —
+    // a disconnected handle returns an error immediately) instead of
+    // silently opening a LOCAL file through the cwd fallback below.
+    if (hConnect != 0 && rem_h == 0 &&
+        s.registry.kind_of(hConnect) == HandleKind::RemoteConnection) {
+        return fail(openads::AE_NO_CONNECTION, "connection is closed");
     }
 #if defined(OPENADS_WITH_SQLITE)
     if (auto* sc = s.registry.lookup<openads::sql_backend::SqliteConnection>(
@@ -7737,8 +7814,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
     // writes the .dbf next to the client app while the subsequent open
     // (remote AdsOpenTable) fails with AE_TABLE_CORRUPTED (5103).
     {
-        ADSHANDLE rc_h = hConn;
-        if (rc_h == 0) rc_h = rddads_default_connection();
+        ADSHANDLE rc_h = resolve_remote_conn_handle(hConn);
         if (auto* rc = get_remote_connection(rc_h)) {
             auto cr = rc->create_table(rel, defs,
                                        static_cast<std::uint16_t>(usTableType),
@@ -7756,6 +7832,17 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
                 : ADS_CDX;
             return AdsOpenTable(rc_h, namebuf.data(), namebuf.data(),
                                 open_type, usCharType, 0, 0, 1, phTable);
+        }
+        // Explicit handle to a disconnected remote connection with no
+        // live remote to fall back to: fail fast rather than writing a
+        // LOCAL file next to the client app.
+        if (hConn != 0 && rc_h == 0) {
+            auto& s_dead = state();
+            if (s_dead.registry.kind_of(hConn) ==
+                    HandleKind::RemoteConnection) {
+                return fail(openads::AE_NO_CONNECTION,
+                            "connection is closed");
+            }
         }
     }
 
@@ -8154,12 +8241,19 @@ UNSIGNED32 ENTRYPOINT AdsDropTable(ADSHANDLE     hConnect,
 #endif
 
     {
-        ADSHANDLE rc_h = hConnect;
-        if (rc_h == 0) rc_h = rddads_default_connection();
+        ADSHANDLE rc_h = resolve_remote_conn_handle(hConnect);
         if (auto* rc = get_remote_connection(rc_h)) {
             auto dr = rc->drop_table(rel, /*delete_files=*/1);
             if (!dr) return fail(dr.error());
             return ok();
+        }
+        if (hConnect != 0 && rc_h == 0) {
+            auto& s_dead = state();
+            if (s_dead.registry.kind_of(hConnect) ==
+                    HandleKind::RemoteConnection) {
+                return fail(openads::AE_NO_CONNECTION,
+                            "connection is closed");
+            }
         }
     }
 
@@ -9227,13 +9321,28 @@ UNSIGNED32 ENTRYPOINT AdsCloseTable(ADSHANDLE hTable) {
         if (auto* rt = get_remote_table(hTable)) {
             // conn is nulled out by AdsDisconnect before the RemoteConnection
             // is freed; skip the wire close op if the connection is already gone.
-            if (rt->conn != nullptr)
-                (void)rt->conn->close_table(rt->id);
+            auto* rc = rt->conn;
+            const bool counted = rt->close_counted;
+            if (rc != nullptr)
+                (void)rc->close_table(rt->id);
             forget_relations(hTable);
             auto& s2 = state();
-            std::lock_guard<std::recursive_mutex> lk2(s2.mu);
-            s2.registry.release(hTable);
-            remote_sql_cursors_map().erase(hTable);
+            openads::network::RemoteConnection* fire = nullptr;
+            {
+                std::lock_guard<std::recursive_mutex> lk2(s2.mu);
+                // Deferred disconnect: AdsDisconnect marked the connection
+                // close_pending while tables were still open; the last
+                // close performs the real disconnect (outside s.mu below).
+                if (counted && rc != nullptr) {
+                    if (--rc->deferred_open_tables == 0 && rc->close_pending) {
+                        rc->close_pending = false;
+                        fire = rc;
+                    }
+                }
+                s2.registry.release(hTable);
+                remote_sql_cursors_map().erase(hTable);
+            }
+            if (fire != nullptr) fire->disconnect();
             return ok();
         }
         if (auto* ops = openads::abi::backend_table_ops_for(hTable))
