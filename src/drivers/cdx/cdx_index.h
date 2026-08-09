@@ -305,6 +305,12 @@ private:
     // disk. No-op while already joined.
     util::Result<void> ensure_write_lock_();
 
+    // Recursive erase with parent-separator maintenance (see .cpp).
+    util::Result<void> erase_from_subtree_(
+        std::uint32_t subtree_root, std::uint32_t recno,
+        const std::string& padded, bool& max_shrank,
+        std::pair<std::string, std::uint32_t>& new_max);
+
     // Join state for the process-wide per-file write lock.
     CdxWriteLockJoin                          write_lock_join_;
 

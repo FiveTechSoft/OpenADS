@@ -52,6 +52,11 @@ add_executable(openads_unit_tests
     unit/abi_pritpal_lock_test.cpp
     unit/ntx_index_test.cpp
     unit/cdx_index_test.cpp
+    unit/cdx_dup_key_split_test.cpp
+    unit/abi_alternating_append_test.cpp
+    unit/abi_mt_contention_test.cpp
+    unit/cdx_ins_seq_test.cpp
+    unit/abi_ins_order_test.cpp
     unit/engine_order_test.cpp
     unit/engine_scope_test.cpp
     unit/abi_index_smoke_test.cpp

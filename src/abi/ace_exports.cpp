@@ -307,6 +307,38 @@ void stamp_dbf_field_displacements(std::uint8_t* descriptors,
     }
 }
 
+// Harbour DBFCDX production-index flag (DBF header byte 28, bit 0x01):
+// a CDX bag whose basename matches the table's is the structural index
+// and Harbour auto-opens it on USE when the bit is set. Stamp it after
+// bag creation when the names match. Skipped for OpenADS-encrypted
+// tables (header byte 0 = 0xC3/0xC4), whose bytes 28-31 hold the
+// encryption-bitmap offset.
+void stamp_production_index_flag(openads::engine::Table* t,
+                                 const std::string&   bag_path) {
+    if (t == nullptr) return;
+    namespace fs = std::filesystem;
+    auto stem_ci = [](const std::string& p) {
+        std::string s = fs::path(p).stem().string();
+        for (auto& c : s) {
+            c = static_cast<char>(
+                std::tolower(static_cast<unsigned char>(c)));
+        }
+        return s;
+    };
+    if (stem_ci(bag_path) != stem_ci(t->path())) return;
+    auto* drv = t->driver();
+    if (drv == nullptr) return;
+    std::uint8_t b0 = 0, b28 = 0;
+    auto r0 = drv->file().read_at(0, &b0, 1);
+    if (!r0 || r0.value() < 1) return;
+    if (b0 == 0xC3 || b0 == 0xC4) return;
+    auto r28 = drv->file().read_at(28, &b28, 1);
+    if (!r28 || r28.value() < 1) return;
+    if ((b28 & 0x01u) != 0) return;
+    b28 = static_cast<std::uint8_t>(b28 | 0x01u);
+    (void)drv->file().write_at(28, &b28, 1);
+}
+
 UNSIGNED16 map_field_type(openads::drivers::DbfFieldType t) {
     using openads::drivers::DbfFieldType;
     // Constants verified empirically (M8.4) against
@@ -7978,9 +8010,12 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
     }
 
     // ── DBF creation path (existing) ────────────────────────────────────────
-    // Compute header + record sizes.
+    // Compute header + record sizes. Harbour DBFCDX uses
+    // 32 + 32*n + 2 (the field list ends with a 2-byte 0x0D 0x00
+    // terminator); matching it keeps headers byte-identical with a
+    // Harbour-written DBF of the same schema.
     std::uint16_t header_len = static_cast<std::uint16_t>(
-        32 + 32 * fields.size() + 1);
+        32 + 32 * fields.size() + 2);
     std::uint32_t rec_len = 1; // delete-flag byte
     for (auto& f : fields) rec_len += f.length;
     if (rec_len > 0xFFFF) {
@@ -8021,6 +8056,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
     }
     stamp_dbf_field_displacements(file.data() + 32, fields.size());
     file.push_back(0x0D);
+    file.push_back(0x00);
     file.push_back(0x1A);
 
     // Atomic-ish write: just truncate-create.
@@ -8410,7 +8446,7 @@ UNSIGNED32 ENTRYPOINT AdsRestructureTable(ADSHANDLE   hConnect,
         for (auto& p : plan) merged.push_back(p.descriptor);
 
         std::uint16_t header_len = static_cast<std::uint16_t>(
-            32 + 32 * merged.size() + 1);
+            32 + 32 * merged.size() + 2);
         std::uint32_t rec_len = 1;
         for (auto& f : merged) rec_len += f.length;
         if (rec_len > 0xFFFF) {
@@ -8444,6 +8480,7 @@ UNSIGNED32 ENTRYPOINT AdsRestructureTable(ADSHANDLE   hConnect,
         }
         stamp_dbf_field_displacements(file_bytes.data() + 32, merged.size());
         file_bytes.push_back(0x0D);
+        file_bytes.push_back(0x00);
 
         std::uint16_t old_rec_len = t.driver()->record_length();
         for (std::uint32_t r = 1; r <= rcount; ++r) {
@@ -12607,37 +12644,45 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
         static std::unordered_map<Handle,
             std::unique_ptr<openads::network::RemoteIndex>> remote_indexes;
         const auto& entries = r.value();
-        std::uint16_t out_n = static_cast<std::uint16_t>(entries.size());
-        if (pu16ArrayLen != nullptr && *pu16ArrayLen < out_n) {
-            out_n = *pu16ArrayLen;
-        }
-        for (std::uint16_t i = 0; i < out_n; ++i) {
+        // Register every tag the server opened, but only WRITE handles up
+        // to the caller's array capacity. The previous code wrote all
+        // entries whenever pu16ArrayLen was NULL — a stack overflow past a
+        // single-handle out-param that clobbered adjacent locals (found on
+        // x86: the table handle got overwritten with an index handle and
+        // the next call failed 5000 "unknown table").
+        const std::uint16_t cap =
+            (pu16ArrayLen != nullptr) ? *pu16ArrayLen : 0;
+        std::uint16_t count = 0;
+        for (const auto& ent : entries) {
             auto ri = std::make_unique<openads::network::RemoteIndex>();
             ri->conn      = rt->conn;
-            ri->id        = entries[i].id;
+            ri->id        = ent.id;
             ri->tbl_id    = rt->id;
             ri->parent    = rt;
-            ri->tag_name      = entries[i].tag;
-            ri->bag_path      = entries[i].bag_path;
-            ri->expression    = entries[i].expression;
-            ri->is_unique     = entries[i].is_unique;
-            ri->is_descending = entries[i].is_descending;
+            ri->tag_name      = ent.tag;
+            ri->bag_path      = ent.bag_path;
+            ri->expression    = ent.expression;
+            ri->is_unique     = ent.is_unique;
+            ri->is_descending = ent.is_descending;
             Handle gh = s.registry.register_object(
                 HandleKind::RemoteIndex, ri.get());
-            ahIndex[i] = to_ads_handle(gh);
+            if (count < cap) {
+                ahIndex[count] = to_ads_handle(gh);
+            }
+            ++count;
             remote_indexes.emplace(gh, std::move(ri));
             // Dedup by tag: production-CDX auto-open and a later explicit
             // AdsOpenIndex on the same bag must not register the order
             // twice, or AdsGetNumIndexes / by-order resolution skew.
             bool known = false;
             for (auto& kv : rt->index_by_tag) {
-                if (kv.first == entries[i].tag) { known = true; break; }
+                if (kv.first == ent.tag) { known = true; break; }
             }
             if (!known) {
-                rt->index_by_tag.emplace_back(entries[i].tag, entries[i].id);
+                rt->index_by_tag.emplace_back(ent.tag, ent.id);
                 rt->index_handles.push_back(static_cast<std::uint64_t>(gh));
             }
-            if (rt->active_index_id == 0) rt->active_index_id = entries[i].id;
+            if (rt->active_index_id == 0) rt->active_index_id = ent.id;
         }
         // Store the production bag path on the parent table so
         // AdsGetIndexFilename / OrdBagName can serve without a wire
@@ -12646,7 +12691,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
             rt->prod_bag_path.empty()) {
             rt->prod_bag_path = entries[0].bag_path;
         }
-        if (pu16ArrayLen != nullptr) *pu16ArrayLen = out_n;
+        if (pu16ArrayLen != nullptr) *pu16ArrayLen = count;
         return ok();
     }
     if (auto* ops = openads::abi::backend_table_ops_for(hTable))
@@ -13699,6 +13744,11 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
             return fail(b.error());
     }
     if (auto fl = idx_owner->flush(); !fl) return fail(fl.error());
+    // A bag named after the table is the Harbour DBFCDX production
+    // index — set DBF header byte 28 so Harbour auto-opens it on USE.
+    if (is_cdx) {
+        stamp_production_index_flag(t, p.string());
+    }
 
     auto& m   = index_bindings();
     auto& act = active_binding_for();
@@ -14013,6 +14063,11 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex(ADSHANDLE hTable, UNSIGNED8* pucFile,
             return fail(b.error());
     }
     if (auto fl = idx->flush(); !fl) return fail(fl.error());
+    // A bag named after the table is the Harbour DBFCDX production
+    // index — set header byte 28 so Harbour auto-opens it on USE.
+    if (path_ends_with_ci(file, ".cdx")) {
+        stamp_production_index_flag(t, file);
+    }
 
     auto& m   = index_bindings();
     auto& act = active_binding_for();
@@ -17672,7 +17727,7 @@ UNSIGNED32 ENTRYPOINT AdsCopyTable(ADSHANDLE   hHandle,
         return fail(openads::AE_INTERNAL_ERROR, "source has no fields");
     }
     std::uint16_t header_len = static_cast<std::uint16_t>(
-        32 + 32 * src_fields.size() + 1);
+        32 + 32 * src_fields.size() + 2);
     std::uint16_t rec_len = t->driver()->record_length();
 
     std::vector<std::uint8_t> file;
@@ -17695,6 +17750,7 @@ UNSIGNED32 ENTRYPOINT AdsCopyTable(ADSHANDLE   hHandle,
     }
     stamp_dbf_field_displacements(file.data() + 32, src_fields.size());
     file.push_back(0x0D);
+    file.push_back(0x00);
 
     // Walk source records, append live ones to the buffered file.
     auto src_count = t->driver()->record_count();
@@ -35635,7 +35691,7 @@ UNSIGNED32 ENTRYPOINT AdsCloneTable(ADSHANDLE hTable, ADSHANDLE* phClone) {
     if (src_fields.empty())
         return fail(openads::AE_INTERNAL_ERROR, "AdsCloneTable: no fields");
     std::uint16_t header_len = static_cast<std::uint16_t>(
-        32 + 32 * src_fields.size() + 1);
+        32 + 32 * src_fields.size() + 2);
     std::uint16_t rec_len = t->driver()->record_length();
 
     std::vector<std::uint8_t> file;
@@ -35658,6 +35714,7 @@ UNSIGNED32 ENTRYPOINT AdsCloneTable(ADSHANDLE hTable, ADSHANDLE* phClone) {
     }
     stamp_dbf_field_displacements(file.data() + 32, src_fields.size());
     file.push_back(0x0D);
+    file.push_back(0x00);
 
     std::uint32_t rcount = t->driver()->record_count();
     for (std::uint32_t r = 1; r <= rcount; ++r) {
@@ -35715,7 +35772,7 @@ UNSIGNED32 ENTRYPOINT AdsCopyTableStructure(ADSHANDLE hTable, UNSIGNED8* pucFile
     if (src_fields.empty())
         return fail(openads::AE_INTERNAL_ERROR, "AdsCopyTableStructure: no fields");
     std::uint16_t header_len = static_cast<std::uint16_t>(
-        32 + 32 * src_fields.size() + 1);
+        32 + 32 * src_fields.size() + 2);   // Harbour DBFCDX header: 32 + 32*n + 2
     std::uint16_t rec_len = t->driver()->record_length();
 
     std::vector<std::uint8_t> file;
@@ -35739,6 +35796,7 @@ UNSIGNED32 ENTRYPOINT AdsCopyTableStructure(ADSHANDLE hTable, UNSIGNED8* pucFile
     }
     stamp_dbf_field_displacements(file.data() + 32, src_fields.size());
     file.push_back(0x0D);
+    file.push_back(0x00);   // Harbour writes a 2-byte 0x0D 0x00 terminator
     file.push_back(0x1A);   // EOF, no records
 
     {

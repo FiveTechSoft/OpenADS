@@ -22,16 +22,20 @@ std::unordered_map<std::string, std::uint64_t> g_cdx_alloc_tail;
 
 // Process-wide per-file CDX write-lock registry (see CDX_WRITE_LOCK_OFF
 // and CdxWriteLockJoin in the header). The OS byte lock is taken once per
-// .cdx per process and shared by every tag instance; `users` counts
-// joined batches, the last release drops the OS lock. Each entry has its
-// OWN mutex: the (potentially seconds-long, cross-process) OS acquire
-// happens under the per-path mutex only, never under the registry
-// mutex — a contended file must not stall writers of unrelated files
-// (the registry map itself is only used for lookup). Entries are never
-// erased: one small entry per distinct .cdx path per process.
+// .cdx per process and shared by every tag instance OF THE SAME THREAD;
+// `users` counts joined batches, the last release drops the OS lock.
+//
+// A batch has a single OWNER THREAD: other threads must wait for the
+// batch to finish instead of joining it — joining mid-batch let a second
+// writer read pages the owner had only in its dirty cache while the
+// on-disk header already pointed at them (6106 "CDX corrupt" under
+// 8-thread duplicate-key stress). The per-entry mutex serialises only
+// registry access and the OS acquire, never held across a batch (safe
+// for worker pools where a connection's requests hop threads).
 struct CdxWriteLockEntry {
     std::mutex                        mu;
     std::size_t                       users = 0;
+    std::thread::id                   owner{};
     std::optional<platform::ByteLock> os_lock;
 };
 std::mutex g_cdx_wl_mu;
@@ -60,7 +64,6 @@ acquire_cdx_os_lock_(platform::File& f, platform::LockKind kind,
     return last_err;
 }
 
-constexpr std::uint32_t kCdxEraseDupGuard = 1048576;
 
 std::string canonicalize_path(const std::string& path) {
     try {
@@ -606,6 +609,7 @@ void CdxWriteLockJoin::release() noexcept {
         std::lock_guard<std::mutex> elk(e->mu);
         if (e->users > 0 && --e->users == 0) {
             e->os_lock.reset();   // drops the OS byte lock
+            e->owner = std::thread::id{};
         }
     } catch (...) {
         // noexcept contract: a lock-registry hiccup must never throw
@@ -622,17 +626,37 @@ util::Result<void> CdxIndex::ensure_write_lock_() {
         if (!slot) slot = std::make_shared<CdxWriteLockEntry>();
         e = slot;
     }
-    {
-        // Per-path serialization only: a cross-process wait here (Harbour
-        // peer mid-batch) stalls writers of THIS .cdx, never of others.
-        std::lock_guard<std::mutex> elk(e->mu);
-        if (e->users == 0) {
-            auto l = acquire_cdx_os_lock_(file_,
-                                          platform::LockKind::Exclusive);
-            if (!l) return l.error();
-            e->os_lock = std::move(l).value();
+    const auto self = std::this_thread::get_id();
+    for (int wait = 0; ; ++wait) {
+        {
+            std::lock_guard<std::mutex> elk(e->mu);
+            if (e->users == 0) {
+                // Free batch: take the OS byte lock. May wait behind a
+                // Harbour peer's batch (~10 s budget); only THIS file's
+                // threads are serialised meanwhile.
+                auto l = acquire_cdx_os_lock_(file_,
+                                              platform::LockKind::Exclusive);
+                if (!l) return l.error();
+                e->os_lock = std::move(l).value();
+                e->owner   = self;
+                e->users   = 1;
+                break;
+            }
+            if (e->owner == self) {
+                // Same thread, another tag of the same bag: join.
+                ++e->users;
+                break;
+            }
+            // Another thread owns the in-flight batch: wait for its
+            // flush. Joining it would let us read pages the owner has
+            // only in its dirty cache while the on-disk header already
+            // references them (torn read → 6106).
         }
-        ++e->users;
+        if (wait > 100000) {   // ~10 s of solid in-process contention
+            return util::Error{5012, 0,
+                "CDX write lock: in-process batch wait timed out", ""};
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
     }
     write_lock_join_.path   = path_;
     write_lock_join_.joined = true;
@@ -884,12 +908,30 @@ util::Result<void> CdxIndex::reload_header_if_changed_() {
     // mid-write then, and on POSIX a same-process shared fcntl lock on
     // the region would downgrade our own exclusive lock (fcntl locks
     // merge per process).
+    // Skip when THIS THREAD owns the batch lock: no peer can be
+    // mid-write then, and on POSIX a same-process shared fcntl lock on
+    // the region would downgrade our own exclusive lock (fcntl locks
+    // merge per process). When ANOTHER thread of this process owns an
+    // in-flight batch, wait for its flush instead of reading a header
+    // that may already reference pages the owner has only in its dirty
+    // cache (torn read → 6106 under multithreaded load).
+    const auto self = std::this_thread::get_id();
     bool holds_batch = false;
-    {
-        std::lock_guard<std::mutex> lk(g_cdx_wl_mu);
-        auto it = g_cdx_write_locks.find(path_);
-        holds_batch = (it != g_cdx_write_locks.end() &&
-                       it->second->users > 0);
+    for (int wait = 0; ; ++wait) {
+        std::shared_ptr<CdxWriteLockEntry> e;
+        {
+            std::lock_guard<std::mutex> lk(g_cdx_wl_mu);
+            auto it = g_cdx_write_locks.find(path_);
+            if (it != g_cdx_write_locks.end()) e = it->second;
+        }
+        if (!e) break;
+        {
+            std::lock_guard<std::mutex> elk(e->mu);
+            if (e->users == 0) break;                    // no batch
+            if (e->owner == self) { holds_batch = true; break; }
+        }
+        if (wait > 100000) break;   // ~10 s: proceed unlocked (legacy)
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
     }
     std::optional<platform::ByteLock> rlk;   // held across the reads below
     if (!holds_batch) {
@@ -1422,11 +1464,18 @@ CdxIndex::insert_into_subtree_(std::uint32_t      subtree_root,
         return util::Error{6106, 0, "CDX branch with no entries", ""};
     }
 
-    // Pick the first entry whose key >= padded; if none, use last.
+    // Pick the first entry whose (key, recno) pair >= the inserted pair;
+    // if none, use last. The recno tiebreak matters when a duplicate-key
+    // run spans a leaf split: text-only descent lands on the FIRST child
+    // containing that key text, but a fresh append (new highest recno)
+    // belongs AFTER the last duplicate — inserting into the early leaf
+    // misorders the leaf chain (Charlie@314 written before Charlie@154)
+    // and corrupts every downstream separator (Pritpal Bedi, B_BIG).
     std::size_t idx = 0;
-    while (idx < entries.size() &&
-           compare_keys_(entries[idx].key.data(), padded.data(),
-                         key_size_) < 0) {
+    while (idx < entries.size()) {
+        const int c = compare_keys_(entries[idx].key.data(), padded.data(),
+                                    key_size_);
+        if (c > 0 || (c == 0 && entries[idx].recno >= recno)) break;
         ++idx;
     }
     if (idx == entries.size()) idx = entries.size() - 1;
@@ -1440,22 +1489,32 @@ CdxIndex::insert_into_subtree_(std::uint32_t      subtree_root,
     // key may exceed the old subtree max. Refresh the parent entry's
     // key from the (possibly-updated) child even on the no-split path.
     if (!child_promote.have) {
-        // No structural change. But the entry's key may need refresh
-        // if the inserted key is larger than the subtree's prior max.
-        if (idx == entries.size() - 1) {
-            if (compare_keys_(padded.data(), entries[idx].key.data(),
-                              key_size_) > 0) {
-                entries[idx].key   = padded;
-                entries[idx].recno = recno;
-                auto epg = get_page_(subtree_root);
-                if (!epg) return epg.error();
-                std::uint32_t l = read_u32_le(epg.value()->data() + 4);
-                std::uint32_t r = read_u32_le(epg.value()->data() + 8);
-                if (auto e = encode_branch_static(*epg.value(), key_size_,
-                                                   entries, l, r); !e)
-                    return e.error();
-                dirty_[subtree_root] = true;
-            }
+        // No structural change. But the entry's (key, recno) pair may
+        // need refresh if the inserted pair is larger than the child's
+        // prior max — a branch entry always holds its child's MAXIMUM
+        // pair, for EVERY entry, not just the rightmost. The comparison
+        // MUST include the recno tiebreak: leaf order is (key ASC,
+        // recno ASC), so inserting a duplicate key text with a higher
+        // recno also raises the child's max. The old code refreshed
+        // only the rightmost entry and compared key text alone, leaving
+        // separators stale (parent "Edward"@140 vs child max
+        // "Edward"@150); Harbour DBFCDX validates child-max == parent-key
+        // on descent and aborts with "hb_cdxPageSeekKey: wrong parent
+        // key" (Pritpal Bedi, B_BIG record-151 GPF).
+        const int cmp = compare_keys_(padded.data(),
+                                      entries[idx].key.data(),
+                                      key_size_);
+        if (cmp > 0 || (cmp == 0 && recno > entries[idx].recno)) {
+            entries[idx].key   = padded;
+            entries[idx].recno = recno;
+            auto epg = get_page_(subtree_root);
+            if (!epg) return epg.error();
+            std::uint32_t l = read_u32_le(epg.value()->data() + 4);
+            std::uint32_t r = read_u32_le(epg.value()->data() + 8);
+            if (auto e = encode_branch_static(*epg.value(), key_size_,
+                                               entries, l, r); !e)
+                return e.error();
+            dirty_[subtree_root] = true;
         }
         return {};
     }
@@ -1844,59 +1903,100 @@ CdxIndex::erase(std::uint32_t recno, const std::string& key) {
         padded.append(key_size_ - padded.size(), pad_ch);
     if (padded.size() > key_size_) padded.resize(key_size_);
 
-    // Locate (key, recno) via the same leaf-chain walk seek_key uses.
-    // The old root-only decode path silently failed once insert_into_
-    // subtree_ promoted a branch root, leaving stale keys behind.
-    auto sk = seek_key(padded, /*soft=*/false);
-    if (!sk) return sk.error();
+    bool shrank = false;
+    std::pair<std::string, std::uint32_t> new_max;
+    auto r = erase_from_subtree_(root_page_, recno, padded, shrank, new_max);
+    if (r) invalidate_cursor();
+    return r;
+}
 
-    bool found = false;
-    if (sk.value().positioned && sk.value().hit == SeekHit::Exact) {
-        std::uint32_t guard = 0;
-        while (guard++ < kCdxEraseDupGuard) {
-            if (cur_index_ >= 0 &&
-                static_cast<std::size_t>(cur_index_) < cur_decoded_.size()) {
-                const auto& e =
-                    cur_decoded_[static_cast<std::size_t>(cur_index_)];
-                if (e.first == padded && (recno == 0 || e.second == recno)) {
-                    found = true;
-                    break;
-                }
-                if (e.first != padded) break;
-            }
-            auto nx = next();
-            if (!nx || !nx.value().positioned) break;
-            if (nx.value().hit != SeekHit::Exact) break;
-            std::string ck = current_key();
-            if (ck.size() < padded.size())
-                ck.append(padded.size() - ck.size(), ' ');
-            if (ck.size() > padded.size()) ck.resize(padded.size());
-            if (ck != padded) break;
-        }
-    }
-    if (!found) {
-        return util::Error{5044, 0, "CDX key not found", ""};
-    }
-
-    auto pg = get_page_(cur_leaf_);
+// Recursive erase with Harbour-style separator maintenance: a branch
+// entry always holds its child's MAXIMUM (key, recno) pair, so when the
+// erase removes a leaf's maximum the parent entry must be rewritten to
+// the new maximum — and so on up the spine (hb_cdxPageBalance does the
+// same via NODE_NEWLASTKEY). Without this, Harbour DBFCDX aborts later
+// inserts with "hb_cdxPageSeekKey: wrong parent key".
+//
+// max_shrank/new_max report to the caller whether this subtree's maximum
+// pair decreased and its new value. A leaf left EMPTY keeps its (stale)
+// entry: walks skip empty leaves and the entry still bounds the range —
+// matching the pre-existing lazy-delete design.
+util::Result<void>
+CdxIndex::erase_from_subtree_(std::uint32_t      subtree_root,
+                              std::uint32_t      recno,
+                              const std::string& padded,
+                              bool&              max_shrank,
+                              std::pair<std::string, std::uint32_t>& new_max) {
+    max_shrank = false;
+    auto pg = get_page_(subtree_root);
     if (!pg) return pg.error();
-    std::uint32_t left_sib  = read_u32_le(pg.value()->data() + 4);
-    std::uint32_t right_sib = read_u32_le(pg.value()->data() + 8);
+    std::uint16_t attr = read_u16_le(pg.value()->data());
 
-    auto dec = decode_leaf_(cur_leaf_);
-    if (!dec) return dec.error();
-    auto keys = std::move(dec).value();
-
-    auto it = std::find_if(keys.begin(), keys.end(),
-        [&](const auto& kv) {
-            return kv.first == padded && (recno == 0 || kv.second == recno);
-        });
-    if (it == keys.end()) {
-        return util::Error{5044, 0, "CDX key not found", ""};
+    if (attr & CDX_NODE_LEAF) {
+        std::uint32_t left_sib  = read_u32_le(pg.value()->data() + 4);
+        std::uint32_t right_sib = read_u32_le(pg.value()->data() + 8);
+        auto dec = decode_compact_leaf_static(*pg.value(), key_size_,
+                                              trail_byte_());
+        if (!dec) return dec.error();
+        auto keys = std::move(dec).value();
+        auto it = std::find_if(keys.begin(), keys.end(),
+            [&](const auto& kv) {
+                return kv.first == padded &&
+                       (recno == 0 || kv.second == recno);
+            });
+        if (it == keys.end()) {
+            return util::Error{5044, 0, "CDX key not found", ""};
+        }
+        const bool was_max = (it == keys.end() - 1);
+        keys.erase(it);
+        if (auto e = encode_leaf_(subtree_root, keys, left_sib, right_sib);
+            !e) {
+            return e.error();
+        }
+        if (was_max && !keys.empty()) {
+            max_shrank = true;
+            new_max    = keys.back();
+        }
+        return {};
     }
-    keys.erase(it);
-    invalidate_cursor();
-    return encode_leaf_(cur_leaf_, keys, left_sib, right_sib);
+
+    // ---- Branch: descend by full (key, recno) pair, like insert.
+    auto dec_b = decode_branch_static(*pg.value(), key_size_);
+    if (!dec_b) return dec_b.error();
+    auto entries = std::move(dec_b).value();
+    if (entries.empty()) {
+        return util::Error{6106, 0, "CDX branch with no entries", ""};
+    }
+    std::size_t idx = 0;
+    while (idx < entries.size()) {
+        const int c = compare_keys_(entries[idx].key.data(), padded.data(),
+                                    key_size_);
+        if (c > 0 || (c == 0 && entries[idx].recno >= recno)) break;
+        ++idx;
+    }
+    if (idx == entries.size()) idx = entries.size() - 1;
+
+    if (auto e = erase_from_subtree_(entries[idx].child, recno, padded,
+                                     max_shrank, new_max); !e) {
+        return e.error();
+    }
+    if (!max_shrank) return {};
+
+    entries[idx].key   = new_max.first;
+    entries[idx].recno = new_max.second;
+    auto epg = get_page_(subtree_root);
+    if (!epg) return epg.error();
+    std::uint32_t l = read_u32_le(epg.value()->data() + 4);
+    std::uint32_t r = read_u32_le(epg.value()->data() + 8);
+    if (auto e = encode_branch_static(*epg.value(), key_size_, entries,
+                                      l, r); !e) {
+        return e.error();
+    }
+    dirty_[subtree_root] = true;
+    // Propagate upward only when this branch's OWN max moved (its last
+    // entry was rewritten); otherwise the change is contained.
+    max_shrank = (idx == entries.size() - 1);
+    return {};
 }
 
 util::Result<void> CdxIndex::flush() {

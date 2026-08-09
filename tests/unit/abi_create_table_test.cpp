@@ -254,7 +254,8 @@ TEST_CASE("AdsCreateTable: field descriptors carry LE displacements") {
     REQUIRE(std::fread(hdr, 1, sizeof(hdr), f) == sizeof(hdr));
     const std::uint16_t hlen =
         static_cast<std::uint16_t>(hdr[8] | (hdr[9] << 8));
-    REQUIRE(hlen == 32u + 32u * 6u + 1u);
+    // Harbour DBFCDX convention: 32 + 32*n + 2 (0x0D 0x00 terminator).
+    REQUIRE(hlen == 32u + 32u * 6u + 2u);
 
     const std::uint32_t want[6] = {1, 21, 41, 44, 67, 70};
     for (int i = 0; i < 6; ++i) {

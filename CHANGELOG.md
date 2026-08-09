@@ -1,3 +1,65 @@
+## 1.8.67 - 2026-08-09
+
+### Fixed — CDX B+tree: Harbour-exact (key, recno) ordering and separators
+
+The definitive fixes for Pritpal Bedi's reproducible "record 151" DBFCDX
+GPF (`Unrecoverable error 9201: hb_cdxPageSeekKey: wrong parent key` at
+DBCOMMIT), reproduced here with his exact B_BIG schema and topology
+(alternating RDDADS/server and DBFCDX instances):
+
+- **Insert descent ignored the recno tiebreak.** When a duplicate-key
+  run spans a leaf split, text-only descent inserted a fresh append
+  (new highest recno) into the FIRST leaf holding that key text instead
+  of after the last duplicate — misordering the leaf chain
+  (`Charlie@314` before `Charlie@154`) and poisoning every separator
+  downstream. Branch descent now compares full (key, recno) pairs.
+- **Parent separators went stale on duplicate-key max growth.** A branch
+  entry holds its child's MAXIMUM pair; inserting a duplicate with a
+  higher recno raised the child max without refreshing the parent —
+  Harbour validates child-max == parent-key on descent and aborts.
+  Separators are now refreshed on every max-pair change, on insert
+  **and** on erase (recursive `erase_from_subtree_` mirrors Harbour's
+  `NODE_NEWLASTKEY` propagation).
+
+### Fixed — two multithreading defects the new stress tests exposed
+
+- **CDX write-lock batch had no owner thread.** Any thread could join an
+  in-flight batch and read pages the owner still held only in its dirty
+  cache (torn read → 6106 "CDX corrupt" under 8 writer threads). Each
+  batch now has an owner thread; other threads wait for its flush.
+  Multi-tag joins from the SAME thread still share the batch.
+- **Remote `AdsOpenIndex` overflowed the caller's handle array.** With a
+  NULL `pu16ArrayLen` it wrote every tag handle past a single-handle
+  out-param, clobbering caller stack (surfaced on x86 as table handles
+  mysteriously turning into index handles). All tags are still
+  registered; only the returned handles are capped by the array size.
+
+### Fixed — DBF headers now byte-identical with Harbour DBFCDX
+
+- Header length is `32 + 32*n + 2` with the 2-byte `0x0D 0x00`
+  terminator (was `+1`), matching Harbour's writer.
+- The production-index flag (header byte 28, bit 0x01) is set when a CDX
+  bag shares the table's basename, so Harbour auto-opens the structural
+  index on USE. Skipped for OpenADS-encrypted tables (bytes 28-31 hold
+  the encryption-bitmap offset).
+
+### Tests — B_BIG coverage gaps closed
+
+- `cdx_dup_key_split_test`: independent raw-page decoder asserting
+  parent-separator == child-max on insert AND erase, duplicate runs
+  spanning splits, recno-bit growth past 16383.
+- `abi_alternating_append_test`: two local connections and a remote
+  server + local client alternating duplicate-key bursts (B_BIG's
+  topology); natural-order appends maintain all tags; lock churn leaves
+  zero locks; cross local/remote lock contention; key-field edits.
+- `abi_mt_contention_test`: 8 writer threads × 50 appends (local and
+  remote), cross-thread lock contention, concurrent readers never see a
+  torn walk.
+- `tests/smoke/harbour/sizecmp.prg`: builds the same table+3-tag CDX via
+  Harbour DBFCDX and OpenADS ADSCDX and compares **byte-by-byte**: DBF
+  header (date bytes excepted), record body, CDX tag-header format
+  fields and expression pools, and per-tag ordered recno sequences.
+
 ## 1.8.66 - 2026-08-08
 
 ### Fixed — multi-tag CDX bags: creation, binding, and the mixed-writer count race
