@@ -1499,6 +1499,8 @@ UNSIGNED32 ENTRYPOINT AdsSetEpoch          (UNSIGNED16 usEpoch);
 UNSIGNED32 ENTRYPOINT AdsSetExact          (UNSIGNED16 bExact);
 UNSIGNED32 ENTRYPOINT AdsSetExact22        (ADSHANDLE hObj,
                                              UNSIGNED16 bIgnoreSpaces);
+// OpenADS extension (RusSoft Ltda): see ace_exports.cpp for rationale.
+UNSIGNED32 ENTRYPOINT AdsSetAdiV2          (UNSIGNED16 bEnable);
 UNSIGNED32 ENTRYPOINT AdsSetFilter         (ADSHANDLE hTable,
                                              UNSIGNED8* pucExpr);
 UNSIGNED32 ENTRYPOINT AdsSetFilter100      (ADSHANDLE hTable,

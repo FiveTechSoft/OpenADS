@@ -266,6 +266,7 @@ add_executable(openads_unit_tests
     unit/abi_adi_tagdir_order_test.cpp
     unit/abi_adi_tagdir_wide_page_test.cpp
     unit/abi_cdx_estaelec_compound_test.cpp
+    unit/abi_adi_v2_explicit_override_test.cpp
     unit/abi_sql_temp_browse_nav_test.cpp
     unit/abi_stale_index_walk_test.cpp
     unit/abi_adt_sql_test.cpp
