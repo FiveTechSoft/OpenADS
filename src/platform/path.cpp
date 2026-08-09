@@ -30,6 +30,22 @@ std::string to_lower(std::string s) {
     return s;
 }
 
+// fs::path::string() converts the native wide (UTF-16, on Windows) name to
+// the narrow/ACP encoding, and THROWS std::system_error when some character
+// has no representation in that codepage — notably the NTFS PUA remap
+// (U+F000-U+F0FF) used for filenames that slipped in an illegal character
+// (":" from a botched "robocopy"/redirect, seen in production as a stray
+// zero-byte file next to real tables). One such neighbour in the directory
+// must not abort resolving every OTHER file in it, so every conversion in
+// this scan is guarded and unconvertible entries are skipped, not fatal.
+std::string safe_path_string(const fs::path& p) {
+    try {
+        return p.string();
+    } catch (const std::exception&) {
+        return std::string();
+    }
+}
+
 } // namespace
 
 std::string resolve_case_insensitive(const std::string& path) {
@@ -50,16 +66,20 @@ std::string resolve_case_insensitive(const std::string& path) {
     // the input verbatim when the case is already correct.
     for (const auto& entry : fs::directory_iterator(parent, ec)) {
         if (ec) break;
-        if (entry.path().filename().string() == leaf) {
-            return entry.path().string();
+        const std::string name = safe_path_string(entry.path().filename());
+        if (name.empty()) continue;   // unconvertible neighbour: skip it
+        if (name == leaf) {
+            return safe_path_string(entry.path());
         }
     }
 
     // Second pass: case-insensitive match returns the on-disk casing.
     for (const auto& entry : fs::directory_iterator(parent, ec)) {
         if (ec) break;
-        if (to_lower(entry.path().filename().string()) == leaf_low) {
-            return entry.path().string();
+        const std::string name = safe_path_string(entry.path().filename());
+        if (name.empty()) continue;   // unconvertible neighbour: skip it
+        if (to_lower(name) == leaf_low) {
+            return safe_path_string(entry.path());
         }
     }
 
