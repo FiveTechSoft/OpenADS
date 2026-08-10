@@ -13089,6 +13089,7 @@ UNSIGNED32 ENTRYPOINT AdsCloseIndex(ADSHANDLE hIndex) {
             act.erase(act_it);
         } else if (it->second.parked) {
             t->unregister_extra_index_view(it->second.parked.get());
+            (void)it->second.parked->flush();
         }
     }
     m.erase(it);
@@ -13109,6 +13110,7 @@ UNSIGNED32 ENTRYPOINT AdsCloseAllIndexes(ADSHANDLE hTable) {
         if (it->second.table == t) {
             if (it->second.parked) {
                 t->unregister_extra_index_view(it->second.parked.get());
+                (void)it->second.parked->flush();
             }
             it = m.erase(it);
         } else {
@@ -36760,5 +36762,630 @@ UNSIGNED32 ENTRYPOINT AdsAggregateClose(ADSHANDLE hRes) {
 }
 
 } // extern "C"  — AdsAggregate* export block
+
+
+
+// ---------------------------------------------------------------------------
+// ARC32 (SAP Advantage Data Architect) ACE API gap.
+// These power ARC's table browser and metadata panes.  Local tables get
+// real implementations; remote tables return sane defaults; DD / FTS /
+// replication functions that are out of reach return AE_SUCCESS with
+// zeroed outputs so ARC never crashes.
+// ---------------------------------------------------------------------------
+
+extern "C" {
+
+// -- AdsGetDataLength --------------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsGetDataLength(ADSHANDLE hTable,
+                                       UNSIGNED8* pucFldName,
+                                       UNSIGNED32 /*ulOptions*/,
+                                       UNSIGNED32* pulLength) {
+    if (pulLength == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    *pulLength = 0;
+    if (auto* rt = get_remote_table(hTable)) {
+        auto i = remote_field_index(rt, pucFldName);
+        if (i == std::numeric_limits<std::size_t>::max())
+            return fail(openads::AE_COLUMN_NOT_FOUND, "");
+        *pulLength = rt->fields[i].length;
+        return ok();
+    }
+    if (auto* ops = openads::abi::backend_table_ops_for(hTable))
+        if (ops->field_length)
+            return ops->field_length(hTable, pucFldName, pulLength);
+    Table* t = get_table(hTable);
+    if (!t) return fail(openads::AE_INTERNAL_ERROR, "no table");
+    std::uint16_t idx = 0;
+    if (!resolve_field_index_h(hTable, t, pucFldName, &idx))
+        return fail(openads::AE_COLUMN_NOT_FOUND, "");
+    const auto& fd = t->field_descriptor(idx);
+    using openads::drivers::DbfFieldType;
+    switch (fd.type) {
+        case DbfFieldType::Memo:
+        case DbfFieldType::Binary: {
+            UNSIGNED32 bufLen = 0;
+            UNSIGNED8 dummy = 0;
+            (void)AdsGetField(hTable, pucFldName, &dummy, &bufLen, 0);
+            *pulLength = bufLen;
+            break;
+        }
+        default:
+            *pulLength = fd.length;
+            break;
+    }
+    return ok();
+}
+
+// -- AdsGetBookmarkLength ----------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsGetBookmarkLength(ADSHANDLE /*hObj*/,
+                                           UNSIGNED32* pulLength) {
+    if (pulLength == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    *pulLength = 4;
+    return ok();
+}
+
+// -- AdsCompareBookmarks -----------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsCompareBookmarks(UNSIGNED8* pucBookmark1,
+                                           UNSIGNED8* pucBookmark2,
+                                           SIGNED32* plResult) {
+    if (plResult == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    if (pucBookmark1 == nullptr || pucBookmark2 == nullptr)
+        return fail(openads::AE_INTERNAL_ERROR, "");
+    UNSIGNED32 r1 = static_cast<UNSIGNED32>(pucBookmark1[0])
+                  | (static_cast<UNSIGNED32>(pucBookmark1[1]) << 8)
+                  | (static_cast<UNSIGNED32>(pucBookmark1[2]) << 16)
+                  | (static_cast<UNSIGNED32>(pucBookmark1[3]) << 24);
+    UNSIGNED32 r2 = static_cast<UNSIGNED32>(pucBookmark2[0])
+                  | (static_cast<UNSIGNED32>(pucBookmark2[1]) << 8)
+                  | (static_cast<UNSIGNED32>(pucBookmark2[2]) << 16)
+                  | (static_cast<UNSIGNED32>(pucBookmark2[3]) << 24);
+    *plResult = (r1 < r2) ? -1 : (r1 > r2) ? 1 : 0;
+    return ok();
+}
+
+// -- AdsGotoBookmark (pre-60 ADSHANDLE version) ------------------------------
+UNSIGNED32 ENTRYPOINT AdsGotoBookmark(ADSHANDLE hTable,
+                                       ADSHANDLE hBookmark) {
+    return AdsGotoRecord(hTable, static_cast<UNSIGNED32>(hBookmark));
+}
+
+// -- AdsGetCollationLang -----------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsGetCollationLang(UNSIGNED8* pucLang,
+                                           UNSIGNED16* pusLen) {
+    if (pusLen == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    openads::abi::copy_to_caller(pucLang, pusLen, std::string("ENGLISH"));
+    return ok();
+}
+
+// -- AdsSetCollationLang -----------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsSetCollationLang(UNSIGNED8* /*pucLang*/) {
+    return ok();
+}
+
+// -- AdsGetCollation ---------------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsGetCollation(ADSHANDLE /*hConnect*/,
+                                       UNSIGNED8* pucCollation,
+                                       UNSIGNED16* pusLen) {
+    if (pusLen == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    openads::abi::copy_to_caller(pucCollation, pusLen,
+                                 std::string("ADS_COLLATION"));
+    return ok();
+}
+
+// -- AdsGetTableCollation ----------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsGetTableCollation(ADSHANDLE /*hTbl*/,
+                                            UNSIGNED8* pucCollation,
+                                            UNSIGNED16* pusLen) {
+    if (pusLen == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    openads::abi::copy_to_caller(pucCollation, pusLen,
+                                 std::string("ADS_COLLATION"));
+    return ok();
+}
+
+// -- AdsGetIndexCollation ----------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsGetIndexCollation(ADSHANDLE /*hIndex*/,
+                                            UNSIGNED8* pucCollation,
+                                            UNSIGNED16* pusLen) {
+    if (pusLen == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    openads::abi::copy_to_caller(pucCollation, pusLen,
+                                 std::string("ADS_COLLATION"));
+    return ok();
+}
+
+// NOTE: AdsSetCollation is already defined at line 19123 of this file.
+// Do NOT redefine it here.
+
+// -- AdsGetHandleLong / AdsSetHandleLong -------------------------------------
+static std::unordered_map<ADSHANDLE, UNSIGNED32>& handle_long_map() {
+    static std::unordered_map<ADSHANDLE, UNSIGNED32> m;
+    return m;
+}
+
+UNSIGNED32 ENTRYPOINT AdsGetHandleLong(ADSHANDLE hObj, UNSIGNED32* pulVal) {
+    if (pulVal == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    auto& m = handle_long_map();
+    auto it = m.find(hObj);
+    *pulVal = (it != m.end()) ? it->second : 0;
+    return ok();
+}
+
+UNSIGNED32 ENTRYPOINT AdsSetHandleLong(ADSHANDLE hObj, UNSIGNED32 ulVal) {
+    handle_long_map()[hObj] = ulVal;
+    return ok();
+}
+
+// -- AdsGetIntProperty -------------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsGetIntProperty(ADSHANDLE /*hObj*/,
+                                         UNSIGNED32 /*ulPropertyID*/,
+                                         UNSIGNED32* pulProperty) {
+    if (pulProperty == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    *pulProperty = 0;
+    return ok();
+}
+
+// -- AdsGetConnectionPath ----------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsGetConnectionPath(ADSHANDLE hConnect,
+                                            UNSIGNED8* pucConnectionPath,
+                                            UNSIGNED16* pusLen) {
+    if (pusLen == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    if (Connection* c = lookup_connection(hConnect)) {
+        openads::abi::copy_to_caller(pucConnectionPath, pusLen,
+                                     c->data_dir());
+        return ok();
+    }
+    openads::abi::copy_to_caller(pucConnectionPath, pusLen, std::string(""));
+    return ok();
+}
+
+// -- AdsGetConnectionProperty ------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsGetConnectionProperty(ADSHANDLE /*hConnect*/,
+                                                UNSIGNED16 /*usPropertyID*/,
+                                                void* pvProperty,
+                                                UNSIGNED32* pulPropertyLen) {
+    if (pulPropertyLen == nullptr)
+        return fail(openads::AE_INTERNAL_ERROR, "");
+    if (pvProperty) memset(pvProperty, 0, *pulPropertyLen);
+    *pulPropertyLen = 0;
+    return ok();
+}
+
+// -- AdsGetTransactionCount --------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsGetTransactionCount(
+    ADSHANDLE /*hConnect*/, UNSIGNED32* pulTransactionCount) {
+    if (pulTransactionCount == nullptr)
+        return fail(openads::AE_INTERNAL_ERROR, "");
+    *pulTransactionCount = 0;
+    return ok();
+}
+
+// -- AdsGetSQLStatement ------------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsGetSQLStatement(ADSHANDLE /*hStmt*/,
+                                          UNSIGNED8* pucSQL,
+                                          UNSIGNED16* pusLen) {
+    if (pusLen == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    openads::abi::copy_to_caller(pucSQL, pusLen, std::string(""));
+    return ok();
+}
+
+// -- AdsGetSQLStatementHandle ------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsGetSQLStatementHandle(ADSHANDLE /*hCursor*/,
+                                                ADSHANDLE* phStmt) {
+    if (phStmt == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    *phStmt = 0;
+    return ok();
+}
+
+// -- AdsNullTerminateStrings -------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsNullTerminateStrings(
+    UNSIGNED16 /*bNullTerminate*/) {
+    return ok();
+}
+
+// -- AdsGetShort -------------------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsGetShort(ADSHANDLE hTable, UNSIGNED8* pucFldName,
+                                   int16_t* psValue) {
+    if (psValue == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    *psValue = 0;
+    SIGNED32 lVal = 0;
+    UNSIGNED32 rc = AdsGetLong(hTable, pucFldName, &lVal);
+    if (rc != ok()) return rc;
+    *psValue = static_cast<int16_t>(lVal);
+    return ok();
+}
+
+// -- AdsGetTime --------------------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsGetTime(ADSHANDLE hTable, UNSIGNED8* pucFldName,
+                                  UNSIGNED8* pucBuf, UNSIGNED16* pusLen) {
+    UNSIGNED32 ulLen = (pusLen != nullptr) ? *pusLen : 0;
+    return AdsGetString(hTable, pucFldName, pucBuf, &ulLen, 0);
+}
+
+// -- AdsGetMoney -------------------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsGetMoney(ADSHANDLE hTable, UNSIGNED8* pucFldName,
+                                   SIGNED64* pqValue) {
+    if (pqValue == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    *pqValue = 0;
+    double dVal = 0;
+    UNSIGNED32 rc = AdsGetDouble(hTable, pucFldName, &dVal);
+    if (rc != ok()) return rc;
+    *pqValue = static_cast<SIGNED64>(dVal * 10000.0);
+    return ok();
+}
+
+// -- AdsIsFieldBinary --------------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsIsFieldBinary(ADSHANDLE hTable,
+                                        UNSIGNED8* pucFldName,
+                                        UNSIGNED16* pbBinary) {
+    if (pbBinary == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    *pbBinary = 0;
+    UNSIGNED16 usType = 0;
+    UNSIGNED32 rc = AdsGetFieldType(hTable, pucFldName, &usType);
+    if (rc != ok()) return rc;
+    if (usType == ADS_BINARY || usType == ADS_IMAGE || usType == ADS_MEMO)
+        *pbBinary = 1;
+    return ok();
+}
+
+// -- AdsGetTableMemoSize -----------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsGetTableMemoSize(ADSHANDLE /*hTable*/,
+                                           UNSIGNED16* pusMemoSize) {
+    if (pusMemoSize == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    *pusMemoSize = 0;
+    return ok();
+}
+
+// -- AdsGetKeyColumn ---------------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsGetKeyColumn(ADSHANDLE /*hCursor*/,
+                                       UNSIGNED16* pusKeyColumn,
+                                       UNSIGNED32 /*ulReserved*/) {
+    if (pusKeyColumn == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    *pusKeyColumn = 0;
+    return ok();
+}
+
+// -- AdsLocate ---------------------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsLocate(ADSHANDLE hTable, UNSIGNED8* pucExpr,
+                                 UNSIGNED16 /*bForward*/,
+                                 UNSIGNED16* pbFound) {
+    if (pbFound == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    *pbFound = 0;
+    UNSIGNED16 result = 0;
+    UNSIGNED32 rc = AdsEvalLogicalExpr(hTable, pucExpr, &result);
+    if (rc != ok()) return rc;
+    *pbFound = result;
+    return ok();
+}
+
+// -- AdsLookupKey ------------------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsLookupKey(ADSHANDLE hIndex, UNSIGNED8* pucKey,
+                                    UNSIGNED16 usKeyLen, UNSIGNED16 usDataType,
+                                    UNSIGNED16* pbFound) {
+    if (pbFound == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    *pbFound = 0;
+    UNSIGNED16 usFound = 0;
+    UNSIGNED32 rc = AdsSeek(hIndex, pucKey, usKeyLen, usDataType, 0, &usFound);
+    if (rc != ok()) return rc;
+    *pbFound = usFound;
+    return ok();
+}
+
+// -- AdsBuildRawKey / AdsBuildRawKey100 --------------------------------------
+UNSIGNED32 ENTRYPOINT AdsBuildRawKey(ADSHANDLE /*hIndex*/,
+                                      UNSIGNED8* pucKey,
+                                      UNSIGNED16* pusKeyLen) {
+    if (pucKey == nullptr || pusKeyLen == nullptr)
+        return fail(openads::AE_INTERNAL_ERROR, "");
+    memset(pucKey, 0, *pusKeyLen);
+    return ok();
+}
+
+UNSIGNED32 ENTRYPOINT AdsBuildRawKey100(ADSHANDLE /*hIndex*/,
+                                         UNSIGNED8* pucKey,
+                                         UNSIGNED16* pusKeyLen,
+                                         UNSIGNED32 /*ulOptions*/) {
+    return AdsBuildRawKey(0, pucKey, pusKeyLen);
+}
+
+// -- AdsIsIndexCompound ------------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsIsIndexCompound(ADSHANDLE /*hIndex*/,
+                                          UNSIGNED16* pbCompound) {
+    if (pbCompound == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    *pbCompound = 0;
+    return ok();
+}
+
+// -- AdsIsIndexCandidate -----------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsIsIndexCandidate(ADSHANDLE /*hIndex*/,
+                                           UNSIGNED16* pbCandidate) {
+    if (pbCandidate == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    *pbCandidate = 0;
+    return ok();
+}
+
+// -- AdsIsIndexPrimaryKey ----------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsIsIndexPrimaryKey(ADSHANDLE /*hIndex*/,
+                                            UNSIGNED16* pbPrimaryKey) {
+    if (pbPrimaryKey == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    *pbPrimaryKey = 0;
+    return ok();
+}
+
+// -- AdsIsIndexNullable ------------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsIsIndexNullable(ADSHANDLE /*hIndex*/,
+                                          UNSIGNED16* pbNullable) {
+    if (pbNullable == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    *pbNullable = 0;
+    return ok();
+}
+
+// -- AdsIsIndexUserDefined ---------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsIsIndexUserDefined(ADSHANDLE /*hIndex*/,
+                                             UNSIGNED16* pbUserDefined) {
+    if (pbUserDefined == nullptr)
+        return fail(openads::AE_INTERNAL_ERROR, "");
+    *pbUserDefined = 0;
+    return ok();
+}
+
+// -- AdsGetNumFTSIndexes -----------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsGetNumFTSIndexes(ADSHANDLE /*hTable*/,
+                                           UNSIGNED16* pusNum) {
+    if (pusNum == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    *pusNum = 0;
+    return ok();
+}
+
+// -- AdsGetIndexHandleByExpr -------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsGetIndexHandleByExpr(ADSHANDLE /*hTable*/,
+                                               UNSIGNED8* /*pucExpr*/,
+                                               UNSIGNED32 /*ulDescending*/,
+                                               ADSHANDLE* phIndex) {
+    if (phIndex == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    *phIndex = 0;
+    return fail(openads::AE_FUNCTION_NOT_AVAILABLE, "");
+}
+
+// -- AdsGetTableRights -------------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsGetTableRights(ADSHANDLE /*hTable*/,
+                                         UNSIGNED16* pusRights) {
+    if (pusRights == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    *pusRights = 0x000F;
+    return ok();
+}
+
+// -- AdsVerifyPassword -------------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsVerifyPassword(ADSHANDLE /*hTable*/,
+                                         UNSIGNED16* pusEnabled) {
+    if (pusEnabled == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    *pusEnabled = 0;
+    return ok();
+}
+
+// -- AdsGetActiveLinkInfo ----------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsGetActiveLinkInfo(ADSHANDLE /*hDBConn*/,
+                                            UNSIGNED16 /*usLinkNum*/,
+                                            UNSIGNED8* pucLinkInfo,
+                                            UNSIGNED16* pusBufferLen) {
+    if (pusBufferLen == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    openads::abi::copy_to_caller(pucLinkInfo, pusBufferLen, std::string(""));
+    return ok();
+}
+
+// -- AdsRegisterUDF ----------------------------------------------------------
+static std::unordered_map<ADSHANDLE, void*>& udf_map() {
+    static std::unordered_map<ADSHANDLE, void*> m;
+    return m;
+}
+
+UNSIGNED32 ENTRYPOINT AdsRegisterUDF(ADSHANDLE hObj, UNSIGNED16 /*usType*/,
+                                      void* lpfnUDF) {
+    udf_map()[hObj] = lpfnUDF;
+    return ok();
+}
+
+// -- AdsStmtConstrainUpdates -------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsStmtConstrainUpdates(ADSHANDLE /*hStatement*/,
+                                               UNSIGNED16 /*usConstrain*/) {
+    return ok();
+}
+
+// -- AdsStmtReadAllColumns ---------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsStmtReadAllColumns(ADSHANDLE /*hStatement*/,
+                                             UNSIGNED16 /*usReadColumns*/) {
+    return ok();
+}
+
+// -- AdsStmtEnableEncryption -------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsStmtEnableEncryption(ADSHANDLE /*hStatement*/,
+                                               UNSIGNED8* /*pucPassword*/) {
+    return ok();
+}
+
+// -- AdsRegisterSQLAbortFunc -------------------------------------------------
+static void* g_sql_abort_func = nullptr;
+
+UNSIGNED32 ENTRYPOINT AdsRegisterSQLAbortFunc(void* lpfnCallback) {
+    g_sql_abort_func = lpfnCallback;
+    return ok();
+}
+
+// -- AdsReapUnusedConnections ------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsReapUnusedConnections(void) {
+    return ok();
+}
+
+// -- AdsFindServers ----------------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsFindServers(UNSIGNED32 /*ulOptions*/,
+                                      ADSHANDLE* phTable) {
+    if (phTable == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    *phTable = 0;
+    return fail(openads::AE_FUNCTION_NOT_AVAILABLE, "");
+}
+
+// -- AdsEvalLogicalExprW -----------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsEvalLogicalExprW(ADSHANDLE /*hTable*/,
+                                           void* /*pwcExpr*/,
+                                           UNSIGNED16* pbResult) {
+    if (pbResult == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    *pbResult = 0;
+    return ok();
+}
+
+// -- AdsCachePrepareSQL ------------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsCachePrepareSQL(ADSHANDLE hConnect,
+                                          UNSIGNED8* pucSQL,
+                                          ADSHANDLE* phStatement) {
+    if (phStatement == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    *phStatement = 0;
+    UNSIGNED32 rc = AdsCreateSQLStatement(hConnect, phStatement);
+    if (rc != ok()) return rc;
+    return AdsPrepareSQL(*phStatement, pucSQL);
+}
+
+// -- AdsCachePrepareSQLW -----------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsCachePrepareSQLW(ADSHANDLE hConnect,
+                                           void* pwcSQL,
+                                           ADSHANDLE* phStatement) {
+    if (phStatement == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    *phStatement = 0;
+    UNSIGNED32 rc = AdsCreateSQLStatement(hConnect, phStatement);
+    if (rc != ok()) return rc;
+    return AdsPrepareSQLW(*phStatement,
+                          reinterpret_cast<UNSIGNED16*>(pwcSQL));
+}
+
+// -- AdsClearCachePool -------------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsClearCachePool(UNSIGNED8* /*pucConnectString*/) {
+    return ok();
+}
+
+// -- AdsGetFTSIndexInfo ------------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsGetFTSIndexInfo(ADSHANDLE /*hIndex*/,
+                                          UNSIGNED8* pucOutput,
+                                          UNSIGNED32* pulBufLen,
+                                          UNSIGNED8** /*ppucField*/,
+                                          UNSIGNED32* /*pulMinWordLen*/,
+                                          UNSIGNED32* /*pulMaxWordLen*/,
+                                          UNSIGNED8** /*ppucDelimiters*/,
+                                          UNSIGNED8** /*ppucNoiseWords*/,
+                                          UNSIGNED8** /*ppucDropChars*/,
+                                          UNSIGNED8** /*ppucCondChars*/,
+                                          UNSIGNED8** /*ppucReserved1*/,
+                                          UNSIGNED8** /*ppucReserved2*/,
+                                          UNSIGNED32* /*pulOptions*/) {
+    if (pulBufLen == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    if (pucOutput) memset(pucOutput, 0, *pulBufLen);
+    *pulBufLen = 0;
+    return ok();
+}
+
+// -- AdsGetFTSIndexInfoW -----------------------------------------------------
+UNSIGNED32 ENTRYPOINT AdsGetFTSIndexInfoW(ADSHANDLE /*hIndex*/,
+                                           void* pwcOutput,
+                                           UNSIGNED32* pulBufLen,
+                                           void** /*ppwcField*/,
+                                           UNSIGNED32* /*pulMinWordLen*/,
+                                           UNSIGNED32* /*pulMaxWordLen*/,
+                                           void** /*ppwcDelimiters*/,
+                                           void** /*ppwcNoiseWords*/,
+                                           void** /*ppwcDropChars*/,
+                                           void** /*ppwcCondChars*/,
+                                           void** /*ppwcReserved1*/,
+                                           void** /*ppwcReserved2*/,
+                                           UNSIGNED32* /*pulOptions*/) {
+    if (pulBufLen == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    if (pwcOutput) memset(pwcOutput, 0, *pulBufLen);
+    *pulBufLen = 0;
+    return ok();
+}
+
+// -- DD stubs ----------------------------------------------------------------
+// Data dictionary functions called by ARC when working with DD.
+// We don't support DD in the free-table browsing path, so return
+// AE_SUCCESS with zeroed outputs.
+
+UNSIGNED32 ENTRYPOINT AdsDDAddProcedure100(ADSHANDLE, UNSIGNED8*, UNSIGNED8*,
+    UNSIGNED8*, UNSIGNED16, UNSIGNED8*, UNSIGNED32, UNSIGNED32,
+    UNSIGNED32) { return ok(); }
+
+UNSIGNED32 ENTRYPOINT AdsDDAddView100(ADSHANDLE, UNSIGNED8*, UNSIGNED8*,
+    UNSIGNED32) { return ok(); }
+
+UNSIGNED32 ENTRYPOINT AdsDDCreate101(ADSHANDLE*, UNSIGNED8*, UNSIGNED8*,
+    UNSIGNED8*, UNSIGNED16, UNSIGNED16, UNSIGNED16,
+    UNSIGNED8*) { return ok(); }
+
+UNSIGNED32 ENTRYPOINT AdsDDCreateArticle(ADSHANDLE, UNSIGNED8*, UNSIGNED8*,
+    UNSIGNED8*, UNSIGNED8*) { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsDDCreateArticle100(ADSHANDLE, UNSIGNED8*, UNSIGNED8*,
+    UNSIGNED8*, UNSIGNED8*, UNSIGNED32) { return ok(); }
+
+UNSIGNED32 ENTRYPOINT AdsDDCreateTrigger100(ADSHANDLE, UNSIGNED8*, UNSIGNED8*,
+    UNSIGNED8*, UNSIGNED8*, UNSIGNED16, UNSIGNED32, UNSIGNED32,
+    UNSIGNED8*) { return ok(); }
+
+UNSIGNED32 ENTRYPOINT AdsDDCreateUserGroup(ADSHANDLE, UNSIGNED8*,
+    UNSIGNED8*) { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsDDDeleteUserGroup(ADSHANDLE,
+    UNSIGNED8*) { return ok(); }
+
+UNSIGNED32 ENTRYPOINT AdsDDDeleteArticle(ADSHANDLE, UNSIGNED8*,
+    UNSIGNED8*) { return ok(); }
+
+// -- Additional stubs for export gap
+
+UNSIGNED32 ENTRYPOINT AdsDDDeployDatabase(ADSHANDLE, UNSIGNED8*,
+    UNSIGNED8*) { return ok(); }
+
+UNSIGNED32 ENTRYPOINT AdsDDGetArticleProperty(ADSHANDLE, UNSIGNED8*,
+    UNSIGNED8*, UNSIGNED16, void*, UNSIGNED32*) { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsDDGetIndexFileProperty(ADSHANDLE, UNSIGNED8*,
+    UNSIGNED8*, UNSIGNED16, void*, UNSIGNED32*) { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsDDGetLinkProperty(ADSHANDLE, UNSIGNED8*,
+    UNSIGNED16, void*, UNSIGNED32*) { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsDDGetPublicationProperty(ADSHANDLE, UNSIGNED8*,
+    UNSIGNED16, void*, UNSIGNED32*) { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsDDGetSubscriptionProperty(ADSHANDLE, UNSIGNED8*,
+    UNSIGNED16, void*, UNSIGNED32*) { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsDDGetUserGroupProperty(ADSHANDLE, UNSIGNED8*,
+    UNSIGNED16, void*, UNSIGNED32*) { return ok(); }
+
+UNSIGNED32 ENTRYPOINT AdsDDSetArticleProperty(ADSHANDLE, UNSIGNED8*,
+    UNSIGNED16, void*, UNSIGNED32, UNSIGNED32) { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsDDSetPublicationProperty(ADSHANDLE, UNSIGNED8*,
+    UNSIGNED16, void*, UNSIGNED32) { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsDDSetSubscriptionProperty(ADSHANDLE, UNSIGNED8*,
+    UNSIGNED16, void*, UNSIGNED32) { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsDDSetUserGroupProperty(ADSHANDLE, UNSIGNED8*,
+    UNSIGNED16, void*, UNSIGNED32) { return ok(); }
+
+UNSIGNED32 ENTRYPOINT AdsDDDeleteSubscription(ADSHANDLE, UNSIGNED8*) { return ok(); }
+
+UNSIGNED32 ENTRYPOINT AdsDDCreateSubscription(ADSHANDLE, UNSIGNED8*, UNSIGNED8*,
+    UNSIGNED8*, UNSIGNED8*, UNSIGNED8*, UNSIGNED8*, UNSIGNED8*,
+    UNSIGNED32, UNSIGNED32) { return ok(); }
+
+
+// -- Additional stubs for export gap
+
+
+UNSIGNED32 ENTRYPOINT AdsActivateAOF(ADSHANDLE, UNSIGNED8*, UNSIGNED32, UNSIGNED32) { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsAddToAOF(ADSHANDLE, UNSIGNED8*, UNSIGNED32, UNSIGNED32) { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsBuildKeyFromRecord(ADSHANDLE, UNSIGNED8*) { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsClearCursorAOF(ADSHANDLE, UNSIGNED8*, UNSIGNED32) { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsClearLastError(void) { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsClearRecordBuffer(ADSHANDLE, UNSIGNED8*, UNSIGNED32) { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsConvertStringToMilliseconds(ADSHANDLE, UNSIGNED8*, UNSIGNED32, UNSIGNED32) { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsConvertUnicodeToCodePage(ADSHANDLE, UNSIGNED8*) { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsCopyTableStructure81(ADSHANDLE, UNSIGNED8*, UNSIGNED32, UNSIGNED32, UNSIGNED32, UNSIGNED32, UNSIGNED32, UNSIGNED32) { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsCopyTableTop(ADSHANDLE) { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsGetColumnPermissions(ADSHANDLE, UNSIGNED8*, UNSIGNED32) { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsGetLibraryVersion(ADSHANDLE) { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsSetInternalError(ADSHANDLE, UNSIGNED8*, UNSIGNED32, UNSIGNED32) { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsSetLastError(ADSHANDLE, UNSIGNED8*, UNSIGNED32, UNSIGNED32) { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsSetStringFromCodePage(ADSHANDLE, UNSIGNED8*) { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsSetupRI(ADSHANDLE, UNSIGNED8*, UNSIGNED32, UNSIGNED32, UNSIGNED32, UNSIGNED32, UNSIGNED32, UNSIGNED32, UNSIGNED32, UNSIGNED32, UNSIGNED32, UNSIGNED32) { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsSqlPeekStatement(ADSHANDLE, UNSIGNED8*, UNSIGNED32) { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsStepIndexKey(ADSHANDLE, UNSIGNED8*, UNSIGNED32, UNSIGNED32) { return ok(); }
+} // extern "C" -- ARC32 ACE API gap block
 
 } // extern "C++"
