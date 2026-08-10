@@ -5,6 +5,7 @@
 #include "tools/serverd/spa_index.h"
 
 #include "engine/data_dict.h"
+#include "mgmt/error_log.h"
 #include "network/server.h"
 #include "openads/ace.h"
 #include "openads/error.h"
@@ -1289,6 +1290,17 @@ std::string b64decode(const std::string& in) {
     return out;
 }
 
+// "user:pass" (already decoded) against the registered credential map.
+bool user_pass_valid(const std::string& raw,
+                      const std::unordered_map<std::string, std::string>& users) {
+    auto colon = raw.find(':');
+    if (colon == std::string::npos) return false;
+    std::string user = raw.substr(0, colon);
+    std::string pw   = raw.substr(colon + 1);
+    auto cit = users.find(user);
+    return cit != users.end() && cit->second == pw;
+}
+
 bool check_basic_auth(const httplib::Request& req,
                       const std::unordered_map<std::string, std::string>& users) {
     if (users.empty()) return true;       // dev mode: no auth
@@ -1298,13 +1310,44 @@ bool check_basic_auth(const httplib::Request& req,
     const std::string prefix = "Basic ";
     if (v.size() < prefix.size() ||
         v.compare(0, prefix.size(), prefix) != 0) return false;
-    auto raw = b64decode(v.substr(prefix.size()));
-    auto colon = raw.find(':');
-    if (colon == std::string::npos) return false;
-    std::string user = raw.substr(0, colon);
-    std::string pw   = raw.substr(colon + 1);
-    auto cit = users.find(user);
-    return cit != users.end() && cit->second == pw;
+    return user_pass_valid(b64decode(v.substr(prefix.size())), users);
+}
+
+// Cookie-session auth. Embedding credentials straight in the
+// navigated-to URL (`http://user:pass@host/...`) is a real trap for
+// any SPA served from the same origin: once `document.location`
+// carries userinfo, the Fetch spec refuses to build a Request from
+// any URL resolved against it ("Request cannot be constructed from a
+// URL that includes credentials"), so every `fetch("/api/...")` the
+// page's own JS makes throws. Cookies don't have that restriction and
+// ride along on every same-origin request (page loads + fetch) with
+// no JS changes needed. The cookie value is the same "user:pass"
+// base64 blob Basic-auth already uses, so verification reuses
+// user_pass_valid() as-is.
+const char* kAuthCookieName = "oads_auth";
+
+bool check_cookie_auth(const httplib::Request& req,
+                       const std::unordered_map<std::string, std::string>& users) {
+    if (users.empty()) return true;
+    auto it = req.headers.find("Cookie");
+    if (it == req.headers.end()) return false;
+    const std::string& all = it->second;
+    const std::string needle = std::string(kAuthCookieName) + "=";
+    std::size_t pos = 0;
+    while (pos < all.size()) {
+        std::size_t semi = all.find(';', pos);
+        std::string part = all.substr(pos, semi == std::string::npos ?
+                                       std::string::npos : semi - pos);
+        std::size_t b = part.find_first_not_of(' ');
+        if (b != std::string::npos) part = part.substr(b);
+        if (part.compare(0, needle.size(), needle) == 0 &&
+            user_pass_valid(b64decode(part.substr(needle.size())), users)) {
+            return true;
+        }
+        if (semi == std::string::npos) break;
+        pos = semi + 1;
+    }
+    return false;
 }
 
 } // namespace
@@ -1317,14 +1360,71 @@ bool HttpConsole::start(const std::string& host,
     wire_srv_ = wire_srv;
     auto& srv = *srv_;
 
-    // studio.web.0.8 — HTTP Basic auth gate. When the credential
-    // map is empty we accept every request (dev mode); otherwise
-    // every request must carry a valid `Authorization: Basic …`.
+    // studio.web.0.8 — auth gate. Empty credential map == dev mode (no
+    // auth, unchanged). Otherwise a request passes with either a
+    // valid `Authorization: Basic …` header OR the oads_auth session
+    // cookie (see check_cookie_auth above for why the cookie exists —
+    // embedding credentials in the page URL breaks the SPA's own
+    // fetch() calls).
+    //
+    // GET /?_auth_user=U&_auth_pass=P is the one-time login path: a
+    // host embedding the console navigates here once with its
+    // generated credentials in the query string (NOT userinfo, so
+    // this specific request is unaffected by the Fetch restriction
+    // above — it's a top-level navigation, not a fetch()). On a match
+    // we set the session cookie and 302-redirect to the same view
+    // without the credentials, so they never end up in
+    // document.location for the SPA's own JS to trip over.
     srv.set_pre_routing_handler(
         [this](const httplib::Request& req, httplib::Response& res) {
-            if (check_basic_auth(req, users_)) {
+            if (req.path == "/" && req.has_param("_auth_user") &&
+                req.has_param("_auth_pass")) {
+                std::string user = req.get_param_value("_auth_user");
+                std::string pass = req.get_param_value("_auth_pass");
+                if (users_.empty() || !user_pass_valid(user + ":" + pass, users_)) {
+                    // Audit trail: every failed login attempt lands in
+                    // the same ads_err.dbf the rest of the engine
+                    // already uses (sp_mgGetErrorLog reads it), so a
+                    // rejected attempt is never silent.
+                    openads::mgmt::ErrorLog::instance().log(
+                        401, "STUDIO_AUTH", 0,
+                        "login failed from " + req.remote_addr +
+                        " user=" + user);
+                    res.status = 403;
+                    res.set_content("invalid credentials", "text/plain; charset=utf-8");
+                    return httplib::Server::HandlerResponse::Handled;
+                }
+                openads::mgmt::ErrorLog::instance().log(
+                    0, "STUDIO_AUTH", 0,
+                    "login ok from " + req.remote_addr + " user=" + user);
+                auto blob = base64_encode(
+                    reinterpret_cast<const std::uint8_t*>((user + ":" + pass).data()),
+                    user.size() + 1 + pass.size());
+                res.set_header("Set-Cookie",
+                    std::string(kAuthCookieName) + "=" + blob +
+                    "; HttpOnly; SameSite=Strict; Path=/");
+                std::string loc = "/?";
+                if (req.has_param("table"))
+                    loc += "table=" + httplib::detail::encode_url(req.get_param_value("table")) + "&";
+                if (req.has_param("tab"))
+                    loc += "tab=" + httplib::detail::encode_url(req.get_param_value("tab")) + "&";
+                if (req.has_param("host"))
+                    loc += "host=" + httplib::detail::encode_url(req.get_param_value("host"));
+                res.status = 302;
+                res.set_header("Location", loc);
+                return httplib::Server::HandlerResponse::Handled;
+            }
+            if (check_basic_auth(req, users_) || check_cookie_auth(req, users_)) {
                 return httplib::Server::HandlerResponse::Unhandled;
             }
+            // Every other request only reaches here with users_ non-empty
+            // (see check_basic_auth/check_cookie_auth's own dev-mode
+            // early-return) -- so this IS always a genuine rejection,
+            // never a false positive from the dev-mode/no-auth path.
+            openads::mgmt::ErrorLog::instance().log(
+                401, "STUDIO_AUTH", 0,
+                "unauthenticated request from " + req.remote_addr +
+                " " + req.method + " " + req.path);
             res.status = 401;
             res.set_header("WWW-Authenticate",
                            "Basic realm=\"OpenADS Studio\"");
