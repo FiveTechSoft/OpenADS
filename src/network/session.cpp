@@ -314,16 +314,66 @@ bool Session::handle_readable() {
 }
 
 void Session::cleanup() {
+    // Tear-down order matters for OS file handles on Windows (no
+    // FILE_SHARE_DELETE): indexes first, then shadow ABI tables, then
+    // engine tables, then low-level FsFile slots, then the ABI connection.
+    // A prior version only closed the ABI shadow (tbls_h_) and left
+    // engine tables + index_h_ + files_ to member destruction — that
+    // worked for most paths, but a client killed mid-CreateIndex (or
+    // after hundreds of open/close cycles) could leave the production
+    // .cdx open until openads_serverd itself exited (Pritpal Bedi).
+
+    // 1) Explicit AdsCloseIndex for every wire index handle. AdsCloseTable
+    //    purges bindings too, but closing indexes first drops each tag's
+    //    File + CDX write-lock join before the table goes away.
+    for (auto& [iid, hidx] : index_h_) {
+        (void)iid;
+        if (hidx != 0) (void)AdsCloseIndex(hidx);
+    }
+    index_h_.clear();
+    index_table_.clear();
+    ordered_tables_.clear();
+    abi_schema_.clear();
+    prefetch_depth_.clear();
+    prefetch_run_dir_.clear();
+
+    // 2) SQL cursors (already ABI handles).
     for (auto& [id, h] : cursor_tbls_) {
-        (void)AdsCloseTable(h);
+        (void)id;
+        if (h != 0) (void)AdsCloseTable(h);
     }
     cursor_tbls_.clear();
-    tbl_open_paths_.clear();
+
+    // 3) Shadow ABI twins (production CDX auto-open + CreateIndex live here).
     for (auto& [id, h] : tbls_h_) {
-        (void)AdsCloseTable(h);
+        (void)id;
+        if (h != 0) (void)AdsCloseTable(h);
     }
     tbls_h_.clear();
-    index_h_.clear();
+
+    // 4) Engine tables held by the session Connection. close_table erases
+    //    the unique_ptr so the driver's File closes immediately — not after
+    //    the Session member destructor runs (which is too late if anything
+    //    else still references the path, and skips LockRegistry cleanup).
+    if (sess_conn_) {
+        for (auto& [id, h] : tbls_) {
+            (void)id;
+            if (auto* t = sess_conn_->lookup_table(h)) {
+                (void)t->flush();
+                openads::mgmt::LockRegistry::instance().remove_all_for_table(t);
+            }
+            sess_conn_->close_table(h);
+            srv_->add_session_table(sid_, -1);
+        }
+    }
+    tbls_.clear();
+    tbl_open_paths_.clear();
+
+    // 5) oads_FOpen / AdsFOpen files for this session.
+    files_.clear();
+
+    // 6) ABI SQL statement + connection (AdsDisconnect closes any leftover
+    //    tables that somehow escaped the loops above).
     if (abi_stmt_ != 0) {
         (void)AdsCloseSQLStatement(abi_stmt_);
         abi_stmt_ = 0;
@@ -421,9 +471,21 @@ ADSHANDLE Session::ensure_abi_handle(std::uint32_t id) {
     }
     std::vector<UNSIGNED8> nb(open_name.size() + 1);
     std::memcpy(nb.data(), open_name.data(), open_name.size());
+    // Match the engine table's share mode so the twin does not upgrade a
+    // shared open to exclusive (or vice versa). map_open_mode(0) is Shared;
+    // Exclusive/Read map from the engine OpenMode.
+    UNSIGNED16 us_mode = ADS_SHARED;
+    switch (tbl->open_mode()) {
+        case openads::engine::OpenMode::Exclusive:
+            us_mode = ADS_EXCLUSIVE; break;
+        case openads::engine::OpenMode::Read:
+            us_mode = ADS_READONLY; break;
+        default:
+            us_mode = ADS_SHARED; break;
+    }
     ADSHANDLE h = 0;
     if (AdsOpenTable(abi_conn_, nb.data(), nullptr,
-                     ADS_CDX, 0, 0, 0, 0, &h) != 0) {
+                     ADS_CDX, 0, 0, 0, us_mode, &h) != 0) {
         return 0;
     }
     tbls_h_[id] = h;

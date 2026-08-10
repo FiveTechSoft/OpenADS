@@ -73,6 +73,30 @@ static void disable_nagle(int s) {
     (void)::setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
 }
 
+// Detect dead peers so Session::cleanup() releases .dbf/.cdx after a
+// client dies without Disconnect (matches Windows SIO_KEEPALIVE_VALS
+// tuning: 15 s idle, 3 s interval, 5 probes).
+static void enable_keepalive(int s) {
+    int on = 1;
+    (void)::setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof(on));
+#if defined(TCP_KEEPIDLE)
+    int idle = 15;
+    (void)::setsockopt(s, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
+#elif defined(TCP_KEEPALIVE)
+    // macOS: seconds until the first keepalive probe
+    int idle = 15;
+    (void)::setsockopt(s, IPPROTO_TCP, TCP_KEEPALIVE, &idle, sizeof(idle));
+#endif
+#if defined(TCP_KEEPINTVL)
+    int intvl = 3;
+    (void)::setsockopt(s, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
+#endif
+#if defined(TCP_KEEPCNT)
+    int cnt = 5;
+    (void)::setsockopt(s, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
+#endif
+}
+
 // POSIX raises SIGPIPE when send() targets a peer that already closed —
 // fatal to the whole process, where Windows just fails the call. Linux
 // suppresses it per-call with MSG_NOSIGNAL (see sock_send); macOS has no
@@ -95,6 +119,7 @@ util::Result<Socket> accept_one(Socket& listener) {
         return util::Error{5000, errno, "accept() failed", ""};
     }
     disable_nagle(c);
+    enable_keepalive(c);
     suppress_sigpipe(c);
     Socket out;
     out.handle = static_cast<std::uintptr_t>(c);

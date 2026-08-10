@@ -5,6 +5,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <mstcpip.h>
 #pragma comment(lib, "ws2_32.lib")
 
 #include <atomic>
@@ -16,6 +17,24 @@ namespace openads::network {
 namespace {
 
 std::atomic<bool> g_inited{false};
+
+// Detect dead peers so Session::cleanup() can release .dbf/.cdx handles
+// after a client process dies without a clean Disconnect (Pritpal Bedi's
+// report: .cdx stayed "in use" until openads_serverd itself was killed).
+// Default Windows keepalive is ~2 hours — far too long for a DB server.
+// 15 s idle + 3 s interval ≈ 15+3*10 ≈ 45 s worst case to detect death.
+static void enable_keepalive(SOCKET s) {
+    BOOL on = TRUE;
+    (void)::setsockopt(s, SOL_SOCKET, SO_KEEPALIVE,
+                       reinterpret_cast<const char*>(&on), sizeof(on));
+    tcp_keepalive ka{};
+    ka.onoff             = 1;
+    ka.keepalivetime     = 15000;  // ms of idle before first probe
+    ka.keepaliveinterval = 3000;   // ms between probes
+    DWORD bytes = 0;
+    (void)::WSAIoctl(s, SIO_KEEPALIVE_VALS, &ka, sizeof(ka),
+                     nullptr, 0, &bytes, nullptr, nullptr);
+}
 
 }
 
@@ -107,6 +126,7 @@ util::Result<Socket> accept_one(Socket& listener) {
                            "accept() failed", ""};
     }
     disable_nagle(c);
+    enable_keepalive(c);
     Socket out;
     out.handle = static_cast<std::uintptr_t>(c);
     return out;
