@@ -1,4 +1,4 @@
-#include <cstdarg>
+﻿#include <cstdarg>
 #include "openads/ace.h"
 #include "openads/error.h"
 #include "abi/lock_retry_policy.h"
@@ -129,7 +129,7 @@ using openads::session::Connection;
 using openads::session::Handle;
 using openads::session::HandleKind;
 
-// S5 — SAP display formatting for Date / Timestamp fields. Defined with the
+// S5 â€” SAP display formatting for Date / Timestamp fields. Defined with the
 // date-format machinery near AdsSetDateFormat (bottom of file); declared
 // here because AdsGetField sits much earlier in this TU.
 //
@@ -137,7 +137,7 @@ using openads::session::HandleKind;
 // AdsGetFIELD returns the value FORMATTED per the connection date format
 // ("01/15/2024", blank "  /  /    "); AdsGetSTRING returns the raw
 // storage text ("20240115") regardless of format. The two entry points
-// intentionally differ — do not "unify" them.
+// intentionally differ â€” do not "unify" them.
 std::string format_date_display(const std::string& raw);
 std::string format_timestamp_display(const std::string& raw);
 // Inverse direction: parse text laid out per the CURRENT date format into
@@ -154,7 +154,7 @@ extern thread_local bool g_field_read_raw;
 ADSHANDLE to_ads_handle(Handle h) { return static_cast<ADSHANDLE>(h); }
 
 struct ProcessState {
-    // M10.36 — recursive_mutex so UNION dispatch can re-enter
+    // M10.36 â€” recursive_mutex so UNION dispatch can re-enter
     // AdsExecuteSQLDirect (used to materialise each member's cursor)
     // while still holding the outer lock.
     std::recursive_mutex                                          mu;
@@ -181,7 +181,7 @@ UNSIGNED32 fail(int code, const char* msg) {
     return fail(openads::util::Error{code, 0, msg ? msg : "", ""});
 }
 
-// ── Tier-1 auto-commit hook ───────────────────────────────────────
+// â”€â”€ Tier-1 auto-commit hook â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // After a successful DML operation on a SQL backend table, mark the
 // transaction dirty and fire auto-commit if the threshold is reached.
 // Returns the auto-commit result (ok or error from commit).
@@ -263,7 +263,7 @@ openads::engine::LockingMode map_locking_mode(UNSIGNED16 lock_type) {
 }
 
 // Stamp DBF header bytes [1..3] (YY MM DD, year as offset from 1900)
-// with today's UTC date — what a real ADS server records when it
+// with today's UTC date â€” what a real ADS server records when it
 // creates or modifies a table. Without this a freshly-created table
 // reports a "1900-00-00" last-update stamp until its first record
 // write triggers CdxDriver::rewrite_header_(). UTC keeps the two paths
@@ -288,7 +288,7 @@ void stamp_dbf_header_today(std::uint8_t* hdr) {
 // tolerant ones (LibreOffice) compute offsets from the field lengths and
 // never notice, but stricter readers reject the header as corrupt and it
 // is simply not what a spec-conforming writer emits (Pritpal Bedi,
-// 29/07/2026 — DBFCDX "corruption detected" report). Stamp the running
+// 29/07/2026 â€” DBFCDX "corruption detected" report). Stamp the running
 // displacement over a just-built descriptor block: `descriptors` points at
 // the first 32-byte descriptor, lengths come from each fd[16].
 // `first_offset` is 1 for plain DBF, 5 when a 4-byte VFP _NullFlags
@@ -342,7 +342,7 @@ void stamp_production_index_flag(openads::engine::Table* t,
 UNSIGNED16 map_field_type(openads::drivers::DbfFieldType t) {
     using openads::drivers::DbfFieldType;
     // Constants verified empirically (M8.4) against
-    // c:\harbour\lib\win\msvc64\rddads.lib — see include/openads/ace.h
+    // c:\harbour\lib\win\msvc64\rddads.lib â€” see include/openads/ace.h
     // for the full sweep table.
     switch (t) {
         case DbfFieldType::Character: return ADS_STRING;        //  4
@@ -393,7 +393,7 @@ cursor_projections() {
     return m;
 }
 
-// Remote SQL cursors map — moved out of AdsExecuteSQLDirect so that
+// Remote SQL cursors map â€” moved out of AdsExecuteSQLDirect so that
 // AdsDisconnect can reach it to null out rt->conn before the
 // RemoteConnection is freed, preventing use-after-free in AdsCloseTable.
 std::unordered_map<Handle,
@@ -412,7 +412,7 @@ projection_for(ADSHANDLE h) {
     return &it->second;
 }
 
-// S4 — user-visible column names for a projected cursor, parallel to
+// S4 â€” user-visible column names for a projected cursor, parallel to
 // cursor_projections(). SAP names a result column after the SELECT list,
 // not after the table's declared spelling, so the two must be tracked
 // separately; see build_projection_aliases() for the rule.
@@ -430,7 +430,7 @@ aliases_for(ADSHANDLE h) {
     return &it->second;
 }
 
-// Forget both maps together — an alias vector outliving its projection
+// Forget both maps together â€” an alias vector outliving its projection
 // would misname the next cursor to reuse the handle.
 void forget_cursor_projection(ADSHANDLE h) {
     cursor_projections().erase(h);
@@ -488,7 +488,7 @@ build_projection_aliases(const openads::sql::SelectStmt& st,
 // Projection-aware variant. Called by Get* entry points that take
 // hTable + pucField; routes ADSFIELD(n) numeric handles through the
 // projection map (n = position within projection, translated to the
-// underlying field index). Bare-name lookups stay direct — rddads
+// underlying field index). Bare-name lookups stay direct â€” rddads
 // only ever asks for projected names so the underlying schema's
 // extra columns aren't reachable through the cursor anyway.
 bool resolve_field_index(Table* tbl, UNSIGNED8* pucField, std::uint16_t* out);
@@ -504,7 +504,7 @@ bool resolve_field_index_h(ADSHANDLE h, Table* tbl,
         }
         return false;
     }
-    // S4 — a projected column may be visible under a name the underlying
+    // S4 â€” a projected column may be visible under a name the underlying
     // table does not carry (`AS alias`, or a duplicate suffixed `_1`), so
     // match the cursor's own names before the table's.
     if (proj != nullptr && p >= 0x10000u && pucField != nullptr) {
@@ -548,7 +548,7 @@ bool resolve_field_index(Table* tbl, UNSIGNED8* pucField, std::uint16_t* out) {
     }
     if (pucField == nullptr) return false;
     auto name = openads::abi::to_internal(pucField, 0);
-    // Delegate to Table::field_index — case-insensitive (matches native
+    // Delegate to Table::field_index â€” case-insensitive (matches native
     // ACE semantics) and cached. Field names in DBF/ADT storage are
     // upper-cased, but callers (and CDX/NTX index expressions) may use
     // any case; an exact-case compare here spuriously missed them.
@@ -558,14 +558,14 @@ bool resolve_field_index(Table* tbl, UNSIGNED8* pucField, std::uint16_t* out) {
     return true;
 }
 
-// lookup_table_by_index — defined further down once IndexBinding is
+// lookup_table_by_index â€” defined further down once IndexBinding is
 // known. Returns the Table bound to the given index handle, or null.
 Table* lookup_table_by_index(ADSHANDLE h);
 openads::drivers::IIndex* iindex_for_handle(ADSHANDLE h);
 openads::util::Result<void> activate_binding(ADSHANDLE h);
 void purge_bindings_for_table(Table* t);
 
-// M12.5 — remote-table lookup helper. Returns nullptr when the
+// M12.5 â€” remote-table lookup helper. Returns nullptr when the
 // handle isn't a TCP-routed table.
 openads::network::RemoteTable* get_remote_table(ADSHANDLE h) {
     auto& s = state();
@@ -573,11 +573,11 @@ openads::network::RemoteTable* get_remote_table(ADSHANDLE h) {
         h, HandleKind::RemoteTable);
 }
 
-// M12.21 option C — settle the sequential-prefetch lag before any op
+// M12.21 option C â€” settle the sequential-prefetch lag before any op
 // that reads or mutates the server's CURRENT record. Rows served locally
 // from the lookahead queue left the server cursor away from the client's
 // logical row by cursor_lag (behind it for a forward run, ahead of it for a
-// backward one); a Skip(0) — which the client sends as Skip(cursor_lag) —
+// backward one); a Skip(0) â€” which the client sends as Skip(cursor_lag) â€”
 // walks the server cursor to the logical row and the ack zeroes the lag. A
 // no-op when nothing was prefetched (the common cold-cache write path pays
 // nothing). RCB 07/15/2026: condition is now `!= 0`, since a backward lag is
@@ -624,7 +624,7 @@ openads::sql_backend::SqliteTable* get_sqlite_table(ADSHANDLE h) {
         h, HandleKind::SqliteTable);
 }
 
-// ── SQL backend connection lookups ─────────────────────────────────
+// â”€â”€ SQL backend connection lookups â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Returns the connection object for a SQL backend handle, or nullptr.
 openads::sql_backend::SqliteConnection* get_sqlite_conn(ADSHANDLE h) {
     auto& s = state();
@@ -1116,7 +1116,7 @@ std::size_t postgres_field_index(openads::sql_backend::PostgresTable* st,
 }
 #endif // OPENADS_WITH_POSTGRESQL
 
-// M12.16 — same dispatch helper for remote-index handles. Returns
+// M12.16 â€” same dispatch helper for remote-index handles. Returns
 // nullptr when `h` is a local IIndex / Connection / unknown.
 openads::network::RemoteIndex* get_remote_index(ADSHANDLE h) {
     auto& s = state();
@@ -1124,7 +1124,7 @@ openads::network::RemoteIndex* get_remote_index(ADSHANDLE h) {
         h, HandleKind::RemoteIndex);
 }
 
-// M12.29 — same dispatch helper for remote-connection handles, used by the
+// M12.29 â€” same dispatch helper for remote-connection handles, used by the
 // AdsDD* Data Dictionary property functions. dd_from_handle() only ever
 // resolves a LOCAL Connection (see its definition below), so every AdsDD*
 // entrypoint checks this FIRST and routes through the wire protocol instead
@@ -1139,14 +1139,14 @@ openads::network::RemoteConnection* get_remote_connection(ADSHANDLE h) {
 // helpers (thread-local rddads default connection).
 ADSHANDLE& rddads_default_connection() noexcept;
 
-// Resolve a caller connection handle — 0 (rddads' "current connection"
+// Resolve a caller connection handle â€” 0 (rddads' "current connection"
 // cleared by a disconnect), a thread-local default that is already
 // disconnected, or a stale handle read from rddads' process-wide slot
-// before another thread's disconnect cleared it — to a live
+// before another thread's disconnect cleared it â€” to a live
 // RemoteConnection handle. A valid handle passes through untouched;
 // otherwise the thread-local default (last AdsConnect60 on this thread)
 // wins if live, and failing that any surviving live RemoteConnection is
-// adopted — mirroring SAP ACE's internal default-connection behaviour,
+// adopted â€” mirroring SAP ACE's internal default-connection behaviour,
 // where disconnecting one connection must not render the surviving ones
 // unusable. Returns 0 when no live remote connection exists (callers
 // then fail fast or take their local fallback, as appropriate).
@@ -1212,13 +1212,13 @@ void remote_ensure_rec_count(openads::network::RemoteTable* rt) {
     }
 }
 
-// Scoped key count of the active order — the server computes it scope +
+// Scoped key count of the active order â€” the server computes it scope +
 // SET DELETED aware, so it matches what OrdKeyCount reports. Falls back
 // to the physical record count in natural order. The remote keyno
 // machinery (GoBottom, KeyGoto, RelKeyPos, skip clamp) must use THIS,
 // not cached_rec_count: with a scope of 1 live row in a 36-row table,
 // clamping to 36 made GoBottom report KeyNo=36 and sent KeyGoto/rel-pos
-// walks 35 rows past the scope end — the phantom/duplicate rows in Tim
+// walks 35 rows past the scope end â€” the phantom/duplicate rows in Tim
 // Stone's scoped remote xBrowse (31/07/2026).
 std::uint32_t remote_ensure_key_count(openads::network::RemoteTable* rt) {
     if (rt == nullptr) return 0;
@@ -1395,7 +1395,7 @@ UNSIGNED32 remote_query_key_num(openads::network::RemoteTable* rt,
         *pulKeyNum = rt->current_keyno;
         return ok();
     }
-    // M12.29 — prefer server-side key number (O(1)) over the legacy
+    // M12.29 â€” prefer server-side key number (O(1)) over the legacy
     // O(n) client-side walk. The server computes pos_of_recno_cached()
     // on the CDX index, eliminating the ~22 sec remote_measure_keyno
     // walk that TXBrowse:Refresh() triggered on every repaint.
@@ -1423,7 +1423,7 @@ UNSIGNED32 remote_goto_key_num(openads::network::RemoteTable* rt,
         if (!act) return fail(act.error());
     }
     remote_ensure_rec_count(rt);
-    // Clamp to the scoped key count when an order is active — a KeyGoto
+    // Clamp to the scoped key count when an order is active â€” a KeyGoto
     // past the scope end must land on the last scoped key, not on a
     // physical record outside the scope.
     const std::uint32_t kmax = remote_table_has_index(rt)
@@ -1469,7 +1469,7 @@ UNSIGNED32 remote_query_rel_key_pos(openads::network::RemoteTable* rt,
     }
     remote_ensure_rec_count(rt);
     // Relative position is within the active order's key walk, so the
-    // denominator is the scoped key count when an order is active —
+    // denominator is the scoped key count when an order is active â€”
     // not the physical record count.
     const std::uint32_t rc = remote_table_has_index(rt)
         ? remote_ensure_key_count(rt)
@@ -1575,7 +1575,7 @@ Table* get_table(ADSHANDLE h) {
     Table* t = s.registry.lookup<Table>(h, HandleKind::Table);
     if (t != nullptr) return t;
     // Real ACE accepts an index handle anywhere a table handle is
-    // expected — rddads' adsGoTop calls AdsGotoTop(hOrdCurrent) when
+    // expected â€” rddads' adsGoTop calls AdsGotoTop(hOrdCurrent) when
     // an order is active. The bound Table is the same as the table's
     // own; we additionally swap the binding's parked IIndex into the
     // Table's active order so navigation actually walks the requested
@@ -1603,7 +1603,7 @@ Connection* find_owning_connection(Table* t) {
 // decode path (make_string / decode_field) trims trailing spaces because
 // the SQL engine, index keys, and AOF filters need trimmed values. On the
 // way out to an ABI caller, re-pad to the declared field width so that
-// FieldGet of a C(20) field always returns exactly 20 characters — the
+// FieldGet of a C(20) field always returns exactly 20 characters â€” the
 // behaviour expected by rddads, Clipper, and X# (Pritpal's xbrowse bug).
 // Never truncates: a value already at or above width is returned as-is.
 std::string pad_char_field(std::string s, std::size_t width) {
@@ -2012,7 +2012,7 @@ UNSIGNED32 sqlite_is_found(ADSHANDLE hTable, UNSIGNED16* pbFound) {
     return ok();
 }
 
-// ── Tier 1: Transaction management adapters (SQLRDD pattern) ──────
+// â”€â”€ Tier 1: Transaction management adapters (SQLRDD pattern) â”€â”€â”€â”€â”€â”€
 
 UNSIGNED32 sqlite_begin_tx(ADSHANDLE hTable) {
     auto* st = get_sqlite_table(hTable);
@@ -2711,7 +2711,7 @@ const openads::abi::BackendTableOps* mssql_table_ops() {
 
 // ---------------------------------------------------------------------------
 // Lifted Firebird table ops + accessor (mirrors the ODBC lift exactly; the
-// native Firebird backend exposes the same read-navigation surface — its
+// native Firebird backend exposes the same read-navigation surface â€” its
 // extra write / run_sql methods are not part of BackendTableOps and are not
 // wired at the ABI border in this slice, matching the ODBC read-only border).
 // ---------------------------------------------------------------------------
@@ -3380,7 +3380,7 @@ UNSIGNED32 postgres_set_filter(ADSHANDLE hTable, UNSIGNED8* pucWhere) {
 }
 
 // Tier-3 push-down: delegate to PostgresConnection::aggregate (one SELECT
-// COUNT/SUM/AVG/MIN/MAX ... WHERE) — same contract as sqlite_aggregate.
+// COUNT/SUM/AVG/MIN/MAX ... WHERE) â€” same contract as sqlite_aggregate.
 UNSIGNED32 postgres_aggregate(
         ADSHANDLE hTable, const char* where_sql,
         const std::vector<openads::engine::AggSpec>* specs,
@@ -3588,7 +3588,7 @@ UNSIGNED32 postgres_is_found(ADSHANDLE hTable, UNSIGNED16* pbFound) {
     return ok();
 }
 
-// ── Tier 1: Transaction management adapters (SQLRDD pattern) ──────
+// â”€â”€ Tier 1: Transaction management adapters (SQLRDD pattern) â”€â”€â”€â”€â”€â”€
 
 UNSIGNED32 postgres_begin_tx(ADSHANDLE hTable) {
     auto* st = get_postgres_table(hTable);
@@ -3688,7 +3688,7 @@ const openads::abi::BackendTableOps* postgres_table_ops() {
 // ---------------------------------------------------------------------------
 
 // "AdsAppendRecord called but AdsWriteRecord hasn't fired yet" is tracked
-// per-Table via Table::pending_append() — see table.h. It used to be a
+// per-Table via Table::pending_append() â€” see table.h. It used to be a
 // global std::unordered_set<Table*>, but a freed table's heap address
 // could be reused by a different table that still carried the stale
 // "pending append" flag, making a plain UPDATE take the INSERT path and
@@ -3717,14 +3717,14 @@ Connection* conn_for_table(Table* t) {
 // Find the DD alias for a table given its resolved absolute path.
 //
 // PERF: fs::weakly_canonical is a filesystem syscall. Doing it once per DD
-// table on every call made this ~7 ms on a 95-table DD — and callers run
+// table on every call made this ~7 ms on a 95-table DD â€” and callers run
 // per NAVIGATION (snapshot_ri_pks) and per WRITE (RI enforcement), which
 // turned large cursor walks into apparent hangs. Two defences:
 //  - a case-insensitive BASENAME pre-filter, so entries that cannot match
 //    (every SQL temp, most tables) are rejected with pure string compares
 //    and only basename collisions pay the canonicalisation;
 //  - hot callers additionally cache the result on the Table
-//    (ri_alias_cached / ri_alias_cache) — the path never changes after
+//    (ri_alias_cached / ri_alias_cache) â€” the path never changes after
 //    open, so the alias can't either.
 std::string ri_alias_for_path(Connection* conn, const std::string& abs_path) {
     namespace fs = std::filesystem;
@@ -3800,7 +3800,7 @@ openads::util::Result<void> ri_check_insert(Connection* conn, Table& child) {
         // rule.parent_tag is the parent index tag name; by convention (single-field
         // PK/FK) the same name identifies the FK field in the child.
         std::string fk_val = ri_trim(ri_read_field(child, rule.parent_tag));
-        if (fk_val.empty()) continue;   // NULL / blank FK → skip
+        if (fk_val.empty()) continue;   // NULL / blank FK â†’ skip
 
         auto ph = conn->open_table(rule.parent,
                                    openads::engine::TableType::Cdx,
@@ -3859,7 +3859,7 @@ openads::util::Result<void> ri_enforce_delete(Connection* conn, Table& parent) {
                                        openads::engine::TableType::Cdx,
                                        need_write ? openads::engine::OpenMode::Shared
                                                   : openads::engine::OpenMode::Read);
-            if (!ch) continue;   // can't open child → skip rule
+            if (!ch) continue;   // can't open child â†’ skip rule
             child = conn->lookup_table(ch.value());
             if (!child) { conn->close_table(ch.value()); continue; }
             opened_here = true;
@@ -3912,7 +3912,7 @@ openads::util::Result<void> ri_enforce_delete(Connection* conn, Table& parent) {
 // Called after every successful local-table navigation.
 // If the table is a parent in any RI rule, snapshot its PK fields onto
 // the Table itself (Table::ri_snapshot()). Storing the snapshot on the
-// Table — rather than in a global Table*-keyed map — means it lives and
+// Table â€” rather than in a global Table*-keyed map â€” means it lives and
 // dies with the table, so a freed-then-reallocated table can never
 // inherit a previous table's stale snapshot (the cause of intermittent
 // missed cascades/restrictions seen only in the full-suite run).
@@ -3921,7 +3921,7 @@ void snapshot_ri_pks(Table* t) {
         if (t) t->ri_snapshot().clear();
         return;
     }
-    // Runs on EVERY navigation (Skip/GoTop/GoBottom/GoTo) — resolve the
+    // Runs on EVERY navigation (Skip/GoTop/GoBottom/GoTo) â€” resolve the
     // DD alias once per Table, not once per step. Without the cache a
     // 382K-row cursor walk on a DD connection took ~45 minutes (7 ms of
     // fs::weakly_canonical calls per Skip); see ri_alias_for_path.
@@ -3947,7 +3947,7 @@ void snapshot_ri_pks(Table* t) {
     }
 }
 
-// ── Parent→child work-area relations (AdsSetRelation) ────────────────
+// â”€â”€ Parentâ†’child work-area relations (AdsSetRelation) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // When a parent's cursor moves, each related child is re-positioned: its
 // controlling order is seeked to the key produced by evaluating `expr`
 // against the parent's current record. A child with no controlling order
@@ -3956,7 +3956,7 @@ void snapshot_ri_pks(Table* t) {
 // Clipper dbSetRelation. A `scoped` relation (AdsSetScopedRelation) also
 // constrains the child to the group of records whose key matches, by
 // setting the child order's top/bottom scope to the relation key.
-// Parent work-area → child relations (local Tables and tcp:// RemoteTables).
+// Parent work-area â†’ child relations (local Tables and tcp:// RemoteTables).
 struct AdsRelation { ADSHANDLE child; std::string expr; bool scoped; };
 std::unordered_map<ADSHANDLE, std::vector<AdsRelation>>& relation_map() {
     static std::unordered_map<ADSHANDLE, std::vector<AdsRelation>> m;
@@ -4018,7 +4018,7 @@ std::string remote_parent_field(openads::network::RemoteTable* parent,
     }
     // RCB 07/14/2026: BUG FIX (pre-existing, exposed by the M12.24 warm
     // GotoTop). This used to fetch the parent's row into the cache above and
-    // then ignore it, reading the field with conn->get_field() — which reads
+    // then ignore it, reading the field with conn->get_field() â€” which reads
     // the SERVER's cursor. That cursor is offset from the client's logical
     // position by cursor_lag whenever rows have been served out of the lookahead
     // block, so the relation followed a STALE PARENT ROW and pointed the child
@@ -4027,15 +4027,15 @@ std::string remote_parent_field(openads::network::RemoteTable* parent,
     // It stayed hidden because the only coverage skipped the parent exactly
     // once, and before the warm GotoTop that first Skip always went to the wire
     // (the queue was still empty), leaving the cursors in sync. The SECOND skip
-    // of any scan would have drained the queue and broken — i.e. this has been
+    // of any scan would have drained the queue and broken â€” i.e. this has been
     // wrong for parent/child grids since sequential prefetch landed.
     //
     // Read the cached row, which is the client's logical current record by
     // construction. Also removes a wire round-trip per parent row per relation.
     //
     // DO NOT "simplify" this back to a single conn->get_field() call. It reads
-    // like the obvious, direct thing to do — that is exactly how the bug got
-    // written — but asking the server for "the current record" is asking the
+    // like the obvious, direct thing to do â€” that is exactly how the bug got
+    // written â€” but asking the server for "the current record" is asking the
     // WRONG QUESTION whenever the client is ahead of it. Guarded by the
     // full-parent walk in the AdsSetRelation remote test; a test that skips the
     // parent only once will NOT catch a regression here.
@@ -4162,7 +4162,7 @@ void seek_remote_child_relation(openads::network::RemoteTable* parent,
         child->current_found = true;
         return;
     }
-    // RCB 07/14/2026: M12.24 — pass `child` so the SeekAck's row trailer lands
+    // RCB 07/14/2026: M12.24 â€” pass `child` so the SeekAck's row trailer lands
     // straight in the child's row cache.
     //
     // Clearing row_valid FIRST is load-bearing, not tidiness: it is what turns
@@ -4179,13 +4179,13 @@ void seek_remote_child_relation(openads::network::RemoteTable* parent,
         return;
     }
     // RCB 07/14/2026: this GotoRecord used to fire UNCONDITIONALLY, and it was
-    // pure overhead — the seek had ALREADY positioned the server cursor on this
+    // pure overhead â€” the seek had ALREADY positioned the server cursor on this
     // record. The only reason for the second frame was to drag the row down,
     // because SeekAck carried no row. It runs once per PARENT row in a relation
     // browse, so it was doubling the wire cost of every child lookup in the grid.
     //
     // An M12.24 server hands us the row with the seek, so this is now only sent
-    // when talking to an OLDER server that didn't. It is NOT dead code — delete
+    // when talking to an OLDER server that didn't. It is NOT dead code â€” delete
     // the branch and every remote relation against a pre-M12.24 server silently
     // stops resolving its child row. (See the row_valid note above for why the
     // condition is trustworthy.)
@@ -4238,7 +4238,7 @@ void seek_remote_child_relation(Table* parent,
         child->current_found = true;
         return;
     }
-    // RCB 07/14/2026: M12.24 — pass `child` so the SeekAck's row trailer lands
+    // RCB 07/14/2026: M12.24 â€” pass `child` so the SeekAck's row trailer lands
     // straight in the child's row cache.
     //
     // Clearing row_valid FIRST is load-bearing, not tidiness: it is what turns
@@ -4255,13 +4255,13 @@ void seek_remote_child_relation(Table* parent,
         return;
     }
     // RCB 07/14/2026: this GotoRecord used to fire UNCONDITIONALLY, and it was
-    // pure overhead — the seek had ALREADY positioned the server cursor on this
+    // pure overhead â€” the seek had ALREADY positioned the server cursor on this
     // record. The only reason for the second frame was to drag the row down,
     // because SeekAck carried no row. It runs once per PARENT row in a relation
     // browse, so it was doubling the wire cost of every child lookup in the grid.
     //
     // An M12.24 server hands us the row with the seek, so this is now only sent
-    // when talking to an OLDER server that didn't. It is NOT dead code — delete
+    // when talking to an OLDER server that didn't. It is NOT dead code â€” delete
     // the branch and every remote relation against a pre-M12.24 server silently
     // stops resolving its child row. (See the row_valid note above for why the
     // condition is trustworthy.)
@@ -4724,7 +4724,7 @@ bool sql_parent_key(ADSHANDLE hParent, const std::string& expr, std::string& key
 
 }  // namespace
 
-// Drive `child` to EOF — used when the parent has no current record or
+// Drive `child` to EOF â€” used when the parent has no current record or
 // the relation key finds no match.
 void relation_child_to_eof(Table* child) {
     (void)child->goto_bottom();
@@ -4852,7 +4852,7 @@ void apply_sql_parent_relations(ADSHANDLE hParent) {
 }
 
 // Re-seek every child related to `hParent`, then cascade into each child's
-// own relations so a multi-level chain (A→B→C) refreshes end to end.
+// own relations so a multi-level chain (Aâ†’Bâ†’C) refreshes end to end.
 void apply_relations_for_handle(ADSHANDLE hParent) {
     auto& tbl = relation_map();
     auto it = tbl.find(hParent);
@@ -4972,13 +4972,13 @@ openads::util::Result<void> ri_enforce_update(Connection* conn, Table& parent) {
         std::string old_pk = fit->second;
 
         if (old_pk == new_pk) continue;   // no PK change for this rule
-        if (old_pk.empty()) continue;      // was blank (NULL) — skip
+        if (old_pk.empty()) continue;      // was blank (NULL) â€” skip
 
         bool need_write = (upd_opt == ADS_DD_RI_CASCADE ||
                            upd_opt == ADS_DD_RI_SETNULL ||
                            upd_opt == ADS_DD_RI_SETDEFAULT);
         // Prefer the child instance the application already has open on
-        // this connection — cascading into a *second* open of the same
+        // this connection â€” cascading into a *second* open of the same
         // file races the OS file cache and share-mode locks, which
         // intermittently dropped the cascade/restrict. Only open (and
         // later close) a fresh instance when the child isn't already open.
@@ -5056,7 +5056,7 @@ openads::util::Result<void> ri_enforce_update(Connection* conn, Table& parent) {
 
 // Returns effective permission level (0-4) for the authenticated user on a
 // DD table alias. Returns 4 (full) when no ACL or no DD is present.
-// Legacy — kept for callers that only need a coarse level.
+// Legacy â€” kept for callers that only need a coarse level.
 [[maybe_unused]] int table_perm_level(Connection* conn, const std::string& alias) {
     if (!conn || !conn->has_dd()) return 4;
     auto* dd = conn->dd();
@@ -5065,7 +5065,7 @@ openads::util::Result<void> ri_enforce_update(Connection* conn, Table& parent) {
 }
 
 // Returns per-operation effective permissions for the connected user on object.
-// If no DD / no ACL defined → all ops open.
+// If no DD / no ACL defined â†’ all ops open.
 openads::engine::DataDict::EffectiveOps
 eff_ops(Connection* conn, const std::string& object_name) {
     openads::engine::DataDict::EffectiveOps full;
@@ -5101,7 +5101,7 @@ std::string name_to_alias(const openads::engine::DataDict* dd,
 
 } // namespace
 
-// RCB 2026-05-22 17:03 — set_stmt_param is defined later in the file alongside
+// RCB 2026-05-22 17:03 â€” set_stmt_param is defined later in the file alongside
 // SqlStatement and stmt_map.  AdsSetString / AdsSetDouble / AdsSetLogical all
 // call it before that definition is reached, so a forward declaration is needed
 // here to satisfy the compiler.  It must be inside a namespace{} block to match
@@ -5131,7 +5131,7 @@ void set_connection_show_deleted(ADSHANDLE hConnect, bool visible) {
 
 // Server --legacy-paths: the network Session's lazy ABI connection must
 // resolve client-absolute paths (e.g. remote AdsCreateTable of
-// "E:\CLIENT\F.DBF") exactly like the session's engine Connection —
+// "E:\CLIENT\F.DBF") exactly like the session's engine Connection â€”
 // otherwise a POSIX server creates a literal "E:\..." file under the
 // data root and the follow-up open fails (found by live verification
 // against a Linux server, Pritpal Bedi's ERP scenario).
@@ -5574,11 +5574,11 @@ materialised_cursor_temps() {
 // INDEX ON over the result, producing <stem>.cdx or <stem>.adi).
 //
 // The materialising path builds ADT temps (see the ADS_ADT call in
-// exec_sql_direct_impl — DBF would truncate column names to 10 chars), so .adt
+// exec_sql_direct_impl â€” DBF would truncate column names to 10 chars), so .adt
 // and its .adm/.adi companions must be listed here. The DBF-era extensions stay
 // so temps written by an older build are still cleaned up. If a new
 // materialising path introduces another on-disk format, add its extensions here
-// too — anything missing leaks one file per query into the data directory.
+// too â€” anything missing leaks one file per query into the data directory.
 void remove_temp_table_files(const std::string& stem) {
     std::error_code ec;
     for (const char* ext : {".adt", ".adm", ".adi",
@@ -5596,7 +5596,7 @@ void drop_materialised_cursor_temp(ADSHANDLE h) {
     remove_temp_table_files(stem);
 }
 
-// ─── Shared materialiser for join / union / aggregate temp cursors ─────────
+// â”€â”€â”€ Shared materialiser for join / union / aggregate temp cursors â”€â”€â”€â”€â”€â”€â”€â”€â”€
 //
 // >>> Before changing ANY of this, read docs/materialised-cursor-temps.md. <<<
 // >>> Do NOT switch these temps back to DBF, and do not "simplify" the     <<<
@@ -5611,7 +5611,7 @@ void drop_materialised_cursor_temp(ADSHANDLE h) {
 // result into a temp table. Seven paths (2-table join, N-way join, UNION,
 // scalar / grouped / join / join+GROUP-BY aggregates) used to hand-assemble
 // a raw DBF here, which silently truncated every result-column name
-// (constraint 2 in the doc) — including `AS` aliases and the merged `R_<name>`
+// (constraint 2 in the doc) â€” including `AS` aliases and the merged `R_<name>`
 // spellings. They now share this one materialiser, which builds an ADT temp:
 //
 //  - The SKELETON (400-byte header + 200-byte descriptors) comes from
@@ -5622,20 +5622,20 @@ void drop_materialised_cursor_temp(ADSHANDLE h) {
 //  - Cells arrive PRE-FORMATTED from the callers (fixed-width text, the same
 //    bytes the DBF temps stored), and are written verbatim: Character and
 //    AsciiNumeric cells are raw ASCII in both containers, so read-back is
-//    byte-identical to the DBF-era temps. Only Date cells change shape —
+//    byte-identical to the DBF-era temps. Only Date cells change shape â€”
 //    8-char "YYYYMMDD" text is encoded to the 4-byte JDN through the same
 //    encode_field_string the write path uses everywhere else (blank-safe:
 //    8 blanks store JDN 0), and decodes back to "YYYYMMDD".
 //  - Numeric columns are declared AsciiNumeric (ADT type 2), NEVER the
 //    letter 'N': the letter maps to binary INTEGER / DOUBLE via
 //    adt_spec_for, which re-renders values and drops the declared scale
-//    (constraint 3 — the #146 trap).
+//    (constraint 3 â€” the #146 trap).
 //  - Records are streamed in ONE file append and the count patched once,
 //    instead of per-record append_record_raw (lock + header rewrite per
 //    row), because a join over a 600K-row table lands here.
 //
 // The temp is registered in materialised_cursor_temps(), so closing the
-// cursor deletes it — the DBF-era paths never registered theirs and leaked
+// cursor deletes it â€” the DBF-era paths never registered theirs and leaked
 // one file per query into the data directory.
 struct TempColSpec {
     std::string   name;   // FULL-length result-column name (the point of ADT)
@@ -5649,7 +5649,7 @@ enum class TempCellKind : std::uint8_t { Text, Num, Date, Logic };
 // Classify a source type for the temp's declared column type. Letters and
 // raw ADT codes are disjoint (letters are all >= 0x41, ADT codes top out at
 // 22), same reasoning as type_name() in the _srt_ path. Anything unknown
-// degrades to Character, which stores the caller's text cell verbatim —
+// degrades to Character, which stores the caller's text cell verbatim â€”
 // the same net behaviour the DBF temps had for exotic types.
 TempCellKind temp_cell_kind(char t) {
     switch (t) {
@@ -5684,7 +5684,7 @@ struct MaterialisedTemp {
 };
 
 // `rows` is the concatenation of fixed-width row images (NO deletion-flag
-// byte — pure cells, `row_stride` bytes each, in `cols` order). Creates,
+// byte â€” pure cells, `row_stride` bytes each, in `cols` order). Creates,
 // fills and opens the temp; does NOT register a cursor handle.
 UNSIGNED32 materialise_temp_adt_open(Connection* c,
                                      const char* prefix,
@@ -5765,7 +5765,7 @@ UNSIGNED32 materialise_temp_adt_open(Connection* c,
     // Locate the file the create path actually wrote. This must mirror
     // AdsCreateTable's own resolution EXACTLY: the connection resolver may
     // hand back a default extension that is not ".adt" (an extensionless
-    // temp name resolves to "<name>.dbf" — the ADT container still goes
+    // temp name resolves to "<name>.dbf" â€” the ADT container still goes
     // there; only the file NAME is legacy). Guessing "<stem>.adt" here left
     // the skeleton orphaned and the reopen failing.
     fs::path adt;
@@ -5818,11 +5818,11 @@ UNSIGNED32 materialise_temp_adt_open(Connection* c,
             for (std::size_t i = 0; i < cols.size(); ++i) {
                 const std::uint16_t sl = cols[i].len ? cols[i].len : 1;
                 if (kinds[i] == TempCellKind::Date) {
-                    // Through the production encoder — same blank-safety
+                    // Through the production encoder â€” same blank-safety
                     // and JDN math as every other ADT date write. A cell
                     // that is not 8 digits (blank group, the "0" sentinel
                     // an empty aggregate renders) stays the zero JDN the
-                    // record was initialised with — a blank date.
+                    // record was initialised with â€” a blank date.
                     std::string cell(
                         reinterpret_cast<const char*>(src + so), sl);
                     bool date8 = cell.size() >= 8;
@@ -6035,14 +6035,14 @@ UNSIGNED32 ENTRYPOINT AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 usServerType
     if (usServerType == ADS_REMOTE_SERVER && !has_remote_scheme(path)) {
         path = "tcp://127.0.0.1:6262/" + path;
     }
-    // M12.5 — `tcp://host:port/<data_dir>` routes the connection
+    // M12.5 â€” `tcp://host:port/<data_dir>` routes the connection
     // through the wire client; every Ads* function that recognises
     // the connection handle's RemoteConnection kind dispatches to
     // the server instead of touching a local Connection.
-    // M12.9 — pucUser / pucPwd are forwarded into the Connect frame;
+    // M12.9 â€” pucUser / pucPwd are forwarded into the Connect frame;
     // the server validates them when it has credentials registered.
     {
-        // M12.12 — `tls://host:port/<dir>` URI. When the engine was
+        // M12.12 â€” `tls://host:port/<dir>` URI. When the engine was
         // built with -DOPENADS_WITH_TLS=ON we open a real TLS client
         // through vendored mbedtls; otherwise we surface a clear
         // AE_FUNCTION_NOT_AVAILABLE so apps don't silently downgrade
@@ -6237,7 +6237,7 @@ UNSIGNED32 ENTRYPOINT AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 usServerType
     }
 #endif
 #if defined(OPENADS_WITH_FIREBIRD)
-    // Native Firebird driver (firebird:// / fb://) — embedded `.fdb`
+    // Native Firebird driver (firebird:// / fb://) â€” embedded `.fdb`
     // in-process via libfbclient, or a TCP server. Parsed into a
     // FirebirdUri (structured user/password/charset/role) and torn down
     // in AdsDisconnect.
@@ -6359,15 +6359,15 @@ UNSIGNED32 ENTRYPOINT AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 usServerType
                                    : std::string();
 
         // Logins-disabled: a stricter, all-connections-rejected gate than
-        // LOG_IN_REQUIRED below — even a valid user/password normally can't
+        // LOG_IN_REQUIRED below â€” even a valid user/password normally can't
         // connect while this is set. Reads the STABLE storage key "prop_16"
-        // (SP_MODIFYDATABASE numbering) — the SAP ABI id for it is
+        // (SP_MODIFYDATABASE numbering) â€” the SAP ABI id for it is
         // ADS_DD_LOGINS_DISABLED (113), translated by db_prop_storage_key.
         // Mirrored in network/session.cpp's Connect handler for remote
         // connections.
         //
         // Admin bypass: without this, setting the flag would be a one-way
-        // door — nobody, not even the admin trying to undo it, could ever
+        // door â€” nobody, not even the admin trying to undo it, could ever
         // reconnect to flip it back off. openads::mgmt::kAdminBypassUser
         // ("adssys", ADS's own conventional admin username) with a correct
         // per-user password (prop_1101) is exempted.
@@ -6550,7 +6550,7 @@ UNSIGNED32 ENTRYPOINT AdsConnect101(UNSIGNED8* pucConnectString,
 // system-procedure machinery further down (namespace spproc).
 extern "C++" {
 namespace spproc { void drop_all_events_for(const void* conn); }
-// S4 — session #temp / trigger-image cleanup (defined by the sess
+// S4 â€” session #temp / trigger-image cleanup (defined by the sess
 // namespace further down, near the trigger machinery).
 extern "C++" void sess_forget_connection(Connection* c);
 }
@@ -6671,7 +6671,7 @@ UNSIGNED32 ENTRYPOINT AdsDisconnect(ADSHANDLE hConnect) {
                 // Disconnect OUTSIDE s.mu: RemoteConnection::disconnect()
                 // serialises with in-flight requests on the connection
                 // mutex, and a request's server handler (in-process
-                // server) re-enters the ABI and takes s.mu — holding both
+                // server) re-enters the ABI and takes s.mu â€” holding both
                 // here could deadlock.
                 pending_remote_disconnect = rc;
             }
@@ -6691,14 +6691,14 @@ UNSIGNED32 ENTRYPOINT AdsDisconnect(ADSHANDLE hConnect) {
     auto& s = state();
     std::lock_guard<std::recursive_mutex> lk(s.mu);
     // Purge any index bindings whose Table* belongs to a table owned
-    // by this connection — otherwise the bindings outlive the conns
+    // by this connection â€” otherwise the bindings outlive the conns
     // entry that owned the Table and leave dangling pointers behind.
     Connection* c = s.registry.lookup<Connection>(hConnect, HandleKind::Connection);
     if (c != nullptr) {
         // Drop this connection's sp_CreateEvent registrations so the
         // global event map can't hold a dangling Connection key.
         spproc::drop_all_events_for(c);
-        // S4 — drop session #temp tables / trigger-image registrations so
+        // S4 â€” drop session #temp tables / trigger-image registrations so
         // the maps can't hold a dangling Connection key (defined near the
         // sess namespace below).
         sess_forget_connection(c);
@@ -6711,7 +6711,7 @@ UNSIGNED32 ENTRYPOINT AdsDisconnect(ADSHANDLE hConnect) {
             openads::engine::set_active_oem_upper_table(nullptr);
         }
         // Collect this connection's still-open Table handles. `s.conns.erase`
-        // below frees the Connection — and with it every Table it owns — so
+        // below frees the Connection â€” and with it every Table it owns â€” so
         // any registry slot still pointing at one of those Tables would dangle.
         // A later allocation reusing that heap address then aliases the stale
         // slot, which surfaces as AdsGetAllTables over-counting and, worse, a
@@ -6756,7 +6756,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
                                         "phTable is null");
     auto& s = state();
     std::unique_lock<std::recursive_mutex> lk(s.mu);
-    // M12.5 — remote connection handle: route through wire client.
+    // M12.5 â€” remote connection handle: route through wire client.
     // hConnect == 0 (rddads "current connection" cleared by a disconnect)
     // resolves to a surviving live remote connection; without this the
     // call silently fell through to a LOCAL cwd auto-connection and
@@ -6766,14 +6766,14 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
             rem_h, HandleKind::RemoteConnection)) {
         auto name = openads::abi::to_internal(pucName, 0);
         // Callers (incl. X#'s ADSRDD) commonly pass the bare table name
-        // without an extension. Send it through unchanged — the server's
+        // without an extension. Send it through unchanged â€” the server's
         // Connection::resolve_table_file() already falls back from .dbf to
         // .adt when the bare name has no matching .dbf on disk, exactly
         // mirroring the LOCAL AdsOpenTable path a few hundred lines down
         // (conn->open_table(name, ...)). Force-appending ".dbf" here (as a
         // previous version of this code did) skipped that fallback on the
-        // server — resolve_table_file() only auto-detects when the name it
-        // receives has NO extension — so every ADT-format table (e.g. a DD
+        // server â€” resolve_table_file() only auto-detects when the name it
+        // receives has NO extension â€” so every ADT-format table (e.g. a DD
         // migrated from SAP with Table_Type=ADT) failed to open remotely
         // with AE_TABLE_CORRUPTED (5103), even though the identical bare
         // name opens fine locally.
@@ -6797,7 +6797,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
         // Mirror the local M-AOF.6 production-index auto-open over the
         // wire: opening <base>.dbf binds <base>.cdx (or <base>.adi for
         // ADT) when the server has it, so rddads / X# see the production
-        // tags as navigable orders — and DbSetOrder(n) resolves them —
+        // tags as navigable orders â€” and DbSetOrder(n) resolves them â€”
         // without an explicit AdsOpenIndex.
         //
         // The server's OpenTableAck may include the production bag path
@@ -6858,7 +6858,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
         return ok();
     }
     // Explicit handle to a disconnected remote connection, and no live
-    // remote connection to fall back to: fail fast (SAP ADS semantics —
+    // remote connection to fall back to: fail fast (SAP ADS semantics â€”
     // a disconnected handle returns an error immediately) instead of
     // silently opening a LOCAL file through the cwd fallback below.
     if (hConnect != 0 && rem_h == 0 &&
@@ -7215,13 +7215,13 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
         tbl->set_alias(std::move(alias));
     }
 
-    // RCB 2026-07-10 — record the caller's usCharType on the Table, and
-    // do it BEFORE the production-index auto-open below: AdsOpenIndex →
+    // RCB 2026-07-10 â€” record the caller's usCharType on the Table, and
+    // do it BEFORE the production-index auto-open below: AdsOpenIndex â†’
     // apply_cdx_oem_collation reads it to stamp the effective OEM sort
     // table onto every tag. usCharType=ADS_OEM is the ONLY signal a
     // Harbour rddads app gives that its data is OEM (AdsSetCharType()
     // just feeds this parameter; rddads never calls AdsSetCollation), so
-    // ignoring it — as this function did before v1.8.9 — makes PL852
+    // ignoring it â€” as this function did before v1.8.9 â€” makes PL852
     // support unreachable for rddads and reintroduces the v1.8.6/v1.8.7
     // not-found seeks on Polish keys (#130 follow-up). Do not remove and
     // do not move below the AdsOpenIndex calls. ADS_DEFAULT (0) keeps
@@ -7229,12 +7229,12 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
     if (usCharType == ADS_ANSI || usCharType == ADS_OEM)
         tbl->set_char_type(usCharType);
 
-    // M-AOF.6 — production-CDX auto-open. ADS / rddads convention:
+    // M-AOF.6 â€” production-CDX auto-open. ADS / rddads convention:
     // opening `<base>.dbf` auto-binds `<base>.cdx` if it exists, so
     // every tag inside it becomes navigable on this Table without
     // an explicit AdsOpenIndex60 call. Without this, the AOF
     // matcher in evaluate_optimised() never finds the index and
-    // every leaf falls back to the per-record evaluation —
+    // every leaf falls back to the per-record evaluation â€”
     // AdsGetAOFOptLevel reports NONE forever even after a
     // CREATE INDEX SQL ran in a prior session.
     namespace fs = std::filesystem;
@@ -7254,7 +7254,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
             (void)AdsOpenIndex(to_ads_handle(gh), b.data(), arr, &alen);
         }
     }
-    // ADI auto-open: same convention for ADT tables — opening `<base>.adt`
+    // ADI auto-open: same convention for ADT tables â€” opening `<base>.adt`
     // (or `<base>.dat`, the Russoft ERP convention of keeping ADT data in
     // .DAT + .ADI per ARC-CAJA) auto-binds `<base>.adi` if it exists, so every
     // tag inside it becomes navigable without an explicit AdsOpenIndex call.
@@ -7376,9 +7376,9 @@ UNSIGNED32 ENTRYPOINT AdsGetRecordLength(ADSHANDLE hTable, UNSIGNED32* pulLen) {
 extern "C++" {
 namespace {
 
-// M10.33 — standard SQL LIKE pattern. `%` matches any sequence
+// M10.33 â€” standard SQL LIKE pattern. `%` matches any sequence
 // (including empty), `_` matches a single character. Greedy match
-// with backtracking — adequate for short DBF cells.
+// with backtracking â€” adequate for short DBF cells.
 static inline bool sql_like_match(const std::string& s,
                                   const std::string& pat) {
     std::size_t si = 0, pi = 0;
@@ -7401,7 +7401,7 @@ static inline bool sql_like_match(const std::string& s,
     return pi == pat.size();
 }
 
-// LIKE with optional case folding — CICHAR columns match LIKE
+// LIKE with optional case folding â€” CICHAR columns match LIKE
 // case-insensitively (oracle-verified), plain CHAR byte-wise.
 static inline bool sql_like_match_t(const std::string& s,
                                     const std::string& pat, bool ci) {
@@ -7414,7 +7414,7 @@ static inline bool sql_like_match_t(const std::string& s,
     return sql_like_match(s2, p2);
 }
 
-// S4 — case sensitivity is a FIELD-TYPE property (oracle-verified on
+// S4 â€” case sensitivity is a FIELD-TYPE property (oracle-verified on
 // pmsys): CICHAR (ADT type 20) columns compare case-insensitively in
 // `=`, LIKE, BETWEEN and IN; plain CHAR compares byte-wise. SAP's
 // system.* catalog columns are CICHAR, which is why
@@ -7445,7 +7445,7 @@ static inline bool field_is_cichar(const openads::engine::Table& t,
            openads::drivers::DbfFieldType::CiCharacter;
 }
 
-// ADS dialect — apply the optional UPPER()/LOWER() case-fold from a
+// ADS dialect â€” apply the optional UPPER()/LOWER() case-fold from a
 // WHERE left-hand side to a cell value before it is compared. A no-op
 // for WhereFn::None, so callers can apply it unconditionally.
 static inline std::string apply_where_fn(std::string s,
@@ -7524,7 +7524,7 @@ DbfTypeSpec dbf_type_for(const std::string& name) {
         return {'N', 0, 0, false};
     if (eq("ModTime"))
         return {'C', 23, 0, false};   // store as ISO-8601 string for now
-    // ── ADT-specific type names: use sentinel chars handled by adt_spec_for ──
+    // â”€â”€ ADT-specific type names: use sentinel chars handled by adt_spec_for â”€â”€
     if (eq("CICHARACTER") || eq("CiCharacter") || eq("CICHAR"))
         return {'W', 0, 0, false};    // ADT type 20: case-insensitive char
     if (eq("ShortInt") || eq("SmallInt") || eq("SMALLINT"))
@@ -7537,11 +7537,11 @@ DbfTypeSpec dbf_type_for(const std::string& name) {
         return {'A', 4, 0, false};    // ADT type 15: 4-byte uint32 auto-increment
     if (eq("Time"))
         return {'Z', 4, 0, false};    // ADT type 13: 4-byte ms since midnight
-    // ADT type 2 — numeric stored as ASCII digits, so the declared scale is
+    // ADT type 2 â€” numeric stored as ASCII digits, so the declared scale is
     // part of the value ("10.50" stays "10.50"). Plain "Numeric" with decimals
     // maps to ADT DOUBLE (type 10) instead, and a conforming ADT DOUBLE
     // descriptor carries NO decimal count (see the fd[137] comment in the ADT
-    // writer — stamping one makes the real ADS engine report the table corrupt,
+    // writer â€” stamping one makes the real ADS engine report the table corrupt,
     // 7016), so a DOUBLE round-trips the value but not its formatting. Used by
     // the SELECT materialisation path, which needs full-length column names
     // (ADT) *and* the source's numeric scale.
@@ -7552,7 +7552,7 @@ DbfTypeSpec dbf_type_for(const std::string& name) {
 
 // Map a parsed field-type char to the byte a DBF field descriptor can carry.
 // The ADT sentinels above ('W', 'S', '$', 'P', 'A', 'Z', '#') are internal
-// markers, not DBF type codes — writing one into fd[11] would produce a table
+// markers, not DBF type codes â€” writing one into fd[11] would produce a table
 // no reader can classify. Collapse each to its closest DBF equivalent.
 char dbf_descriptor_type_char(char t) {
     switch (t) {
@@ -7576,7 +7576,7 @@ std::string trim(std::string s) {
     return s;
 }
 
-// rddads `NAME,Type,Len,Dec;…` parser. Empty `defs` returns an empty
+// rddads `NAME,Type,Len,Dec;â€¦` parser. Empty `defs` returns an empty
 // vector. Used by AdsCreateTable (M9.5) and AdsRestructureTable (M9.26).
 struct FieldOut {
     std::string  name;
@@ -7731,7 +7731,7 @@ AdtFieldSpec adt_spec_for(const FieldOut& f) {
 } // namespace
 } // extern "C++"
 
-// RCB 2026-07-10 — usCharType is now honoured: it is forwarded to the
+// RCB 2026-07-10 â€” usCharType is now honoured: it is forwarded to the
 // AdsOpenTable call that hands the created table back, so an ADS_OEM
 // creation gets its tags built under the configured OEM collation
 // (#130 follow-up). Don't re-comment the parameter out.
@@ -7872,7 +7872,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
     if (!full.has_extension()) full.replace_extension(is_adt ? ".adt" : ".dbf");
 
     if (is_adt) {
-        // ── ADT creation path ───────────────────────────────────────────────
+        // â”€â”€ ADT creation path â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         // Respect the file name the caller asked for -- real ACE creates
         // exactly that file. Forcing ".adt" breaks any application that keeps
         // ADT data under another extension (ExtFile='.DAT' is a common ERP
@@ -7955,15 +7955,15 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
             // is loss-free and matches the ADT on-disk layout a conforming
             // reader expects.
             //
-            // For NUMERIC (type 2) the scale goes at byte 139, not 137 — that
+            // For NUMERIC (type 2) the scale goes at byte 139, not 137 â€” that
             // is where the real engine puts it. Verified byte-for-byte against
             // SAP-written tables (mp corpus, service.adt): an N(10,2) column
-            // reads …135:10 136:0 137:0 138:0 139:2 140:0. We keep writing 137
+            // reads â€¦135:10 136:0 137:0 138:0 139:2 140:0. We keep writing 137
             // as well so a table written here stays readable by older OpenADS
             // builds, which only looked at 137; SAP ignores it.
             //
             // 139 is also the AUTOINC counter slot, but only for type 15, and
-            // an autoinc field has no scale — so the two uses never collide.
+            // an autoinc field has no scale â€” so the two uses never collide.
             // The reader in adt_driver.cpp mirrors this and only consults 139
             // for type 2, precisely so a populated counter is never mistaken
             // for a decimal count.
@@ -8012,7 +8012,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
     }
 
     if (is_vfp) {
-        // ── VFP DBF creation (0x30 / 0x31 / 0x32) ───────────────────────────
+        // â”€â”€ VFP DBF creation (0x30 / 0x31 / 0x32) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         bool has_memo = false;
         bool has_autoinc = false;
         std::uint16_t nullable_count = 0;
@@ -8096,7 +8096,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
                             ADS_VFP, usCharType, 0, 0, 1, phTable);
     }
 
-    // ── DBF creation path (existing) ────────────────────────────────────────
+    // â”€â”€ DBF creation path (existing) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Compute header + record sizes. Harbour DBFCDX uses
     // 32 + 32*n + 2 (the field list ends with a 2-byte 0x0D 0x00
     // terminator); matching it keeps headers byte-identical with a
@@ -8162,7 +8162,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
     }
 
     // If the field list declares any memo (M) field, stage an empty
-    // .fpt next to the .dbf — Connection::open_table auto-attaches it,
+    // .fpt next to the .dbf â€” Connection::open_table auto-attaches it,
     // and without it any write to the M field fails "memo store not
     // attached" (e.g. X#'s ADSRDD on FieldPut to a memo column).
     {
@@ -8286,7 +8286,7 @@ UNSIGNED32 ENTRYPOINT AdsDropTable(ADSHANDLE     hConnect,
 
 // --- M9.26 AdsRestructureTable (ADD-only) ----------------------------------
 //
-// Real ACE rebuilds the DBF with three field-def strings — add,
+// Real ACE rebuilds the DBF with three field-def strings â€” add,
 // delete, and change. The most common rddads call site only feeds
 // the "add" list (`pucDeleteFields` / `pucChangeFields` empty), which
 // is what 0.2.x supports. Non-empty delete / change lists return
@@ -8321,9 +8321,9 @@ UNSIGNED32 ENTRYPOINT AdsRestructureTable(ADSHANDLE   hConnect,
                             : std::string();
     auto add_fields = parse_rddads_field_defs(add);
 
-    // CHANGE list (M10.12): same shape as ADD (NAME,Type,Len,Dec;…).
+    // CHANGE list (M10.12): same shape as ADD (NAME,Type,Len,Dec;â€¦).
     // Each entry replaces the same-named existing field's length /
-    // decimals. The Type must match the existing field — type
+    // decimals. The Type must match the existing field â€” type
     // conversion (rename / retype) needs a clean-room ADS spec and
     // stays deferred. Apps that need it can issue DELETE + ADD.
     auto change_fields = parse_rddads_field_defs(chg);
@@ -8332,7 +8332,7 @@ UNSIGNED32 ENTRYPOINT AdsRestructureTable(ADSHANDLE   hConnect,
         change_map[cf.name] = cf;
     }
 
-    // DELETE list is a `;`-separated list of bare field names —
+    // DELETE list is a `;`-separated list of bare field names â€”
     // unlike pucAddFields the entries carry no type / len info.
     std::unordered_set<std::string> del_set;
     {
@@ -8490,7 +8490,7 @@ UNSIGNED32 ENTRYPOINT AdsRestructureTable(ADSHANDLE   hConnect,
             bool           from_old      = false;
             std::uint16_t  old_offset    = 0;
             std::uint8_t   old_length    = 0;
-            char           old_type      = '\0';  // non-'\0' → type conversion
+            char           old_type      = '\0';  // non-'\0' â†’ type conversion
             char           new_type      = '\0';  // target raw type
         };
         std::vector<PerField> plan;
@@ -8533,7 +8533,7 @@ UNSIGNED32 ENTRYPOINT AdsRestructureTable(ADSHANDLE   hConnect,
         if (plan.empty()) {
             return fail(openads::AE_INTERNAL_ERROR,
                         "AdsRestructureTable: every field deleted "
-                        "without an ADD — would leave the table empty");
+                        "without an ADD â€” would leave the table empty");
         }
         std::vector<FieldOut> merged;
         merged.reserve(plan.size());
@@ -8650,7 +8650,7 @@ UNSIGNED32 ENTRYPOINT AdsRestructureTable(ADSHANDLE   hConnect,
                             std::memcpy(new_buf.data() + out_off, nb, copy);
                         }
                     } else {
-                        // D↔C and other pairs: raw copy up to min length.
+                        // Dâ†”C and other pairs: raw copy up to min length.
                         std::uint8_t copy_len =
                             std::min<std::uint8_t>(p.old_length, nlen);
                         std::memcpy(new_buf.data() + out_off,
@@ -8725,7 +8725,7 @@ UNSIGNED32 ENTRYPOINT AdsExtractKey(ADSHANDLE hIndex, UNSIGNED8* pucBuf,
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown index");
     openads::drivers::IIndex* idx = iindex_for_handle(hIndex);
     if (!idx) return fail(openads::AE_INTERNAL_ERROR, "index not loaded");
-    // Return the key in its STORED encoding — rddads' OrdKeyVal decodes
+    // Return the key in its STORED encoding â€” rddads' OrdKeyVal decodes
     // the buffer by key type (HB_ORD2DBL for ADS_NUMERIC), so a numeric
     // (FoxNumeric) tag must yield the 8-byte order-preserving binary key,
     // not the ASCII expression text (which OrdKeyVal printed as "*****").
@@ -8754,7 +8754,7 @@ UNSIGNED32 ENTRYPOINT AdsGotoRecord(ADSHANDLE hTable, UNSIGNED32 ulRecord) {
     if (auto* rt = get_remote_table(hTable)) {
         rt->found_cached = true; rt->current_found = false;  // M12.21: GoTo clears Found()
         remote_clear_nav_boundaries(rt);
-        // M12.29 — preserve keyno_valid when navigating to the same record.
+        // M12.29 â€” preserve keyno_valid when navigating to the same record.
         // FWH xbrowse paint saves RecNo(), skips through visible rows, then
         // GotoRecord(bookmark). The restore-same-record case was destroying
         // keyno_valid unconditionally, triggering an O(n) remote_measure_keyno
@@ -8839,7 +8839,7 @@ local_files_map() {
 }
 
 } // namespace
-} // extern "C++"  — fs helpers regain C++ linkage inside the ABI block
+} // extern "C++"  â€” fs helpers regain C++ linkage inside the ABI block
 
 UNSIGNED32 ENTRYPOINT AdsCheckExistence(ADSHANDLE hConn, UNSIGNED8* pucName,
                              UNSIGNED16* pbExists) {
@@ -9400,7 +9400,7 @@ UNSIGNED32 ENTRYPOINT AdsGotoTop(ADSHANDLE hTable) {
         return ok();
     }
     if (auto* rt = get_remote_table(hTable)) {
-        // M12.18 — rt-aware overload parses the row trailer in the
+        // M12.18 â€” rt-aware overload parses the row trailer in the
         // same RTT, so AdsGetField immediately after GoTop hits
         // the cache.
         rt->found_cached = true; rt->current_found = false;  // M12.21: GoTop clears Found()
@@ -9487,12 +9487,12 @@ UNSIGNED32 ENTRYPOINT AdsSkip(ADSHANDLE hTable, SIGNED32 lRows) {
         const std::uint32_t rec_before =
             rt->row_valid ? rt->current_recno : 0u;
         const bool row_valid_before = rt->row_valid;
-        // M12.21 — sequential prefetch: Skip(1) drains the queue
+        // M12.21 â€” sequential prefetch: Skip(1) drains the queue
         // populated by the previous Skip's lookahead block. Zero
         // RTT for every cached step.
         //
         // RCB 07/14/2026: the drain itself now lives in remote_drain_prefetch()
-        // because the index-handle Skip path (remote_index_skip — what rddads
+        // because the index-handle Skip path (remote_index_skip â€” what rddads
         // ACTUALLY calls once an order is set, via hOrdCurrent) needs exactly
         // the same logic. It used to have none at all: it threw the queue away
         // on every skip. Duplicating the drain there would have meant two copies
@@ -9506,7 +9506,7 @@ UNSIGNED32 ENTRYPOINT AdsSkip(ADSHANDLE hTable, SIGNED32 lRows) {
             apply_relations_for_handle(hTable);
             return ok();
         }
-        // RCB 07/15/2026: M12.25 — PgUp. Symmetric to the forward drain above.
+        // RCB 07/15/2026: M12.25 â€” PgUp. Symmetric to the forward drain above.
         if (lRows == -1 &&
             openads::network::remote_drain_prefetch(rt, -1)) {
             remote_sync_keyno_skip(rt, lRows);
@@ -9545,7 +9545,7 @@ UNSIGNED32 ENTRYPOINT AdsAtEOF(ADSHANDLE hTable, UNSIGNED16* pbAtEnd) {
         cli_trace("[cli] AdsAtEOF: nav_eof=%d row_valid=%d",
                   (int)rt->nav_at_eof, (int)rt->row_valid);
         if (rt->nav_at_eof) { *pbAtEnd = 1; return ok(); }
-        // M12.21 option C — a valid cached current row (including one
+        // M12.21 option C â€” a valid cached current row (including one
         // served locally from the prefetch queue) means the cursor is
         // on a record, so it cannot be at EOF: answer with no round
         // trip. This is what lets a prefetched scan loop, which polls
@@ -9570,7 +9570,7 @@ UNSIGNED32 ENTRYPOINT AdsAtBOF(ADSHANDLE hTable, UNSIGNED16* pbAtBegin) {
         cli_trace("[cli] AdsAtBOF: nav_bof=%d row_valid=%d",
                   (int)rt->nav_at_bof, (int)rt->row_valid);
         if (rt->nav_at_bof) { *pbAtBegin = 1; return ok(); }
-        // M12.21 option C — a valid cached current row means the cursor
+        // M12.21 option C â€” a valid cached current row means the cursor
         // is on a record, so it cannot be at BOF: answer with no round
         // trip (see AdsAtEOF).
         if (rt->row_valid) { *pbAtBegin = 0; return ok(); }
@@ -9641,7 +9641,7 @@ UNSIGNED32 ENTRYPOINT AdsGetFieldName(ADSHANDLE hTable, UNSIGNED16 usFieldNum,
         if (usFieldNum == 0 || usFieldNum > p->size()) {
             return fail(openads::AE_COLUMN_NOT_FOUND, "");
         }
-        // S4 — a projected column is named after the SELECT list, not
+        // S4 â€” a projected column is named after the SELECT list, not
         // after the table's declared spelling. See
         // build_projection_aliases() for SAP's exact rule.
         if (const auto* al = aliases_for(hTable);
@@ -9798,7 +9798,7 @@ std::size_t remote_field_index(openads::network::RemoteTable* rt,
         rt->fields = std::move(r).value();
         rt->fields_cached = true;
     }
-    // ACE "field name OR 1-based ordinal cast to a pointer" idiom — X#'s
+    // ACE "field name OR 1-based ordinal cast to a pointer" idiom â€” X#'s
     // ADSRDD calls AdsGetFieldType/Length/Decimals (and the value
     // getters) by ordinal. A tiny pointer value is the ordinal; reading
     // it as a string address would fault.
@@ -10033,7 +10033,7 @@ UNSIGNED32 ENTRYPOINT AdsGetLong(ADSHANDLE hTable, UNSIGNED8* pucField, SIGNED32
         return ok();
     }
     // SQL backend (e.g. postgresql): read text via the per-backend ops
-    // vtable then parse. Mirrors the AdsGetDouble fix — without it a PG
+    // vtable then parse. Mirrors the AdsGetDouble fix â€” without it a PG
     // handle fell through to the native get_table() path and errored.
     if (auto* ops = openads::abi::backend_table_ops_for(hTable)) {
         if (ops->get_field) {
@@ -10138,7 +10138,7 @@ SIGNED32 to_julian(int y, int m, int d) {
 // Opt-in switch for the ADI v2 tag layout (compound / computed / FOR tags,
 // dense leaf with front coding). OFF by default, so a deployment that does not
 // ask for it keeps the legacy single-field bag byte for byte. Read on every
-// call — index creation is not a hot path — so a test or an application can turn
+// call â€” index creation is not a hot path â€” so a test or an application can turn
 // it on for one process without a restart.
 bool adi_v2_enabled() noexcept {
     const char* e = std::getenv("OPENADS_ADI_V2");
@@ -10247,7 +10247,7 @@ UNSIGNED32 ENTRYPOINT AdsGetRecordNum(ADSHANDLE hTable, UNSIGNED16 /*bFilterOpti
                            UNSIGNED32* pulRecordNum) {
     if (pulRecordNum == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
     if (auto* rt = get_remote_table(hTable)) {
-        // M12.18 — recno is part of the row trailer that arrives
+        // M12.18 â€” recno is part of the row trailer that arrives
         // with every nav ack, so the cache hit avoids a separate
         // GetRecordNum RTT after a nav.
         if (rt->row_valid) {
@@ -10269,7 +10269,7 @@ UNSIGNED32 ENTRYPOINT AdsGetRecordNum(ADSHANDLE hTable, UNSIGNED16 /*bFilterOpti
 
 UNSIGNED32 ENTRYPOINT AdsGetRecordCount(ADSHANDLE hTable, UNSIGNED16 bFilterOption,
                              UNSIGNED32* pulRecordCount) {
-    // rddads OrdKeyCount (DBOI_KEYCOUNT) passes hOrdCurrent here — a
+    // rddads OrdKeyCount (DBOI_KEYCOUNT) passes hOrdCurrent here â€” a
     // RemoteIndex handle. Must return the *index* key count (scope +
     // SET DELETED aware on the server), NOT the parent table's physical
     // record count. Routing to the table made remote xBrowse allocate
@@ -10285,7 +10285,7 @@ UNSIGNED32 ENTRYPOINT AdsGetRecordCount(ADSHANDLE hTable, UNSIGNED16 bFilterOpti
     }
     if (auto* rt = get_remote_table(hTable)) {
         if (pulRecordCount == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
-        // M12.19 — record count is invariant outside of explicit
+        // M12.19 â€” record count is invariant outside of explicit
         // writes (AppendBlank / DeleteRecord / RecallRecord / Pack
         // / Zap), so cache the value on first hit and serve every
         // subsequent AdsGetRecordCount + AdsGetRelKeyPos (scrollbar)
@@ -10309,21 +10309,21 @@ UNSIGNED32 ENTRYPOINT AdsGetRecordCount(ADSHANDLE hTable, UNSIGNED16 bFilterOpti
     // calls AdsGetRecordCount with the ORDER handle (pArea->hOrdCurrent) to
     // count the records reachable THROUGH that order. For a conditional/FOR
     // order the index holds only the matching rows, so the count must be the
-    // index key count (e.g. 4), not the table's physical record_count() (5) —
+    // index key count (e.g. 4), not the table's physical record_count() (5) â€”
     // native DBFCDX reports 4 here. AdsGetKeyCount already special-cases this;
     // mirror it, but ONLY when an INDEX handle was passed: a TABLE handle must
     // still report the full physical count (RecCount() semantics).
     if (auto* idx = iindex_for_handle(hTable)) {
         if (auto* cdx =
                 dynamic_cast<openads::drivers::cdx::CdxIndex*>(idx)) {
-            // M10.31 — scope-aware: when scope is active, count only keys
+            // M10.31 â€” scope-aware: when scope is active, count only keys
             // within the scoped range rather than the full conditional index.
             // t was already resolved from hTable via get_table() above, which
             // handles index handles via lookup_table_by_index + activate.
             if (t && t->order()) {
                 auto& sc = t->order()->scope();
                 // rddads OrdKeyCount calls AdsGetRecordCount on the order
-                // handle — must honour SET DELETED ON (exclude deleted
+                // handle â€” must honour SET DELETED ON (exclude deleted
                 // keys) or remote xBrowse allocates ghost rows / hangs.
                 const bool hide_del = !t->show_deleted_records();
                 std::function<bool(std::uint32_t)> live;
@@ -10357,7 +10357,7 @@ UNSIGNED32 ENTRYPOINT AdsGetRecordCount(ADSHANDLE hTable, UNSIGNED16 bFilterOpti
         }
         if (auto* adi =
                 dynamic_cast<openads::drivers::adi::AdiIndex*>(idx)) {
-            // Native ADI tag: same rule as CDX — count the index walk, not
+            // Native ADI tag: same rule as CDX â€” count the index walk, not
             // the table, so a FOR-clause tag reports its matching subset.
             //
             // Y se cuenta con count_live_recnos, igual que CDX: mirar el
@@ -10373,14 +10373,14 @@ UNSIGNED32 ENTRYPOINT AdsGetRecordCount(ADSHANDLE hTable, UNSIGNED16 bFilterOpti
             return ok();
         }
     }
-    // M10.31 / M10.32 — when SQL has materialised a traversal sequence
+    // M10.31 / M10.32 â€” when SQL has materialised a traversal sequence
     // (DISTINCT / LIMIT / OFFSET / ORDER BY), report that sequence's
     // length so apps that drive walking by record-count get the
     // post-clause row count.
     if (t->has_recno_sequence()) {
         *pulRecordCount = static_cast<UNSIGNED32>(t->recno_sequence().size());
     } else if (t->has_filter()) {
-        // M10.33 — WHERE-filtered cursor without an installed
+        // M10.33 â€” WHERE-filtered cursor without an installed
         // sequence (no ORDER BY / DISTINCT / LIMIT). Count
         // matching live rows on demand so BETWEEN / LIKE / regular
         // predicates surface their cardinality through GetRecordCount.
@@ -10422,10 +10422,10 @@ UNSIGNED32 ENTRYPOINT AdsGetField(ADSHANDLE hTable, UNSIGNED8* pucField,
                        UNSIGNED16 /*usOption*/) {
     if (auto* rt = get_remote_table(hTable)) {
         if (pulLen == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
-        // M12.17/18 — serve from row cache. Cache populated either
+        // M12.17/18 â€” serve from row cache. Cache populated either
         // by piggyback on the prior nav-op ack (M12.18) or by a
         // standalone FetchCurrentRow call here on first access.
-        // xbrowse-style W cols × H rows repaint: 1 RTT per row,
+        // xbrowse-style W cols Ã— H rows repaint: 1 RTT per row,
         // zero RTT per cell.
         if (!rt->row_valid) {
             (void)rt->conn->fetch_current_row(rt);
@@ -10445,7 +10445,7 @@ UNSIGNED32 ENTRYPOINT AdsGetField(ADSHANDLE hTable, UNSIGNED8* pucField,
             openads::abi::copy_to_caller(pucBuf, pulLen, val);
             return ok();
         }
-        // BOF/EOF — blank template (FWH td_blankrow, TBrowse append row).
+        // BOF/EOF â€” blank template (FWH td_blankrow, TBrowse append row).
         return ads_get_field_blank_out(
             pucBuf, pulLen,
             blank_abi_field_from_ads(rt->fields[fi].type, rt->fields[fi].length),
@@ -10515,7 +10515,7 @@ UNSIGNED32 ENTRYPOINT AdsGetLastError(UNSIGNED32* pulCode, UNSIGNED8* pucBuf,
 // SAP / rddads signature: 5 args.
 //   AdsGetVersion(&ulMajor, &ulMinor, &ucLetter, ucDesc, &usDescLen)
 //
-// pucLetter : single ASCII letter (NOT a UNSIGNED32 codepoint) —
+// pucLetter : single ASCII letter (NOT a UNSIGNED32 codepoint) â€”
 //             writing 4 bytes into a 1-byte slot was undefined.
 // pucDesc / pusDescLen : caller-allocated description buffer +
 //             in/out length. We write the OpenADS version string
@@ -10565,7 +10565,7 @@ UNSIGNED32 ENTRYPOINT AdsGetVersion(UNSIGNED32* pulMajor, UNSIGNED32* pulMinor,
 // Local-mode connections now report the host name + the local wall clock
 // instead of empty strings / 0. AdsGetServerTime returns a six-arg shape
 // matching the ACE 6.x signature rddads' ADSGETSERVERTIME function expects
-// (date string, time string, milliseconds since midnight) — the previous
+// (date string, time string, milliseconds since midnight) â€” the previous
 // 2-arg stub left rddads' on-stack pucDateBuf / pucTimeBuf uninitialised.
 
 namespace {
@@ -10604,7 +10604,7 @@ UNSIGNED32 ENTRYPOINT AdsGetServerTime(ADSHANDLE  /*hConnect*/,
     return openads::AE_SUCCESS;
 }
 
-// ── Trigger execution ──────────────────────────────────────────────────────────
+// â”€â”€ Trigger execution â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Fires enabled triggers on `table_alias` matching `event_mask` (1=INSERT
 // 2=UPDATE 3=DELETE) and `timing` (1=BEFORE 2=INSTEAD_OF 4=AFTER).
 // Triggers are sorted by priority (ascending) before firing.
@@ -10615,7 +10615,7 @@ UNSIGNED32 ENTRYPOINT AdsGetServerTime(ADSHANDLE  /*hConnect*/,
 
 // One collected trigger row-image field: display text + a canonical type
 // char ('C','N','I','L','D','T'), so the script layer can hand cursors and
-// expressions a properly TYPED value (S3 — `n.recurring > 0` must see a
+// expressions a properly TYPED value (S3 â€” `n.recurring > 0` must see a
 // number, not text).
 struct TrigField_ {
     std::string text;
@@ -10623,7 +10623,7 @@ struct TrigField_ {
 };
 
 // Canonical type char for a driver field type. Time/RowVersion/blob-ish
-// types stay 'C' (raw text) — the script engine has no representation for
+// types stay 'C' (raw text) â€” the script engine has no representation for
 // them and text round-trips safely.
 inline char trig_type_char_(openads::drivers::DbfFieldType t) {
     using FT = openads::drivers::DbfFieldType;
@@ -10669,7 +10669,7 @@ Handle handle_for_conn(Connection* c) {
     return found;
 }
 
-// Return the SQL body to execute for a trigger — prefer container unless it
+// Return the SQL body to execute for a trigger â€” prefer container unless it
 // looks like a short type code (e.g. "1"), in which case fall back to procedure.
 static const std::string& trigger_sql_body(const openads::engine::DataDict::TriggerEntry& e) {
     if (e.container.size() > 4) return e.container;
@@ -10677,13 +10677,13 @@ static const std::string& trigger_sql_body(const openads::engine::DataDict::Trig
     return e.container;
 }
 
-// ── Procedural trigger body executor ────────────────────────────────────────
+// â”€â”€ Procedural trigger body executor â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Implements a minimal interpreter for SAP ADS trigger body SQL:
-//   DECLARE @var TYPE       — declares a local variable (ignored, just tracked)
-//   SET @var = expr         — assigns a value; expr may be __new.field, __old.field,
+//   DECLARE @var TYPE       â€” declares a local variable (ignored, just tracked)
+//   SET @var = expr         â€” assigns a value; expr may be __new.field, __old.field,
 //                             a string literal, a numeric literal, or a SQL expression
-//   __new.fieldname         — value of the new record's field (INSERT/UPDATE)
-//   __old.fieldname         — value of the old record's field (UPDATE/DELETE)
+//   __new.fieldname         â€” value of the new record's field (INSERT/UPDATE)
+//   __old.fieldname         â€” value of the old record's field (UPDATE/DELETE)
 // All other statements are executed via AdsExecuteSQLDirect after substitution.
 
 // Type alias to avoid MSVC C2562 when returning std::map<> from a function
@@ -10723,9 +10723,9 @@ struct TrigError_ {
     std::string   message;
 };
 
-}  // extern "C++"  — trig_ helpers regain C++ linkage (silences C4190)
+}  // extern "C++"  â€” trig_ helpers regain C++ linkage (silences C4190)
 
-// fire_triggers_ — fire all enabled, matching triggers for a given event + timing.
+// fire_triggers_ â€” fire all enabled, matching triggers for a given event + timing.
 // timing: 1=BEFORE  2=INSTEAD_OF  4=AFTER
 // Returns true if an INSTEAD OF trigger was fired (caller should skip the actual DML).
 bool fire_triggers_(Handle hConn, Connection* conn,
@@ -10733,7 +10733,7 @@ bool fire_triggers_(Handle hConn, Connection* conn,
                     std::uint32_t timing,
                     Table* new_tbl = nullptr, Table* old_tbl = nullptr,
                     TrigError_* out_err = nullptr,
-                    // S4 — pre-built row images for firings where no table
+                    // S4 â€” pre-built row images for firings where no table
                     // row exists yet (INSERT BEFORE / INSTEAD OF: the image
                     // comes from the statement's VALUES).
                     const TrigFieldMap_* new_override = nullptr,
@@ -10758,7 +10758,7 @@ bool fire_triggers_(Handle hConn, Connection* conn,
         if (e->options & 0x02u) { want_memos  = true; }
     }
     TrigFieldMap_ new_fields, old_fields;
-    // S4 — statement-supplied images take precedence (INSERT BEFORE /
+    // S4 â€” statement-supplied images take precedence (INSERT BEFORE /
     // INSTEAD OF fire before any row exists to collect from).
     if (new_override != nullptr) new_fields = *new_override;
     if (old_override != nullptr) old_fields = *old_override;
@@ -10775,7 +10775,7 @@ bool fire_triggers_(Handle hConn, Connection* conn,
                     const auto& fd = t->field_descriptor(i);
                     // Skip memo and blob field types (NO MEMOS option).
                     // RCB 07/18/2026: was a char-vs-enum comparison that
-                    // never matched — fixed to compare the enum.
+                    // never matched â€” fixed to compare the enum.
                     using FT = openads::drivers::DbfFieldType;
                     if (fd.type == FT::Memo || fd.type == FT::Binary ||
                         fd.type == FT::Varbinary)
@@ -10796,8 +10796,8 @@ bool fire_triggers_(Handle hConn, Connection* conn,
         }
     }
 
-    // S4 — re-entrancy guard: a write performed INSIDE a trigger body to
-    // the SAME table/event does not re-fire that trigger (SAP semantics —
+    // S4 â€” re-entrancy guard: a write performed INSIDE a trigger body to
+    // the SAME table/event does not re-fire that trigger (SAP semantics â€”
     // the INSTEAD OF idiom `insert into t select * from __new` would
     // otherwise recurse).
     static thread_local std::vector<std::string> tl_active_fires;
@@ -10830,7 +10830,7 @@ bool fire_triggers_(Handle hConn, Connection* conn,
 
         // RCB 07/17/2026 (S2): the body runs through the typed script
         // engine (full IF/WHILE/TRY, EXECUTE PROCEDURE into DD script
-        // procs, RAISE). A failure is REPORTED to the caller — the old
+        // procs, RAISE). A failure is REPORTED to the caller â€” the old
         // fragment silently swallowed it, so pmsys audit triggers "fired"
         // while writing nothing and the DML still reported success.
         auto r = script_run_trigger_body(conn, to_ads_handle(hConn), body_copy,
@@ -10859,7 +10859,7 @@ UNSIGNED32 ENTRYPOINT AdsAppendRecord(ADSHANDLE hTable) {
         rt->key_count_cached = false;               // M12.19
         // Cursor moves onto a new blank; any prior keyno is for a different
         // row. Leaving keyno_valid set made AdsGetKeyNum/GetRelKeyPos report
-        // the pre-append position until the next nav invalidation — wrong
+        // the pre-append position until the next nav invalidation â€” wrong
         // scrollbar math after TXBrowse:Refresh() following DBAPPEND.
         rt->keyno_valid      = false;
         remote_clear_nav_boundaries(rt);
@@ -10977,7 +10977,7 @@ UNSIGNED32 ENTRYPOINT AdsAppendRecord(ADSHANDLE hTable) {
     // ACE semantics: a freshly-appended record in a non-exclusive table is
     // automatically locked. Done inside engine append_record() so engine-
     // level callers (SQL INSERT, server AppendBlank) get it too. X#'s
-    // ADSRDD relies on this — its GoHot refuses to write a record it sees
+    // ADSRDD relies on this â€” its GoHot refuses to write a record it sees
     // as unlocked.
     t->set_pending_append(true);
     return ok();
@@ -11116,7 +11116,7 @@ UNSIGNED32 ENTRYPOINT AdsWriteRecord(ADSHANDLE hTable) {
         }
     }
 
-    // Trigger firing order: INSTEAD OF → (skip flush) OR BEFORE → flush → AFTER
+    // Trigger firing order: INSTEAD OF â†’ (skip flush) OR BEFORE â†’ flush â†’ AFTER
     // RCB 07/17/2026 (S2): trigger failures propagate to the client (SAP
     // oracle probe Q6): BEFORE/INSTEAD OF failure blocks the write; AFTER
     // failure returns the error but the write persists.
@@ -11291,7 +11291,7 @@ UNSIGNED32 ENTRYPOINT AdsDeleteRecord(ADSHANDLE hTable) {
             return fail(ri.error());
     }
 
-    // Trigger firing order for DELETE: INSTEAD OF → (skip delete) OR BEFORE → delete → AFTER
+    // Trigger firing order for DELETE: INSTEAD OF â†’ (skip delete) OR BEFORE â†’ delete â†’ AFTER
     // RCB 07/17/2026 (S2): failures propagate (probe Q6 semantics).
     TrigError_ terr;
     if (Connection* conn = conn_for_table(t)) {
@@ -11357,7 +11357,7 @@ UNSIGNED32 ENTRYPOINT AdsRecallRecord(ADSHANDLE hTable) {
 UNSIGNED32 ENTRYPOINT AdsIsRecordDeleted(ADSHANDLE hTable, UNSIGNED16* pbDeleted) {
     if (pbDeleted == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
     if (auto* rt = get_remote_table(hTable)) {
-        // M12.18 — deleted flag rides with the row trailer.
+        // M12.18 â€” deleted flag rides with the row trailer.
         if (rt->row_valid) {
             *pbDeleted = rt->current_deleted ? 1 : 0;
             return ok();
@@ -11377,7 +11377,7 @@ UNSIGNED32 ENTRYPOINT AdsIsRecordDeleted(ADSHANDLE hTable, UNSIGNED16* pbDeleted
 
 UNSIGNED32 ENTRYPOINT AdsSetString(ADSHANDLE hTable, UNSIGNED8* pucField,
                         UNSIGNED8* pucValue, UNSIGNED32 ulLen) {
-    // RCB 2026-05-22 17:03 — AdsSet* previously had no awareness of statement
+    // RCB 2026-05-22 17:03 â€” AdsSet* previously had no awareness of statement
     // handles.  get_table() only queries the HandleRegistry for HandleKind::Table
     // and returns nullptr for anything else, so calls against a prepared statement
     // handle always failed with [5000] unknown table.  We check set_stmt_param
@@ -11510,7 +11510,7 @@ UNSIGNED32 ENTRYPOINT AdsSetString(ADSHANDLE hTable, UNSIGNED8* pucField,
 
 UNSIGNED32 ENTRYPOINT AdsSetLogical(ADSHANDLE hTable, UNSIGNED8* pucField,
                          UNSIGNED16 bValue) {
-    // RCB 2026-05-22 17:03 — same statement-handle gap as AdsSetString.
+    // RCB 2026-05-22 17:03 â€” same statement-handle gap as AdsSetString.
     // Logical fields in DBF are stored as 'T'/'F' but the SQL parser accepts
     // 1 and 0 in INSERT/UPDATE VALUES, so we emit those as the literal.
     if (pucField != nullptr)
@@ -11544,7 +11544,7 @@ UNSIGNED32 ENTRYPOINT AdsSetLogical(ADSHANDLE hTable, UNSIGNED8* pucField,
 
 UNSIGNED32 ENTRYPOINT AdsSetDouble(ADSHANDLE hTable, UNSIGNED8* pucField,
                         double dValue) {
-    // RCB 2026-05-22 17:03 — same statement-handle gap as AdsSetString.
+    // RCB 2026-05-22 17:03 â€” same statement-handle gap as AdsSetString.
     // AdsSetLongLong also routes through here (it casts to double before calling
     // us), so fixing this one covers both numeric bind types.  We use a char
     // buffer with snprintf rather than std::to_string to avoid locale-dependent
@@ -11595,7 +11595,7 @@ UNSIGNED32 ENTRYPOINT AdsSetLongLong(ADSHANDLE hTable, UNSIGNED8* pucField,
 
 namespace {
 
-// Inverse of to_julian — convert a Clipper Julian Day Number back to
+// Inverse of to_julian â€” convert a Clipper Julian Day Number back to
 // a Gregorian (Y, M, D) triple.
 void julian_to_ymd(SIGNED32 jd, int& y, int& m, int& d) {
     long L = static_cast<long>(jd) + 68569;
@@ -11619,7 +11619,7 @@ void compact_ace_date_value(const UNSIGNED8* value, UNSIGNED16 len,
     // ("03/07/2025" under MM/DD/CCYY -> 2025-03-07); try that first.
     // Everything below is the permissive OpenADS superset kept for
     // existing callers: ISO "yyyy-mm-dd" and raw "YYYYMMDD" still land
-    // (SAP rejects raw with 5080 — documented deviation, php and the
+    // (SAP rejects raw with 5080 â€” documented deviation, php and the
     // remote twin write raw).
     if (std::string byfmt = parse_date_by_format(s); !byfmt.empty()) {
         *out = std::move(byfmt);
@@ -11655,7 +11655,7 @@ UNSIGNED32 ENTRYPOINT AdsGetMemoLength(ADSHANDLE hTable, UNSIGNED8* pucField,
                             UNSIGNED32* pulLen) {
     if (pulLen == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
     if (auto* rt = get_remote_table(hTable)) {
-        // Reuse the existing GetField wire op — the returned string
+        // Reuse the existing GetField wire op â€” the returned string
         // is the full memo content; size() is the memo length.
         auto i = remote_field_index(rt, pucField);
         if (i == std::numeric_limits<std::size_t>::max() || i >= rt->fields.size()) {
@@ -11739,7 +11739,7 @@ UNSIGNED32 ENTRYPOINT AdsGetString(ADSHANDLE hTable, UNSIGNED8* pucField,
         UNSIGNED32 raw_len = (pulLen && *pulLen > 0) ? *pulLen : 65536;
         std::vector<UNSIGNED8> tmp(raw_len + 1, 0);
         // AdsGetString promises the RAW storage text (dates "YYYYMMDD"),
-        // while AdsGetField formats per the date format — suppress the
+        // while AdsGetField formats per the date format â€” suppress the
         // formatting for the length of this delegated read.
         g_field_read_raw = true;
         UNSIGNED32 frc = AdsGetField(hTable, pucField, tmp.data(),
@@ -11773,7 +11773,7 @@ UNSIGNED32 ENTRYPOINT AdsGetString(ADSHANDLE hTable, UNSIGNED8* pucField,
     std::string s = v.value().as_string;
     // SAP returns the raw-width blank ("        ", len 8) for an empty
     // DATE read through GetString, not an empty string. Timestamps stay
-    // as decoded — SAP raises 5066 for GetString on those, but php_ads
+    // as decoded â€” SAP raises 5066 for GetString on those, but php_ads
     // depends on the raw "YYYYMMDDhhmmss" (documented deviation).
     {
         const auto& fdd = t->field_descriptor(idx);
@@ -11827,7 +11827,7 @@ bool resolve_field_index_w(Table* tbl, UNSIGNED8* pucField,
     }
     if (pucField == nullptr) return false;
     auto name = openads::abi::to_internal(pucField, 0);
-    // Delegate to Table::field_index — case-insensitive (matches native
+    // Delegate to Table::field_index â€” case-insensitive (matches native
     // ACE semantics) and cached. Field names in DBF/ADT storage are
     // upper-cased, but callers (and CDX/NTX index expressions) may use
     // any case; an exact-case compare here spuriously missed them.
@@ -12144,7 +12144,7 @@ UNSIGNED32 ENTRYPOINT AdsLockRecord(ADSHANDLE hTable, UNSIGNED32 ulRecord) {
 #endif
     Table* t = get_table(hTable);
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
-    // ulRecord == 0 → the current record (ACE convention). Resolving it
+    // ulRecord == 0 â†’ the current record (ACE convention). Resolving it
     // also keeps the CDX record-lock byte (FILE_BASE - recno) clear of
     // the file/table lock byte (FILE_BASE) when recno would be 0.
     std::uint32_t rec = (ulRecord == 0) ? t->recno() : ulRecord;
@@ -12394,7 +12394,7 @@ namespace {
 // per-process map so the L1 thunks can resolve the table from the index
 // handle.
 // Binding for one open tag. Multi-tag CDX files create one binding
-// per tag. At most ONE binding per table is "live" — its `idx` has
+// per tag. At most ONE binding per table is "live" â€” its `idx` has
 // been moved into Table::order_; the rest park their IIndex here so
 // OrdSetFocus / AdsGetIndexHandle can swap them in on demand.
 struct IndexBinding {
@@ -12434,7 +12434,7 @@ void park_active_order(Table* t) {
 }
 
 // Drop every binding tied to `t`. Called from AdsCloseTable / AdsCloseAllTables
-// / AdsDisconnect — without this, a Connection teardown leaves the bindings
+// / AdsDisconnect â€” without this, a Connection teardown leaves the bindings
 // behind, so a later test (or app reconnect) that allocates a Table at the
 // same heap slot inherits the stale entries and table_has_active misfires.
 void purge_bindings_for_table(Table* t) {
@@ -12484,7 +12484,7 @@ openads::util::Result<void> activate_binding(ADSHANDLE h) {
     // touches it after the swap). When act_it points to a handle
     // that's no longer in the binding map (stale entry left by a
     // previous AdsCloseAllIndexes / test cleanup that didn't tidy
-    // act_), drop the act entry but leave Table::order_ alone — the
+    // act_), drop the act entry but leave Table::order_ alone â€” the
     // current code may have set it via the legacy AdsCreateIndex path
     // that doesn't populate `act_`.
     if (act_it != act.end()) {
@@ -12519,7 +12519,7 @@ Table* table_for_index(ADSHANDLE hIndex) {
     auto it = index_bindings().find(hIndex);
     if (it == index_bindings().end()) return nullptr;
     // Activate this binding so the Table's order_ reflects the
-    // requested index — AdsSeek / AdsGotoTop / etc. always operate
+    // requested index â€” AdsSeek / AdsGotoTop / etc. always operate
     // through the Table's active order, and rddads passes the index
     // handle (pArea->hOrdCurrent) as the operand.
     (void)activate_binding(hIndex);
@@ -12553,7 +12553,7 @@ void mark_cdx_key_encoding(Table* t, openads::drivers::IIndex* idx) {
         return;
     }
     // Computed expression: FoxNumeric only when the key has the 8-byte
-    // binary width AND the expression provably evaluates numeric — the
+    // binary width AND the expression provably evaluates numeric â€” the
     // same rules the AdsCreateIndex61 path applies (Val() heuristic +
     // record-1 probe). Fixes numeric Val() DbSeek on reopened CDX (#130).
     if (idx->key_length() != 8) return;
@@ -12580,12 +12580,12 @@ void mark_cdx_key_encoding(Table* t, openads::drivers::IIndex* idx) {
 }
 
 // Stamp OEM national collation onto a CDX index for its table.
-// RCB 2026-07-10 — uses the table's EFFECTIVE collation
+// RCB 2026-07-10 â€” uses the table's EFFECTIVE collation
 // (Table::oem_sort_table(): connection AdsSetCollation override, else
 // ADS_OEM char type + configured default OEM collation), not just the
 // connection's. Reading only conn->oem_sort_table() here left every
-// rddads-opened tag on binary compare — rddads can't call
-// AdsSetCollation — so PL852 seeks missed existing keys (#130
+// rddads-opened tag on binary compare â€” rddads can't call
+// AdsSetCollation â€” so PL852 seeks missed existing keys (#130
 // follow-up). Keep routing through Table::oem_sort_table().
 void apply_cdx_oem_collation(Table* t, openads::drivers::IIndex* idx) {
     if (t == nullptr || idx == nullptr) return;
@@ -12670,7 +12670,7 @@ namespace {
 // Route an ADT table's .adi bag through the CdxIndex engine (full evaluated
 // key + 32-bit recno), so compound / computed / FOR tags work over ADT the
 // same way they do over DBF. The file is then CDX-format even though it is
-// named .adi — only enable when those .ADI files are NOT interchanged with
+// named .adi â€” only enable when those .ADI files are NOT interchanged with
 // real Advantage. Gate: env OPENADS_ADT_CDX_INDEX=1.
 bool adt_cdx_index_enabled() {
     const char* e = std::getenv("OPENADS_ADT_CDX_INDEX");
@@ -12755,7 +12755,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
         const auto& entries = r.value();
         // Register every tag the server opened, but only WRITE handles up
         // to the caller's array capacity. The previous code wrote all
-        // entries whenever pu16ArrayLen was NULL — a stack overflow past a
+        // entries whenever pu16ArrayLen was NULL â€” a stack overflow past a
         // single-handle out-param that clobbered adjacent locals (found on
         // x86: the table handle got overwritten with an index handle and
         // the next call failed 5000 "unknown table").
@@ -12879,8 +12879,8 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
     // Refresh: drop any prior bindings for this Table that came from
     // the same file path. If the active binding was among them, also
     // surrender Table::order_; the caller's reopen will repopulate it.
-    // RCB 01/08/2026: keep the old tag→handle mapping and REUSE those
-    // handles below — remote clients (openads_serverd's wire index_h_)
+    // RCB 01/08/2026: keep the old tagâ†’handle mapping and REUSE those
+    // handles below â€” remote clients (openads_serverd's wire index_h_)
     // hold the numeric handles across a bag reopen, and erasing them
     // made the next SetOrder fail with 5000 (stale binding).
     std::unordered_map<std::string, ADSHANDLE> old_handles;
@@ -12914,7 +12914,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
     if (!is_cdx && !is_adi &&
         !path_ends_with_ci(path, ".ntx")) {
         // Custom extension (".Z01"): the suffix says nothing about the
-        // on-disk format — a compound create writes a CDX bag under any
+        // on-disk format â€” a compound create writes a CDX bag under any
         // name, and DBFCDX reads it back by content. Sniff the header so
         // reopening takes the CDX path instead of misreading it as NTX.
         is_cdx = file_has_cdx_signature(path);
@@ -12938,7 +12938,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
     }
     if (tags.empty()) {
         // NTX or empty CDX: open once via the legacy path. M9.14 lets
-        // multiple NTX files coexist on the same Table — when the
+        // multiple NTX files coexist on the same Table â€” when the
         // table already has an active order, the new NTX parks as an
         // extra view instead of replacing it.
         auto idx = make_index_for(path);
@@ -12969,19 +12969,19 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
     // when the table doesn't already have an active order; the rest
     // (and the first tag in the additive case) park as extra views.
     //
-    // ACE semantics: opening a bag opens EVERY tag — the handle array
+    // ACE semantics: opening a bag opens EVERY tag â€” the handle array
     // only limits how many tag handles are RETURNED to the caller, never
     // how many tags are bound and maintained. Binding just the first tag
     // when the caller passes a NULL/short array left the remaining tags
     // stale on every write; a Harbour DBFCDX peer opening the same bag
-    // then hit corrupt trees ("Corruption detected" / GPF on append —
+    // then hit corrupt trees ("Corruption detected" / GPF on append â€”
     // Pritpal Bedi's record-151 crash).
     UNSIGNED16 cap = (pu16ArrayLen != nullptr) ? *pu16ArrayLen : 0;
     UNSIGNED16 count = 0;
     for (const auto& name : tags) {
         std::unique_ptr<openads::drivers::IIndex> sub;
         // A rerouted bag was listed through CdxIndex above, so it must be
-        // opened through CdxIndex too — handing a CDX-format .adi to the
+        // opened through CdxIndex too â€” handing a CDX-format .adi to the
         // native AdiIndex reader fails and drops every tag on the floor.
         if (is_adi && !adt_to_cdx) {
             auto idx = std::make_unique<openads::drivers::adi::AdiIndex>();
@@ -13346,7 +13346,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
     // index_bindings() / active_binding_for() maps (and the per-table order
     // list) with no synchronization, so two connections building indexes
     // concurrently corrupt the unordered_map (heap corruption / AV). Serialize
-    // the whole native create under the registry mutex — the SQL backends above
+    // the whole native create under the registry mutex â€” the SQL backends above
     // already take it. (state().mu is recursive, so nested handle lookups are
     // safe.)
     std::lock_guard<std::recursive_mutex> _create_lk(state().mu);
@@ -13377,7 +13377,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
     const char* default_ext = is_adt_table ? ".adi" : ".cdx";
     fs::path p;
     if (bag.empty()) {
-        // No bag name supplied → structural index bag: same stem as the
+        // No bag name supplied â†’ structural index bag: same stem as the
         // table (.cdx for DBF, .adi for ADT).  Mirrors AdsOpenTable90.
         p = fs::path(t->path()).replace_extension(default_ext);
     } else {
@@ -13390,7 +13390,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
     }
     // ACE AdsCreateIndex* option bits. include/openads/ace.h carries the
     // SDK-standard values (ADS_UNIQUE 0x01, ADS_COMPOUND 0x02, ADS_CUSTOM
-    // 0x04, ADS_DESCENDING 0x08) — but the two RDD clients we interop with
+    // 0x04, ADS_DESCENDING 0x08) â€” but the two RDD clients we interop with
     // put the "compound" and "descending" flags on SWAPPED bits, measured
     // by instrumenting this function:
     //
@@ -13403,7 +13403,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
     // lone 0x02 OR a lone 0x08 is ascending (it is just that client's
     // "compound" marker), and "descending" is the one case where BOTH bits
     // are set (0x0A). Reading a lone 0x08 (or 0x02) as descending built every
-    // Harbour (resp. X#) order reversed — AdsGotoTop landing on the last key,
+    // Harbour (resp. X#) order reversed â€” AdsGotoTop landing on the last key,
     // SKIP walking backward. The internal SQL CREATE INDEX path (below) emits
     // 0x0A for a descending tag so it round-trips through this same decode.
     const bool opt_compound_bit   = (ulOptions & ADS_COMPOUND) != 0;   // 0x02
@@ -13419,7 +13419,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
         // Custom extension (Pritpal's ".Z01", 29/07/2026): the on-disk
         // FORMAT follows the index kind, not the suffix. Both RDD clients
         // set their compound marker on every tag, so a compound create
-        // writes a CDX-format bag regardless of the extension — exactly
+        // writes a CDX-format bag regardless of the extension â€” exactly
         // what real ADS does and the only form Harbour's DBFCDX can read
         // back (it parses every bag as CDX and reported our NTX-written
         // ".Z01" as corrupted). An explicit ".ntx" suffix, or a create
@@ -13457,7 +13457,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
     // 8-byte order-preserving binary key (keySize 8), not text. Detect a
     // bare numeric field so the index is created with keySize=8 and marked
     // FoxNumeric; the engine then emits the binary key at write time.
-    // STR()/character expressions stay text. (Date deferred — DTOS-style
+    // STR()/character expressions stay text. (Date deferred â€” DTOS-style
     // text indexes already interop.)
     bool cdx_numeric_key = false;
     if (is_cdx) {
@@ -13492,7 +13492,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
 
     // Targeted for the common rddads pattern INDEX ON Val(charfield) (#130).
     // The record-1 probe above cannot run on an empty table, so fall back to a
-    // syntactic test — but only when the WHOLE expression is that call.
+    // syntactic test â€” but only when the WHOLE expression is that call.
     //
     // Testing for "VAL(" anywhere misfires on a CHARACTER key that merely
     // contains one: `cDocumeTra+STR(VAL(cConIntTra),3,0)` is a concatenation
@@ -13535,7 +13535,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
     // key length (which is wrong/empty on an empty table). Detect a bare
     // ASCII-stored numeric field (N / F) so the index width is pinned to
     // the field length and the decimals land in the header. VFP binary
-    // numerics (I/B/Y) are not ASCII on disk — left for a follow-up.
+    // numerics (I/B/Y) are not ASCII on disk â€” left for a follow-up.
     bool          ntx_numeric_key  = false;
     std::uint16_t ntx_num_width     = 0;
     std::uint16_t ntx_num_dec       = 0;
@@ -13603,7 +13603,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
 
     // ADT table + .adi bag -> route to the CdxIndex engine when the env opt-in
     // is set OR the bag already exists in CDX format (so adding a tag to a
-    // reroute-built bag stays CDX even with the flag absent — never mix formats
+    // reroute-built bag stays CDX even with the flag absent â€” never mix formats
     // in one bag). A fresh bag (the ERP erases the .adi before reindex) has no
     // file, so the env flag decides the format to write.
     const bool adt_to_cdx = is_adi && is_adt_table &&
@@ -13632,8 +13632,8 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
             adt_t == openads::drivers::adi::ADT_TYPE_CHAR ||
             adt_t == openads::drivers::adi::ADT_TYPE_CICHAR;
         // The v2 opaque-key leaf (full key stored, memcmp-ordered) is correct for
-        // char fields and ANY computed/compound expression — exactly what the ERP
-        // uses (STR()/DTOS()/concat → character keys). A BARE numeric/date field
+        // char fields and ANY computed/compound expression â€” exactly what the ERP
+        // uses (STR()/DTOS()/concat â†’ character keys). A BARE numeric/date field
         // keeps the legacy numeric ADI leaf (sign-flipped float keys) so the
         // existing packed-key seeks keep working.
         // v2 is OPT-IN. With the switch off this call behaves exactly as it did
@@ -13669,9 +13669,9 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
             cp.key_len     = static_cast<std::uint16_t>(klen);
             cp.descending  = descend;
         } else if (!is_char_field) {
-            // Bare numeric/date → legacy numeric ADI leaf (8-byte packed keys).
+            // Bare numeric/date â†’ legacy numeric ADI leaf (8-byte packed keys).
             // Bare character keeps klen = field length for the legacy char
-            // leaf — do NOT force 8 here or every char key is truncated and
+            // leaf â€” do NOT force 8 here or every char key is truncated and
             // partial seeks miss (OPENADS_ADI_V2 off is the default).
             klen = 8;
         }
@@ -13747,7 +13747,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
             if (auto so = existing.set_options(unique, descend, klen); !so)
                 return fail(so.error());
             // Re-creating an existing tag overwrites its stored KEY
-            // expression and FOR clause too — the whole point of
+            // expression and FOR clause too â€” the whole point of
             // "INDEX ON <other column> TAG ORDERX" without first deleting
             // the bag. Without this the header kept the old column, so
             // AdsGetIndexExpr lied and the next dbAppend synced the wrong
@@ -13780,7 +13780,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
             std::move(created).value());
         // Pin the key geometry to the numeric field descriptor so the
         // on-disk key is the native fixed-width STR(value,width,dec) form
-        // (and the header carries the decimal count) — independent of any
+        // (and the header carries the decimal count) â€” independent of any
         // probed key length, which is absent on an empty table.
         if (ntx_numeric_key) {
             if (auto sf = ntx_owner->set_numeric_format(
@@ -13817,7 +13817,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
         if (!raw) return fail(raw.error());
         t->load_record_for_bulk_scan(std::move(raw.value()), r);
 
-        // DBFCDX inserts deleted rows too — the index is a logical
+        // DBFCDX inserts deleted rows too â€” the index is a logical
         // mirror of the table, not a "live-only" view. SET DELETED
         // hides them at navigation time. Only the FOR clause filters
         // entries out at build time.
@@ -13856,7 +13856,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
     }
     if (auto fl = idx_owner->flush(); !fl) return fail(fl.error());
     // A bag named after the table is the Harbour DBFCDX production
-    // index — set DBF header byte 28 so Harbour auto-opens it on USE.
+    // index â€” set DBF header byte 28 so Harbour auto-opens it on USE.
     if (is_cdx) {
         stamp_production_index_flag(t, p.string());
     }
@@ -13985,7 +13985,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
     // Drop ANY existing binding whose tag matches the one we're
     // re-creating: a CREATE INDEX command on an existing tag is a
     // silent overwrite (clear_data already wiped the on-disk
-    // B+tree) so the stale binding must vanish too — otherwise
+    // B+tree) so the stale binding must vanish too â€” otherwise
     // ordinal lookups iterate over both the old and new bindings.
     for (auto it = m.begin(); it != m.end(); ) {
         if (it->second.table == t && it->second.tag_name == tag) {
@@ -14101,14 +14101,14 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex(ADSHANDLE hTable, UNSIGNED8* pucFile,
                 std::move(created).value());
         } else {
             // The bag exists: ADD the tag (SAP ACE semantics) instead of
-            // truncating the bag — the legacy entry point used to recreate
+            // truncating the bag â€” the legacy entry point used to recreate
             // the file unconditionally, silently dropping every previously
             // created tag (only the last one survived).
             auto added = openads::drivers::cdx::CdxIndex::add_tag(
                 file, tag, expr, klen, false, false, for_expr);
             if (!added && added.error().code == 5044) {
                 // Tag already present: silent overwrite (Harbour rddads /
-                // Clipper convention) — reopen, wipe, rebuild below.
+                // Clipper convention) â€” reopen, wipe, rebuild below.
                 openads::drivers::cdx::CdxIndex existing;
                 auto reopen = existing.open_named(
                     file, openads::drivers::IndexOpenMode::Shared, tag);
@@ -14139,7 +14139,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex(ADSHANDLE hTable, UNSIGNED8* pucFile,
     // records are skipped so AdsSeek over the new index never returns
     // phantom recnos. For CDX, collect the key stream and bulk-load the
     // B+tree bottom-up (one encode per page) instead of record-by-record
-    // insertion — ~10x faster on a full build.
+    // insertion â€” ~10x faster on a full build.
     auto rec_count = t->record_count();
     openads::drivers::cdx::CdxIndex* cdx_bulk =
         path_ends_with_ci(file, ".cdx")
@@ -14148,7 +14148,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex(ADSHANDLE hTable, UNSIGNED8* pucFile,
     std::vector<std::pair<std::string, std::uint32_t>> bulk_keys;
     if (cdx_bulk) bulk_keys.reserve(rec_count);
     for (std::uint32_t r = 1; r <= rec_count; ++r) {
-        // Direct driver read (read-ahead friendly) — legacy AdsCreateIndex path.
+        // Direct driver read (read-ahead friendly) â€” legacy AdsCreateIndex path.
         auto raw = t->driver()->read_record_raw(r);
         if (!raw) return fail(raw.error());
         t->load_record_for_bulk_scan(std::move(raw.value()), r);
@@ -14175,7 +14175,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex(ADSHANDLE hTable, UNSIGNED8* pucFile,
     }
     if (auto fl = idx->flush(); !fl) return fail(fl.error());
     // A bag named after the table is the Harbour DBFCDX production
-    // index — set header byte 28 so Harbour auto-opens it on USE.
+    // index â€” set header byte 28 so Harbour auto-opens it on USE.
     if (path_ends_with_ci(file, ".cdx")) {
         stamp_production_index_flag(t, file);
     }
@@ -14207,7 +14207,7 @@ UNSIGNED32 ENTRYPOINT AdsDeleteIndex(ADSHANDLE hIndex) {
 // / AdsDeleteCustomKey with just an index handle and expect the call
 // to operate on the **current record**. Real ACE evaluates the
 // index's expression against the positioned row and inserts (or
-// erases) the resulting (key, recno) entry — the "custom" wording
+// erases) the resulting (key, recno) entry â€” the "custom" wording
 // comes from the surrounding `ADS_CUSTOM` flag on the index, which
 // disables the engine's auto-sync so apps drive the index manually
 // through these two entry points.
@@ -14317,7 +14317,7 @@ UNSIGNED32 ENTRYPOINT AdsDeleteCustomKey(ADSHANDLE hIndex) {
 // --- M9.19 Full-text search ------------------------------------------------
 //
 // Creates an OpenADS-native `.fts` inverted-index file alongside the
-// table. The format is plain UTF-8 text — clean-room, NOT derived
+// table. The format is plain UTF-8 text â€” clean-room, NOT derived
 // from any proprietary ADS FTS layout. Search support (token lookup
 // at query time) is a follow-up milestone; today the create path
 // gives apps a stable artefact to commit and visit.
@@ -14472,7 +14472,7 @@ UNSIGNED32 ENTRYPOINT AdsFailedTransactionRecovery(UNSIGNED8* pucServer) {
         return fail(openads::AE_INTERNAL_ERROR, "null server path");
     }
     auto path = openads::abi::to_internal(pucServer, 0);
-    // Recovery happens automatically on Connection::open — the open
+    // Recovery happens automatically on Connection::open â€” the open
     // path scans openads.txlog, replays orphan transactions' before-
     // images, and truncates the log. Open + close gives the caller a
     // single explicit recovery pass.
@@ -14508,7 +14508,7 @@ UNSIGNED32 ENTRYPOINT AdsGetAllLocks(ADSHANDLE hTable, UNSIGNED32* paRecnos,
     return ok();
 }
 
-// M12.16c — switch the active order on `hTable` to the binding
+// M12.16c â€” switch the active order on `hTable` to the binding
 // whose tag matches `pucName` (case-insensitive). Mirrors the
 // rddads adsOrdSetActive(cTagName) flow. Empty / NULL name flips
 // the table back to natural-record-order (clear active binding).
@@ -14518,7 +14518,7 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrder(ADSHANDLE hTable, UNSIGNED8* pucName) {
             ? openads::abi::to_internal(pucName, 0) : std::string();
         auto r = rt->conn->set_order_by_name(rt->id, name);
         if (!r) return fail(r.error());
-        // RCB 07/14/2026: BUG FIX — the controlling order just changed, so the
+        // RCB 07/14/2026: BUG FIX â€” the controlling order just changed, so the
         // cached row and every queued lookahead row were read in the OLD order
         // and cannot be served against the new one. Same family as the AdsSeek
         // stale-queue bug: without this, the first skip after an OrdSetFocus
@@ -14691,7 +14691,7 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrderByHandle(ADSHANDLE hTable, ADSHANDLE hInde
             rt->server_order_id = ri->id;
             rt->keyno_valid     = false;
             rt->key_count_cached = false;
-            // RCB 07/14/2026: BUG FIX — order changed, so the cached row and
+            // RCB 07/14/2026: BUG FIX â€” order changed, so the cached row and
             // the queued lookahead rows are in the wrong order. Drop them.
             // (Same stale-queue family as AdsSeek / AdsSetIndexOrder.)
             rt->row_valid = false;
@@ -14786,7 +14786,7 @@ UNSIGNED32 ENTRYPOINT AdsSkipUnique(ADSHANDLE hIndex, SIGNED32 lDirection) {
 // OpenADS publishes a small clean-room API: load the .fts file at
 // `pucFile`, tokenise the query with the standard rules, intersect
 // the per-token recno lists, and write up to `*pulCount` recnos into
-// `paRecnos`. `*pulCount` is treated as in/out — the caller passes
+// `paRecnos`. `*pulCount` is treated as in/out â€” the caller passes
 // the array capacity and reads back the total number of matches
 // (which may be larger than the buffer).
 UNSIGNED32 ENTRYPOINT AdsFTSSearch(ADSHANDLE   /*hConnect*/,
@@ -14821,7 +14821,7 @@ UNSIGNED32 ENTRYPOINT AdsFTSSearch(ADSHANDLE   /*hConnect*/,
 // Real persistence in OpenADS' clean-room DD text format. When the
 // caller's connection has no DD attached (i.e. the connection was
 // opened against a plain data directory, not a `.add` file), the
-// CRUD calls report AE_SUCCESS and no-op — matching the "everything
+// CRUD calls report AE_SUCCESS and no-op â€” matching the "everything
 // quiescent" contract used for AdsMg* in M9.24. Apps that opened
 // the DD via `Connection::open(<.add>)` (M6) get round-trip
 // persistence.
@@ -15074,10 +15074,10 @@ UNSIGNED32 ENTRYPOINT AdsDDRemoveRefIntegrity(ADSHANDLE hConn, UNSIGNED8* pucNam
     return ok();
 }
 
-// SAP database-property id (ABI) → the legacy "prop_N" storage key that
+// SAP database-property id (ABI) â†’ the legacy "prop_N" storage key that
 // existing OpenADS DDs persist (SP_MODIFYDATABASE numbering; the
 // AdsConnect60 login checks read prop_5 / prop_16, DA-Web db_props.php
-// reads the same keys). The storage keys are deliberately STABLE — only
+// reads the same keys). The storage keys are deliberately STABLE â€” only
 // the public ABI numbering moved to SAP's. Ids without a mapping fall
 // back to a raw prop_<id> passthrough, which also keeps legacy callers
 // that passed the storage numbers directly working (their old ids and
@@ -15210,7 +15210,7 @@ UNSIGNED32 ENTRYPOINT AdsDDGetUserProperty(ADSHANDLE hConn, UNSIGNED8* pucUser,
     if (dd == nullptr) { *pusLen = 0; return ok(); }
     auto user = openads::abi::to_internal(pucUser, 0);
 
-    // ADS_DD_USER_BAD_LOGINS (1103) — always 0, returned as uint16.
+    // ADS_DD_USER_BAD_LOGINS (1103) â€” always 0, returned as uint16.
     if (usProp == 1103) {
         UNSIGNED16 zero = 0;
         UNSIGNED16 n = std::min<UNSIGNED16>(cap, sizeof(UNSIGNED16));
@@ -15218,7 +15218,7 @@ UNSIGNED32 ENTRYPOINT AdsDDGetUserProperty(ADSHANDLE hConn, UNSIGNED8* pucUser,
         *pusLen = sizeof(UNSIGNED16);
         return ok();
     }
-    // ADS_DD_USER_GROUP_MEMBERSHIP (1102) — comma-separated group list.
+    // ADS_DD_USER_GROUP_MEMBERSHIP (1102) â€” comma-separated group list.
     if (usProp == 1102) {
         std::string groups;
         for (const auto& g : dd->groups_of(user)) {
@@ -15259,10 +15259,10 @@ UNSIGNED32 ENTRYPOINT AdsDDSetUserProperty(ADSHANDLE hConn, UNSIGNED8* pucUser,
     if (!dd->has_user(user))
         return fail(static_cast<int>(openads::AE_TABLE_NOT_FOUND), user.c_str());
 
-    // ADS_DD_USER_BAD_LOGINS (1103) — read-only counter, silently ignore sets.
+    // ADS_DD_USER_BAD_LOGINS (1103) â€” read-only counter, silently ignore sets.
     if (usProp == 1103) return ok();
 
-    // ADS_DD_USER_GROUP_MEMBERSHIP (1102) — add user to the named group.
+    // ADS_DD_USER_GROUP_MEMBERSHIP (1102) â€” add user to the named group.
     if (usProp == 1102) {
         if (pvBuf == nullptr || usLen == 0) return ok();
         std::string grp(reinterpret_cast<const char*>(pvBuf), usLen);
@@ -15371,12 +15371,12 @@ UNSIGNED32 ENTRYPOINT AdsDDGetTableProperty(ADSHANDLE hConn, UNSIGNED8* pucTable
         case ADS_DD_TABLE_RELATIVE_PATH:       // 211
             return put_str(rel);
 
-        case ADS_DD_TABLE_PATH: {              // 205 — absolute path
+        case ADS_DD_TABLE_PATH: {              // 205 â€” absolute path
             fs::path abs = fs::path(c->data_dir()) / rel;
             return put_str(abs.string());
         }
 
-        case ADS_DD_TABLE_TYPE: {              // 204 — infer from extension
+        case ADS_DD_TABLE_TYPE: {              // 204 â€” infer from extension
             fs::path p(rel);
             std::string ext = p.extension().string();
             for (auto& ch : ext)
@@ -15393,7 +15393,7 @@ UNSIGNED32 ENTRYPOINT AdsDDGetTableProperty(ADSHANDLE hConn, UNSIGNED8* pucTable
         case ADS_DD_TABLE_OBJ_ID:             // 208
             return put_u32(0);
 
-        case ADS_DD_TABLE_FIELD_COUNT:         // 206 — requires opening table
+        case ADS_DD_TABLE_FIELD_COUNT:         // 206 â€” requires opening table
             return put_u32(0);
 
         case ADS_DD_TABLE_AUTO_CREATE:         // 203
@@ -15717,7 +15717,7 @@ UNSIGNED32 ENTRYPOINT AdsDDGetFieldProperty(ADSHANDLE hConn, UNSIGNED8* pucTable
                     ret = put_u16(static_cast<std::uint16_t>(fd.length));
                 } else if (usProp == ADS_DD_FIELD_DECIMAL) {
                     ret = put_u16(static_cast<std::uint16_t>(fd.decimals));
-                } else {  // ADS_DD_FIELD_DEFINITION — "name, type, len, dec"
+                } else {  // ADS_DD_FIELD_DEFINITION â€” "name, type, len, dec"
                     ret = put_str(fd.name + "," +
                                   std::to_string(map_field_type(fd.type)) +
                                   "," + std::to_string(fd.length) + "," +
@@ -15913,7 +15913,7 @@ UNSIGNED32 ENTRYPOINT AdsDDGetIndexProperty(ADSHANDLE hConn, UNSIGNED8* pucTable
         case ADS_DD_INDEX_KEY_LENGTH: return put_u16(found_idx->key_length());
         case ADS_DD_INDEX_KEY_TYPE: {
             // SAP shape: UNSIGNED16 ADS data type of the key (see
-            // AdsGetKeyType) — numeric-encoded keys report ADS_NUMERIC,
+            // AdsGetKeyType) â€” numeric-encoded keys report ADS_NUMERIC,
             // everything else ADS_STRING.
             using KE = openads::drivers::KeyEncoding;
             bool numeric =
@@ -16062,7 +16062,7 @@ UNSIGNED32 ENTRYPOINT AdsDDGetTriggerProperty(ADSHANDLE hConn, UNSIGNED8* pucNam
             else if (e.event_mask==3 && e.timing==2) combined = 0x0100;
             return put_u32(combined);
         }
-        case 1401: /* ADS_DD_TRIG_EVENT_TYPE (SAP ACE) — 1=INSERT 2=UPDATE 3=DELETE */
+        case 1401: /* ADS_DD_TRIG_EVENT_TYPE (SAP ACE) â€” 1=INSERT 2=UPDATE 3=DELETE */
             return put_u32(static_cast<std::uint32_t>(e.event_mask));
         case 1402: /* ADS_DD_TRIG_TIMING (SAP ACE extension) */
             return put_u32(e.timing);
@@ -16119,7 +16119,7 @@ UNSIGNED32 ENTRYPOINT AdsDDSetTriggerProperty(ADSHANDLE hConn, UNSIGNED8* pucNam
         case 1408: /* ADS_DD_TRIG_TABLENAME (SAP ACE) */
             e.table_alias = val; break;
         case ADS_DD_TRIGGER_EVENT:
-        case 1401: /* ADS_DD_TRIG_EVENT_TYPE (SAP ACE) — decode combined ADS constant */
+        case 1401: /* ADS_DD_TRIG_EVENT_TYPE (SAP ACE) â€” decode combined ADS constant */
         {
             std::uint32_t combined = 0;
             parse_u32(combined);
@@ -16494,8 +16494,8 @@ UNSIGNED32 ENTRYPOINT AdsDDDropView(ADSHANDLE hConn, UNSIGNED8* pucName) {
 
 // ---------------------------------------------------------------------------
 // SAP ACE aliases not yet covered above
-// AdsDDAddView / AdsDDRemoveView — thin aliases for Create/Drop.
-// AdsDDGetPermissions / AdsDDGrantPermission / AdsDDRevokePermission —
+// AdsDDAddView / AdsDDRemoveView â€” thin aliases for Create/Drop.
+// AdsDDGetPermissions / AdsDDGrantPermission / AdsDDRevokePermission â€”
 //   fine-grained object ACL helpers used by the php_advantage extension.
 // ---------------------------------------------------------------------------
 
@@ -16906,7 +16906,7 @@ UNSIGNED32 ENTRYPOINT AdsGetIndexHandle(ADSHANDLE hTable, UNSIGNED8* pucName,
 
 
 // Authoritative ordinal sequence of index-binding handles for table `t`.
-// For a CDX bag this is the file's struct-tag (creation) order — what
+// For a CDX bag this is the file's struct-tag (creation) order â€” what
 // ADS / rddads expose through ORDSETFOCUS(N) and OrdNumber(); for NTX it
 // is handle-id order. AdsGetIndexHandleByOrder and
 // AdsGetIndexOrderByHandle MUST share this so they stay exact inverses.
@@ -16918,7 +16918,7 @@ UNSIGNED32 ENTRYPOINT AdsGetIndexHandle(ADSHANDLE hTable, UNSIGNED8* pucName,
 // re-bound here.
 //
 // extern "C++": this file's ACE exports live in an extern "C" block, but
-// this internal helper returns a C++ UDT (std::vector) — give it C++
+// this internal helper returns a C++ UDT (std::vector) â€” give it C++
 // linkage so MSVC doesn't warn C4190.
 extern "C++" std::vector<ADSHANDLE> ordered_index_handles_for(Table* t) {
     auto& m   = index_bindings();
@@ -16983,7 +16983,7 @@ UNSIGNED32 ENTRYPOINT AdsGetIndexHandleByOrder(ADSHANDLE hTable, UNSIGNED16 usOr
     if (phIndex == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
     // Remote table: resolve the ordinal to one of the wire index handles
     // registered at open (production auto-open) / AdsOpenIndex. This is the
-    // path rddads' DbSetOrder(<number>) takes — without it, CDX falls back
+    // path rddads' DbSetOrder(<number>) takes â€” without it, CDX falls back
     // to natural order and remote browses show no index.
     if (auto* rt = get_remote_table(hTable)) {
         if (rt->index_handles.empty()) {
@@ -17066,15 +17066,15 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexDirection(ADSHANDLE hIndex, UNSIGNED16 usDir) {
         return fail(openads::AE_INTERNAL_ERROR, "no active order");
     }
     // Real ADS semantics: AdsSetIndexDirection REVERSES the current
-    // traversal direction — it is not an absolute set. rddads' / X#'s
+    // traversal direction â€” it is not an absolute set. rddads' / X#'s
     // OrdDescend() proves this: the RDD reads the current direction
     // (AdsIsIndexDescending) and, when it differs from the requested one,
-    // calls AdsSetIndexDirection(hIndex, TRUE) — always TRUE, in both the
-    // asc→desc and desc→asc cases. So TRUE means "flip", not "descend".
+    // calls AdsSetIndexDirection(hIndex, TRUE) â€” always TRUE, in both the
+    // ascâ†’desc and descâ†’asc cases. So TRUE means "flip", not "descend".
     // Treating usDir as an absolute 0/1 wedged FWH xbrowse header sorting:
     // the first double-click flipped to descending and every later click
     // re-requested TRUE, which an absolute set left descending forever.
-    // (void)usDir — the value is a legacy flag; the operation is a toggle.
+    // (void)usDir â€” the value is a legacy flag; the operation is a toggle.
     (void)usDir;
     auto* mo = const_cast<openads::engine::Order*>(o);
     mo->set_descending_traverse(!mo->descending_traverse());
@@ -17084,18 +17084,18 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexDirection(ADSHANDLE hIndex, UNSIGNED16 usDir) {
 // ACE / rddads signature: 6 args.
 //   AdsSeek(hIndex, pucKey, u16KeyLen, u16KeyType, u16SeekType, &u16Found)
 //
-// u16KeyType  : ADS_STRINGKEY / ADS_NUMERICKEY / ... — describes
+// u16KeyType  : ADS_STRINGKEY / ADS_NUMERICKEY / ... â€” describes
 //               pucKey's encoding. We accept whatever the caller sends
 //               and pass the bytes through as-is; the engine compares
 //               on raw bytes after padding to the index's key length.
 // u16SeekType : 0 = exact (hard), 1 = soft. Bit 1 = AfterKey.
 // rddads' hb_adsUpdateAreaFlags asks AdsIsFound after every seek to
-// decide whether Found() should report .T. — return the flag the
+// decide whether Found() should report .T. â€” return the flag the
 // engine set inside seek_key.
 UNSIGNED32 ENTRYPOINT AdsIsFound(ADSHANDLE hTable, UNSIGNED16* pbFound) {
     if (pbFound == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
     if (auto* rt = get_remote_table(hTable)) {
-        // M12.21 option C — serve Found() locally when a nav/seek op set
+        // M12.21 option C â€” serve Found() locally when a nav/seek op set
         // it (the common scan case: Skip clears it), saving a round-trip
         // on every step. Fall back to the server only when uncached.
         if (rt->found_cached) { *pbFound = rt->current_found ? 1 : 0; return ok(); }
@@ -17133,7 +17133,7 @@ static UNSIGNED32 ads_seek_local(ADSHANDLE hIndex,
     (void)u16KeyType;
     // Numeric seek keys arrive as sizeof(double) raw IEEE bytes. The ADS SDK
     // names this ADS_DOUBLEKEY (2), but Harbour's rddads tags a numeric dbSeek
-    // with the field DATA type (ADS_STRING==4 in this ABI) — so gating on
+    // with the field DATA type (ADS_STRING==4 in this ABI) â€” so gating on
     // u16KeyType==ADS_DOUBLEKEY missed EVERY rddads numeric seek (the key fell
     // through as 8 raw double bytes and never matched the stored ASCII key).
     // Detect a double key by length + a numeric (ASCII-stored) active index
@@ -17156,7 +17156,7 @@ static UNSIGNED32 ads_seek_local(ADSHANDLE hIndex,
         dk_numeric = (dkt == openads::drivers::DbfFieldType::Numeric ||
                       dkt == openads::drivers::DbfFieldType::Float);
         // DBF Date only: CDX/NTX date keys are raw YYYYMMDD text. ADT
-        // AdtDate keys are ADI packed binary — the ADI driver converts
+        // AdtDate keys are ADI packed binary â€” the ADI driver converts
         // a raw-double seek key itself, so leave those on the raw path.
         dk_date    = (dkt == openads::drivers::DbfFieldType::Date);
         dk_logical = (dkt == openads::drivers::DbfFieldType::Logical);
@@ -17269,7 +17269,7 @@ static UNSIGNED32 ads_seek_local(ADSHANDLE hIndex,
     // matches every record. Skip the underlying B+tree compare and
     // walk straight to the first / last record (depending on the
     // SeekLast retry latch). The seek_last_retry_latch is set only
-    // by AdsSeekLast — meaning the caller is bFindLast=TRUE, in
+    // by AdsSeekLast â€” meaning the caller is bFindLast=TRUE, in
     // which case we want the LAST entry in ASC traversal direction
     // (DBFCDX hb_cdxSeek with fLast = TRUE returns the same record
     // as soft + skip-to-end-of-key-group; the empty key has only
@@ -17278,7 +17278,7 @@ static UNSIGNED32 ads_seek_local(ADSHANDLE hIndex,
         // DBFCDX: empty key always matches; soft-or-hard, asc-only.
         // For DESCEND orders the empty key falls through to the
         // regular seek path so DBFCDX's CDX_MAX_REC_NUM / fLast
-        // inversion takes effect — `DBSEEK("",T,T)` on a DESCEND
+        // inversion takes effect â€” `DBSEEK("",T,T)` on a DESCEND
         // tag is expected to miss (Eof), not land on the bottom.
         bool desc = (t->order() != nullptr &&
                      t->order()->descending_traverse());
@@ -17428,17 +17428,17 @@ UNSIGNED32 ENTRYPOINT AdsSeek(ADSHANDLE hIndex,
                         u16KeyLen);
         if (ri->parent) {
             ri->parent->row_valid = false;               // M12.17
-            // RCB 07/14/2026: BUG FIX — this path invalidated the cached row
+            // RCB 07/14/2026: BUG FIX â€” this path invalidated the cached row
             // but not the lookahead queue. A seek repositions the server cursor
             // ABSOLUTELY, so every queued row belongs to the pre-seek position
             // and the consumed-lag counter no longer describes anything real.
             // Left as it was, the next AdsSkip(1) popped a stale PRE-SEEK row
             // and returned it as the current record with no wire traffic at all
-            // — nothing on the network to make it look wrong — and the wire skip
+            // â€” nothing on the network to make it look wrong â€” and the wire skip
             // after that sent (step + a lag that no longer applied).
             ri->parent->invalidate_prefetch();
         }
-        // RCB 07/14/2026: M12.24 — pass the parent so the SeekAck's row trailer
+        // RCB 07/14/2026: M12.24 â€” pass the parent so the SeekAck's row trailer
         // lands straight in the row cache. Without it row_valid stays false and
         // the caller's next AdsGetField pays a FetchCurrentRow round-trip, i.e.
         // seek-then-read costs 2 RTTs instead of 1.
@@ -17578,13 +17578,13 @@ UNSIGNED32 ENTRYPOINT AdsSeekLast(ADSHANDLE hIndex,
                         u16KeyLen);
         if (ri->parent) {
             ri->parent->row_valid = false;               // M12.17
-            // RCB 07/14/2026: same stale-queue bug as AdsSeek — see the note
+            // RCB 07/14/2026: same stale-queue bug as AdsSeek â€” see the note
             // there for why dropping the block is mandatory after a seek.
             ri->parent->invalidate_prefetch();
         }
         auto r = ri->conn->seek(ri->id, key,
             /*soft=*/0,
-            /*last=*/1, ri->parent);       // M12.24 — see AdsSeek
+            /*last=*/1, ri->parent);       // M12.24 â€” see AdsSeek
         if (!r) return fail(r.error());
         if (pbFound) *pbFound = r.value().hit;
         if (ri->parent) {                            // M12.21 option C
@@ -17609,12 +17609,12 @@ UNSIGNED32 ENTRYPOINT AdsSeekLast(ADSHANDLE hIndex,
 // usLen       : explicit scope-key length. Required because typed
 //               keys (ADS_DOUBLEKEY, ADS_RAWKEY) legally contain
 //               embedded NULs that strlen() would truncate.
-// usDataType  : ADS_STRINGKEY / ADS_RAWKEY / ADS_DOUBLEKEY / ... —
+// usDataType  : ADS_STRINGKEY / ADS_RAWKEY / ADS_DOUBLEKEY / ... â€”
 //               matches AdsSeek's u16KeyType. We mirror AdsSeek's
 //               ADS_DOUBLEKEY -> ASCII-padded conversion so a scope
 //               set with a double compares apples-to-apples against
 //               the index's stored key bytes.
-// A scope bound longer than the index key is meaningless — trim it. Bounds
+// A scope bound longer than the index key is meaningless â€” trim it. Bounds
 // SHORTER than the key are NOT padded: they bound by prefix, and the engine
 // compares only the bytes the caller supplied (Table::key_in_*_scope_).
 // Padding them to key_length used to be done here to make an unpadded bound
@@ -17639,7 +17639,7 @@ UNSIGNED32 ENTRYPOINT AdsSetScope(ADSHANDLE hIndex, UNSIGNED16 usScope,
         if (!r) return fail(r.error());
         // The scoped key count and every keyno/rel-pos value derived
         // from it just changed; recompute lazily on next use. Also drop
-        // read-ahead rows — they were read under the old scope.
+        // read-ahead rows â€” they were read under the old scope.
         if (ri->parent != nullptr) {
             ri->parent->key_count_cached = false;
             ri->parent->keyno_valid      = false;
@@ -17719,7 +17719,7 @@ UNSIGNED32 ENTRYPOINT AdsSetScope(ADSHANDLE hIndex, UNSIGNED16 usScope,
     } else {
         key = pucScope
             ? openads::abi::to_internal(pucScope, usLen) : std::string();
-        // rddads passes hb_itemGetCLen() — the trimmed string length. That
+        // rddads passes hb_itemGetCLen() â€” the trimmed string length. That
         // shorter-than-the-key bound is handled by prefix comparison in the
         // engine, so it is stored as sent; only an over-long bound is trimmed.
         trim_scope_key_to_index(t, key);
@@ -17753,7 +17753,7 @@ UNSIGNED32 ENTRYPOINT AdsGetScope(ADSHANDLE hIndex, UNSIGNED16 usScope,
     // rddads' ADSKEYCOUNT (filter option != ADS_IGNOREFILTERS) seeds
     // *pusLen with sizeof(buffer) then calls AdsGetScope. A failure that
     // leaves *pusLen untouched makes the caller think a scope is set and
-    // enter the key-walk branch — which returns KeyCount=0 and blanks
+    // enter the key-walk branch â€” which returns KeyCount=0 and blanks
     // FWH xBrowse over remote tables/indexes. Remote handles carry no
     // client-side scope; report empty scope explicitly.
     if (get_remote_index(hIndex) != nullptr || get_remote_table(hIndex)) {
@@ -17831,7 +17831,7 @@ UNSIGNED32 ENTRYPOINT AdsCopyTable(ADSHANDLE   hHandle,
     if (!dst.has_extension()) dst.replace_extension(".dbf");
 
     // Build a new DBF that mirrors the source schema. Copy live
-    // records (deleted rows skipped — filter options beyond
+    // records (deleted rows skipped â€” filter options beyond
     // ADS_RESPECTFILTERS land later).
     const auto& src_fields = t->driver()->fields();
     if (src_fields.empty()) {
@@ -17902,7 +17902,7 @@ UNSIGNED32 ENTRYPOINT AdsCopyTable(ADSHANDLE   hHandle,
 //   AdsCopyTableContents(hSrc, hDst, usFilterOption)
 //
 // usFilterOption : ADS_IGNOREFILTERS (0) / ADS_RESPECTFILTERS (1).
-// We iterate raw records and skip the DBF tombstone byte — that
+// We iterate raw records and skip the DBF tombstone byte â€” that
 // matches IGNOREFILTERS (the default Harbour passes). RESPECT
 // will land alongside AOF-aware copy in a follow-up; until then
 // the param is accepted for signature parity and noted.
@@ -17959,7 +17959,7 @@ UNSIGNED32 ENTRYPOINT AdsReindex(ADSHANDLE hTable) {
 // predicate into a SQL WHERE and install it on the backend so it filters
 // server-side. Returns true when handled here (backend table); `rc` then holds
 // the ABI return: ok() on a pushed filter, or a "not available" failure when
-// the predicate can't be translated — so the caller never assumes a filter we
+// the predicate can't be translated â€” so the caller never assumes a filter we
 // did not actually apply and filters client-side instead.
 static bool backend_try_push_filter(ADSHANDLE hTable,
                                     const std::string& clipper_pred,
@@ -17979,7 +17979,7 @@ static bool backend_try_push_filter(ADSHANDLE hTable,
     return true;
 }
 
-// M-AOF.3 — wire AdsSetAOF / AdsClearAOF to the
+// M-AOF.3 â€” wire AdsSetAOF / AdsClearAOF to the
 // engine::aof::evaluate full-scan bitmap evaluator and install the
 // resulting per-record bitmap as the table-level filter predicate.
 // Skip / GoTop / GoBottom already honour the predicate, so the
@@ -17988,7 +17988,7 @@ static bool backend_try_push_filter(ADSHANDLE hTable,
 // entry-point contract.
 //
 // AdsGetAOFOptLevel still reports ADS_OPTIMIZED_NONE because the
-// V1 bitmap is built by a full table scan — no indexes are
+// V1 bitmap is built by a full table scan â€” no indexes are
 // consulted yet. M-AOF.4 will start reporting PART / FULL based
 // on per-leaf coverage. The "is an AOF currently installed at
 // all?" signal is exposed separately so the ABI layer can keep
@@ -18026,8 +18026,8 @@ UNSIGNED32 ENTRYPOINT AdsSetAOF(ADSHANDLE hTable, UNSIGNED8* pucCondition,
         // mirrors real ADS, which errors when an AOF cannot be built.
         // Returning "success + OPTIMIZED_NONE" reads correct in
         // isolation, but stock rddads decides whether to run its own
-        // client-side row filter purely from AdsSetAOF's return value —
-        // it does not call AdsGetAOFOptLevel — so on AE_SUCCESS it
+        // client-side row filter purely from AdsSetAOF's return value â€”
+        // it does not call AdsGetAOFOptLevel â€” so on AE_SUCCESS it
         // assumes the server optimised the filter and skips the
         // client-side pass, turning SET FILTER into a no-op.
         t->clear_filter();
@@ -18054,7 +18054,7 @@ UNSIGNED32 ENTRYPOINT AdsSetAOF(ADSHANDLE hTable, UNSIGNED8* pucCondition,
     return ok();
 }
 
-// AdsSetAOF100 — wide/dual-encoding sibling of AdsSetAOF. Per the SAP
+// AdsSetAOF100 â€” wide/dual-encoding sibling of AdsSetAOF. Per the SAP
 // docs, ulOptions can additionally carry ADS_ENCODE_UTF8 / ADS_ENCODE_UTF16
 // to select the encoding of pvFilter; the numeric values of those flags
 // are not published anywhere available to this build, so only the
@@ -18431,7 +18431,7 @@ UNSIGNED32 ENTRYPOINT AdsSetBinary(ADSHANDLE hTable, UNSIGNED8* pucField,
     PendingBinaryKey key{t, idx};
     auto it = m.find(key);
     if (ulOffset == 0) {
-        // First chunk — reset (or create) the accumulator and lock in
+        // First chunk â€” reset (or create) the accumulator and lock in
         // the announced total + binary type.
         if (it != m.end()) it->second = PendingBinary{};
         else               it = m.emplace(key, PendingBinary{}).first;
@@ -18483,7 +18483,7 @@ UNSIGNED32 ENTRYPOINT AdsGetLastAutoinc(ADSHANDLE hTable, UNSIGNED32* pulValue) 
         return fail(openads::AE_INTERNAL_ERROR, "");
     }
     // ADT/VFP autoinc tracking lands when those drivers gain extended
-    // type support. For now report 0 — the field still reads as part
+    // type support. For now report 0 â€” the field still reads as part
     // of the record buffer for non-autoinc types.
     *pulValue = 0;
     return ok();
@@ -18534,7 +18534,7 @@ UNSIGNED32 ENTRYPOINT AdsIsRecordEncrypted(ADSHANDLE hTable, UNSIGNED16* pbEncry
     return ok();
 }
 
-// M11.2 — convert a plain CDX table to OpenADS-encrypted in place.
+// M11.2 â€” convert a plain CDX table to OpenADS-encrypted in place.
 // Requires AdsSetEncryptionPassword to have been called on the
 // owning connection (located by walking the registry for the
 // connection whose tables include this Table*).
@@ -18674,7 +18674,7 @@ UNSIGNED32 ENTRYPOINT AdsBeginTransaction(ADSHANDLE hConnect) {
         return ok();
     }
 #endif
-    // Table handles — route through the table's connection TxManager
+    // Table handles â€” route through the table's connection TxManager
 #if defined(OPENADS_WITH_SQLITE)
     if (auto* st = get_sqlite_table(hConnect)) {
         if (st->conn) {
@@ -18974,7 +18974,7 @@ UNSIGNED32 ENTRYPOINT AdsInTransaction(ADSHANDLE hConnect, UNSIGNED16* pbInTx) {
     return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
 }
 
-// M12.1 — set the auto-commit threshold on a SQL backend connection.
+// M12.1 â€” set the auto-commit threshold on a SQL backend connection.
 // When threshold > 0, after threshold DML statements the connection
 // auto-commits. When threshold = 0, auto-commit is disabled.
 UNSIGNED32 ENTRYPOINT AdsSetAutoCommit(ADSHANDLE hConnect,
@@ -19069,15 +19069,15 @@ UNSIGNED32 ENTRYPOINT AdsSetAutoCommit(ADSHANDLE hConnect,
     return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
 }
 
-// M11.2 — set the encryption password on a connection. Affects
+// M11.2 â€” set the encryption password on a connection. Affects
 // every subsequent table open: encrypted tables (header byte 0xC3)
 // transparently decrypt on read / encrypt on write using AES-256-CTR
-// keyed off the (zero-padded) password bytes. OpenADS-only format —
+// keyed off the (zero-padded) password bytes. OpenADS-only format â€”
 // not byte-compatible with SAP ADS encrypted .adt files.
-// M11.8 — OEM (CP437) ↔ ANSI (UTF-8 in this build) conversion
+// M11.8 â€” OEM (CP437) â†” ANSI (UTF-8 in this build) conversion
 // helpers. `pucBuf` is read until a NUL byte. Output is written
 // in place into the same buffer (caller must size for worst case
-// — UTF-8 may grow up to 3x); `pulLen` carries the input length
+// â€” UTF-8 may grow up to 3x); `pulLen` carries the input length
 // in and the output length out.
 UNSIGNED32 ENTRYPOINT AdsConvertOemToAnsi(UNSIGNED8* pucBuf, UNSIGNED32* pulLen) {
     if (pucBuf == nullptr || pulLen == nullptr) {
@@ -19119,7 +19119,7 @@ UNSIGNED32 ENTRYPOINT AdsConvertAnsiToOem(UNSIGNED8* pucBuf, UNSIGNED32* pulLen)
     return ok();
 }
 
-// M11.7 — set the connection's string-compare collation. Names:
+// M11.7 â€” set the connection's string-compare collation. Names:
 // `binary` (default) or `nocase`. Affects equality / range
 // comparisons for Character columns in SQL WHERE.
 UNSIGNED32 ENTRYPOINT AdsSetCollation(ADSHANDLE hConnect, UNSIGNED8* pucName) {
@@ -19158,7 +19158,7 @@ UNSIGNED32 ENTRYPOINT AdsSetCollation(ADSHANDLE hConnect, UNSIGNED8* pucName) {
             openads::engine::lookup_oem_upper_table(name.c_str());
         c->set_oem_upper_table(up);
         // Publish for expression evaluation (UPPER() / upper_bare in
-        // index_expr have no Connection context) — see
+        // index_expr have no Connection context) â€” see
         // active_oem_upper_table in oem_collation.h.
         openads::engine::set_active_oem_upper_table(up);
     }
@@ -19196,7 +19196,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateSavepoint(ADSHANDLE hConnect, UNSIGNED8* pucName,
     return ok();
 }
 
-// M11.3 — release a savepoint without rolling back. The work done
+// M11.3 â€” release a savepoint without rolling back. The work done
 // since CreateSavepoint stays part of the enclosing transaction.
 UNSIGNED32 ENTRYPOINT AdsReleaseSavepoint(ADSHANDLE hConnect, UNSIGNED8* pucName) {
     auto& s = state();
@@ -19422,7 +19422,7 @@ struct SqlStatement {
 #endif
     std::string                            sql;
     std::string                            sql_username;
-    // RCB 2026-05-22 17:03 — The original struct stored only the raw SQL string.
+    // RCB 2026-05-22 17:03 â€” The original struct stored only the raw SQL string.
     // AdsSet* functions never had a place to write named parameter values because
     // no parameter map existed here.  AdsPrepareSQL and AdsExecuteSQL had no
     // substitution step, so calling bindXxx() on a prepared statement always
@@ -19433,10 +19433,10 @@ struct SqlStatement {
     std::unordered_map<std::string, std::string> params;
     UNSIGNED32 sql_timeout = 0;
     // Per-statement table-open overrides set by AdsStmt* helpers.
-    // 0 = ADS_DEFAULT → CDX. NOTE (2026-07-28): this default is weaker
+    // 0 = ADS_DEFAULT â†’ CDX. NOTE (2026-07-28): this default is weaker
     // than it looks, and callers cannot always correct it. Harbour's
     // contrib/rddads calls AdsStmtSetTableType only when the requested
-    // type is ADS_CDX or ADS_VFP — an ADS_ADT statement never reaches
+    // type is ADS_CDX or ADS_VFP â€” an ADS_ADT statement never reaches
     // us, because on the real Advantage engine a statement already
     // defaults to ADT. So an ADT table queried through Harbour arrives
     // here as CDX and nothing in the SQL text can say otherwise when the
@@ -19445,9 +19445,9 @@ struct SqlStatement {
     // header and overrides this on open; keep that in place before
     // trusting table_type for anything that touches an existing file.
     UNSIGNED16  table_type   = 0;
-    UNSIGNED16  lock_type    = 0;   // 0 = default → compatible locking
+    UNSIGNED16  lock_type    = 0;   // 0 = default â†’ compatible locking
     UNSIGNED16  char_type    = 0;
-    UNSIGNED16  read_only    = 0;   // non-zero → open read-only
+    UNSIGNED16  read_only    = 0;   // non-zero â†’ open read-only
     UNSIGNED16  check_rights = 0;
     bool        disable_enc  = false;
     std::string collation;
@@ -19507,7 +19507,7 @@ void stmt_unregister(ADSHANDLE h) {
     sql_timeout_map().erase(h);
 }
 
-// RCB 2026-05-22 17:03 — Statement handles live in stmt_map() which is a plain
+// RCB 2026-05-22 17:03 â€” Statement handles live in stmt_map() which is a plain
 // unordered_map keyed on the handle value (starting at 0x60000000).  They are
 // completely invisible to get_table(), which queries the separate HandleRegistry
 // for HandleKind::Table.  This helper is the single check point: if h is in
@@ -19550,7 +19550,7 @@ openads::engine::LockingMode stmt_locking_mode(const SqlStatement& s) {
 // SQL DML (UPDATE/DELETE/INSERT/MERGE) opens tables Shared so multiuser
 // readers can coexist, but writeback_record_() enforces a GoHot lock guard
 // in Shared mode. Without an engine-held lock every SET/DELETE hits 5035
-// "record not locked" — which broke AFTER-trigger bodies (UPDATE log SET…),
+// "record not locked" â€” which broke AFTER-trigger bodies (UPDATE log SETâ€¦),
 // plain SQL DML, NewSeqKey, and the unit suite after the write-guard landed
 // (issue #138). Hold a table-exclusive lock for the life of the statement,
 // matching the RI cascade path. Navigational multiuser still requires an
@@ -19734,7 +19734,7 @@ UNSIGNED32 ENTRYPOINT AdsExecuteSQL(ADSHANDLE hStatement, ADSHANDLE* phCursor) {
             if (pit != params.end()) {
                 sql += pit->second;          // bound literal
             } else {
-                sql.append(src, i, j - i);   // unknown :name — leave verbatim
+                sql.append(src, i, j - i);   // unknown :name â€” leave verbatim
             }
             i = j;
         } else {
@@ -19797,7 +19797,7 @@ extract_system_table_filter_(const openads::sql::SelectStmt& st) {
             found = true;
         } else if (col == "obj_name" || col == "name") {
             // "name" is the SAP column name for the object in
-            // system.permissions (OpenADS renamed OBJ_NAME → Name).
+            // system.permissions (OpenADS renamed OBJ_NAME â†’ Name).
             filter.object_name = cmp.literal;
             found = true;
         } else if (col == "table_name") {
@@ -19878,7 +19878,7 @@ build_memory_result(const std::string& tag,
             std::uint8_t* dst = rec.data() + f.record_offset;
             if (f.type == openads::drivers::DbfFieldType::Integer) {
                 // Guard non-numeric text (e.g. an RI rule stored as a word)
-                // — std::stol would throw across the ABI boundary and crash.
+                // â€” std::stol would throw across the ABI boundary and crash.
                 std::int32_t iv = 0;
                 if (!val.empty()) {
                     try { iv = static_cast<std::int32_t>(std::stol(val)); }
@@ -19942,7 +19942,7 @@ build_system_table(Connection* c, std::string sys_name,
     // RCB 07/16/2026: size a text column to its longest actual value instead
     // of a fixed CHAR width. system.{storedprocedures,functions} declared
     // their body columns as C(255), so multi-KB SQL bodies (pmsys:
-    // sp_SaveIntoAuditLog is 5359 bytes) came back as a 255-byte prefix —
+    // sp_SaveIntoAuditLog is 5359 bytes) came back as a 255-byte prefix â€”
     // silent data loss in the catalog even though the DD and the execution
     // path hold the full text. Memory-table records cap at 64 KB total, so
     // clamp each column defensively below that.
@@ -20043,7 +20043,7 @@ build_system_table(Connection* c, std::string sys_name,
             rows.push_back({
                 e.tag_name, e.table_alias, file, e.expression, e.condition,
                 e.options, e.key_length,
-                "0", "", "", "", "",   // FTS fields — empty on non-FTS indexes
+                "0", "", "", "", "",   // FTS fields â€” empty on non-FTS indexes
                 e.comment, e.collation});
         };
         if (filter && filter->table_name) {
@@ -20083,7 +20083,7 @@ build_system_table(Connection* c, std::string sys_name,
                                                      : plus - start);
                 std::size_t b = term.find_first_not_of(' ');
                 std::size_t e = term.find_last_not_of(' ');
-                if (b == std::string::npos) return {};  // empty term → bail
+                if (b == std::string::npos) return {};  // empty term â†’ bail
                 term = term.substr(b, e - b + 1);
                 bool okid = std::isalpha(static_cast<unsigned char>(term[0])) ||
                             term[0] == '_';
@@ -20117,7 +20117,7 @@ build_system_table(Connection* c, std::string sys_name,
                 for (auto& ch : ext)
                     ch = static_cast<char>(
                         std::tolower(static_cast<unsigned char>(ch)));
-                if (ext != ".adt")  // ADT keys live in .adi — not read here
+                if (ext != ".adt")  // ADT keys live in .adi â€” not read here
                     bags.push_back(tp.replace_extension(".cdx").string());
             }
             for (const auto& bag : bags) {
@@ -20152,7 +20152,7 @@ build_system_table(Connection* c, std::string sys_name,
             std::string expr = expr_for_tag(rel, alias, tag);
             if (expr.empty()) continue;
             std::vector<std::string> fields = parse_simple_fields(expr);
-            if (fields.empty()) continue;  // calculated/complex → no rows
+            if (fields.empty()) continue;  // calculated/complex â†’ no rows
             int seq = 1;
             for (const auto& f : fields) {
                 rows.push_back({alias, f, std::to_string(seq), tag});
@@ -20242,7 +20242,7 @@ build_system_table(Connection* c, std::string sys_name,
     }
     if (sys_name == "usergroupmembers") {
         // Lists which users belong to which group.
-        // SAP column set + order (2026-07-29) is User_Name THEN Group_Name —
+        // SAP column set + order (2026-07-29) is User_Name THEN Group_Name â€”
         // the reverse of the GROUP_NAME/USER_NAME pair OpenADS used to emit, so
         // positional readers saw the two values swapped as well as misnamed.
         // User_Name carries the declared spelling, matching system.users.Name.
@@ -20621,7 +20621,7 @@ build_system_table(Connection* c, std::string sys_name,
         };
         const std::string& user = c->username();
         if (user.empty()) {
-            // No logged-in user — return empty (caller treats as open access).
+            // No logged-in user â€” return empty (caller treats as open access).
             return build(cols, {});
         }
         auto entries = dd->get_all_effective_perms(user);
@@ -20672,7 +20672,7 @@ build_system_table(Connection* c, std::string sys_name,
         // OpenADS stores the RI rule as a word; SAP exposes the raw
         // numeric code, which is asymmetric between update and delete
         // (update Cascade=1, delete Cascade=2; SetNull=3 both). Restrict's
-        // code is a documented default (0) — pmsys has no Restrict RI to
+        // code is a documented default (0) â€” pmsys has no Restrict RI to
         // oracle it against.
         auto ri_rule_code = [](const std::string& w, bool is_del)
                             -> std::string {
@@ -20918,7 +20918,7 @@ build_system_table(Connection* c, std::string sys_name,
                             break;
                         }
                     }
-                    // SAP reports the DD/ADT type code — CICHAR is 20
+                    // SAP reports the DD/ADT type code â€” CICHAR is 20
                     // there, not the ACE sweep constant 25.
                     unsigned tcode = fd.type ==
                         openads::drivers::DbfFieldType::CiCharacter
@@ -20961,7 +20961,7 @@ namespace spproc {
 // -- Named events (sp_CreateEvent / sp_SignalEvent / sp_WaitForEvent...) ----
 // Registrations are per (connection, event-name): every connection that
 // created an event gets its own pending-signal counter and data queue, so
-// one waiter consuming a signal doesn't starve another — mirroring SAP's
+// one waiter consuming a signal doesn't starve another â€” mirroring SAP's
 // per-connection event registration model. Signals from any connection in
 // this process reach all registrations of that name (remote clients' SQL
 // executes inside the server process, so cross-client signaling works).
@@ -21191,12 +21191,12 @@ extern "C++" bool dispatch_sp_builtin(
         }
         if (!dd) { *prc = fail(openads::AE_FUNCTION_NOT_AVAILABLE, "no DD"); return true; }
         if (scope_u == "ALL") {
-            // All triggers in the DD — persist
+            // All triggers in the DD â€” persist
             for (auto& [key, trig] : dd->triggers())
                 trig.enabled = enable;
             *prc = ok(); return true;
         }
-        // Check if scope_raw matches a table alias → disable all triggers for that table
+        // Check if scope_raw matches a table alias â†’ disable all triggers for that table
         bool found_table = false;
         for (auto& [key, trig] : dd->triggers()) {
             std::string ta = trig.table_alias;
@@ -21206,7 +21206,7 @@ extern "C++" bool dispatch_sp_builtin(
             if (ta == sr) { trig.enabled = enable; found_table = true; }
         }
         if (found_table) { *prc = ok(); return true; }
-        // Check if scope_raw matches a trigger name → disable that single trigger
+        // Check if scope_raw matches a trigger name â†’ disable that single trigger
         for (auto& [key, trig] : dd->triggers()) {
             std::string tn = trig.name;
             std::string sr = scope_raw;
@@ -21314,7 +21314,7 @@ extern "C++" bool dispatch_sp_builtin(
     }
     if (uname == "SP_CREATEINDEX" || uname == "SP_CREATEINDEX90") {
         // (TableName, FileName, TagName, Expression, Condition, Options,
-        //  PageSize[, Collation]) — mirrors the CREATE INDEX SQL path:
+        //  PageSize[, Collation]) â€” mirrors the CREATE INDEX SQL path:
         // resolve this Connection's ADSHANDLE, open the table, and reuse
         // AdsCreateIndex61. The optional sp_CreateIndex90 collation
         // argument is accepted and ignored (index collation follows the
@@ -21610,7 +21610,7 @@ extern "C++" bool dispatch_sp_builtin(
     }
     if (uname == "SP_MODIFYLINK") {
         // (Name, Dictionary, StaticPath, AuthenticateActiveUser, UserName,
-        //  Password) — recreate the link with the new settings.
+        //  Password) â€” recreate the link with the new settings.
         if (!dd) { *prc = fail(openads::AE_FUNCTION_NOT_AVAILABLE, "no DD"); return true; }
         if (auto r = dd->drop_link(arg(0)); !r) { *prc = fail(r.error()); return true; }
         if (auto r = dd->create_link(arg(0), arg(1), arg(4), arg(5)); !r) {
@@ -21637,7 +21637,7 @@ extern "C++" bool dispatch_sp_builtin(
     }
     if (uname == "SP_SIGNALEVENT") {
         // (EventName, WaitForCommit, Options[, EventData]). WaitForCommit
-        // is accepted but signals immediately — commit-deferred signaling
+        // is accepted but signals immediately â€” commit-deferred signaling
         // needs transaction hooks that don't exist yet.
         std::string name = spproc::lower(arg(0));
         {
@@ -21696,7 +21696,7 @@ extern "C++" bool dispatch_sp_builtin(
 extern "C++" {
 
 // Enumerate every index attached to an open Table handle in this process.
-// Walks the ABI registry at snapshot time — no open/close bookkeeping to
+// Walks the ABI registry at snapshot time â€” no open/close bookkeeping to
 // drift out of sync. Remote sessions open their tables through this same
 // registry (session.cpp calls the ABI in-process), so the network Server's
 // build_mg_snapshot uses this too; attribution to a user/conn is the
@@ -21848,7 +21848,7 @@ inline std::string fmt_time(std::chrono::system_clock::time_point tp) {
 // Dispatch for built-in sp_* procedures that produce a cursor. Returns true
 // and fills *out (a table or an error) when the name is recognized; the
 // caller adopts the table and registers the cursor handle. Runs WITHOUT the
-// global ABI mutex held — sp_WaitForEvent blocks, and the signaling
+// global ABI mutex held â€” sp_WaitForEvent blocks, and the signaling
 // connection needs that mutex to get its EXECUTE PROCEDURE through.
 bool dispatch_sp_builtin_cursor(
         Connection* c,
@@ -21859,7 +21859,7 @@ bool dispatch_sp_builtin_cursor(
     namespace fs = std::filesystem;
 
     // Everything except the blocking event waits touches shared engine
-    // state (connection tables, DD, handle registry) — serialize on the
+    // state (connection tables, DD, handle registry) â€” serialize on the
     // global ABI mutex like every other SQL statement branch. The waits
     // stay lock-free: they only use `c` as an opaque registry key, and
     // the signaling connection needs this mutex to make progress.
@@ -22053,7 +22053,7 @@ bool dispatch_sp_builtin_cursor(
                 }
                 if (!match) continue;
             }
-            // One row per index FILE, like SAP — a multi-tag CDX/ADI
+            // One row per index FILE, like SAP â€” a multi-tag CDX/ADI
             // shows once, not once per tag.
             bool dup = false;
             for (const auto& r0 : rows)
@@ -22267,7 +22267,7 @@ bool dispatch_sp_builtin_cursor(
     if (uname == "SP_MGGETERRORLOG") {
         // Newest entries from the ads_err.dbf error log (mgmt::ErrorLog).
         // No-arg default is 25, single arg sets the count, and the
-        // two-arg SAP form's second number is the DBF-log count — the
+        // two-arg SAP form's second number is the DBF-log count â€” the
         // only log OpenADS keeps. Error_Number is 0: per the SAP docs the
         // DBF-log entries have no Error_Number (that column only exists
         // in the ADT variant).
@@ -22808,7 +22808,7 @@ bool dispatch_sp_builtin_cursor(
 
 }  // extern "C++"
 
-} // extern "C"  — temporarily closed so proc:: helpers get C++ linkage
+} // extern "C"  â€” temporarily closed so proc:: helpers get C++ linkage
 
 // ============================================================
 // Script-engine bridge (docs/script-engine.md par 4.2 / 4.5).
@@ -22888,8 +22888,8 @@ inline Value value_from_text(const std::string& text, Type t) {
             return Value::date(openads::script::jdn_from_ymd(y, m, d));
         }
         case Type::Timestamp: {
-            // Raw engine format "YYYYMMDDHHMMSS[…]" (AdtTimestamp / DBF T
-            // reader output) — digit run with no separators.
+            // Raw engine format "YYYYMMDDHHMMSS[â€¦]" (AdtTimestamp / DBF T
+            // reader output) â€” digit run with no separators.
             bool raw14 = trimmed.size() >= 8;
             for (std::size_t k2 = 0; raw14 && k2 < 8; ++k2)
                 if (!std::isdigit(static_cast<unsigned char>(trimmed[k2])))
@@ -23081,7 +23081,7 @@ struct OneValueCursor final : openads::script::SqlCursor {
 
 // If `sql` is exactly "SELECT <literal> FROM system.iota", return the
 // literal's value; otherwise empty. Recognizes numbers, 'strings', NULL,
-// TRUE/FALSE and {d '...'}/{ts '...'} — precisely what the executor's
+// TRUE/FALSE and {d '...'}/{ts '...'} â€” precisely what the executor's
 // variable substitution can produce.
 inline std::optional<Value> literal_iota_select(const std::string& sql) {
     auto trim = [](std::string s) {
@@ -23121,7 +23121,7 @@ inline std::optional<Value> literal_iota_select(const std::string& sql) {
         return Value::character(v2);
     }
     if (lit.front() == '{') {
-        // {d 'YYYY-MM-DD'} / {ts '...'} — reuse the text parser.
+        // {d 'YYYY-MM-DD'} / {ts '...'} â€” reuse the text parser.
         auto q1 = lit.find('\'');
         auto q2 = lit.rfind('\'');
         if (q1 == std::string::npos || q2 <= q1) return std::nullopt;
@@ -23150,7 +23150,7 @@ struct AbiSqlCursor final : openads::script::SqlCursor {
     explicit AbiSqlCursor(ADSHANDLE hc) : h(hc) {}
     ~AbiSqlCursor() override { if (h) AdsCloseTable(h); }
     // Hand the underlying cursor handle to the caller (top-level script
-    // result — S3 §10 mechanism); the wrapper stops owning it.
+    // result â€” S3 Â§10 mechanism); the wrapper stops owning it.
     ADSHANDLE release_handle() { ADSHANDLE x = h; h = 0; return x; }
 
     bool next() override {
@@ -23166,7 +23166,7 @@ struct AbiSqlCursor final : openads::script::SqlCursor {
         return n;
     }
     std::string field_name(std::size_t idx) const override {
-        // Script cursor field access (c.name — S3 §11).
+        // Script cursor field access (c.name â€” S3 Â§11).
         UNSIGNED8 nm[128] = {0};
         UNSIGNED16 cap = sizeof(nm) - 1;
         if (AdsGetFieldName(h, static_cast<UNSIGNED16>(idx + 1), nm, &cap)
@@ -23177,7 +23177,7 @@ struct AbiSqlCursor final : openads::script::SqlCursor {
         return s;
     }
     Value field(std::size_t idx) override {
-        // RCB 07/18/2026 (S3 probe C22): prefer BY-NAME access — on a
+        // RCB 07/18/2026 (S3 probe C22): prefer BY-NAME access â€” on a
         // projected SELECT the engine's ordinal path can reach the BASE
         // table's ordinal (returning the wrong column), while name lookup
         // respects the projection. Ordinal stays as the fallback for
@@ -23238,7 +23238,7 @@ struct AbiBridge final : openads::script::SqlBridge {
 
     openads::util::Result<std::unique_ptr<openads::script::SqlCursor>>
     exec(const std::string& sql) override {
-        // Fast path: "SELECT <literal> FROM system.iota" — the shape that
+        // Fast path: "SELECT <literal> FROM system.iota" â€” the shape that
         // variable substitution leaves behind for "(SELECT param FROM
         // __input)". Answered directly; also sidesteps the SQL engine's
         // current lack of literal-only projections (S2-4 gap list).
@@ -23250,7 +23250,7 @@ struct AbiBridge final : openads::script::SqlBridge {
             }
         }
         // Expression fast path: "SELECT <expr> FROM system.iota" with a
-        // script-evaluable projection ("SELECT LENGTH(@t) …" after variable
+        // script-evaluable projection ("SELECT LENGTH(@t) â€¦" after variable
         // substitution). The SQL engine has no expression projections yet;
         // the script evaluator's builtin/operator set covers the idiom
         // (probes N5, C-series result selects).
@@ -23266,7 +23266,7 @@ struct AbiBridge final : openads::script::SqlBridge {
         ADSHANDLE hc = 0;
         UNSIGNED32 rc = AdsExecuteSQLDirect(hStmt, sbuf.data(), &hc);
         if (rc != 0) {
-            // Surface the INNER error text — the statement prefix alone
+            // Surface the INNER error text â€” the statement prefix alone
             // hides which piece of a multi-statement script failed.
             std::string inner = openads::abi::last_error_message();
             return openads::util::Error{static_cast<std::int32_t>(rc), 0,
@@ -23303,9 +23303,9 @@ struct AbiBridge final : openads::script::SqlBridge {
         if (src != "system.iota") return std::nullopt;
         std::string proj = trim(s.substr(7, fp - 7));
         if (proj.empty()) return std::nullopt;
-        // Single projection only — but only a TOP-LEVEL comma splits
+        // Single projection only â€” but only a TOP-LEVEL comma splits
         // projections; commas inside parens/braces/quotes are argument
-        // separators (TIMESTAMPDIFF( SQL_TSI_MONTH, {d '…'}, {d '…'} )).
+        // separators (TIMESTAMPDIFF( SQL_TSI_MONTH, {d 'â€¦'}, {d 'â€¦'} )).
         {
             int depth = 0;
             bool in_str = false;
@@ -23410,11 +23410,11 @@ openads::util::Result<Value> run_dd_function(
 //
 // Case-insensitive whole-word table-name rewrite outside 'strings' and
 // [brackets]. Used to map the proc virtual tables onto real ones:
-//   __input  → system.iota (every __input column reference is a parameter
+//   __input  â†’ system.iota (every __input column reference is a parameter
 //              name, and parameters are substituted to literals by the
 //              executor first, so "(SELECT Month FROM __input)" becomes
 //              "(SELECT 2 FROM system.iota)")
-//   __output → a per-call temp FREE table created from the declared output
+//   __output â†’ a per-call temp FREE table created from the declared output
 //              parameters; returned as the statement cursor, SAP-style.
 inline std::string rewrite_word(const std::string& sql,
                                 const std::string& from,
@@ -23493,7 +23493,7 @@ struct ProcBridge final : openads::script::SqlBridge {
 //
 // The __output temp is an ADT (see run_dd_procedure below), so DBF's limits do
 // not apply here. The old 254 cap was DBF's character-field maximum and it
-// silently shortened any wider declared output — SAP procs routinely declare
+// silently shortened any wider declared output â€” SAP procs routinely declare
 // CICHAR(255) and wider. ADT carries the length in a uint16 field descriptor;
 // an over-long *record* is rejected by AdsCreateTable ("ADT record too long")
 // rather than silently truncated, which is the behaviour we want.
@@ -23526,7 +23526,7 @@ inline openads::util::Result<std::string> run_dd_procedure(
 
     ProcBridge bridge(c, hStmt);
 
-    // Output params → temp FREE table the body INSERTs into.
+    // Output params â†’ temp FREE table the body INSERTs into.
     auto outs = openads::script::parse_params(pe.output_params);
     if (outs && !outs.value().empty()) {
         char nb[48];
@@ -23548,7 +23548,7 @@ inline openads::util::Result<std::string> run_dd_procedure(
         // A DBF field descriptor allots the column name 11 bytes, so a DBF
         // temp truncates every declared output column to 10 characters:
         // sp_GetPhysicalPath's `databasepath` came back as `databasepa`. That
-        // is not cosmetic — the procedure may be reading ADT tables or
+        // is not cosmetic â€” the procedure may be reading ADT tables or
         // declaring outputs that mirror SAP catalog columns, whose names run
         // well past 10 (Trig_Function_Name is 18), and a caller that then
         // references the column by name simply cannot find it. Capping every
@@ -23557,7 +23557,7 @@ inline openads::util::Result<std::string> run_dd_procedure(
         //
         // Plain CREATE TABLE takes its format from the statement's table type
         // and defaults to CDX (i.e. DBF), so pin ADT across this one DDL and
-        // restore the caller's setting afterwards — the procedure body may run
+        // restore the caller's setting afterwards â€” the procedure body may run
         // its own CREATE TABLE and must not inherit our choice.
         //
         // This mirrors the fix already made to the SELECT static-cursor path
@@ -23577,7 +23577,7 @@ inline openads::util::Result<std::string> run_dd_procedure(
 
     // Input params become scope variables; bodies read them either directly
     // or via "(SELECT <param> FROM __input)", which the substitution +
-    // __input→system.iota rewrite turns into a literal select.
+    // __inputâ†’system.iota rewrite turns into a literal select.
     openads::script::Executor ex(&bridge);
     ex.set_user(c->username());
     auto ins = openads::script::parse_params(pe.input_params);
@@ -23587,9 +23587,9 @@ inline openads::util::Result<std::string> run_dd_procedure(
             Value v = Value::null();
             if (i < args.size()) {
                 const auto& a = args[i];
-                // SAP type-checks argument binding at prepare: a {d …}
+                // SAP type-checks argument binding at prepare: a {d â€¦}
                 // temporal literal bound to an Integer-family parameter is
-                // AQE 2124 (oracle 2026-07-24, sp_ChargeMonthlyRent —
+                // AQE 2124 (oracle 2026-07-24, sp_ChargeMonthlyRent â€”
                 // small ints print as <Integer> in the message).
                 if (a.is_temporal && ps[i].type == Type::Integer) {
                     return openads::util::Error{2124, 0,
@@ -23681,13 +23681,13 @@ inline Value trig_value(const TrigField_& f) {
     }
 }
 
-// SQL literal for a row-image field — typed rendering ({d '…'} for dates,
+// SQL literal for a row-image field â€” typed rendering ({d 'â€¦'} for dates,
 // bare numbers, quoted strings) via the script engine's own renderer.
 inline std::string trig_literal(const TrigField_& f) {
     return openads::script::to_sql_literal(trig_value(f));
 }
 
-// One-row cursor over a full trigger row image — backs
+// One-row cursor over a full trigger row image â€” backs
 // `DECLARE n CURSOR AS SELECT * FROM __new` (pmsys Trig_Container).
 // std::map ordering keeps the column order deterministic.
 struct TrigRowCursor final : openads::script::SqlCursor {
@@ -23742,7 +23742,7 @@ struct TriggerBridge final : openads::script::SqlBridge {
             std::getenv("OPENADS_TRACE") != nullptr;
         if (trig_trace)
             std::fprintf(stderr, "[trig-exec] %.120s\n", sql.c_str());
-        // 1. INSERT INTO __error … VALUES (code, 'msg') — the classic ADS
+        // 1. INSERT INTO __error â€¦ VALUES (code, 'msg') â€” the classic ADS
         //    way for a trigger to fail the DML. Surface it as an error.
         {
             std::string up = sql;
@@ -23824,7 +23824,7 @@ struct TriggerBridge final : openads::script::SqlBridge {
             ++i;
         }
 
-        // 3. Fast path: SELECT <field> FROM __new|__old — one-value cursor.
+        // 3. Fast path: SELECT <field> FROM __new|__old â€” one-value cursor.
         {
             std::string t = s;
             std::size_t b = t.find_first_not_of(" \t\r\n");
@@ -23853,9 +23853,9 @@ struct TriggerBridge final : openads::script::SqlBridge {
                             col.back() == ']')
                             col = col.substr(1, col.size() - 2);
                         const auto* m = (src == "__old") ? old_f : new_f;
-                        // SELECT * FROM __new|__old — full row image as a
+                        // SELECT * FROM __new|__old â€” full row image as a
                         // cursor (pmsys Trig_Container: DECLARE n CURSOR AS
-                        // SELECT * FROM __new; …; n.field).
+                        // SELECT * FROM __new; â€¦; n.field).
                         if (col == "*")
                             return std::unique_ptr<
                                 openads::script::SqlCursor>(
@@ -23872,7 +23872,7 @@ struct TriggerBridge final : openads::script::SqlBridge {
         // 4. Statements still referencing the bare __new/__old tables:
         //    a normal trigger re-inserting its source row would double-write
         //    (old-fragment parity: skip); an INSTEAD OF trigger's write is
-        //    the real one — run it with the row image as literals.
+        //    the real one â€” run it with the row image as literals.
         {
             std::string low = s;
             for (auto& ch : low)
@@ -23881,7 +23881,7 @@ struct TriggerBridge final : openads::script::SqlBridge {
                         low.find("__old") != std::string::npos;
             if (refs && !instead_of)
                 return std::unique_ptr<openads::script::SqlCursor>{};
-            // S4 — the INSTEAD OF idiom `INSERT INTO <t> SELECT * FROM
+            // S4 â€” the INSTEAD OF idiom `INSERT INTO <t> SELECT * FROM
             // __new`: expand to an explicit column INSERT built from the
             // row image (empty-text fields are omitted so DD defaults and
             // the NOT NULL checks apply to what the client actually sent).
@@ -23959,10 +23959,10 @@ struct TriggerBridge final : openads::script::SqlBridge {
 };
 
 // ---- S3: top-level scripts through AdsExecuteSQLDirect -------------------
-// SAP mechanism (doc §10): AdsExecuteSQLDirect accepts full multi-statement
+// SAP mechanism (doc Â§10): AdsExecuteSQLDirect accepts full multi-statement
 // scripts; the returned cursor is the last SELECT's result; a script with no
 // SELECT returns rc=0 and no cursor. OpenADS previously executed only single
-// statements — ad-hoc scripts, the qa-diff probe battery, and pmsys
+// statements â€” ad-hoc scripts, the qa-diff probe battery, and pmsys
 // sp_GetPhysicalPath's EXECUTE IMMEDIATE (a full script string) all need
 // this entry.
 
@@ -23970,7 +23970,7 @@ struct TriggerBridge final : openads::script::SqlBridge {
 // Lexed with the script lexer so ';' inside strings/brackets never counts.
 inline bool is_script_input(const std::string& sql) {
     auto toks = openads::script::lex(sql);
-    if (!toks) return false;              // not even lexable → SQL engine
+    if (!toks) return false;              // not even lexable â†’ SQL engine
     const auto& t = toks.value();
     if (t.empty()) return false;
     using Tok = openads::script::Tok;
@@ -23992,7 +23992,7 @@ inline bool is_script_input(const std::string& sql) {
 }
 
 // Execute a top-level script. The last SELECT's cursor either carries a real
-// ADS handle (AbiSqlCursor — handed straight to the caller) or is an
+// ADS handle (AbiSqlCursor â€” handed straight to the caller) or is an
 // engine-internal cursor (literal fast path, trigger row image) that gets
 // materialized into a temp FREE DBF, mirroring the EXECUTE PROCEDURE result
 // machinery.
@@ -24006,7 +24006,7 @@ inline openads::util::Result<void> run_top_level_script(
     ex.set_user(c->username());
     auto r = ex.run(*prog.value());
     if (!r) {
-        // Uncaught RAISE surfaces in SAP's shape (§11 F3c/F5): rc 7200,
+        // Uncaught RAISE surfaces in SAP's shape (Â§11 F3c/F5): rc 7200,
         // "{[name] code : msg}".
         if (r.error().sub_code == openads::script::kRaiseSubCode) {
             return openads::util::Error{openads::script::kScriptError, 2224,
@@ -24029,7 +24029,7 @@ inline openads::util::Result<void> run_top_level_script(
     }
 
     // Engine-internal cursor: materialize rows into a temp ADT (full-length
-    // column names — the DBF this used to write truncated them to 10).
+    // column names â€” the DBF this used to write truncated them to 10).
     std::size_t nc = cur->field_count();
     if (nc == 0) return {};
     if (nc > 64) nc = 64;                 // sanity cap
@@ -24086,10 +24086,10 @@ inline bool sq_is_scalar_agg(const openads::sql::SelectStmt& sq) {
            sq.projection[0].rfind("$AGG_", 0) == 0;
 }
 
-// S4 — shared by the join materializers (2-table + N-way). The merged
+// S4 â€” shared by the join materializers (2-table + N-way). The merged
 // temp cursor is a text-convention DBF, but the SOURCE tables may be
 // ADT (pmsys) whose records carry a 5-byte prefix and binary field
-// encodings — so joins must go through DECODED field values
+// encodings â€” so joins must go through DECODED field values
 // (Table::read_field), never raw record bytes, and each source field
 // maps to a DBF text descriptor.
 inline openads::drivers::DbfField join_out_field(
@@ -24147,7 +24147,7 @@ inline openads::drivers::DbfField join_out_field(
 }
 
 // SAP TRUNCATES AVG toward zero at the result's decimals rather than
-// rounding (oracle 2026-07-21: AVG(money) 1505.58485… -> 1505.5848 at
+// rounding (oracle 2026-07-21: AVG(money) 1505.58485â€¦ -> 1505.5848 at
 // 4dp; AVG(integer) 2190965.7 -> 2190965 at 0dp).
 inline double avg_truncate(double v, int dp) {
     double scale = std::pow(10.0, dp);
@@ -24159,7 +24159,7 @@ inline double avg_truncate(double v, int dp) {
 // (blank cell); the caller pads to out.length.
 // SAP's declared width for an aggregate result column, oracle-probed against
 // the mp corpus 2026-07-30 (see TODO.parity.md). Widths were measured through
-// AdsGetString, which preserves the padding — the PHP binding trims, so it
+// AdsGetString, which preserves the padding â€” the PHP binding trims, so it
 // cannot be used to check this:
 //
 //   SUM(payfile.CHARGES)    N(11,2) -> 21   source + 10
@@ -24190,14 +24190,14 @@ inline bool agg_source_is_text(openads::drivers::DbfFieldType t) {
         case FT::RowVersion: case FT::ModTime:
             return false;
         default:
-            return true;          // Date, Character, Time, Timestamp, Memo…
+            return true;          // Date, Character, Time, Timestamp, Memoâ€¦
     }
 }
 
 // A date-sourced MIN/MAX result must be declared DATE in the temp, not
 // CHARACTER: SAP renders it through the connection date format
 // ("01/18/0203"), which AdsGetField only applies to Date-typed columns.
-// The accumulated cell text stays the raw "YYYYMMDD" — the temp
+// The accumulated cell text stays the raw "YYYYMMDD" â€” the temp
 // materialiser converts a 'D' column's text cell to the binary JDN.
 inline bool agg_source_is_date(openads::drivers::DbfFieldType t) {
     using FT = openads::drivers::DbfFieldType;
@@ -24205,7 +24205,7 @@ inline bool agg_source_is_date(openads::drivers::DbfFieldType t) {
 }
 
 // Value of an aggregate's argument for the current row. Normally the plain
-// column, but SUM(a * b) evaluates `a <op> b` instead — same shape and same
+// column, but SUM(a * b) evaluates `a <op> b` instead â€” same shape and same
 // arithmetic as a projection-level $ARITH_ item, so only the accumulation
 // differs. `rhs_fi` is ignored when the RHS is a literal.
 // `arg_dec` = the argument's declared scale (agg_arg_shape). Division is
@@ -24251,7 +24251,7 @@ struct TextMinMax {
     void feed(const std::string& v) {
         // A blank value is absent, not a minimum. A zero-JDN ADT date is NULL
         // and decodes to "", but a join/group temp stores it as a blank DBF
-        // cell with is_null unset — so without this an empty string wins every
+        // cell with is_null unset â€” so without this an empty string wins every
         // MIN. SAP agrees: MIN over a column with blank dates returns the
         // earliest REAL date, never "".
         if (v.find_first_not_of(' ') == std::string::npos) return;
@@ -24277,26 +24277,26 @@ inline std::uint16_t agg_result_width(openads::sql::AggregateKind k,
     }
 }
 
-// ── SAP's declared shape for an ARITHMETIC aggregate argument ──────────────
+// â”€â”€ SAP's declared shape for an ARITHMETIC aggregate argument â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 //
 // Oracle-derived from 45 probes against ace64.dll (scratch table wprobe on
 // the mp sandbox, 2026-08-05; the raw measurements are in TODO.parity.md
 // history). SAP sizes `SUM(a <op> b)` from an (integer-digits, scale) pair
-// computed per operand and combined per operation — every probe fits:
+// computed per operand and combined per operation â€” every probe fits:
 //
 //   operand N(L,s):   ip = L - s - (s ? 1 : 0)
 //   operand INTEGER:  ip = 11, s = 0        (int32 digits + sign)
 //   literal:          ip = int_digits + 1,  s = fractional digits AS
-//                     WRITTEN ("2.50" is (2,2)) — hence ArithExpr::rhs_text
+//                     WRITTEN ("2.50" is (2,2)) â€” hence ArithExpr::rhs_text
 //   a * b:   ip = ip1 + ip2 - 1             s = s1 + s2
-//   a ± b:   ip = max(ip1, ip2) + 1         s = max(s1, s2)
+//   a Â± b:   ip = max(ip1, ip2) + 1         s = max(s1, s2)
 //   a / b:   ip = ip1 + s2 + min(s1, 2)     s = s1 + ip2 - 1
 //
 //   declared length  L = ip + s + (s ? 1 : 0)
-//   SUM width = L + 10 · AVG/MIN/MAX width = L · displayed scale = s
+//   SUM width = L + 10 Â· AVG/MIN/MAX width = L Â· displayed scale = s
 //   (agg_result_width applies the SUM/AVG rule when handed this L.)
 //
-// The div ip term (min(s1,2)) is the empirical fit over five probes —
+// The div ip term (min(s1,2)) is the empirical fit over five probes â€”
 // division inside aggregates is rare; re-probe before "simplifying" it.
 struct AggArgShape {
     std::uint16_t len = 0;   // declared length of the argument expression
@@ -24312,7 +24312,7 @@ inline void agg_operand_ip_s(const openads::drivers::DbfField& f,
         return;
     }
     if (f.type == FT::Currency || f.type == FT::AdtMoney) {
-        // SAP types money arithmetic as MONEY (rendered unpadded) — a known
+        // SAP types money arithmetic as MONEY (rendered unpadded) â€” a known
         // divergence; treat as N(len,4) so at least the scale matches.
         *s = 4; *ip = std::max<int>(1, f.length - 5);
         return;
@@ -24403,12 +24403,12 @@ inline std::string join_cell_text(openads::engine::Table& t,
             // RIGHT-justified, matching both the xBase numeric convention and
             // SAP: reading a numeric column as a string returns it padded to
             // the declared width, e.g. N(10,2) holding 0 reads back as
-            // "      0.00" — not "0.00". A join must not reformat a value
+            // "      0.00" â€” not "0.00". A join must not reformat a value
             // differently from a plain read of the same column.
             //
             // This was left-justified ("%-*.*f") on the theory that leading
             // spaces "leak" into string reads of the temp cursor. They are not
-            // a leak — they are the value's declared presentation, and SAP
+            // a leak â€” they are the value's declared presentation, and SAP
             // emits them. Left-justifying made every joined numeric disagree
             // with the same column read directly.
             char cell[64];
@@ -24422,7 +24422,7 @@ inline std::string join_cell_text(openads::engine::Table& t,
         case 'L':
             s = v.value().as_bool ? "T" : "F";
             break;
-        default:   // 'C' / 'D' — decoded display text
+        default:   // 'C' / 'D' â€” decoded display text
             s = v.value().as_string;
             break;
     }
@@ -24430,7 +24430,7 @@ inline std::string join_cell_text(openads::engine::Table& t,
     return s;
 }
 
-// S4 — SAP wraps EVERY SQL-statement failure as rc 7200 with an AQE
+// S4 â€” SAP wraps EVERY SQL-statement failure as rc 7200 with an AQE
 // envelope; the native code and a SQLSTATE ride inside the TEXT
 // (oracle-probed 2026-07-23):
 //   Error 7200:  AQE Error:  State = S0000;   NativeError = 2121;
@@ -24439,7 +24439,7 @@ inline std::string join_cell_text(openads::engine::Table& t,
 //   ... NativeError = 5004;  [iAnywhere Solutions][Advantage SQL][ASA]
 //   Error 5004:  Either ACE could not find the specified file, ...
 // Spacing is significant (2 spaces after "7200:"/"AQE Error:"/";" before
-// the brand, 3 after the State) — replicated byte-for-byte.
+// the brand, 3 after the State) â€” replicated byte-for-byte.
 inline std::string sql_error_envelope(std::int32_t code,
                                       const std::string& msg,
                                       const std::string& sql) {
@@ -24449,7 +24449,7 @@ inline std::string sql_error_envelope(std::int32_t code,
     bool         asa    = false;
     std::string  loc_token;    // when set, append SAP's location suffix
     switch (code) {
-        case 5004:              // missing table — msg pre-shaped at source
+        case 5004:              // missing table â€” msg pre-shaped at source
             asa = true;
             break;
         case 5063:              // AE_COLUMN_NOT_FOUND -> SQL engine 2121
@@ -24460,7 +24460,7 @@ inline std::string sql_error_envelope(std::int32_t code,
         case 2124:              // arg-binding type check (pre-shaped msg)
             state = "S0000";
             if (msg.find("Source Data Type: <Date>") != std::string::npos)
-                loc_token = "{d";   // locate the offending {d …} literal
+                loc_token = "{d";   // locate the offending {d â€¦} literal
             break;
         case 2137:              // ambiguous unqualified column (pre-shaped)
             state = "S0000";
@@ -24514,7 +24514,7 @@ inline std::string sql_error_envelope(std::int32_t code,
             return std::isalnum(u) != 0 || ch == '_';
         };
         // SAP points at the offending token's own occurrence. For an
-        // ambiguous column that means the UNQUALIFIED reference — skip
+        // ambiguous column that means the UNQUALIFIED reference â€” skip
         // occurrences that are part of a longer word or qualified by an
         // `alias.` prefix. `require_word` off keeps the old raw-substring
         // behaviour as a fallback when no clean word-boundary hit exists.
@@ -24616,9 +24616,9 @@ inline std::string first_ambiguous_join_column(
 
 // ---- S4: connection-scoped trigger row images + session #temp tables ----
 // While a trigger fires, its __new/__old one-row images are visible to
-// EVERY statement executed on the connection — including stored
-// procedures the trigger body calls (pmsys: trigger →
-// sp_SaveIntoAuditLog → `SELECT n.[col] newVal INTO #MyTrigTbl FROM
+// EVERY statement executed on the connection â€” including stored
+// procedures the trigger body calls (pmsys: trigger â†’
+// sp_SaveIntoAuditLog â†’ `SELECT n.[col] newVal INTO #MyTrigTbl FROM
 // __new n`). #temp tables are connection-scoped result snapshots
 // created by SELECT INTO #t, readable via FROM #t, and removed by
 // DROP TABLE #t or disconnect.
@@ -24724,7 +24724,7 @@ extern "C++" openads::util::Result<void> script_run_trigger_body(
         return openads::util::Error{openads::AE_INTERNAL_ERROR, 0,
             "trigger: statement alloc failed", ""};
     // S4: make this trigger's row images visible to every statement on
-    // the connection while the body runs — stored procedures called from
+    // the connection while the body runs â€” stored procedures called from
     // the body resolve __new/__old through sess::active_images.
     sess::ImageScope img_scope(conn, &new_f, &old_f);
     scriptbridge::TriggerBridge bridge(conn, hStmt, &new_f, &old_f,
@@ -24760,7 +24760,7 @@ bool dispatch_sql_uri_acl(const std::string& sqlstr,
     return true;
 }
 
-// S4 — DD field constraints for one table (case-insensitive lookup):
+// S4 â€” DD field constraints for one table (case-insensitive lookup):
 // "required" (NOT NULL) and "default" decoded from the DD's SAP binary
 // Field records. Keyed by lower-cased field name. Used by the INSERT
 // (enforce + apply defaults) and UPDATE (reject SET col = NULL)
@@ -24813,7 +24813,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
     // the lock (only the owning thread executes this handle).
     std::pair<const ADSHANDLE, SqlStatement*> it_kv{hStatement, st_ptr};
     auto* it = &it_kv;
-    // M12.7 — remote SQL exec. The statement was created against a
+    // M12.7 â€” remote SQL exec. The statement was created against a
     // RemoteConnection; ship the SQL over the wire, allocate a
     // RemoteTable handle around the returned cursor table-id, and
     // hand the resulting ADSHANDLE back to the caller. From here on
@@ -24873,7 +24873,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         }
         // Let SQLite classify the statement (it knows the column count): run_sql
         // returns a navigable cursor for a result-producing statement, or a null
-        // pointer for an executed INSERT/UPDATE/DELETE/DDL — no SQL parsing here.
+        // pointer for an executed INSERT/UPDATE/DELETE/DDL â€” no SQL parsing here.
         auto r = it->second->sqlite->run_sql(sqlstr);
         if (!r) return fail(r.error());
         auto cursor = std::move(r).value();
@@ -25172,9 +25172,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
     if (!c) return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
     auto sql = openads::abi::to_internal(pucSQL, 0);
 
-    // S3 (§10 mechanism): full multi-statement scripts route through the
+    // S3 (Â§10 mechanism): full multi-statement scripts route through the
     // script engine; the last SELECT's cursor comes back as the statement
-    // cursor. Single statements fall through to the SQL dispatcher below —
+    // cursor. Single statements fall through to the SQL dispatcher below â€”
     // the script engine's embedded statements re-enter here one at a time,
     // so per-statement ACL checks still apply.
     if (scriptbridge::is_script_input(sql)) {
@@ -25489,7 +25489,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                             openads::engine::LockingMode lmode)
         -> openads::util::Result<Handle> {
         std::string resolved = tname;
-        // S4 — session #temp table: serve the stored snapshot as a
+        // S4 â€” session #temp table: serve the stored snapshot as a
         // memory table.
         if (!tname.empty() && tname[0] == '#') {
             sess::TempTable tt;
@@ -25606,7 +25606,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
 
     // M10.5/M10.7/M10.9: dispatch on the leading keyword. INSERT /
     // UPDATE / DELETE / CREATE TABLE / CREATE INDEX write through
-    // the engine and return no cursor (phCursor → 0); SELECT keeps
+    // the engine and return no cursor (phCursor â†’ 0); SELECT keeps
     // the M9.21 path.
     if (openads::sql::sql_is_drop_index(sql)) {
         auto di = openads::sql::parse_drop_index(sql);
@@ -25700,7 +25700,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         auto ct = openads::sql::parse_create_table(sql);
         if (!ct) return fail(ct.error());
 
-        // M10.42 — CREATE TABLE t AS SELECT ...: recursively run the
+        // M10.42 â€” CREATE TABLE t AS SELECT ...: recursively run the
         // inner SELECT, build the new table's schema from the result
         // cursor's projected fields, then walk + insert each row.
         if (!ct.value().select_sql.empty()) {
@@ -25736,7 +25736,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             // the source so that an ADT source produces an ADT target and a
             // DBF source produces a CDX target.  Hardcoding ADS_CDX here
             // caused silent schema corruption: ADT field types (Money,
-            // Timestamp, ShortInt, …) have no DBF equivalent, so they were
+            // Timestamp, ShortInt, â€¦) have no DBF equivalent, so they were
             // silently coerced to Character when the target was forced to
             // .dbf regardless of the source format.
             UNSIGNED16 ctas_tgt_type = it->second->table_type;
@@ -25745,11 +25745,11 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 AdsGetTableType(srcCur, &src_type);
                 ctas_tgt_type = (src_type == ADS_ADT) ? ADS_ADT : ADS_CDX;
             }
-            // Build NAME,Type,Len,Dec;… from schema.
+            // Build NAME,Type,Len,Dec;â€¦ from schema.
             // Two switch blocks: the first covers printable-letter DBF type
-            // codes ('C', 'N', …); the second covers ADT numeric type codes
-            // (1–20) stored as raw bytes by adt_driver.cpp.  The ranges are
-            // disjoint (DBF letters are all ≥ 0x42; ADT codes top out at 20)
+            // codes ('C', 'N', â€¦); the second covers ADT numeric type codes
+            // (1â€“20) stored as raw bytes by adt_driver.cpp.  The ranges are
+            // disjoint (DBF letters are all â‰¥ 0x42; ADT codes top out at 20)
             // so there is no ambiguity.
             auto type_name = [](char raw) -> const char* {
                 switch (raw) {
@@ -25841,7 +25841,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     recnos.push_back(r);
                 }
             }
-            // Pre-resolve src column → tgt column by name match.
+            // Pre-resolve src column â†’ tgt column by name match.
             std::vector<std::uint16_t> src_cols(schema.size());
             std::vector<std::uint16_t> tgt_cols(schema.size());
             for (std::size_t i = 0; i < schema.size(); ++i) {
@@ -25886,7 +25886,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         UNSIGNED16 ct_tgt_type = it->second->table_type;
         if (ct_tgt_type == 0 || ct_tgt_type == ADS_DEFAULT) ct_tgt_type = ADS_CDX;
 
-        // Build the rddads `NAME,Type,Len,Dec;…` field-def string and
+        // Build the rddads `NAME,Type,Len,Dec;â€¦` field-def string and
         // route through AdsCreateTable so M9.5's parser owns the
         // schema-write logic.
         std::string defs;
@@ -25941,9 +25941,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         });
         if (conn_h == 0) return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
 
-        // M13.1 — validate table name is not a SELECT result.
+        // M13.1 â€” validate table name is not a SELECT result.
         // INDEX ON (SELECT ...) would open the source table file instead
-        // of using the materialized cursor → corrupts the source indexes.
+        // of using the materialized cursor â†’ corrupts the source indexes.
         // Enforce that table name is a simple identifier/filename.
         const auto& tname = ci.value().table;
         if (tname.empty() || tname[0] == '(' || tname.find("SELECT") != std::string::npos) {
@@ -25984,7 +25984,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         // Re-encode for AdsCreateIndex61's decode. That decode treats a
         // .cdx (compound) tag as descending only when BOTH the compound and
         // descending bits are set (the two RDD clients disagree on which bit
-        // is which — see the decode comment there), so a descending index
+        // is which â€” see the decode comment there), so a descending index
         // must carry ADS_COMPOUND | ADS_DESCENDING (0x0A), not 0x08 alone.
         if (ci.value().unique)     opts |= ADS_UNIQUE;
         if (ci.value().descending) opts |= (ADS_COMPOUND | ADS_DESCENDING);
@@ -26024,7 +26024,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         if (c->has_dd()) {
             auto* dd = c->dd();
             const auto& g = gs.value();
-            // Map right name → bitmask.  Grants accumulate (OR into existing).
+            // Map right name â†’ bitmask.  Grants accumulate (OR into existing).
             using DD = openads::engine::DataDict;
             uint32_t new_bits = 0;
             std::string r = g.right;
@@ -26038,7 +26038,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             else if (r == "EXECUTE")   new_bits = DD::DD_PERM_EXECUTE;
             else if (r == "REFERENCE" || r == "REFERENCES")
                                        new_bits = DD::DD_PERM_REFERENCE;
-            else                       new_bits = DD::DD_PERM_FULL;  // unknown → full
+            else                       new_bits = DD::DD_PERM_FULL;  // unknown â†’ full
             // Determine object type from the DD.
             std::string obj_type = "Table";
             if (dd->has_proc(g.object))     obj_type = "StoredProc";
@@ -26088,7 +26088,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         return ok();
     }
 
-    // M11.4 — `CREATE PROCEDURE <name> AS '<dll_path>::<symbol>'`.
+    // M11.4 â€” `CREATE PROCEDURE <name> AS '<dll_path>::<symbol>'`.
     // Loads the DLL, resolves the symbol, registers the proc on the
     // connection. Returns no cursor.
     if (openads::sql::sql_is_create_procedure(sql)) {
@@ -26104,7 +26104,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         return ok();
     }
 
-    // M11.4 — `EXECUTE PROCEDURE <name>(<arg>, ...)`. Built-in sp_* names
+    // M11.4 â€” `EXECUTE PROCEDURE <name>(<arg>, ...)`. Built-in sp_* names
     // are dispatched directly to DataDict operations; others call the
     // DLL entry point registered via CREATE PROCEDURE.
     if (openads::sql::sql_is_execute_procedure(sql)) {
@@ -26117,8 +26117,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             std::toupper(static_cast<unsigned char>(ch)));
         if (uname.size() > 3 && uname[0]=='S' && uname[1]=='P' && uname[2]=='_') {
             // Cursor-producing built-ins run WITHOUT s.mu: sp_WaitForEvent
-            // blocks until another connection's sp_SignalEvent — which
-            // needs this same mutex — fires or the timeout lapses.
+            // blocks until another connection's sp_SignalEvent â€” which
+            // needs this same mutex â€” fires or the timeout lapses.
             std::optional<openads::util::Result<Table>> spt;
             if (dispatch_sp_builtin_cursor(c, uname, ep.value().args, &spt)) {
                 if (!spt->has_value()) return fail(spt->error());
@@ -26141,8 +26141,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             }
         }
         // RCB 07/17/2026 (S2): DD SQL-script stored procedures run through
-        // the script engine (docs/script-engine.md §4.3). This is the path
-        // that did not exist at all — script procs previously fell through
+        // the script engine (docs/script-engine.md Â§4.3). This is the path
+        // that did not exist at all â€” script procs previously fell through
         // to "procedure not registered". Native (AEP DLL) procs still take
         // the registered-fn path below.
         if (c->has_dd()) {
@@ -26195,7 +26195,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         return materialise_temp_adt(c, "_call_", rcols, rrow, 255, phCursor);
     }
 
-    // S4 — MERGE, UPSERT form (master_merge.htm): probe the ON condition;
+    // S4 â€” MERGE, UPSERT form (master_merge.htm): probe the ON condition;
     // matched rows take the UPDATE specification with SET expressions
     // evaluated through the script engine (the matched row's columns are
     // bound as parameters, so `Sequence = Sequence + 1` and IIF(...) work);
@@ -26447,7 +26447,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             return ok();
         }
 
-        // No match — INSERT specification (if present). Values are
+        // No match â€” INSERT specification (if present). Values are
         // evaluated (no row context) and rendered as literals into a
         // plain INSERT INTO statement.
         if (!mg.value().has_insert) {
@@ -26541,7 +26541,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             }
             assns.push_back({static_cast<std::uint16_t>(fidx), a.value});
         }
-        // S4 — SET <col> = NULL on a DD non-nullable column fails 5147
+        // S4 â€” SET <col> = NULL on a DD non-nullable column fails 5147
         // before any write (SAP: "cannot be updated to a NULL value due
         // to a 'not NULL' constraint").
         {
@@ -26566,11 +26566,11 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         // Walk every live record, run optional WHERE via the same
         // engine filter machinery, and apply the assignments inline.
         if (upd.value().where) {
-            // Leverage the same compile path as SELECT — but inline
+            // Leverage the same compile path as SELECT â€” but inline
             // a smaller version that walks the AST recursively. Reuse
             // is fine: same structure, no SQL features missing.
             // (Helper extraction is deferred until UPDATE picks up
-            // CONTAINS or AND/OR — for now the closures below fully
+            // CONTAINS or AND/OR â€” for now the closures below fully
             // cover the tree.)
             using Pred = std::function<bool(openads::engine::Table&)>;
             std::function<openads::util::Result<Pred>(
@@ -26676,7 +26676,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 if (!tbl->passes_filter()) continue;
 
                 // Evaluate the SET list once for this row (expressions
-                // bind the row's CURRENT — pre-write — column values).
+                // bind the row's CURRENT â€” pre-write â€” column values).
                 std::vector<openads::script::Value> assn_vals;
                 assn_vals.reserve(assns.size());
                 for (const auto& a : assns) {
@@ -26885,7 +26885,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         }
         // Triggers are ROW-LEVEL (SAP semantics): each matching row fires
         // INSTEAD OF / BEFORE / AFTER with that row's __old image (the
-        // values being deleted — pmsys's Delete AuditLog is AFTER DELETE
+        // values being deleted â€” pmsys's Delete AuditLog is AFTER DELETE
         // and reads `SELECT propertyid FROM __old`). INSTEAD OF
         // supersedes the engine's own delete. Failures propagate
         // (probe Q6 semantics).
@@ -26974,11 +26974,11 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             "Unequal number of insert columns and insert values or the "
             "incorrect number of stored procedure input parameters";
 
-        // S4 — DD field constraints (oracle-verified): SAP rejects an
+        // S4 â€” DD field constraints (oracle-verified): SAP rejects an
         // INSERT that leaves a non-nullable column without a value with
         // 5147, checking fields in ordinal order; a missing column with
         // a DD default takes the default instead (an EXPLICIT NULL does
-        // not — it violates). Applies to the VALUES paths; the
+        // not â€” it violates). Applies to the VALUES paths; the
         // INSERT...SELECT path doesn't enforce yet.
         auto ins_rules = dd_field_rules_for(c, ins.value().table);
         auto ins_lower = [](std::string s2) {
@@ -27015,7 +27015,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             return {};
         };
 
-        // M10.41 — INSERT INTO t (cols) SELECT ...: recursively
+        // M10.41 â€” INSERT INTO t (cols) SELECT ...: recursively
         // execute the inner SELECT, walk its cursor, append one
         // target row per source row mapping the inner cursor's
         // projected columns to `ins.columns` positionally.
@@ -27130,7 +27130,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             return ok();
         }
 
-        // M10.52 — multi-row VALUES path. When `rows` is non-empty,
+        // M10.52 â€” multi-row VALUES path. When `rows` is non-empty,
         // append + populate one record per tuple; otherwise fall
         // back to the single-row `values` path.
         auto write_one = [&](const std::vector<openads::sql::InsertLiteral>&
@@ -27150,7 +27150,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 }
                 const auto& v = vals[i];
                 if (v.is_expr) {
-                    // S4 — expression value (User(), Now(), …) evaluated
+                    // S4 â€” expression value (User(), Now(), â€¦) evaluated
                     // through the script engine.
                     auto pr = scriptbridge::compiled(
                         "RETURN " + v.text + ";");
@@ -27181,7 +27181,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             }
             // Apply DD default values to columns the statement did not
             // name (evaluated through the script engine: FALSE, now(),
-            // …; unparseable text falls back to a raw write).
+            // â€¦; unparseable text falls back to a raw write).
             for (std::uint16_t i = 0;
                  !ins_rules.empty() && i < tbl->field_count(); ++i) {
                 const auto& fd = tbl->field_descriptor(i);
@@ -27211,7 +27211,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             }
             return std::monostate{};
         };
-        // S4 — NOT NULL pre-check BEFORE any trigger or write: SAP's 5147
+        // S4 â€” NOT NULL pre-check BEFORE any trigger or write: SAP's 5147
         // constraint violation leaves no row behind and fires nothing.
         {
             std::string viol;
@@ -27239,7 +27239,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         Handle ins_hConn = !ins_alias.empty() ? handle_for_conn(c) : Handle{0};
         bool ins_instead_of = false;
         TrigError_ ins_terr;
-        // S4 — pre-write __new image from the statement VALUES (first
+        // S4 â€” pre-write __new image from the statement VALUES (first
         // row): INSERT BEFORE / INSTEAD OF triggers fire before any table
         // row exists, so the image must come from the statement. pmsys's
         // Insert AuditLog is an INSTEAD OF trigger that reads
@@ -27335,10 +27335,10 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         return ok();
     }
 
-    // M10.26 — top-level `UNION [ALL]` between SELECTs. Each member
+    // M10.26 â€” top-level `UNION [ALL]` between SELECTs. Each member
     // must currently be a `SELECT * FROM <t> [WHERE ...]` form (no
     // joins, aggregates, projection lists, GROUP BY, or ORDER BY
-    // inside members — those compose with UNION in a follow-up).
+    // inside members â€” those compose with UNION in a follow-up).
     // First member's schema is reused for the merged cursor.
     {
         struct UnionPart { std::string sql_text; bool all = false; };
@@ -27397,19 +27397,19 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             auto& s = state();
             std::lock_guard<std::recursive_mutex> lk(s.mu);
 
-            // M10.36 — every UNION member runs through the full
+            // M10.36 â€” every UNION member runs through the full
             // SELECT-execute pipeline as a recursive call to
             // AdsExecuteSQLDirect (allowed by the recursive_mutex on
             // s.mu). Members may now carry JOIN, GROUP BY, aggregates,
-            // CASE WHEN, DISTINCT, LIMIT — anything a plain SELECT
+            // CASE WHEN, DISTINCT, LIMIT â€” anything a plain SELECT
             // accepts. The first member's cursor schema (whatever the
-            // pipeline produces — temp DBF for joins/aggregates,
+            // pipeline produces â€” temp DBF for joins/aggregates,
             // source schema for SELECT *) drives the merged schema;
             // later members align by column name against it.
             //
             // Last member's ORDER BY still becomes the merged sort
             // (M10.28 semantics). We capture it from a parse, then
-            // let the recursive call run as-is — its sort is
+            // let the recursive call run as-is â€” its sort is
             // overwritten by the final post-merge stable_sort below.
             std::optional<openads::sql::OrderBy> final_order;
             {
@@ -27509,7 +27509,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                                 static_cast<std::uint16_t>(col_src[i]));
                             if (v) sval = v.value().as_string;
                         }
-                        // uint16 — an ADT character column can exceed 255
+                        // uint16 â€” an ADT character column can exceed 255
                         // bytes; the old uint8 cast mis-tiled the row.
                         std::uint16_t L = schema[i].length;
                         for (std::uint16_t k = 0; k < L; ++k) {
@@ -27533,7 +27533,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
 
             // Column specs for the shared ADT temp helper
             // (docs/materialised-cursor-temps.md). The old DBF emit also
-            // copied fd.raw_type VERBATIM into the descriptor — an ADT
+            // copied fd.raw_type VERBATIM into the descriptor â€” an ADT
             // source leaked its numeric type code (1-22) into a DBF byte,
             // producing a descriptor no reader could classify; the helper's
             // dual-range mapping normalises those.
@@ -27546,7 +27546,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             }
             std::vector<std::uint8_t> file;
 
-            // M10.28 — apply ORDER BY (from last member) to merged rows.
+            // M10.28 â€” apply ORDER BY (from last member) to merged rows.
             if (final_order) {
                 std::int32_t fi = -1;
                 std::uint16_t off = 0;
@@ -27604,10 +27604,10 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
     auto parsed = openads::sql::parse_select(sql);
     if (!parsed) return fail(parsed.error());
 
-    // S5 — `FROM <view>`: resolve a DD view by substituting its stored
+    // S5 â€” `FROM <view>`: resolve a DD view by substituting its stored
     // SELECT as a derived table. The existing M10.46 machinery then runs
     // the view's SQL recursively and applies the outer clauses (WHERE /
-    // ORDER BY / TOP / aggregates / projection) to its cursor — exactly
+    // ORDER BY / TOP / aggregates / projection) to its cursor â€” exactly
     // SAP's composition semantics, oracle-probed on the mp views
     // (`SELECT TOP 5 Total, ClaimKey FROM SumByClaim ORDER BY ClaimKey`
     // etc.). UNION members re-enter this dispatcher and resolve views for
@@ -27636,13 +27636,13 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
     }
 
     // ====================================================================
-    // ADS dialect — N-way comma join (3+ tables) with composite keys and
+    // ADS dialect â€” N-way comma join (3+ tables) with composite keys and
     // `<alias>.*` projection. The single-JoinClause path below handles only
     // two tables; this path generalises to the multi-table inventory
     // aggregation the application issues (a header/detail join with
     // dimension tables). It runs a left-deep equi-join in FROM order and writes the
-    // projected columns — named by their UNQUALIFIED column name, the ADS
-    // result semantics — into a temp DBF cursor.
+    // projected columns â€” named by their UNQUALIFIED column name, the ADS
+    // result semantics â€” into a temp DBF cursor.
     //
     // NOTE: filters are applied after the join is fully bound (same as the
     // two-table path). Pushing single-table predicates (e.g. the date range)
@@ -27656,7 +27656,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         (parsed.value().from_tables.size() == 2 &&
          !parsed.value().inner_join.has_value())) {
         auto& st = parsed.value();
-        // S4 — aggregates (COUNT/SUM/AVG/MIN/MAX, optional GROUP BY /
+        // S4 â€” aggregates (COUNT/SUM/AVG/MIN/MAX, optional GROUP BY /
         // HAVING) are supported by accumulating during the join walk;
         // the other complex projection kinds are not.
         const bool nway_agg = !st.aggregates.empty();
@@ -27719,7 +27719,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         "multi-table join: table open failed");
         }
 
-        // SAP 2137 — an unqualified column present in more than one joined
+        // SAP 2137 â€” an unqualified column present in more than one joined
         // table is ambiguous. Checked before resolution (which resolves
         // left-first and would silently pick one).
         {
@@ -27897,7 +27897,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             const auto& f =
                 tbls[ti]->driver()->fields()[static_cast<std::size_t>(fi)];
             auto ofld = scriptbridge::join_out_field(f);
-            // Full-length names — the ADT temp carries them whole. (The
+            // Full-length names â€” the ADT temp carries them whole. (The
             // DBF-era resize(10) here also made two long names that agree
             // in their first 10 chars dedup into ONE output column.)
             if (!seen.insert(lc(ofld.name)).second) return;  // first-wins
@@ -28038,7 +28038,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         // --- 7. Residual WHERE evaluator over the bound rows. Rows are
         //         bound by POSITIONING each table (goto_record) and
         //         recording the recno in recs[ti]; values come from
-        //         Table::read_field (decoded — works for ADT's 5-byte
+        //         Table::read_field (decoded â€” works for ADT's 5-byte
         //         prefix + binary encodings as well as DBF), never from
         //         raw record bytes.
         std::vector<std::uint32_t> recs(N, 0);
@@ -28423,7 +28423,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 std::size_t pj_pos = 0;
                 for (const auto& pj : st.projection) {
                     // Positional AS alias (see the single-table GROUP BY
-                    // path — same constraint-4 rule).
+                    // path â€” same constraint-4 rule).
                     const std::string* pj_alias = nullptr;
                     for (const auto& pa : st.projection_aliases)
                         if (pa.first == pj_pos) { pj_alias = &pa.second; break; }
@@ -28627,7 +28627,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             return fail(openads::AE_INTERNAL_ERROR, "join post-open");
         }
 
-        // SAP 2137 — reject an unqualified column present in both joined
+        // SAP 2137 â€” reject an unqualified column present in both joined
         // tables (checked here, where both source schemas are still
         // distinct; the merged cursor below would hide the ambiguity).
         {
@@ -28645,7 +28645,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         std::int32_t rcol = rtbl->field_index(j.right_column);
         // Orientation fallback: a comma-join (`FROM a, b WHERE a.x = b.y`)
         // lowers the join key from the WHERE, where the alias qualifiers are
-        // dropped — so `left_column`/`right_column` may name the columns in
+        // dropped â€” so `left_column`/`right_column` may name the columns in
         // the opposite order to base/joined. If the straight assignment does
         // not resolve but the swapped one does, use the swap. Purely
         // additive: it only fires on inputs the strict path already rejects,
@@ -28684,7 +28684,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             return sl;
         };
 
-        // INNER / LEFT walk left + lookup right. RIGHT swaps that —
+        // INNER / LEFT walk left + lookup right. RIGHT swaps that â€”
         // walk right + lookup left. FULL walks left first (emitting
         // matched + LEFT-style fillers) and then walks right to emit
         // only the unmatched right rows with a blank left filler.
@@ -28718,13 +28718,13 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 probe_map[trim_trailing(v.value().as_string)].push_back(r);
             }
         }
-        // Keep the legacy name `rmap` working — the executor below
+        // Keep the legacy name `rmap` working â€” the executor below
         // walks one side and probes the other through this map.
         auto& rmap = probe_map;
 
         // Build merged schema. The temp cursor is a text-convention DBF,
         // but the SOURCE tables may be ADT (pmsys) whose records carry a
-        // 5-byte prefix and binary field encodings — so the merge must go
+        // 5-byte prefix and binary field encodings â€” so the merge must go
         // through DECODED field values (read_field), never raw record
         // bytes, and each source field maps to a DBF text descriptor.
         struct JOutCol {
@@ -28735,7 +28735,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         std::vector<JOutCol> jcols;
         std::vector<openads::drivers::DbfField> merged;
         // Source CICHAR columns demote to plain 'C' in the temp DBF, so
-        // remember them by merged name — the WHERE/ORDER BY compilers on
+        // remember them by merged name â€” the WHERE/ORDER BY compilers on
         // the joined cursor consult this set to keep SAP's
         // case-insensitive collation.
         std::unordered_set<std::string> join_ci_cols;
@@ -28764,7 +28764,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 oc.src_idx    = static_cast<std::uint16_t>(i);
                 oc.from_right = true;
                 oc.fld        = scriptbridge::join_out_field(rfields[i]);
-                // Full-length merged name — the ADT temp carries it whole.
+                // Full-length merged name â€” the ADT temp carries it whole.
                 // (The DBF-era truncation to 10 chars here made a long
                 // right-side column unreachable by its R_ form.)
                 oc.fld.name = "R_" + oc.fld.name;
@@ -28785,7 +28785,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         }
 
         // Merged column specs + row images for the shared ADT temp helper
-        // (docs/materialised-cursor-temps.md — the DBF this used to write
+        // (docs/materialised-cursor-temps.md â€” the DBF this used to write
         // truncated every merged name, R_ prefix included, to 10 chars).
         std::vector<TempColSpec> jtcols;
         jtcols.reserve(merged.size());
@@ -28795,8 +28795,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         std::vector<std::uint8_t> file;
 
         // Helper: emit one merged record from the DECODED field values of
-        // the currently-positioned source rows (driver-abstracted — works
-        // for ADT and DBF alike). Either side may be absent — outer-join
+        // the currently-positioned source rows (driver-abstracted â€” works
+        // for ADT and DBF alike). Either side may be absent â€” outer-join
         // fillers leave that side's cells blank.
         std::uint32_t emitted = 0;
         auto emit_merged = [&](bool has_left, bool has_right) {
@@ -28819,7 +28819,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         };
 
         if (walk_right) {
-            // RIGHT OUTER — walk right rows, look up the LEFT hash.
+            // RIGHT OUTER â€” walk right rows, look up the LEFT hash.
             // Unmatched right rows surface with blank left fields.
             std::uint32_t rrc = rtbl->record_count();
             for (std::uint32_t r = 1; r <= rrc; ++r) {
@@ -28839,7 +28839,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 }
             }
         } else {
-            // INNER / LEFT / FULL — walk left rows, look up the RIGHT
+            // INNER / LEFT / FULL â€” walk left rows, look up the RIGHT
             // hash. Unmatched left rows surface with blank right
             // fields when is_left or is_full; dropped otherwise.
             std::unordered_set<std::uint32_t> matched_right;
@@ -28881,7 +28881,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         c->close_table(rh.value());
 
         // Materialise + open the merged cursor; NOT yet the user-visible
-        // handle — WHERE / ORDER BY / aggregates below keep refining it.
+        // handle â€” WHERE / ORDER BY / aggregates below keep refining it.
         MaterialisedTemp jtmp;
         {
             UNSIGNED32 mrc = materialise_temp_adt_open(
@@ -29080,7 +29080,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             ctbl->set_filter(std::move(compiled).value());
         }
         if (parsed.value().order_by) {
-            // M10.37 — multi-column ORDER BY against the joined cursor.
+            // M10.37 â€” multi-column ORDER BY against the joined cursor.
             struct SortKey {
                 std::uint16_t field_index;
                 bool          descending;
@@ -29166,7 +29166,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             ctbl->set_recno_sequence(std::move(seq));
         }
 
-        // M10.34 — GROUP BY across JOIN. Same shape as the plain-table
+        // M10.34 â€” GROUP BY across JOIN. Same shape as the plain-table
         // grouped path (M10.25) but reads from the merged cursor.
         if (!parsed.value().group_by.empty() &&
             !parsed.value().aggregates.empty()) {
@@ -29449,9 +29449,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             // (docs/materialised-cursor-temps.md): the DBF this used to
             // write truncated aliases to 11 chars.
             // SAP parity (oracle-verified 07/18/2026): the result carries
-            // ONLY the projected aggregates — group keys are not emitted
+            // ONLY the projected aggregates â€” group keys are not emitted
             // unless projected. Columns are typed N(20,dp) (dp from the
-            // source field; COUNT dp=0), named alias / EXPR / EXPR_1 / …,
+            // source field; COUNT dp=0), named alias / EXPR / EXPR_1 / â€¦,
             // and groups emit sorted ascending by group key.
             auto jg_dp = [&](std::size_t i) -> int {
                 using K = openads::sql::AggregateKind;
@@ -29465,7 +29465,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             };
             // A text MIN/MAX column is one width for every group: the widest
             // decoded value seen anywhere (the source descriptor would
-            // truncate — an ADT date is 4 bytes on disk, 8 decoded).
+            // truncate â€” an ADT date is 4 bytes on disk, 8 decoded).
             std::vector<std::size_t> jg_textw(slots.size(), 0);
             for (auto& kv : groups)
                 for (std::size_t i = 0; i < slots.size(); ++i)
@@ -29535,7 +29535,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                                         jg_stride, phCursor);
         }
 
-        // M10.23 — JOIN + aggregate. Walk the merged cursor (already
+        // M10.23 â€” JOIN + aggregate. Walk the merged cursor (already
         // filtered by the outer WHERE) and replace it with a 1-row
         // aggregate temp DBF before registering the user-visible
         // handle.
@@ -29659,7 +29659,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             // (docs/materialised-cursor-temps.md): the DBF this used to
             // write truncated aliases to 10 chars.
             // SAP parity: columns typed N(20,dp), named alias / EXPR /
-            // EXPR_1 / … (same rules as the grouped paths).
+            // EXPR_1 / â€¦ (same rules as the grouped paths).
             auto jagg_dp = [&](std::size_t i) -> int {
                 using K = openads::sql::AggregateKind;
                 switch (slots[i].def.kind) {
@@ -29751,7 +29751,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         jtmp_guard.keep = true;
         materialised_cursor_temps()[gh] = jtmp.stem;
         // Apply the SELECT projection to the joined cursor (previously
-        // ignored — a join always exposed every merged column). Left
+        // ignored â€” a join always exposed every merged column). Left
         // columns resolve by name; a right-table column that collides
         // with a left name is reachable via its merged `R_<name>` form.
         std::vector<std::uint16_t> jproj;
@@ -29760,7 +29760,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             for (const auto& col : parsed.value().projection) {
                 std::int32_t fidx = ctbl->field_index(col);
                 if (fidx < 0) {
-                    // Full-length lookup — the ADT temp carries the whole
+                    // Full-length lookup â€” the ADT temp carries the whole
                     // merged name (no DBF 10-char truncation any more).
                     fidx = ctbl->field_index("R_" + col);
                 }
@@ -29769,7 +29769,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 jproj.push_back(static_cast<std::uint16_t>(fidx));
             }
         }
-        // S4 — DISTINCT / TOP / LIMIT [OFFSET] on the joined cursor
+        // S4 â€” DISTINCT / TOP / LIMIT [OFFSET] on the joined cursor
         // (previously silently ignored). Same shape as the single-table
         // M10.31/M10.32 block: operate on the post-WHERE /
         // post-ORDER-BY traversal sequence; DISTINCT dedups by the
@@ -29843,7 +29843,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         return ok();
     }
 
-    // M10.46 — derived table: `FROM (SELECT ...)`. Recursively run
+    // M10.46 â€” derived table: `FROM (SELECT ...)`. Recursively run
     // the inner SELECT first; the resulting cursor's underlying
     // engine::Table becomes the source for the outer clauses.
     auto& s = state();
@@ -29863,7 +29863,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         if (!tbl) return fail(openads::AE_INTERNAL_ERROR,
                               "derived table cursor lookup");
         // continue, lock_guard scoped to whole function below by
-        // dropping out — we want to hold lock through registration.
+        // dropping out â€” we want to hold lock through registration.
         // Since `lk` would die at end of this `if` block, re-take.
     }
     std::lock_guard<std::recursive_mutex> lk(s.mu);
@@ -29880,7 +29880,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
     }
     (void)table_handle;
 
-    // M10.10: aggregate query — walk matching rows, compute the
+    // M10.10: aggregate query â€” walk matching rows, compute the
     // aggregate accumulators, materialise a 1-row temp DBF with one
     // numeric column per aggregate, and return a cursor on it.
     if (!parsed.value().aggregates.empty()) {
@@ -29892,7 +29892,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             std::uint16_t           src_len     = 0;    // source-field width
             std::int32_t            rhs_field   = -1;   // SUM(a * b): b
             // Effective scale/width of the ARGUMENT. For a bare column these
-            // are the source's; for `a <op> b` they follow the operation —
+            // are the source's; for `a <op> b` they follow the operation â€”
             // SAP renders SUM(Real * PRICE) with 4 decimals for two N(..,2)
             // columns, so multiplication adds the scales.
             std::uint8_t            arg_dec     = 0;
@@ -29942,7 +29942,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     }
                     if (a.arg_expr) slot.is_text = false;
                     {
-                        // SAP's declared shape for the argument — oracle-
+                        // SAP's declared shape for the argument â€” oracle-
                         // derived rules in agg_arg_shape (byte-identical
                         // widths incl. the bare-column case).
                         const openads::drivers::DbfField* rfd = nullptr;
@@ -29964,7 +29964,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         }
 
         // Build the WHERE filter (same shape as the SELECT branch
-        // below — but the predicate compiles independently here so
+        // below â€” but the predicate compiles independently here so
         // the aggregate path doesn't depend on that block's lambdas).
         std::function<bool(openads::engine::Table&)> filter;
         if (parsed.value().where) {
@@ -29999,7 +29999,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                                 (openads::engine::Table& t){return !p(t);}};
                 }
                 if (node.kind == Kind::In) {
-                    // S4 — IN under an aggregate WHERE (COUNT(*) WHERE x
+                    // S4 â€” IN under an aggregate WHERE (COUNT(*) WHERE x
                     // IN (...)); literal lists only, CICHAR folds case.
                     std::int32_t fidx =
                         tbl->field_index(node.in_clause.column);
@@ -30084,7 +30084,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             filter = std::move(compiled).value();
         }
 
-        // M10.25 — `GROUP BY <col>[, <col>...] [HAVING <agg> op num]`.
+        // M10.25 â€” `GROUP BY <col>[, <col>...] [HAVING <agg> op num]`.
         // Walk matching rows, hash by group-key tuple, accumulate per
         // group, then emit one row per group (passing HAVING) into a
         // multi-row temp DBF cursor. Schema: original group-by
@@ -30115,7 +30115,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 gbs.push_back(std::move(gc));
             }
 
-            // M10.30 — HAVING is now a boolean tree of HavingCmp leaves.
+            // M10.30 â€” HAVING is now a boolean tree of HavingCmp leaves.
             // Resolve each leaf to a slot at compile time (validation
             // only); per-group evaluation re-walks the tree.
             auto resolve_slot = [&](const openads::sql::HavingCmp& ha)
@@ -30187,7 +30187,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 if (auto g = tbl->goto_record(r); !g) continue;
                 if (tbl->is_deleted()) continue;
                 // A derived-table / VIEW source arrives as a live cursor
-                // with its own filter (the view's WHERE) — rows it hides
+                // with its own filter (the view's WHERE) â€” rows it hides
                 // must not reach the aggregate.
                 if (!tbl->passes_filter()) continue;
                 if (filter && !filter(*tbl)) continue;
@@ -30237,7 +30237,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     }
                     // SUM(a * b): evaluate the expression like the scalar
                     // path does. Reading only the bare left column summed
-                    // SUM([real] * units) as SUM(real) — invisible in the
+                    // SUM([real] * units) as SUM(real) â€” invisible in the
                     // gate's bounded group, whose units were all 1, and
                     // caught the day the unbounded query first completed.
                     double d = scriptbridge::agg_arg_value(
@@ -30297,8 +30297,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             // (docs/materialised-cursor-temps.md): the DBF this used to
             // write truncated aliases and group-key names to 10 chars.
             // SAP parity: aggregate columns are N(20,dp), named alias /
-            // EXPR / EXPR_1 / …; group-key columns are emitted in their
-            // SELECT-list position (`SELECT col, COUNT(*) … GROUP BY col`)
+            // EXPR / EXPR_1 / â€¦; group-key columns are emitted in their
+            // SELECT-list position (`SELECT col, COUNT(*) â€¦ GROUP BY col`)
             // with the source field's type/length. Groups emit sorted
             // ascending by group key.
             auto grp_dp = [&](std::size_t i) -> int {
@@ -30496,7 +30496,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                                         grow_stride, phCursor);
         }
 
-        // M10.54 — compile each slot's optional FILTER. Subset:
+        // M10.54 â€” compile each slot's optional FILTER. Subset:
         // Cmp / AND / OR / NOT (full WHERE support left to follow-up).
         using AggPred = std::function<bool(openads::engine::Table&)>;
         std::vector<AggPred> slot_preds(slots.size());
@@ -30725,7 +30725,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         // (docs/materialised-cursor-temps.md): the DBF this used to write
         // truncated any alias over 10 characters.
         // SAP parity: columns typed N(20,dp), named alias / EXPR / EXPR_1 /
-        // … (oracle-verified naming; unaliased aggregates count up).
+        // â€¦ (oracle-verified naming; unaliased aggregates count up).
         auto agg_dp = [&](std::size_t i) -> int {
             using K = openads::sql::AggregateKind;
             switch (slots[i].def.kind) {
@@ -30786,7 +30786,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                                 distinct_seen[i].size()));
                         break;
                     }
-                    // M10.54 — when this slot has a FILTER, count[i]
+                    // M10.54 â€” when this slot has a FILTER, count[i]
                     // already excludes filter-failing rows; use it
                     // even for CountStar.
                     std::snprintf(buf, sizeof(buf), "%llu",
@@ -30828,7 +30828,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     break;
             }
             // Right-justified to the declared width, except COUNT which SAP
-            // leaves unpadded — agg_cell_text owns both rules. `buf` above is
+            // leaves unpadded â€” agg_cell_text owns both rules. `buf` above is
             // already the formatted digits; re-pad it here rather than
             // re-deriving, since Count(*) has no source value to pass.
             const std::size_t w = agg_w(i);
@@ -30857,12 +30857,12 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             bool                                is_numeric = false;
             double                              number = 0.0;
             std::shared_ptr<std::unordered_set<std::uint32_t>> contains_hits;
-            // M10.33 — BETWEEN upper bound.
+            // M10.33 â€” BETWEEN upper bound.
             std::string                         literal2;
             double                              number2 = 0.0;
-            // M11.7 — case-insensitive ASCII compare when set.
+            // M11.7 â€” case-insensitive ASCII compare when set.
             bool                                nocase = false;
-            // ADS dialect — UPPER()/LOWER() wrapping the LHS column.
+            // ADS dialect â€” UPPER()/LOWER() wrapping the LHS column.
             openads::sql::WhereFn               lhs_fn =
                 openads::sql::WhereFn::None;
         };
@@ -30913,7 +30913,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                             (openads::engine::Table& t) { return !p(t); }};
             }
             if (node.kind == Kind::Exists) {
-                // M10.17 / M10.24 — EXISTS / NOT EXISTS. Honors
+                // M10.17 / M10.24 â€” EXISTS / NOT EXISTS. Honors
                 // subquery's WHERE (M10.24); when that WHERE has
                 // outer-column references (e.g.
                 // `EXISTS (SELECT * FROM b WHERE b.x = a.y)`), the
@@ -31008,7 +31008,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 // M10.15: materialise the IN set at compile time. For
                 // a literal list, just lift the strings in. For a
                 // subquery, walk its source table inline (no nested
-                // ABI dispatch — keeps the lock_guard intact).
+                // ABI dispatch â€” keeps the lock_guard intact).
                 std::int32_t fidx = tbl->field_index(node.in_clause.column);
                 if (fidx < 0) {
                     return openads::util::Error{
@@ -31021,7 +31021,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     return sl;
                 };
                 // CICHAR columns fold case in IN membership (S4); the
-                // fold applies ONLY to the membership set and probe —
+                // fold applies ONLY to the membership set and probe â€”
                 // the correlated path's inner-WHERE literal compares
                 // stay byte-wise (their columns are checked separately).
                 bool in_ci = field_is_cichar(*tbl, fi);
@@ -31036,7 +31036,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 for (auto& lit : node.in_clause.literals)
                     set->insert(in_fold(trim_trailing(lit)));
                 if (node.in_clause.subquery) {
-                    // M10.35 — detect correlation in subquery's WHERE.
+                    // M10.35 â€” detect correlation in subquery's WHERE.
                     bool correlated = false;
                     if (node.in_clause.subquery->where) {
                         std::function<void(const openads::sql::WhereExpr&)>
@@ -31227,7 +31227,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             term.literal2    = w.literal2;
             term.number2     = w.number2;
             term.lhs_fn      = w.lhs_fn;
-            // M11.7 — stamp collation onto the term when the
+            // M11.7 â€” stamp collation onto the term when the
             // connection is in nocase mode and the cmp involves
             // string operands. S4: CICHAR (ADT type 20) columns compare
             // case-insensitively regardless of connection collation
@@ -31241,7 +31241,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 term.literal2 = to_lower_ascii(term.literal2);
             }
             // PAD SPACE (oracle-verified): trailing blanks are
-            // insignificant in string comparisons — a CHAR(20) script
+            // insignificant in string comparisons â€” a CHAR(20) script
             // variable substitutes as a space-padded literal and must
             // still match ('PROPERTIES           ' matches on SAP).
             if (!w.is_numeric) {
@@ -31252,7 +31252,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     term.literal2.pop_back();
             }
             if (w.subquery) {
-                // M10.29 — correlated scalar subquery. If the
+                // M10.29 â€” correlated scalar subquery. If the
                 // subquery's WHERE references an outer column, we
                 // re-evaluate the subquery per outer row instead of
                 // materialising a single value at compile time.
@@ -31459,7 +31459,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         }
                     }};
                 }
-                // M10.18: scalar subquery — materialise once at
+                // M10.18: scalar subquery â€” materialise once at
                 // compile time. Open the subquery's table, walk for
                 // the first non-deleted record, read the projection's
                 // first column, and use that as the cmp literal.
@@ -31478,7 +31478,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     tbl->field_descriptor(static_cast<std::uint16_t>(fidx))
                         .type != openads::drivers::DbfFieldType::Character;
 
-                // M10.19 — aggregate scalar subquery
+                // M10.19 â€” aggregate scalar subquery
                 // (`= (SELECT MAX(x) FROM t)`). Single aggregate slot
                 // computes against the inner table; numeric result
                 // lands directly in the cmp's number/literal.
@@ -31636,7 +31636,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 }
                 if (term.op == openads::sql::WhereOp::IsNull ||
                     term.op == openads::sql::WhereOp::IsNotNull) {
-                    // M10.44 / M11.6 — prefer the VFP NULL bitmap
+                    // M10.44 / M11.6 â€” prefer the VFP NULL bitmap
                     // when the field is nullable; otherwise treat
                     // an all-blanks character cell as NULL.
                     bool null_ish = t.is_field_null(term.field_index);
@@ -31679,7 +31679,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
     // them by the column's value, and install the sequence as the
     // cursor's traversal order.
     if (parsed.value().order_by) {
-        // M10.6 / M10.37 — ORDER BY one column, with cascading
+        // M10.6 / M10.37 â€” ORDER BY one column, with cascading
         // additional columns for ties (M10.37).
         struct SortKey {
             std::uint16_t field_index;
@@ -31776,7 +31776,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         tbl->set_recno_sequence(std::move(seq));
     }
 
-    // M10.31 — DISTINCT. M10.32 — LIMIT [OFFSET]. Both operate on the
+    // M10.31 â€” DISTINCT. M10.32 â€” LIMIT [OFFSET]. Both operate on the
     // post-WHERE / post-ORDER-BY traversal sequence; if neither
     // ORDER BY nor a recno_sequence is present yet, walk the
     // filtered cursor to materialise one first.
@@ -31841,7 +31841,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         tbl->set_recno_sequence(std::move(seq));
     }
 
-    // M10.38 — projection contains a CASE expression. Materialise the
+    // M10.38 â€” projection contains a CASE expression. Materialise the
     // post-WHERE / post-ORDER-BY / post-DISTINCT / post-LIMIT row set
     // into a temp DBF whose schema mirrors the projection list (CASE
     // items become C(30); regular columns preserve source type +
@@ -31873,7 +31873,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         };
         std::vector<OutCol> outs;
         outs.reserve(parsed.value().projection.size());
-        int script_expr_seq = 0;   // EXPR / EXPR_1 / … numbering (SAP)
+        int script_expr_seq = 0;   // EXPR / EXPR_1 / â€¦ numbering (SAP)
         for (std::size_t i = 0; i < parsed.value().projection.size(); ++i) {
             const auto& p = parsed.value().projection[i];
             OutCol o;
@@ -31937,7 +31937,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     }
                 } else if (fc.kind == K::ScriptCall) {
                     // SAP names unaliased expression projections EXPR,
-                    // EXPR_1, … (oracle-verified). Static type inference
+                    // EXPR_1, â€¦ (oracle-verified). Static type inference
                     // over the compiled expression drives the temp-column
                     // type so subquery consumers see typed values.
                     if (!fc.alias.empty()) o.name = fc.alias;
@@ -31971,7 +31971,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     o.raw_type = 'C';
                     o.length   = 50;
                 } else {
-                    // M10.43 / M10.45 — multi-arg fns. Width = generous
+                    // M10.43 / M10.45 â€” multi-arg fns. Width = generous
                     // default; alias drives the column name; no
                     // pre-resolved src_field (per-arg lookups happen
                     // at row-eval time).
@@ -32202,7 +32202,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             ccases.push_back(std::move(cc));
         }
 
-        // Build the row list — honor any installed recno_sequence,
+        // Build the row list â€” honor any installed recno_sequence,
         // else walk the filtered cursor.
         std::vector<std::uint32_t> walk_seq;
         if (tbl->has_recno_sequence()) {
@@ -32217,7 +32217,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             }
         }
 
-        // M10.49 / M10.50 — pre-compute window values per row when
+        // M10.49 / M10.50 â€” pre-compute window values per row when
         // any window items appear in the projection. For each
         // window slot, group rows by PARTITION BY key, sort within
         // each group by ORDER BY (if any), then assign values per
@@ -32411,9 +32411,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         case K::Rtrim: val = trim_right(std::move(raw)); break;
 
                         case K::ScriptCall: {
-                            // S4 — whole-call text (NEWIDSTRING(<keyword>),
-                            // IIF(col < {d…}, …), Year([modtime]), nested
-                            // Trim(Convert(…))) evaluated by the script
+                            // S4 â€” whole-call text (NEWIDSTRING(<keyword>),
+                            // IIF(col < {dâ€¦}, â€¦), Year([modtime]), nested
+                            // Trim(Convert(â€¦))) evaluated by the script
                             // expression engine with the CURRENT row's
                             // columns bound as parameters. compiled() caches
                             // by text, so the per-row cost is a hash lookup.
@@ -32430,7 +32430,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                                 rr.value().return_value.is_null) {
                                 val.clear();
                             } else if (o.raw_type == 'D') {
-                                // DBF date cell — raw YYYYMMDD.
+                                // DBF date cell â€” raw YYYYMMDD.
                                 const auto& rv = rr.value().return_value;
                                 std::int64_t jdn =
                                     rv.type ==
@@ -32452,7 +32452,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         case K::Udf: {
                             // RCB 07/17/2026: DD stored functions run through
                             // the typed script engine (docs/script-engine.md).
-                            // Errors PROPAGATE and fail the SELECT — SAP
+                            // Errors PROPAGATE and fail the SELECT â€” SAP
                             // returns 7200 for a failing UDF, and the old
                             // silent "" here is how EoM produced 02/00/2026.
                             if (!c->has_dd()) break;
@@ -32539,7 +32539,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                                     else
                                         sargs.push_back(SV::real(arg.number));
                                 } else if (arg.is_call) {
-                                    // Nested call text (e.g. CurDate()) —
+                                    // Nested call text (e.g. CurDate()) â€”
                                     // evaluate through the engine itself.
                                     auto pr = scriptbridge::compiled(
                                         "RETURN " + arg.text + ";");
@@ -32570,7 +32570,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         case K::NullIf:
                         case K::Coalesce:
                         case K::IfNull: {
-                            // M10.43 / M10.45 — multi-arg fns. Resolve
+                            // M10.43 / M10.45 â€” multi-arg fns. Resolve
                             // each arg as either a column read (with
                             // trailing-space trim for Char-typed slots)
                             // or the parsed literal.
@@ -32631,7 +32631,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                                 val = std::move(src);
                             } else if (fc.kind == K::DateDiff &&
                                        fc.args.size() == 2) {
-                                // M10.45 — DATEDIFF on YYYYMMDD strings:
+                                // M10.45 â€” DATEDIFF on YYYYMMDD strings:
                                 // returns days_a - days_b via Julian day.
                                 auto julian = [](const std::string& sl) -> long {
                                     if (sl.size() < 8) return 0;
@@ -32652,14 +32652,14 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                                 val = buf;
                             } else if (fc.kind == K::NullIf &&
                                        fc.args.size() == 2) {
-                                // M10.53 — NULLIF(a, b): NULL if
+                                // M10.53 â€” NULLIF(a, b): NULL if
                                 // equal, else a. Empty string =
                                 // NULL by convention.
                                 std::string a = arg_str(fc.args[0]);
                                 std::string b = arg_str(fc.args[1]);
                                 val = (a == b) ? std::string() : a;
                             } else if (fc.kind == K::Coalesce) {
-                                // M10.53 — first non-empty arg wins.
+                                // M10.53 â€” first non-empty arg wins.
                                 for (auto& a : fc.args) {
                                     auto cs = arg_str(a);
                                     if (!cs.empty()) {
@@ -32668,12 +32668,12 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                                 }
                             } else if (fc.kind == K::IfNull &&
                                        fc.args.size() == 2) {
-                                // M10.53 — IFNULL(expr, default).
+                                // M10.53 â€” IFNULL(expr, default).
                                 std::string a = arg_str(fc.args[0]);
                                 val = a.empty() ? arg_str(fc.args[1]) : a;
                             } else if (fc.kind == K::DateAdd &&
                                        fc.args.size() == 2) {
-                                // M10.45 — add N days to YYYYMMDD.
+                                // M10.45 â€” add N days to YYYYMMDD.
                                 std::string ds = arg_str(fc.args[0]);
                                 if (ds.size() < 8) { val = ds; break; }
                                 int y = std::atoi(ds.substr(0, 4).c_str());
@@ -32775,7 +32775,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
 
     // RCB 07/16/2026: column-level permission enforcement. If the connected
     // user is column-restricted on the source table, the cursor must expose
-    // ONLY the columns they may SELECT — SAP grants a group table access but
+    // ONLY the columns they may SELECT â€” SAP grants a group table access but
     // hides specific columns, and OpenADS used to leak the whole table. We
     // reuse the existing cursor-projection mechanism: SELECT * projects the
     // permitted columns; an explicit projection naming a forbidden column is
@@ -32796,7 +32796,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         return s;
     };
 
-    // ADS static-cursor semantics — single-table SELECT with ORDER BY /
+    // ADS static-cursor semantics â€” single-table SELECT with ORDER BY /
     // DISTINCT / LIMIT must be a STANDALONE temp table, not the live source
     // with a recno_sequence. Real ACE returns a static cursor (its own temp
     // table) for these; the ERP then runs `INDEX ON ... ; DBSETORDER(n)` on
@@ -32896,7 +32896,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 }
                 return "Character";
             };
-            // S4 — a materialised cursor carries its OWN descriptors, so the
+            // S4 â€” a materialised cursor carries its OWN descriptors, so the
             // SELECT-list naming applied to a live cursor via cursor_aliases()
             // cannot reach it; the names have to be baked into the temp's DDL
             // here instead. cols[i] corresponds to projection[i] one-for-one
@@ -32934,7 +32934,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             // >>> and two of them are invisible until a specific customer
             // >>> scenario breaks; both have already been regressed once.
             //
-            // ADS_ADT, not ADS_CDX — the temp must preserve full column names.
+            // ADS_ADT, not ADS_CDX â€” the temp must preserve full column names.
             //
             // A DBF field descriptor allots 11 bytes to the name, so a DBF temp
             // silently truncates every column to 10 characters. That is not
@@ -32942,7 +32942,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             // (RI_Primary_Table 16, Enable_Internet 15, User_Defined_Prop 17,
             // Trig_Function_Name 18), so a DBF temp turned
             //     SELECT Name, RI_Primary_Table FROM system.relations ORDER BY Name
-            // into a result whose second column was called RI_Primary — undoing
+            // into a result whose second column was called RI_Primary â€” undoing
             // the SAP column-name parity work and breaking any client that then
             // referenced the column by name. User tables with long columns were
             // mangled the same way. ADT carries full-length names.
@@ -32974,7 +32974,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                             //
                             // Numeric/Float are ASCII in both DBF and ADT (see
                             // decode_field), so as_string carries the declared
-                            // scale exactly — "10.50" stays "10.50". Writing a
+                            // scale exactly â€” "10.50" stays "10.50". Writing a
                             // double there would re-render it as "10.5" and lose
                             // the N(12,2) formatting that #146 exists to protect.
                             //
@@ -33031,7 +33031,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         }
     }
 
-    // M10.46 — when this query was a derived-table outer SELECT,
+    // M10.46 â€” when this query was a derived-table outer SELECT,
     // reuse the inner cursor's existing handle so the user-visible
     // cursor isn't a stale alias of an already-registered Table*.
     ADSHANDLE gh = (derived_cur != 0)
@@ -33057,7 +33057,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             build_projection_aliases(parsed.value(), proj.size());
         cursor_projections()[gh] = std::move(proj);
     } else if (allowed_cols) {
-        // SELECT * by a column-restricted user → project only permitted columns,
+        // SELECT * by a column-restricted user â†’ project only permitted columns,
         // in table order.
         std::vector<std::uint16_t> proj;
         const std::uint16_t nf = static_cast<std::uint16_t>(tbl->field_count());
@@ -33074,14 +33074,14 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
 }
 
 // Thin export over the SQL dispatcher above: a failing statement also
-// lands in the SAP-style ads_err error log with the statement text —
+// lands in the SAP-style ads_err error log with the statement text â€”
 // matching ADS, whose error log records the SQL errors (7200 etc.) it
 // raises while serving clients. Success paths pay nothing.
-// S4 — AQE envelope depth guard. Internal recursion (derived tables,
+// S4 â€” AQE envelope depth guard. Internal recursion (derived tables,
 // INTO snapshots, script-bridge embedded SQL) re-enters
 // AdsExecuteSQLDirect; only the OUTERMOST, client-facing call wraps the
 // failure as SAP's rc-7200 AQE envelope. Inner calls keep the native
-// code + message so engine/script error handling is unaffected — same
+// code + message so engine/script error handling is unaffected â€” same
 // as SAP, whose envelopes carry the innermost native code.
 static thread_local int sql_exec_depth_ = 0;
 
@@ -33105,7 +33105,7 @@ UNSIGNED32 ENTRYPOINT AdsExecuteSQLDirect(ADSHANDLE hStatement, UNSIGNED8* pucSQ
     // RCB 07/15/2026: SAP ADS positions a SQL result cursor ON the first
     // record after execute; OpenADS was leaving the engine Table at BOF, so a
     // client that reads the current record immediately (the SAP-supported
-    // pattern) got a phantom empty row on EVERY query — proven with
+    // pattern) got a phantom empty row on EVERY query â€” proven with
     // `SELECT COUNT(*)` returning two rows (blank, then the count) vs SAP's
     // one. Position the result at row 1 here, at the public-API boundary, so
     // it applies uniformly to engine tables, memory-backed system.*/aggregate
@@ -33142,7 +33142,7 @@ UNSIGNED32 ENTRYPOINT AdsExecuteSQLDirectW(ADSHANDLE hStatement, UNSIGNED16* pwc
 // ACE keeps one process-wide date display string. SAP's default is
 // "MM/DD/CCYY" (probed: AdsGetDateFormat on a fresh ace64.dll), and ours
 // now matches. The format drives AdsGetFIELD / AdsGetDate display and
-// AdsSetDate parsing; AdsGetSTRING deliberately stays raw "YYYYMMDD" —
+// AdsSetDate parsing; AdsGetSTRING deliberately stays raw "YYYYMMDD" â€”
 // SAP behaves the same way, and php_ads' date handling depends on it
 // (see docs/date-display-format.md before changing ANY of this).
 //
@@ -33167,8 +33167,8 @@ std::string   g_search_path;
 std::uint16_t g_set_decimals = 2;
 
 // Render (y, m, d) through an ACE-style format string. Recognised,
-// case-insensitively: CCYY / YYYY → 4-digit year, YY → 2-digit year,
-// MM → 2-digit month, DD → 2-digit day. Every other character is
+// case-insensitively: CCYY / YYYY â†’ 4-digit year, YY â†’ 2-digit year,
+// MM â†’ 2-digit month, DD â†’ 2-digit day. Every other character is
 // copied verbatim, so separators ("/", "-", ".") pass straight through.
 std::string format_ace_date(const std::string& fmt, int y, int m, int d) {
     char two_y[4], two[4], four[8];
@@ -33197,7 +33197,7 @@ std::string format_ace_date(const std::string& fmt, int y, int m, int d) {
     return out;
 }
 
-// The format with every digit position blanked — SAP renders an empty
+// The format with every digit position blanked â€” SAP renders an empty
 // date through AdsGetField as "  /  /    " (separators kept, digits
 // spaces), NOT as an empty string.
 std::string blank_ace_date(const std::string& fmt) {
@@ -33301,7 +33301,7 @@ std::string parse_date_by_format(const std::string& text) {
 }
 
 // SAP display rule for AdsGetField on a TIMESTAMP column:
-//   "<formatted date> hh:mm:ss AM|PM" — 12-hour clock, 2-digit hour
+//   "<formatted date> hh:mm:ss AM|PM" â€” 12-hour clock, 2-digit hour
 //   ("01/15/2024 01:45:59 PM", len 22 under the default format), and a
 //   blank timestamp renders as "  /  /     12:00:00 AM".
 // `raw` is the engine's internal decode ("YYYYMMDDhhmmss", or empty).
@@ -33392,7 +33392,7 @@ UNSIGNED32 ENTRYPOINT AdsClearProgressCallback(void) { ADS_STUB(openads::AE_SUCC
 UNSIGNED32 ENTRYPOINT AdsCacheOpenCursors(UNSIGNED16) { ADS_STUB(openads::AE_SUCCESS); }
 UNSIGNED32 ENTRYPOINT AdsCacheOpenTables(UNSIGNED16) { ADS_STUB(openads::AE_SUCCESS); }
 UNSIGNED32 ENTRYPOINT AdsCacheRecords(ADSHANDLE hTable, UNSIGNED16 usNumRecords) {
-    // RCB 07/14/2026: M12.23 — this used to be a no-op ("OpenADS does not
+    // RCB 07/14/2026: M12.23 â€” this used to be a no-op ("OpenADS does not
     // pre-cache rows"), which stopped being true back in M12.21 and is now
     // thoroughly untrue. The caller's depth now rides on every subsequent Skip
     // for this table (see kPrefetchDepthAuto in wire.h) and overrides the
@@ -33410,7 +33410,7 @@ UNSIGNED32 ENTRYPOINT AdsCacheRecords(ADSHANDLE hTable, UNSIGNED16 usNumRecords)
         rt->cache_records_hint = usNumRecords;
         // Turning caching off has to bite NOW, not at the next refill. Rows
         // already queued would otherwise keep being served locally out of the
-        // old block — and a caller who just disabled read-ahead is, per SAP's
+        // old block â€” and a caller who just disabled read-ahead is, per SAP's
         // own guidance, usually about to start editing and specifically needs
         // to stop seeing cached data.
         if (usNumRecords <= 1) rt->invalidate_prefetch();
@@ -33431,7 +33431,7 @@ UNSIGNED32 ENTRYPOINT AdsCopyTableContent(ADSHANDLE hSrc, ADSHANDLE hDst) {
     // Build a field-name mapping: for each source field find the
     // matching destination field (by name). Fields that exist only in
     // one table are silently skipped, which is the documented ADS
-    // behaviour — no schema match required.
+    // behaviour â€” no schema match required.
     struct FieldPair { std::uint16_t si; std::uint16_t di; };
     std::vector<FieldPair> pairs;
     std::uint16_t nc = src->field_count();
@@ -33488,7 +33488,7 @@ UNSIGNED32 ENTRYPOINT AdsCustomizeAOF(ADSHANDLE hTable, UNSIGNED32 ulNumRecords,
 UNSIGNED32 ENTRYPOINT AdsData(UNSIGNED16, void*) { ADS_STUB(openads::AE_SUCCESS); }
 // SAP / rddads signature: AdsEvalAOF(hTable, pucExpr, *pusOptLevel).
 // Returns the optimisation level (ADS_OPTIMIZED_NONE / PART / FULL)
-// the engine would use to evaluate the filter. Currently a stub —
+// the engine would use to evaluate the filter. Currently a stub â€”
 // caller's *pusOptLevel is zeroed (= ADS_OPTIMIZED_NONE).
 UNSIGNED32 ENTRYPOINT AdsEvalAOF(ADSHANDLE, UNSIGNED8*, UNSIGNED16* pusOptLevel)
     { if (pusOptLevel) *pusOptLevel = 0;
@@ -33499,7 +33499,7 @@ UNSIGNED32 ENTRYPOINT AdsFilterOption(ADSHANDLE, UNSIGNED16, UNSIGNED16* p)
 // pucFilter is a caller-allocated buffer; pusLen is in/out (capacity
 // in, actual filter length out). We don't track per-table AOF source
 // strings yet (only the evaluated bitmap), so return an empty filter
-// — Harbour's ADSGETAOF treats that as "no AOF" and returns "".
+// â€” Harbour's ADSGETAOF treats that as "no AOF" and returns "".
 UNSIGNED32 ENTRYPOINT AdsGetAOF(ADSHANDLE hTable, UNSIGNED8* pucFilter, UNSIGNED16* pusLen) {
     if (pusLen == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
     if (auto* rt = get_remote_table(hTable)) {
@@ -33712,7 +33712,7 @@ UNSIGNED32 ENTRYPOINT AdsGetIndexFilename(ADSHANDLE hIndex, UNSIGNED16 /*usOrder
     return ok();
 }
 // 1-based position of the order `hIndex` within its table's ordinal
-// sequence — the exact inverse of AdsGetIndexHandleByOrder. Harbour
+// sequence â€” the exact inverse of AdsGetIndexHandleByOrder. Harbour
 // rddads' OrdNumber() / DBOI_NUMBER calls this after resolving a tag
 // name to a handle (contrib/rddads/ads1.c, adsOrderInfo); a stubbed 0
 // made OrdNumber() report 0 for every tag. Returns 0 (natural order)
@@ -33739,7 +33739,7 @@ UNSIGNED32 ENTRYPOINT AdsGetIndexOrderByHandle(ADSHANDLE hIndex, UNSIGNED16* p) 
     std::string tag;
     {
         auto it = m.find(hIndex);
-        if (it == m.end()) return ok();   // unknown handle → natural order
+        if (it == m.end()) return ok();   // unknown handle â†’ natural order
         t   = it->second.table;
         tag = it->second.tag_name;        // copy before the helper rehashes m
     }
@@ -33822,7 +33822,7 @@ UNSIGNED32 ENTRYPOINT AdsGetKeyType(ADSHANDLE hIndex, UNSIGNED16* p) {
     if (p == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
     // ACE reports the key expression *result type* here, using the
     // field-type constants (ADS_STRING=4, ADS_NUMERIC=2, ADS_DATE=3,
-    // ADS_LOGICAL=1) — NOT the AdsSeek/AdsSetScope buffer-encoding
+    // ADS_LOGICAL=1) â€” NOT the AdsSeek/AdsSetScope buffer-encoding
     // constants (ADS_STRINGKEY=1 / ADS_DOUBLEKEY=2). Harbour's rddads
     // switches OrdScope()'s key encoding on this value; returning
     // ADS_STRINGKEY (1 == ADS_LOGICAL) made every character key look
@@ -33944,7 +33944,7 @@ UNSIGNED32 ENTRYPOINT AdsGetRecord(ADSHANDLE hTable, UNSIGNED8* pucRecord,
             *pulLen = r.value();
             return ok();
         }
-        // RCB 07/14/2026: BUG FIX — GetRecord reads the SERVER's current
+        // RCB 07/14/2026: BUG FIX â€” GetRecord reads the SERVER's current
         // record, so the prefetch lag has to be settled first. Rows served
         // locally out of the lookahead queue leave the server cursor offset by
         // cursor_lag, and this path never settled, so it happily handed back
@@ -33952,8 +33952,8 @@ UNSIGNED32 ENTRYPOINT AdsGetRecord(ADSHANDLE hTable, UNSIGNED8* pucRecord,
         //
         // KNOWN COST, accepted deliberately: settling forces a round-trip, so a
         // scan shaped like Skip(1)/GetRecord/Skip(1)/GetRecord defeats
-        // read-ahead and pays 1 RTT per row. Correctness has to win — handing
-        // back the wrong record is not a trade we get to make — but it does mean
+        // read-ahead and pays 1 RTT per row. Correctness has to win â€” handing
+        // back the wrong record is not a trade we get to make â€” but it does mean
         // AdsGetRecord is the ONE nav-path read that prefetch cannot accelerate.
         // Fixing it properly means carrying the raw record image in the
         // lookahead block; today the block carries decoded per-field values,
@@ -33989,7 +33989,7 @@ UNSIGNED32 ENTRYPOINT AdsGetRecord(ADSHANDLE hTable, UNSIGNED8* pucRecord,
         *pulLen = need;
         return fail(openads::AE_INSUFFICIENT_BUFFER, "record buffer too small");
     }
-    // Raw binary image — copy verbatim, no NUL terminator.
+    // Raw binary image â€” copy verbatim, no NUL terminator.
     std::memcpy(pucRecord, buf.data(), need);
     *pulLen = need;
     return ok();
@@ -34151,7 +34151,7 @@ UNSIGNED32 ENTRYPOINT AdsGetRelKeyPos(ADSHANDLE h, double* p) {
             if (walk[i] == rn) { pos = i; break; }
         }
         if (pos >= walk.size()) {
-            // Cursor recno not present in the index — fall back to
+            // Cursor recno not present in the index â€” fall back to
             // recno-based fraction so the result stays monotonic.
             if (rn > rc) rn = rc;
             *p = static_cast<double>(rn - 1) /
@@ -34194,8 +34194,8 @@ UNSIGNED32 ENTRYPOINT AdsGetTableCharType(ADSHANDLE hTable, UNSIGNED16* p) {
     Table* t = get_table(hTable);
     if (t == nullptr)
         return fail(openads::AE_INTERNAL_ERROR, "no table");
-    // RCB 2026-07-10 — report the char type the table was opened with
-    // (AdsOpenTable now stores usCharType — #130 follow-up). Was a
+    // RCB 2026-07-10 â€” report the char type the table was opened with
+    // (AdsOpenTable now stores usCharType â€” #130 follow-up). Was a
     // hard-coded ADS_ANSI.
     *p = t->char_type();
     return ok();
@@ -34272,14 +34272,14 @@ UNSIGNED32 ENTRYPOINT AdsIsIndexDescending(ADSHANDLE hIndex, UNSIGNED16* p) {
     if (p == nullptr) return openads::AE_INTERNAL_ERROR;
     *p = 0;
     if (auto* ri = get_remote_index(hIndex)) {
-        // Physical flag only — the dynamic AdsSetIndexDirection traversal
+        // Physical flag only â€” the dynamic AdsSetIndexDirection traversal
         // override (see the LOCAL path below) isn't wired over the wire
         // protocol yet.
         *p = ri->is_descending ? 1 : 0;
         return openads::AE_SUCCESS;
     }
-    // For the ACTIVE order, report the *effective* traversal direction —
-    // the dynamic flag AdsSetIndexDirection toggles — not the index's baked
+    // For the ACTIVE order, report the *effective* traversal direction â€”
+    // the dynamic flag AdsSetIndexDirection toggles â€” not the index's baked
     // physical descending flag. rddads' OrdDescend() reads this to decide
     // whether to flip; if it always saw the physical flag it could never
     // observe a dynamic reversal, and FWH xbrowse header re-sorting (which
@@ -34358,7 +34358,7 @@ UNSIGNED32 ENTRYPOINT AdsIsRecordInAOF(ADSHANDLE, UNSIGNED32, UNSIGNED16* p)
     { if (p) *p = 1; return openads::AE_SUCCESS; }
 // ulRecord == 0 means "the current record" (ACE convention). Reports
 // whether *this* connection holds an exclusive lock on it. Remote
-// handles aren't introspected yet — they report 0.
+// handles aren't introspected yet â€” they report 0.
 UNSIGNED32 ENTRYPOINT AdsIsRecordLocked(ADSHANDLE hTable, UNSIGNED32 ulRecord,
                              UNSIGNED16* pbLocked) {
     if (pbLocked == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
@@ -34620,7 +34620,7 @@ UNSIGNED32 ENTRYPOINT AdsSetSearchPath(UNSIGNED8* pucPath) {
 // regardless, so this is recorded for ACE API parity; nothing consults it
 // in a way that would block an otherwise-valid connection.
 //
-// Internal helper — give it C++ linkage (it returns a reference, which a
+// Internal helper â€” give it C++ linkage (it returns a reference, which a
 // C-linkage function may not, tripping clang's -Werror=return-type-c-linkage
 // inside this file's big `extern "C"` block). Mirrors the extern "C++" island
 // used for the other reference-returning helpers above.
@@ -34644,7 +34644,7 @@ UNSIGNED32 ENTRYPOINT AdsShowDeleted(UNSIGNED16 us) {
         if (Connection* c = lookup_connection(resolve_connection_handle(0))) {
             c->set_show_deleted(visible);
         }
-        // M12.31 — SET DELETED is process-wide on the client but must be
+        // M12.31 â€” SET DELETED is process-wide on the client but must be
         // pushed to every open remote server session; otherwise scoped
         // index walks on the server still return deleted rows.
         s.registry.for_each_handle([&](Handle, HandleKind k, void* p) {
@@ -34655,14 +34655,14 @@ UNSIGNED32 ENTRYPOINT AdsShowDeleted(UNSIGNED16 us) {
         // RCB 07/14/2026: flipping SET DELETED changes which rows are VISIBLE,
         // which retroactively invalidates every row we have already read ahead
         // of the cursor. The look-ahead block was walked under the old
-        // visibility, so without this a scan keeps serving rows from it —
-        // locally, with no wire traffic at all to hint that anything is stale —
+        // visibility, so without this a scan keeps serving rows from it â€”
+        // locally, with no wire traffic at all to hint that anything is stale â€”
         // and deleted records keep appearing after SET DELETED ON (or vanish
         // after SET DELETED OFF).
         //
         // Same stale-block family as the AdsSeek / AdsSetIndexOrder cases: any
         // operation that changes what the queued rows MEAN has to drop them.
-        // Purely local state, so it is safe to do under s.mu — no round-trip,
+        // Purely local state, so it is safe to do under s.mu â€” no round-trip,
         // unlike the show_deleted() pushes below.
         s.registry.for_each_handle([&](Handle, HandleKind k, void* p) {
             if (k != HandleKind::RemoteTable) return;
@@ -34676,7 +34676,7 @@ UNSIGNED32 ENTRYPOINT AdsShowDeleted(UNSIGNED16 us) {
             rt->keyno_valid      = false;
         });
     }
-    // Release s.mu before the wire round-trips — the in-process test
+    // Release s.mu before the wire round-trips â€” the in-process test
     // server (and openads_serverd embedded in the same DLL) re-enters
     // the ABI on another thread and takes s.mu; holding it here
     // deadlocks (same pattern as remote AdsOpenTable / AdsOpenIndex).
@@ -34718,7 +34718,7 @@ UNSIGNED32 ENTRYPOINT AdsStmtSetTableType(ADSHANDLE h, UNSIGNED16 us) {
 UNSIGNED32 ENTRYPOINT AdsTestLogin(UNSIGNED8*, UNSIGNED16, UNSIGNED8*, UNSIGNED8*, UNSIGNED32)
     { ADS_STUB(openads::AE_SUCCESS); }
 UNSIGNED32 ENTRYPOINT AdsTestRecLocks(ADSHANDLE hTable) {
-    // Diagnostic hook. Validate the handle and report success — OpenADS
+    // Diagnostic hook. Validate the handle and report success â€” OpenADS
     // has no separate lock-table consistency check to run.
     if (get_remote_table(hTable) || get_table(hTable) != nullptr) return ok();
     return fail(openads::AE_INTERNAL_ERROR, "unknown table");
@@ -34738,13 +34738,13 @@ struct MgBackend {
     std::string   host;       // remote only
     std::uint16_t port = 0;   // remote only
     // DD user this mgmt handle is asking on behalf of, if AdsMgConnect's
-    // caller supplied one — carried on every later MgConnect/MgRequest
+    // caller supplied one â€” carried on every later MgConnect/MgRequest
     // round-trip so the mgmt session registers under a real name instead
     // of "(anonymous)". Empty is still valid (pre-existing behavior).
     std::string   mg_user;
 };
 
-// Optional [u16 ulen][user] MgConnect payload — empty when `user` is empty,
+// Optional [u16 ulen][user] MgConnect payload â€” empty when `user` is empty,
 // matching pre-existing "(anonymous)" behavior for callers that don't know
 // or care which DD user is asking.
 std::vector<std::uint8_t> build_mg_connect_payload(const std::string& user) {
@@ -34769,7 +34769,7 @@ fetch_mg_snapshot(const MgBackend& be) {
     using openads::util::Error;
     if (!be.remote) {
         // Local mode: report this process by enumerating the ABI
-        // handle registry — shared with the sp_mg* SQL procedures
+        // handle registry â€” shared with the sp_mg* SQL procedures
         // (see collect_local_abi_snapshot near dispatch_sp_builtin_cursor).
         return collect_local_abi_snapshot();
     }
@@ -34782,7 +34782,7 @@ fetch_mg_snapshot(const MgBackend& be) {
 
     // MgConnect handshake first, on this same socket, so the session this
     // MgRequest travels on registers under be.mg_user instead of
-    // "(anonymous)" — AdsMgConnect's own reachability probe (above) uses a
+    // "(anonymous)" â€” AdsMgConnect's own reachability probe (above) uses a
     // separate, immediately-closed socket, so its username never reaches
     // whichever connection actually ends up carrying the MgRequest.
     if (!be.mg_user.empty()) {
@@ -34819,7 +34819,7 @@ fetch_mg_snapshot(const MgBackend& be) {
 // Ask a remote server what build it is via the Hello opcode (supported by
 // every wire protocol version). Returns e.g. "openads/1.8.14"; a pre-1.8.14
 // server answers its hardcoded "openads/0.3.2", which is itself the
-// diagnosis — an old serverd is running. Empty string when unreachable.
+// diagnosis â€” an old serverd is running. Empty string when unreachable.
 std::string fetch_server_hello(const MgBackend& be) {
     openads::network::network_init();
     auto sock = openads::network::connect_tcp(be.host, be.port);
@@ -34874,7 +34874,7 @@ mg_collector_for(ADSHANDLE h) {
 
 // Copy a POD struct into the caller's buffer, clamped to *pusLen, and
 // write back the real struct size.
-// Raw struct memcpy is safe across THIS boundary — unlike the wire,
+// Raw struct memcpy is safe across THIS boundary â€” unlike the wire,
 // where a 32-bit client and 64-bit server may disagree on layout.
 // The caller (rddads / Harbour) and this DLL both consume the same
 // include/openads/ace.h ADS_MGMT_* definitions, so the layouts are
@@ -34932,7 +34932,7 @@ bool send_mg_mutator(const MgBackend& be,
 // existing pattern: zero-fill caller's buffer, return AE_SUCCESS so apps
 // proceed without special-casing local-mode mgmt absence.
 
-// AdsMgConnect — pucServer selects local vs. remote. An empty or
+// AdsMgConnect â€” pucServer selects local vs. remote. An empty or
 // "local" server string yields a local-process backend; anything of
 // the form "host" or "host:port" yields a remote backend (default
 // port 16262, the OpenADS server port).
@@ -34952,8 +34952,8 @@ UNSIGNED32 ENTRYPOINT AdsMgConnect(UNSIGNED8* pucServer, UNSIGNED8* pucUser,
 
     // Decide local vs. remote. A string is a REMOTE target only when
     // it is "host:port" with a non-empty, all-digit port. Everything
-    // else — empty, "local", a drive path like "C:" or "C:\data",
-    // a bare name — is a local-mode backend. (rddads' manage.prg
+    // else â€” empty, "local", a drive path like "C:" or "C:\data",
+    // a bare name â€” is a local-mode backend. (rddads' manage.prg
     // passes "C:" for local management; that must not be mistaken
     // for a host named "C".)
     be.remote = false;
@@ -35029,7 +35029,7 @@ UNSIGNED32 ENTRYPOINT AdsMgGetInstallInfo(ADSHANDLE h, void* p, UNSIGNED16* l) {
     if (!c.has_value()) return static_cast<UNSIGNED32>(c.error().code);
     ADS_MGMT_INSTALL_INFO info = c.value().install_info();
     // For a remote mgmt handle the version that matters is the SERVER
-    // binary's, not this DLL's — MgCollector only knows the local build.
+    // binary's, not this DLL's â€” MgCollector only knows the local build.
     // One Hello round-trip answers it for any server version ever shipped.
     if (const MgBackend* be = lookup_mg(h); be != nullptr && be->remote) {
         std::string hello = fetch_server_hello(*be);   // "openads/X.Y.Z"
@@ -35040,7 +35040,7 @@ UNSIGNED32 ENTRYPOINT AdsMgGetInstallInfo(ADSHANDLE h, void* p, UNSIGNED16* l) {
             std::string vs = "OpenADS " + ver;
             // aucVersionStr is 16 bytes. A release version ("OpenADS
             // 1.8.14") fits; a dev build ("1.8.14-3-gabc1234-dirty") does
-            // not — prefer the version detail over the brand then.
+            // not â€” prefer the version detail over the brand then.
             if (vs.size() >= sizeof(info.aucVersionStr)) vs = ver;
             std::memset(info.aucVersionStr, 0, sizeof(info.aucVersionStr));
             std::memcpy(info.aucVersionStr, vs.c_str(),
@@ -35121,7 +35121,7 @@ UNSIGNED32 ENTRYPOINT AdsMgGetWorkerThreadActivity(ADSHANDLE h, void* p, UNSIGNE
     return emit_mg_array(col.value().worker_thread_activity(), p, c, sz);
 }
 // Non-SAP extension: one average per-frame cost (microseconds) per user,
-// in the same order/count AdsMgGetUserNames just returned — pair them up
+// in the same order/count AdsMgGetUserNames just returned â€” pair them up
 // by index. Not part of the SAP-compatible surface; ADS_MGMT_USER_INFO's
 // fixed layout has no room for this.
 UNSIGNED32 ENTRYPOINT AdsMgGetUserAvgCost(ADSHANDLE h, UNSIGNED32* p,
@@ -35131,11 +35131,11 @@ UNSIGNED32 ENTRYPOINT AdsMgGetUserAvgCost(ADSHANDLE h, UNSIGNED32* p,
     return emit_mg_array(col.value().user_avg_costs(), p, c, sz);
 }
 // Non-SAP extension: on-demand detail for one Active Queries row (see
-// mgmt::MgCollector::thread_sql) — the SQL text of the last ExecuteSQL
+// mgmt::MgCollector::thread_sql) â€” the SQL text of the last ExecuteSQL
 // frame `ulThreadNumber` processed, plus when it started, epoch seconds
 // (0 if unknown/never ran SQL). *pulLen is buffer capacity in, actual
 // text length out (truncated to capacity if longer, same convention as
-// AdsDDGetDatabaseProperty) — call once with a 0-capacity probe to size
+// AdsDDGetDatabaseProperty) â€” call once with a 0-capacity probe to size
 // the buffer, same as everywhere else in this ABI.
 UNSIGNED32 ENTRYPOINT AdsMgGetThreadSql(ADSHANDLE h, UNSIGNED32 ulThreadNumber,
                                         UNSIGNED8* pucBuf, UNSIGNED32* pulLen,
@@ -35188,7 +35188,7 @@ UNSIGNED32 ENTRYPOINT AdsMgResetCommStats(ADSHANDLE h) {
 // already defined earlier in this file.
 
 // ---------------------------------------------------------------------------
-// M12.22 — versioned ACE overloads the X# RDD (xsharp.eu) binds by name.
+// M12.22 â€” versioned ACE overloads the X# RDD (xsharp.eu) binds by name.
 // Most are thin forwards to the base signature already implemented above,
 // dropping the parameters newer ACE builds added (charset/collation tags,
 // page sizes, RI error strings). The handful with no OpenADS base get a
@@ -35352,7 +35352,7 @@ UNSIGNED32 ENTRYPOINT AdsSetProperty(ADSHANDLE /*hObj*/, UNSIGNED32 /*ulOperatio
     return ok();
 }
 
-// AdsSetRightsChecking — global, process-wide legacy rights-checking
+// AdsSetRightsChecking â€” global, process-wide legacy rights-checking
 // mode. Real rights enforcement in OpenADS happens server-side in the
 // DD engine regardless of this client-side flag (see project notes on
 // DD engine enforcement), so this only records the caller's requested
@@ -35387,7 +35387,7 @@ UNSIGNED32 ENTRYPOINT AdsIsTableTransactionFree(ADSHANDLE hTable,
 }
 
 // OpenADS keys connections/tables by handle, not by path/name, so
-// report "not found" — X# then opens a fresh connection/table.
+// report "not found" â€” X# then opens a fresh connection/table.
 UNSIGNED32 ENTRYPOINT AdsFindConnection25(UNSIGNED8* /*pucFullPath*/,
                                ADSHANDLE* phConnect) {
     if (phConnect) *phConnect = 0;
@@ -35404,7 +35404,7 @@ UNSIGNED32 ENTRYPOINT AdsGetTableHandle25(ADSHANDLE /*hConnect*/, UNSIGNED8* /*p
 }
 
 // The SAP "60" bookmark API hands back an opaque blob the app later
-// replays. OpenADS encodes it as the 4-byte little-endian recno —
+// replays. OpenADS encodes it as the 4-byte little-endian recno â€”
 // stable for the table's lifetime, enough for navigate-and-return.
 UNSIGNED32 ENTRYPOINT AdsGetBookmark60(ADSHANDLE hObj, UNSIGNED8* pucBookmark,
                             UNSIGNED32* pulLength) {
@@ -35425,7 +35425,7 @@ UNSIGNED32 ENTRYPOINT AdsGetBookmark60(ADSHANDLE hObj, UNSIGNED8* pucBookmark,
 }
 // SAP / rddads signature: 3 args. AdsGetBookmark60 returns
 // (pucBookmark + *pulLength); the caller hands that exact length
-// back into AdsGotoBookmark60 to replay the bookmark — needed
+// back into AdsGotoBookmark60 to replay the bookmark â€” needed
 // because real ACE supports variable-length bookmarks (the size
 // depends on the index/order). OpenADS encodes everything as a
 // 4-byte recno today, so any ulLength < 4 is a malformed call.
@@ -35453,7 +35453,7 @@ UNSIGNED32 ENTRYPOINT AdsGotoEOF(ADSHANDLE hTable) {
 
 // X#'s ADSRDD calls this during table OPEN to size its memo buffers.
 // Report the attached memo store's block size; for a table with no
-// memo (or a remote handle — no memo introspection over the wire yet)
+// memo (or a remote handle â€” no memo introspection over the wire yet)
 // hand back the xBase FPT default so the RDD has a usable value.
 UNSIGNED32 ENTRYPOINT AdsGetMemoBlockSize(ADSHANDLE hObj, UNSIGNED16* pusBlockSize) {
     if (pusBlockSize == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
@@ -35468,7 +35468,7 @@ UNSIGNED32 ENTRYPOINT AdsGetMemoBlockSize(ADSHANDLE hObj, UNSIGNED16* pusBlockSi
 }
 
 // ---------------------------------------------------------------------------
-// M12.23 — close the export gap the X# Advantage RDD (XSharp.Rdd) relies on.
+// M12.23 â€” close the export gap the X# Advantage RDD (XSharp.Rdd) relies on.
 // ADSRDD.prg references ~45 entry points OpenADS didn't yet export. Most are
 // accept-and-ignore (session toggles, statement helpers) or thin forwards;
 // the field-setter family uses the ACE "field NAME or 1-based ordinal cast to
@@ -35645,7 +35645,7 @@ UNSIGNED32 ENTRYPOINT AdsContinue(ADSHANDLE hTable, UNSIGNED16* pbFound) {
     if (pbFound) *pbFound = 0;
     Table* t = get_table(hTable);
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
-    // Skip one record forward — Table::skip() is filter-aware: it walks
+    // Skip one record forward â€” Table::skip() is filter-aware: it walks
     // past non-matching records until it finds one that passes the current
     // filter (AOF or SetFilter) or reaches EOF.
     auto r = t->skip(1);
@@ -35989,10 +35989,10 @@ UNSIGNED32 ENTRYPOINT AdsSetEmpty(ADSHANDLE hObj, UNSIGNED8* pId) {
     return AdsSetString(hObj, as_field(resolve_field_id(hObj, pId, nm, sizeof(nm))),
                         &blank, 0);
 }
-// RCB 2026-07-03 — AdsSetNull previously always aliased to AdsSetEmpty.
+// RCB 2026-07-03 â€” AdsSetNull previously always aliased to AdsSetEmpty.
 // For a prepared-statement parameter, AdsSetEmpty routes through
 // AdsSetString, which stores the *quoted* literal '' (see
-// set_stmt_param callers above) — that substitutes an empty-string
+// set_stmt_param callers above) â€” that substitutes an empty-string
 // literal into the SQL text instead of the NULL keyword, breaking
 // parameterized queries on typed (numeric/date) columns and changing
 // IS NULL semantics on text columns. Try the statement-handle path
@@ -36163,7 +36163,7 @@ UNSIGNED32 ENTRYPOINT AdsSetSQLTimeout(ADSHANDLE hObj, UNSIGNED32 ulTimeout) {
 }
 
 // ---------------------------------------------------------------------------
-// SAP ACE API name aliases — binaries compiled against ace64.dll use these
+// SAP ACE API name aliases â€” binaries compiled against ace64.dll use these
 // names.  OpenADS uses Create/Drop internally; SAP ACE uses Add/Remove.
 // ---------------------------------------------------------------------------
 
@@ -36193,7 +36193,7 @@ UNSIGNED32 ENTRYPOINT AdsDDRemoveTrigger(ADSHANDLE hConn, UNSIGNED8* pucName) {
     return AdsDDDropTrigger(hConn, pucName);
 }
 
-// AdsDDFindFirstObject / FindNextObject / FindClose — stubs
+// AdsDDFindFirstObject / FindNextObject / FindClose â€” stubs
 // OpenADS does not implement the find-handle enumeration pattern; callers
 // that need object lists should query the system.* virtual tables instead.
 UNSIGNED32 ENTRYPOINT AdsDDFindFirstObject(ADSHANDLE /*hObject*/,
@@ -36217,10 +36217,10 @@ UNSIGNED32 ENTRYPOINT AdsDDFindClose(ADSHANDLE /*hObject*/, ADSHANDLE /*hFindHan
     return ok();
 }
 
-} // extern "C"  — close stub block (opened at line 17925)
-} // extern "C"  — close ACE API exports block (opened at line 12394)
+} // extern "C"  â€” close stub block (opened at line 17925)
+} // extern "C"  â€” close ACE API exports block (opened at line 12394)
 
-// ── Task 2: AdsFetchWhere result-set registry + exports ───────────────────────
+// â”€â”€ Task 2: AdsFetchWhere result-set registry + exports â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 //
 // Process-local registry that maps opaque result handles to the
 // FetchWhereBatch returned by the wire call.  Handles live in the
@@ -36265,7 +36265,7 @@ bool agg_field_is_numeric(openads::drivers::DbfFieldType t) {
     }
 }
 
-// In-process FetchWhere scan — mirrors network/session.cpp Opcode::FetchWhere.
+// In-process FetchWhere scan â€” mirrors network/session.cpp Opcode::FetchWhere.
 openads::network::FetchWhereBatch
 local_run_fetch_where(Table& tbl, std::uint32_t maxrows,
                       const std::string& expr,
@@ -36299,7 +36299,7 @@ local_run_fetch_where(Table& tbl, std::uint32_t maxrows,
     return batch;
 }
 
-// In-process aggregate scan — mirrors network/session.cpp Opcode::Aggregate.
+// In-process aggregate scan â€” mirrors network/session.cpp Opcode::Aggregate.
 // Returns false and sets err on an invalid spec (unknown field, empty field on
 // non-COUNT, etc.).
 bool local_run_aggregate(Table& tbl, const std::string& for_expr,
@@ -36387,7 +36387,7 @@ std::vector<std::string> fw_split_cols(const UNSIGNED8* pszCols) {
 
 extern "C" {  // reopen for AdsFetchWhere* exports
 
-// ─ AdsFetchWhere ─────────────────────────────────────────────────────────────
+// â”€ AdsFetchWhere â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Filtered scan over a table; remote tables use the wire opcode, local DBF
 // tables scan in-process. SQL-backed tables are not supported here.
 UNSIGNED32 ENTRYPOINT AdsFetchWhere(ADSHANDLE hTbl, UNSIGNED8* pszExpr, UNSIGNED8* pszCols,
@@ -36422,7 +36422,7 @@ UNSIGNED32 ENTRYPOINT AdsFetchWhere(ADSHANDLE hTbl, UNSIGNED8* pszExpr, UNSIGNED
     return ok();
 }
 
-// ─ AdsFetchWhereRows ─────────────────────────────────────────────────────────
+// â”€ AdsFetchWhereRows â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 UNSIGNED32 ENTRYPOINT AdsFetchWhereRows(ADSHANDLE hRes, UNSIGNED32* pulRows) {
     if (pulRows == nullptr)
         return fail(openads::AE_INTERNAL_ERROR, "AdsFetchWhereRows: null");
@@ -36434,7 +36434,7 @@ UNSIGNED32 ENTRYPOINT AdsFetchWhereRows(ADSHANDLE hRes, UNSIGNED32* pulRows) {
     return ok();
 }
 
-// ─ AdsFetchWhereRecno ────────────────────────────────────────────────────────
+// â”€ AdsFetchWhereRecno â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // ulRow is 0-based.  Recnos are populated only when WANT_RECNO (0x01) was
 // set in ulFlags at AdsFetchWhere call time.
 UNSIGNED32 ENTRYPOINT AdsFetchWhereRecno(ADSHANDLE hRes, UNSIGNED32 ulRow,
@@ -36452,7 +36452,7 @@ UNSIGNED32 ENTRYPOINT AdsFetchWhereRecno(ADSHANDLE hRes, UNSIGNED32 ulRow,
     return ok();
 }
 
-// ─ AdsFetchWhereField ────────────────────────────────────────────────────────
+// â”€ AdsFetchWhereField â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Copy the value of column `pszCol` at result row `ulRow` into `pucBuf`.
 // Column lookup is case-insensitive.  *pusLen is in/out (capacity in,
 // written byte count out), following the same truncation idiom as AdsGetField.
@@ -36492,7 +36492,7 @@ UNSIGNED32 ENTRYPOINT AdsFetchWhereField(ADSHANDLE hRes, UNSIGNED32 ulRow,
     return ok();
 }
 
-// ─ AdsFetchWhereEof ──────────────────────────────────────────────────────────
+// â”€ AdsFetchWhereEof â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // *pbEof is set to 1 when the server exhausted the table during the scan
 // (no more rows remain past the last matched record), 0 when ulMaxRows was
 // hit before EOF.
@@ -36507,7 +36507,7 @@ UNSIGNED32 ENTRYPOINT AdsFetchWhereEof(ADSHANDLE hRes, UNSIGNED16* pbEof) {
     return ok();
 }
 
-// ─ AdsFetchWhereClose ────────────────────────────────────────────────────────
+// â”€ AdsFetchWhereClose â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Release the result batch and invalidate the handle.  Calling any other
 // AdsFetchWhere* accessor with this handle after Close returns an error.
 UNSIGNED32 ENTRYPOINT AdsFetchWhereClose(ADSHANDLE hRes) {
@@ -36516,12 +36516,12 @@ UNSIGNED32 ENTRYPOINT AdsFetchWhereClose(ADSHANDLE hRes) {
     return ok();
 }
 
-// ─ AdsFetchWhereApplyRow ──────────────────────────────────────────────────────
+// â”€ AdsFetchWhereApplyRow â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Load batch row `ulRow` (its recno + field values) into hTbl's RemoteTable
 // row cache, so AdsGetField / AdsGetRecordNum / AdsIsRecordDeleted / AdsAtEOF
 // serve that row with NO extra round-trip. This lets a forward filter scan
 // (rddads V2) walk the matched rows entirely from a batched AdsFetchWhere
-// result — one round-trip per batch instead of an AdsGotoRecord per match.
+// result â€” one round-trip per batch instead of an AdsGotoRecord per match.
 //
 // The batch must have been fetched with WANT_RECNO. Values are matched to the
 // table's fields by column name (case-insensitive); columns the batch did not
@@ -36532,7 +36532,7 @@ UNSIGNED32 ENTRYPOINT AdsFetchWhereApplyRow(ADSHANDLE hRes, UNSIGNED32 ulRow, AD
         return fail(openads::AE_FUNCTION_NOT_AVAILABLE,
                     "AdsFetchWhereApplyRow: not applicable on a local table");
 
-    // Ensure the field schema is cached so we can map columns → field indices.
+    // Ensure the field schema is cached so we can map columns â†’ field indices.
     // (One wire round-trip the first time only; rddads has it cached already.)
     if (!rt->fields_cached) {
         auto d = rt->conn->describe_table(rt->id);
@@ -36579,9 +36579,9 @@ UNSIGNED32 ENTRYPOINT AdsFetchWhereApplyRow(ADSHANDLE hRes, UNSIGNED32 ulRow, AD
     return ok();
 }
 
-} // extern "C"  — AdsFetchWhere* export block
+} // extern "C"  â€” AdsFetchWhere* export block
 
-// ── Tier-3: AdsAggregate result-set registry + exports ────────────────────────
+// â”€â”€ Tier-3: AdsAggregate result-set registry + exports â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 //
 // Mirrors the FetchWhere registry: opaque high-range handles map to the
 // vector of scalars returned by RemoteConnection::aggregate. A distinct
@@ -36647,7 +36647,7 @@ bool agg_parse_spec(const UNSIGNED8* pszAggSpec,
 
 extern "C" {  // reopen for AdsAggregate* exports
 
-// ─ AdsAggregate ──────────────────────────────────────────────────────────────
+// â”€ AdsAggregate â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 UNSIGNED32 ENTRYPOINT AdsAggregate(ADSHANDLE hTbl, UNSIGNED8* pszForCond,
                         UNSIGNED8* pszAggSpec, ADSHANDLE* phResult) {
     if (phResult == nullptr)
@@ -36718,7 +36718,7 @@ UNSIGNED32 ENTRYPOINT AdsAggregate(ADSHANDLE hTbl, UNSIGNED8* pszForCond,
                 "AdsAggregate: not applicable on this table");
 }
 
-// ─ AdsAggregateCount ─────────────────────────────────────────────────────────
+// â”€ AdsAggregateCount â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 UNSIGNED32 ENTRYPOINT AdsAggregateCount(ADSHANDLE hRes, UNSIGNED32* pulCount) {
     if (pulCount == nullptr)
         return fail(openads::AE_INTERNAL_ERROR, "AdsAggregateCount: null");
@@ -36731,7 +36731,7 @@ UNSIGNED32 ENTRYPOINT AdsAggregateCount(ADSHANDLE hRes, UNSIGNED32* pulCount) {
     return ok();
 }
 
-// ─ AdsAggregateValue ─────────────────────────────────────────────────────────
+// â”€ AdsAggregateValue â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // ulIndex is 0-based. *pusType receives the result discriminator
 // (0=empty, 1=numeric, 2=string); *pusLen is in/out (capacity / written).
 UNSIGNED32 ENTRYPOINT AdsAggregateValue(ADSHANDLE hRes, UNSIGNED32 ulIndex,
@@ -36754,14 +36754,14 @@ UNSIGNED32 ENTRYPOINT AdsAggregateValue(ADSHANDLE hRes, UNSIGNED32 ulIndex,
     return ok();
 }
 
-// ─ AdsAggregateClose ─────────────────────────────────────────────────────────
+// â”€ AdsAggregateClose â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 UNSIGNED32 ENTRYPOINT AdsAggregateClose(ADSHANDLE hRes) {
     std::lock_guard<std::mutex> lk(agg_mu());
     agg_results().erase(hRes);
     return ok();
 }
 
-} // extern "C"  — AdsAggregate* export block
+} // extern "C"  â€” AdsAggregate* export block
 
 
 
@@ -37331,6 +37331,8 @@ UNSIGNED32 ENTRYPOINT AdsDDDeleteUserGroup(ADSHANDLE,
 UNSIGNED32 ENTRYPOINT AdsDDDeleteArticle(ADSHANDLE, UNSIGNED8*,
     UNSIGNED8*) { return ok(); }
 
+UNSIGNED32 ENTRYPOINT AdsDDDeletePublication(ADSHANDLE, UNSIGNED8*) { return ok(); }
+
 // -- Additional stubs for export gap
 
 UNSIGNED32 ENTRYPOINT AdsDDDeployDatabase(ADSHANDLE, UNSIGNED8*,
@@ -37386,6 +37388,136 @@ UNSIGNED32 ENTRYPOINT AdsSetStringFromCodePage(ADSHANDLE, UNSIGNED8*) { return o
 UNSIGNED32 ENTRYPOINT AdsSetupRI(ADSHANDLE, UNSIGNED8*, UNSIGNED32, UNSIGNED32, UNSIGNED32, UNSIGNED32, UNSIGNED32, UNSIGNED32, UNSIGNED32, UNSIGNED32, UNSIGNED32, UNSIGNED32) { return ok(); }
 UNSIGNED32 ENTRYPOINT AdsSqlPeekStatement(ADSHANDLE, UNSIGNED8*, UNSIGNED32) { return ok(); }
 UNSIGNED32 ENTRYPOINT AdsStepIndexKey(ADSHANDLE, UNSIGNED8*, UNSIGNED32, UNSIGNED32) { return ok(); }
+
+// -- Additional stubs for export gap (v1.8.71)
+UNSIGNED32 ENTRYPOINT AdsAccessVfpSystemField() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsAreTriggersEnabled() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsCloseCachedTrigStatements() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsCloseFile() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsConvertCodePageToUnicode() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsConvertDateToJulian() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsConvertJulianToDate() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsConvertJulianToString() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsConvertKeyToDouble() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsConvertMillisecondsToString() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsConvertStringToJulian() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsCopyTableTop100() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsCreateCriticalSection() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsCreateMemTable() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsCreateMemTable90() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsDBFDateToString() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsDDAutoCreateIndex() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsDDAutoCreateTable() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsDDClose() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsDDCreateASA() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsDDCreateASA101() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsDDCreateFunction100() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsDDCreatePackage() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsDDCreatePublication() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsDDDeleteIndex() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsDDDisableTriggers() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsDDDropPackage() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsDDEnableTriggers() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsDDExecuteProcedure() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsDDFindFirst() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsDDFreeTable() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsDDGetObjectProperty() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsDDGetObjectProperty100() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsDDGetProcInterfaceVersion() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsDDGetTableOpenOptions() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsDDMoveObjectFile() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsDDOpen() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsDDRenameObject() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsDDSetActiveDictionary() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsDDSetObjectAccessRights() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsDDSetObjectProperty() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsDDSetObjectProperty100() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsDDVerifyUserRights() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsDeactivateAOF() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsDeleteTable() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsEcho() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsEvalExpr() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsExpressionLongToShort() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsExpressionLongToShort100() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsExpressionLongToShort90() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsExpressionShortToLong() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsExpressionShortToLong90() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsExtractPathPart() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsFreeExpr() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsFreeTokenBuffer() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsGetBaseFieldName() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsGetBaseFieldNum() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsGetConnectionHandle() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsGetCursorAOF() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsGetDeleteStatementW() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsGetFieldCreationString() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsGetFilePosition() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsGetFTSScore() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsGetIndexFlags() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsGetIndexInfo() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsGetIndexPageSize() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsGetInsertStatementW() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsGetKeyFilter() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsGetMergeStatementW() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsGetNullRecord() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsGetNumSegments() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsGetPreparedFields() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsGetRecordPointer() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsGetRILookupInfo() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsGetROWIDPrefix() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsGetSegmentFieldname() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsGetSegmentFieldNumbers() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsGetSegmentOffset() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsGetSelectStatementW() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsGetSQLStmtParams() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsGetTableCreationString() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsGetTableWAN() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsGetUpdateStatementW() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsImageToClipboard() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsImageToHBitmap() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsInitTokenBuffer() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsIsIndexExprValid() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsIsIndexFTS() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsIsSegmentDescending() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsLockRecordImplicitly() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsMakeNameUnique() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsMemCompare() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsMemCompare90() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsMemICompare() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsMemICompare90() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsMemLwr() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsMemLwr90() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsMergeAOF() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsOpenFileRaw() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsParseExpr() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsParseExpr100() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsPerformRI() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsPrepareSQLNow() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsPrepareSQLNowW() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsPullTrigger() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsReadFile() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsReadRecordNumbers() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsReadRecords() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsRefreshView() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsReindexFTS() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsReleaseObject() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsRemoveSQLComments() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsSeekInFile() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsSetBaseTableAccess() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsSetBOFFlag() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsSetCollationSequence() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsSetCursorAOF() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsSetFlushFlag() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsSetPacketSize() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsSetTableCharType() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsSleep() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsStmtGetCursorHandle() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsStmtGetNumParams() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsStmtSetOptimization() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsVerifyRI() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsWaitForObject() { return ok(); }
+UNSIGNED32 ENTRYPOINT AdsWriteMiniDump() { return ok(); }
+
 } // extern "C" -- ARC32 ACE API gap block
 
 } // extern "C++"
