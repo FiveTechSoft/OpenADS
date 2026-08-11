@@ -1,4 +1,4 @@
-﻿#include <cstdarg>
+#include <cstdarg>
 #include "openads/ace.h"
 #include "openads/error.h"
 #include "abi/lock_retry_policy.h"
@@ -7229,6 +7229,11 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
     if (usCharType == ADS_ANSI || usCharType == ADS_OEM)
         tbl->set_char_type(usCharType);
 
+    // Release s.mu before production-index auto-open (AdsOpenIndex does
+    // file I/O + may take index_bindings_mu). Holding the registry mutex
+    // across it serialises every USE behind INDEX ON and can deadlock.
+    lk.unlock();
+
     // M-AOF.6 â€” production-CDX auto-open. ADS / rddads convention:
     // opening `<base>.dbf` auto-binds `<base>.cdx` if it exists, so
     // every tag inside it becomes navigable on this Table without
@@ -12409,6 +12414,13 @@ std::unordered_map<ADSHANDLE, IndexBinding>& index_bindings() {
     return m;
 }
 
+// Protects index_bindings() / active_binding_for() only. MUST NOT be held
+// across bulk CDX I/O (see AdsCreateIndex61). Recursive so helpers re-enter.
+std::recursive_mutex& index_bindings_mu() {
+    static std::recursive_mutex m;
+    return m;
+}
+
 // Records, per table, which binding handle currently owns the active
 // IIndex (i.e. the one moved into Table::order_).
 std::unordered_map<Table*, ADSHANDLE>& active_binding_for() {
@@ -12419,6 +12431,7 @@ std::unordered_map<Table*, ADSHANDLE>& active_binding_for() {
 // Park the table's active order back into its binding slot, leaving the
 // table in natural order (AdsSetIndexOrder(h, "") semantics).
 void park_active_order(Table* t) {
+    std::lock_guard<std::recursive_mutex> lk(index_bindings_mu());
     auto& act = active_binding_for();
     auto act_it = act.find(t);
     if (act_it == act.end()) return;
@@ -12438,6 +12451,7 @@ void park_active_order(Table* t) {
 // behind, so a later test (or app reconnect) that allocates a Table at the
 // same heap slot inherits the stale entries and table_has_active misfires.
 void purge_bindings_for_table(Table* t) {
+    std::lock_guard<std::recursive_mutex> lk(index_bindings_mu());
     auto& m   = index_bindings();
     auto& act = active_binding_for();
     for (auto it = m.begin(); it != m.end(); ) {
@@ -12448,6 +12462,7 @@ void purge_bindings_for_table(Table* t) {
 }
 
 Table* lookup_table_by_index(ADSHANDLE h) {
+    std::lock_guard<std::recursive_mutex> lk(index_bindings_mu());
     auto& m = index_bindings();
     auto it = m.find(h);
     if (it == m.end()) return nullptr;
@@ -12455,6 +12470,7 @@ Table* lookup_table_by_index(ADSHANDLE h) {
 }
 
 openads::drivers::IIndex* iindex_for_handle(ADSHANDLE h) {
+    std::lock_guard<std::recursive_mutex> lk(index_bindings_mu());
     auto& m = index_bindings();
     auto it = m.find(h);
     if (it == m.end()) return nullptr;
@@ -12468,6 +12484,7 @@ openads::drivers::IIndex* iindex_for_handle(ADSHANDLE h) {
 // currently active, park its IIndex back into that binding before
 // stealing the requested one. No-op when `h` is already active.
 openads::util::Result<void> activate_binding(ADSHANDLE h) {
+    std::lock_guard<std::recursive_mutex> lk(index_bindings_mu());
     auto& m = index_bindings();
     auto it = m.find(h);
     if (it == m.end()) {
@@ -12511,7 +12528,7 @@ openads::util::Result<void> activate_binding(ADSHANDLE h) {
 }
 
 ADSHANDLE next_index_handle() {
-    static std::uint64_t n = 0x40000000ULL;  // disjoint from table handles
+    static std::atomic<std::uint64_t> n{0x40000000ULL};
     return static_cast<ADSHANDLE>(++n);
 }
 
@@ -12873,6 +12890,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
     }
     auto path = p.string();
 
+    std::lock_guard<std::recursive_mutex> _oi_lk(index_bindings_mu());
     auto& m   = index_bindings();
     auto& act = active_binding_for();
 
@@ -13349,7 +13367,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
     // the whole native create under the registry mutex â€” the SQL backends above
     // already take it. (state().mu is recursive, so nested handle lookups are
     // safe.)
-    std::lock_guard<std::recursive_mutex> _create_lk(state().mu);
+    // (no whole-path state().mu — see index_bindings_mu for map ops)
     (void)pucKeyFilter; (void)usPageSize;
     auto bag  = normalize_index_path(
         openads::abi::to_internal(pucFileName, 0));
@@ -13861,6 +13879,9 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
         stamp_production_index_flag(t, p.string());
     }
 
+    // Map mutations (sibling park + tag registration) under index_bindings_mu.
+    // Bulk build above intentionally ran unlocked for multi-thread INDEX ON.
+    std::lock_guard<std::recursive_mutex> _bind_lk(index_bindings_mu());
     auto& m   = index_bindings();
     auto& act = active_binding_for();
     // Sibling tag refresh: a fresh CREATE INDEX implicitly resyncs

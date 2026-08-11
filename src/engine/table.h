@@ -274,10 +274,13 @@ public:
                                        std::size_t         len);
     util::Result<void> apply_tx_rollback_append(std::uint32_t recno);
 
-    // Deferred flush mode. When true, AdsWriteRecord skips the
-    // per-record FlushFileBuffers — the record is written to OS cache
-    // but not synced to physical media until AdsFlushFileBuffers is
-    // called. Gives 10-100x speedup for bulk inserts.
+    // Deferred flush mode. When true, AdsWriteRecord settles the dirty
+    // record + index keys but skips Table::flush (index page writeback).
+    // That keeps the CDX write-lock batch open across many writes — good
+    // for single-thread bulk insert, bad for multi-writer shared bags
+    // (peers wait until close). Default OFF; apps that want the bulk
+    // path call AdsSetDeferredFlush(1). OPENADS_FSYNC=1 separately
+    // controls FlushFileBuffers inside driver/index flush.
     bool deferred_flush() const noexcept { return deferred_flush_; }
     void set_deferred_flush(bool v) noexcept { deferred_flush_ = v; }
 

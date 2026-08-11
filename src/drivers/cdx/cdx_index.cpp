@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <memory>
@@ -16,6 +18,21 @@
 namespace openads::drivers::cdx {
 
 namespace {
+
+// Harbour DBFCDX does NOT FlushFileBuffers on every commit / index
+// write — it relies on the OS page cache. OpenADS used to fsync the
+// .cdx on every CdxIndex::flush (and the .dbf on every Table::flush),
+// which made ADSCDX ~6× slower than DBFCDX on concurrent create.
+// Default: write pages only. Set OPENADS_FSYNC=1 to restore the old
+// power-fail-safe FlushFileBuffers on every flush.
+bool want_fsync_() {
+    static const bool v = [] {
+        const char* e = std::getenv("OPENADS_FSYNC");
+        return e && (e[0] == '1' || e[0] == 'y' || e[0] == 'Y' ||
+                     e[0] == 't' || e[0] == 'T');
+    }();
+    return v;
+}
 
 std::mutex g_cdx_alloc_mu;
 std::unordered_map<std::string, std::uint64_t> g_cdx_alloc_tail;
@@ -34,6 +51,7 @@ std::unordered_map<std::string, std::uint64_t> g_cdx_alloc_tail;
 // for worker pools where a connection's requests hop threads).
 struct CdxWriteLockEntry {
     std::mutex                        mu;
+    std::condition_variable           cv;   // waiters wake on last release
     std::size_t                       users = 0;
     std::thread::id                   owner{};
     std::optional<platform::ByteLock> os_lock;
@@ -606,11 +624,16 @@ void CdxWriteLockJoin::release() noexcept {
             if (it == g_cdx_write_locks.end()) return;
             e = it->second;
         }
-        std::lock_guard<std::mutex> elk(e->mu);
-        if (e->users > 0 && --e->users == 0) {
-            e->os_lock.reset();   // drops the OS byte lock
-            e->owner = std::thread::id{};
+        {
+            std::lock_guard<std::mutex> elk(e->mu);
+            if (e->users > 0 && --e->users == 0) {
+                e->os_lock.reset();   // drops the OS byte lock
+                e->owner = std::thread::id{};
+            }
         }
+        // Wake every waiter that was parking on another thread's batch.
+        // notify_all is cheap when no one is waiting.
+        e->cv.notify_all();
     } catch (...) {
         // noexcept contract: a lock-registry hiccup must never throw
         // through a destructor.
@@ -627,36 +650,43 @@ util::Result<void> CdxIndex::ensure_write_lock_() {
         e = slot;
     }
     const auto self = std::this_thread::get_id();
-    for (int wait = 0; ; ++wait) {
-        {
-            std::lock_guard<std::mutex> elk(e->mu);
-            if (e->users == 0) {
-                // Free batch: take the OS byte lock. May wait behind a
-                // Harbour peer's batch (~10 s budget); only THIS file's
-                // threads are serialised meanwhile.
-                auto l = acquire_cdx_os_lock_(file_,
-                                              platform::LockKind::Exclusive);
-                if (!l) return l.error();
-                e->os_lock = std::move(l).value();
-                e->owner   = self;
-                e->users   = 1;
-                break;
-            }
-            if (e->owner == self) {
-                // Same thread, another tag of the same bag: join.
-                ++e->users;
-                break;
-            }
-            // Another thread owns the in-flight batch: wait for its
-            // flush. Joining it would let us read pages the owner has
-            // only in its dirty cache while the on-disk header already
-            // references them (torn read → 6106).
+    // Harbour peers never give up (FLX_WAIT). Bound our own in-process
+    // wait at ~60 s — long enough for a large multi-tag CREATE INDEX on
+    // a peer thread, short enough to surface a real deadlock.
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    for (;;) {
+        std::unique_lock<std::mutex> elk(e->mu);
+        if (e->users == 0) {
+            // Free batch: take the OS byte lock while holding e->mu so
+            // two threads of this process cannot both try_acquire the
+            // same region (Windows same-process exclusive fails the
+            // second with LOCK_VIOLATION and used to burn the full
+            // 10 s retry budget). Peers in other processes still
+            // contend via the OS lock's own retry loop.
+            auto l = acquire_cdx_os_lock_(file_,
+                                          platform::LockKind::Exclusive);
+            if (!l) return l.error();
+            e->os_lock = std::move(l).value();
+            e->owner   = self;
+            e->users   = 1;
+            break;
         }
-        if (wait > 100000) {   // ~10 s of solid in-process contention
+        if (e->owner == self) {
+            // Same thread, another tag of the same bag: join.
+            ++e->users;
+            break;
+        }
+        // Another thread owns the in-flight batch: wait for its
+        // flush. Joining it would let us read pages the owner has
+        // only in its dirty cache while the on-disk header already
+        // references them (torn read → 6106). cv wakes on release()
+        // instead of a 100 µs poll (slow "thread launch" under load).
+        if (e->cv.wait_until(elk, deadline) == std::cv_status::timeout &&
+            e->users != 0 && e->owner != self) {
             return util::Error{5012, 0,
                 "CDX write lock: in-process batch wait timed out", ""};
         }
-        std::this_thread::sleep_for(std::chrono::microseconds(100));
     }
     write_lock_join_.path   = path_;
     write_lock_join_.joined = true;
@@ -2000,6 +2030,17 @@ CdxIndex::erase_from_subtree_(std::uint32_t      subtree_root,
 }
 
 util::Result<void> CdxIndex::flush() {
+    // Always drop our join on every exit path. A failed mid-flush that
+    // left the batch open pinned the OS write lock and every peer
+    // thread waiting on it timed out after ~10 s ("stops working
+    // abruptly" under ADSCDX MT). RAII-style release via local flag.
+    struct ReleaseJoin {
+        CdxWriteLockJoin& j;
+        bool              armed = true;
+        ~ReleaseJoin() { if (armed) j.release(); }
+        void disarm() { armed = false; }
+    } guard{write_lock_join_};
+
     // Read-only open/navigate leaves no page dirty, yet AdsCloseTable flushes
     // every table on close. Skip the rewrite so a read-only open/close cycle
     // does not bump the .cdx mtime or take a write lock another station needs
@@ -2010,7 +2051,7 @@ util::Result<void> CdxIndex::flush() {
         if (!any_dirty) {
             // Header-only mutations (set_options / set_expression) join the
             // write lock without dirtying pages; don't hold it hostage.
-            write_lock_join_.release();
+            // guard dtor releases.
             return {};
         }
     }
@@ -2030,18 +2071,22 @@ util::Result<void> CdxIndex::flush() {
         auto r = flush_page_(off);
         if (!r) return r.error();
     }
-    // Persist root_page_ / counter â€” `insert` already does this on
+    // Persist root_page_ / counter — `insert` already does this on
     // every root change, but a paranoia rewrite here keeps the
     // sub-tag header in sync if the caller reaches `flush` via a
     // different path (eg. set_options + clear_data + insert chain).
     if (sub_header_offset_ != 0) {
         if (auto r = rewrite_header_(); !r) return r.error();
     }
-    if (auto s = file_.sync(); !s) return s.error();
-    // Batch is durable — release the Harbour-compatible write lock so
-    // peers (HbDBU / other OpenADS processes) can observe the new file
-    // version and start their own batch.
-    write_lock_join_.release();
+    // Pages are on the OS cache and visible to peer processes that
+    // share the file mapping / cache. Skip FlushFileBuffers unless
+    // OPENADS_FSYNC=1 (see want_fsync_()). AdsFlushFileBuffers can
+    // still force durability via the driver file handle when apps ask.
+    if (want_fsync_()) {
+        if (auto s = file_.sync(); !s) return s.error();
+    }
+    // Batch is released so peers can observe the new version.
+    // (guard dtor also releases; double-release is a no-op.)
     return {};
 }
 
@@ -2318,7 +2363,9 @@ CdxIndex::create(const std::string& path,
         if (!wrote) return wrote.error();
     }
 
-    if (auto s = file.sync(); !s) return s.error();
+    if (want_fsync_()) {
+        if (auto s = file.sync(); !s) return s.error();
+    }
 
     CdxIndex ix;
     ix.path_              = canonicalize_path(path);
@@ -2486,7 +2533,9 @@ CdxIndex::add_tag(const std::string& path,
         if (!fw) return fw.error();
     }
 
-    if (auto s = file.sync(); !s) return s.error();
+    if (want_fsync_()) {
+        if (auto s = file.sync(); !s) return s.error();
+    }
 
     CdxIndex ix;
     ix.path_              = canonicalize_path(path);

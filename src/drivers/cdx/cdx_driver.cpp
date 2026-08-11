@@ -4,6 +4,7 @@
 #include "platform/time.h"
 
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <thread>
@@ -362,6 +363,16 @@ util::Result<void> CdxDriver::rewrite_header_() {
 }
 
 util::Result<void> CdxDriver::flush() {
+    // Record bodies are already written via write_at / append_record_raw.
+    // Harbour DBFCDX does not FlushFileBuffers on every commit; matching
+    // that default is a multi-x win for ADSCDX bulk append + INDEX ON.
+    // Opt into the old power-fail-safe path with OPENADS_FSYNC=1.
+    static const bool fsync = [] {
+        const char* e = std::getenv("OPENADS_FSYNC");
+        return e && (e[0] == '1' || e[0] == 'y' || e[0] == 'Y' ||
+                     e[0] == 't' || e[0] == 'T');
+    }();
+    if (!fsync) return {};
     return file_.sync();
 }
 
