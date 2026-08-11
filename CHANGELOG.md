@@ -1,3 +1,36 @@
+## 1.8.72 - 2026-08-11
+
+### Performance - ADSCDX multi-thread create ~30x faster than Harbour DBFCDX
+
+Measured on the same workload as the new unit test (40 tables / 4 threads,
+10 rows + 3-tag CDX each), always paired with a Harbour DBFCDX baseline:
+
+| Side | Before | After |
+|------|-------:|------:|
+| Harbour DBFCDX | ~4 s | ~4 s (baseline) |
+| OpenADS ADSCDX (ACE) | ~22 s (~6x slower) | ~0.13 s (~30x faster) |
+| Harbour ADSCDX (rddads) | ~11 s | ~0.15 s (~27x faster) |
+
+Correctness: dbf=645 B, cdx=6144 B, 10 records, three tags (IDX01/02/03).
+
+- **No per-op FlushFileBuffers.** Harbour DBFCDX does not fsync on every
+  commit/index write. OpenADS did (CdxDriver::flush + CdxIndex::flush),
+  dominating wall time. Default is page-write only; set OPENADS_FSYNC=1
+  to restore the old power-fail-safe path.
+- **AdsCreateIndex61 no longer holds state().mu across bulk build.**
+  Only index_bindings_mu around map mutations, so multi-thread INDEX ON
+  scales. AdsOpenTable unlocks the registry mutex before production
+  AdsOpenIndex to avoid USE/INDEX serialisation and lock inversion.
+- **CDX write-lock wait** uses a condition variable (not 100 us poll) and
+  always releases the batch join on flush error paths.
+
+### Tests
+
+- abi_mt_create_vs_dbfcdx_test.cpp - every ADSCDX speed run is paired with
+  a Harbour DBFCDX baseline (mt_create_bench.prg, hbmk2 -mt). Fails if
+  ADSCDX is >8x slower or sizes/record counts diverge.
+- Build harness: tests/unit/build_mt_create_bench.bat.
+
 ## 1.8.68 - 2026-08-09
 
 ### Fixed — clang -Werror build breaks in the new test files
