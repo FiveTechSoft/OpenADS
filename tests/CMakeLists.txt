@@ -55,6 +55,7 @@ add_executable(openads_unit_tests
     unit/cdx_dup_key_split_test.cpp
     unit/abi_alternating_append_test.cpp
     unit/abi_mt_contention_test.cpp
+    unit/abi_mt_create_vs_dbfcdx_test.cpp
     unit/cdx_ins_seq_test.cpp
     unit/abi_ins_order_test.cpp
     unit/engine_order_test.cpp
