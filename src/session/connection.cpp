@@ -206,18 +206,26 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
     // joining, so the table always lands under data_dir_ and a later
     // AdsOpenTable with the same name resolves to the very same file.
     //
-    // OPEN exception: an absolute path that already names an existing
-    // file is honored verbatim — SAP opens free tables by full path even
-    // on a data-directory connection, and folding those broke every
-    // caller that opens a table it just staged at an absolute location
-    // (the DD field-property fixtures do exactly that).
+    // OPEN exception (strict / non-legacy only): an absolute path that
+    // already names an existing file is honored verbatim — SAP opens free
+    // tables by full path even on a data-directory connection, and folding
+    // those broke every caller that opens a table it just staged at an
+    // absolute location (the DD field-property fixtures do exactly that).
     //
-    // CREATE exception (option 2, issue #142): honour an absolute path
-    // when its parent directory is data_dir_ or a subdirectory of it.
-    // A bare drive-root name (C:\STRAY.DBF) still folds — the root always
-    // exists but is never a deliberate destination (abi_create_table_test
-    // pins that case). Paths outside data_dir_ keep folding so DbCreate
-    // cannot write next to the application.
+    // CREATE exception (option 2, issue #142; strict / non-legacy only):
+    // honour an absolute path when its parent directory is data_dir_ or a
+    // subdirectory of it. A bare drive-root name (C:\STRAY.DBF) still folds
+    // — the root always exists but is never a deliberate destination
+    // (abi_create_table_test pins that case). Paths outside data_dir_ keep
+    // folding so DbCreate cannot write next to the application.
+    //
+    // Legacy ERP mode (server --legacy-paths) is different: client-absolute
+    // paths MUST always remount under --data, even when the same spelling
+    // happens to exist on the host filesystem. On a Windows server with
+    // --data C:/Temp and USE "C:/Creative.RAM/...", a leftover
+    // C:\Creative.RAM\... tree must not win over C:\Temp\Creative.RAM\...
+    // (Pritpal Bedi, Aug 2026). Linux live verification never hit this
+    // because E:\... does not exist as a real path on POSIX.
     fs::path rel = fs::path(effective);
     // Legacy mode adds host-independent absolute detection: a Windows
     // client path like "E:\CLIENT\F.DBF" is not absolute to
@@ -228,7 +236,16 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
         rel.is_absolute() || rel.has_root_directory() ||
         (legacy_paths_ && platform::is_client_absolute(effective));
     if (client_absolute) {
-        if (!for_create) {
+        if (legacy_paths_) {
+            // Always remap onto the data root; never open/create a host
+            // path outside the jail just because it already exists.
+            if (auto r = platform::resolve_client_path({data_dir_},
+                                                       effective)) {
+                rel = fs::path(*r);
+            } else {
+                rel = fs::path(platform::fold_absolute_to_relative(effective));
+            }
+        } else if (!for_create) {
             std::error_code ec;
             fs::path cand = rel;
             if (!cand.has_extension()) {
@@ -260,6 +277,7 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
                     return resolved;
                 }
             }
+            rel = rel.relative_path();
         } else {
             // Absolute create under the configured data directory: write
             // exactly there. Parent must exist (we do not mkdir intermediates);
@@ -291,20 +309,6 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
                 (!parent_is_drive_root && fs::is_directory(parent, ec))) {
                 return platform::resolve_case_insensitive(rel.string());
             }
-        }
-        if (legacy_paths_) {
-            // Legacy ERP mode (server --legacy-paths): strip a matching
-            // data-root prefix case-insensitively and ignoring the drive
-            // letter ("C:/TEMP/Sub/t.dbf" with root "c:\temp" resolves to
-            // "<root>/Sub/t.dbf"); when no root prefix matches, drop the
-            // drive/root and join the remainder under data_dir_.
-            if (auto r = platform::resolve_client_path({data_dir_},
-                                                       effective)) {
-                rel = fs::path(*r);
-            } else {
-                rel = fs::path(platform::fold_absolute_to_relative(effective));
-            }
-        } else {
             rel = rel.relative_path();
         }
     }

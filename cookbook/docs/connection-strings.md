@@ -122,11 +122,30 @@ tls://<host>:<port>/<server-side-path>      (encrypted transport)
 ```
 
 The `<server-side-path>` is resolved by the server process, not the
-client, so it is a path on the **server's** machine.
+client. Prefer **forward slashes** even on Windows (`C:/app/data`, not
+`C:\app\data`).
 
 ```
-tcp://192.168.0.10:6262/app/data
+tcp://192.168.0.10:6262/C:/app/data
 tls://db.internal:6262/app/data
+```
+
+Two server modes (see
+[`local-and-remote.md`](local-and-remote.md#path-mapping---data-uri-and---legacy-paths)
+for the full table):
+
+| Server flags | URI path means | Table paths |
+|--------------|----------------|-------------|
+| `--data C:/app/data` (strict) | Must fall under `--data` | Relative, or absolute under the jail |
+| `--data C:/Temp --legacy-paths` | Logical connect dir (often `C:/`) | Legacy absolute `C:/Creative.RAM/...` remounts under `C:/Temp` |
+
+```harbour
+// Strict: URI carries the real server folder
+AdsConnect60( "tcp://127.0.0.1:6262/C:/app/data", ADS_REMOTE_SERVER, ... )
+
+// Legacy ERP: URI keeps the drive the app always used; --data is physical
+AdsConnect60( "tcp://127.0.0.1:6262/C:/", ADS_REMOTE_SERVER, ... )
+// USE "C:/Creative.RAM/..."  ->  C:/Temp/Creative.RAM/... on the server
 ```
 
 After connecting, every call (`AdsOpenTable`, navigation, SQL) is

@@ -149,6 +149,97 @@ TEST_CASE("Connection legacy_paths folds an unknown absolute path under root") {
     fs::remove_all(dir, ec);
 }
 
+// Regression (Pritpal Bedi, Aug 2026): on a Windows server with
+// --legacy-paths, an absolute client path that happens to exist on the
+// host filesystem OUTSIDE --data must still remount under the data root.
+// Strict mode keeps the SAP free-table OPEN-exists exception; legacy
+// mode must not.
+TEST_CASE("Connection legacy_paths ignores host-absolute file that exists outside data root") {
+    auto base = tmp_dir("legacy_host_shadow");
+    auto jail = base / "Temp";
+    auto shadow = base / "Creative.RAM";
+    fs::create_directories(jail / "Creative.RAM");
+    fs::create_directories(shadow);
+    write_minimal_dbf(jail / "Creative.RAM" / "t.dbf");
+    write_minimal_dbf(shadow / "t.dbf");
+    {
+        auto opened = Connection::open(jail.string());
+        REQUIRE(opened.has_value());
+        Connection c = std::move(opened).value();
+
+        const std::string host_abs =
+            fs::absolute(shadow / "t.dbf").generic_string();
+        const std::string host_can =
+            fs::weakly_canonical(shadow / "t.dbf").generic_string();
+        const std::string jail_can =
+            fs::weakly_canonical(jail).generic_string();
+        const std::string under_jail =
+            fs::weakly_canonical(jail / "Creative.RAM" / "t.dbf")
+                .generic_string();
+
+        // Strict mode (legacy OFF): existing absolute path is honored
+        // verbatim — that is the SAP free-table OPEN exception.
+        {
+            auto type = TableType::Cdx;
+            CHECK(fs::path(c.resolve_table_file(host_abs, type))
+                      .generic_string() == host_can);
+        }
+
+        c.set_legacy_paths(true);
+
+        // Legacy ON: same absolute path must NOT stay on the shadow
+        // tree. It is remounted under --data (fold/prefix-strip).
+        {
+            auto type = TableType::Cdx;
+            const std::string got =
+                fs::path(c.resolve_table_file(host_abs, type))
+                    .generic_string();
+            CHECK(got != host_can);
+            // Remounted path lives under the jail (possibly a folded
+            // remainder of the full host path).
+            CHECK(got.rfind(jail_can, 0) == 0);
+        }
+
+        // ERP-style short path (the real client spelling): drive letter
+        // dropped, remainder joined under --data → jail/Creative.RAM/t.dbf
+        // even though the host also has a Creative.RAM tree outside.
+        {
+            auto type = TableType::Cdx;
+            CHECK(fs::path(c.resolve_table_file(
+                              "C:/Creative.RAM/t.dbf", type))
+                      .generic_string() == under_jail);
+            CHECK(fs::path(c.resolve_table_file(
+                              "C:\\Creative.RAM\\t.dbf", type))
+                      .generic_string() == under_jail);
+        }
+
+        // Create: parent of the host absolute path exists, but legacy
+        // must still remount under the jail (not write next to shadow).
+        {
+            auto type = TableType::Cdx;
+            const std::string create_host =
+                fs::absolute(shadow / "new.dbf").generic_string();
+            const std::string got = fs::path(c.resolve_table_file(
+                                                 create_host, type,
+                                                 /*for_create=*/true))
+                                        .generic_string();
+            CHECK(got != fs::path(create_host).generic_string());
+            CHECK(got.rfind(jail_can, 0) == 0);
+
+            // Short ERP create spelling lands exactly where open will.
+            const std::string short_create =
+                fs::path(c.resolve_table_file("C:/Creative.RAM/new.dbf",
+                                              type, /*for_create=*/true))
+                    .generic_string();
+            CHECK(short_create ==
+                  fs::weakly_canonical(jail / "Creative.RAM" / "new.dbf")
+                      .generic_string());
+        }
+    }
+    std::error_code ec;
+    fs::remove_all(base, ec);
+}
+
 // Regression for the live-verified Linux-server bug: a remote
 // AdsCreateTable routes through the session's lazy ABI connection, which
 // never received the legacy flag — on a POSIX server the client-absolute

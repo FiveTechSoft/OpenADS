@@ -54,13 +54,127 @@ Optional:
 - `--data <dir>` -- jail remote `Connect` requests under this directory
   (and, if `--http-port` is set, the directory the browser console
   serves). Accepts more than one root separated by `;`
-  (e.g. `--data "C:\data;D:\more-data"`) when the tables you want to
+  (e.g. `--data "C:/data;D:/more-data"`) when the tables you want to
   serve live under different drives or shares -- a client path only has
   to fall under one of the listed roots.
+- `--legacy-paths` -- zero-change ERP mode: see
+  [Path mapping: `--data`, URI, and `--legacy-paths`](#path-mapping---data-uri-and---legacy-paths)
+  below.
+
+Prefer **forward slashes** in `--data` and in the URI path on every OS
+(including Windows). Backslashes are accepted but confuse shell quoting
+and connection-string construction.
 
 The server can also be installed as a system service (a Windows service,
 a `systemd` unit, or a `launchd` job), but you do not need that to run the
 cookbook examples -- leave it running in a console window.
+
+### Path mapping: `--data`, URI, and `--legacy-paths`
+
+Three separate pieces. Mixing them is the usual source of
+`AdsConnect60 failed` and of tables landing on the wrong drive.
+
+| Piece | What it is | Example |
+|-------|------------|---------|
+| `--data` | Physical directory **on the server** where files live (the jail) | `--data C:/Temp` |
+| URI path | Connect directory the client asks for after `host:port/` | `tcp://127.0.0.1:6262/C:/` |
+| `--legacy-paths` | Remount client-absolute table paths onto `--data` | flag or `legacy_paths=1` in `openads.ini` |
+
+**Do not put the data root inside the URI when using legacy mode.**
+`--data` already names the physical tree. The URI path is only the
+*logical* connect directory the client still spells (often a drive root
+such as `C:/` or `E:/`).
+
+#### Strict mode (default, no `--legacy-paths`)
+
+- The URI path must fall **under** one of the `--data` roots.
+- Relative table names open under the connect directory.
+- Absolute table paths that already exist on the **server** host may be
+  opened as free tables (SAP-compatible). That is *not* remounting onto
+  `--data`.
+
+```
+openads_serverd --port 6262 --data C:/Temp/app
+# client:
+AdsConnect60( "tcp://127.0.0.1:6262/C:/Temp/app", ADS_REMOTE_SERVER, ... )
+USE "orders.dbf"   // -> C:/Temp/app/orders.dbf
+```
+
+Wrong (path outside `--data`):
+
+```
+--data C:/Temp
+URI  tcp://127.0.0.1:6262/Temp/C:/     // fails: not under C:/Temp
+URI  tcp://127.0.0.1:6262/C:/          // fails without legacy-paths
+```
+
+#### Legacy ERP mode (`--legacy-paths`) — zero client source changes
+
+Use this when the application still does `USE "C:/Creative.RAM/..."` (or
+`E:\...`) and you want those tables under a single server folder, or on
+Linux/macOS without Windows drive letters.
+
+```
+# Physical layout on the server:
+#   C:/Temp/Creative.RAM/CAC00001/...
+#   C:/Temp/Creative.KTE/CAC00001/...
+
+openads_serverd --port 6262 --data C:/Temp --legacy-paths
+
+# client (unchanged USE lines):
+AdsSetServerType( ADS_REMOTE_SERVER )
+AdsConnect60( "tcp://127.0.0.1:6262/C:/", ADS_REMOTE_SERVER, ... )
+USE "C:/Creative.RAM/CAC00001/TEST.dbf"
+// opens C:/Temp/Creative.RAM/CAC00001/TEST.dbf
+```
+
+Rules with `--legacy-paths`:
+
+1. Drive letter is ignored for matching; comparison is case-insensitive.
+2. If the client path starts with a `--data` root (ignoring drive), the
+   root prefix is stripped and re-joined under that root.
+3. Otherwise the drive/root is dropped and the remainder is joined under
+   the first `--data` root (`C:/Creative.RAM/...` → `<data>/Creative.RAM/...`).
+4. A drive-root-only connect dir (`C:/`, `E:/`) maps to the matching
+   drive root when `--data` lists whole drives, else to the first root.
+5. Host files that happen to exist at the *client* spelling outside
+   `--data` are **not** used; remount always wins.
+
+Same idea Windows client → Linux server:
+
+```
+openads_serverd --port 16262 --data /tmp/openads_legacy --legacy-paths
+# client URI:  tcp://server:16262/E:/
+# client USE:  E:\CREATIVE.RAM\C0000001\TEST.dbf
+# lands at:    /tmp/openads_legacy/CREATIVE.RAM/C0000001/TEST.dbf
+```
+
+#### Notation cheat sheet (forward slashes)
+
+| Goal | Server | Client URI | Client table path |
+|------|--------|------------|-------------------|
+| Relative names under a folder | `--data C:/app/data` | `tcp://host:6262/C:/app/data` | `orders.dbf` |
+| Whole drive as data | `--data C:/` | `tcp://host:6262/C:/` | `Temp/orders.dbf` or absolute under `C:/` |
+| ERP absolute paths, data in Temp | `--data C:/Temp --legacy-paths` | `tcp://host:6262/C:/` | `C:/Creative.RAM/...` (unchanged) |
+| ERP absolute paths on Linux | `--data /tmp/openads_legacy --legacy-paths` | `tcp://host:6262/E:/` | `E:/CREATIVE.RAM/...` |
+
+`openads.ini` equivalents:
+
+```ini
+data = C:/Temp
+legacy_paths = 1
+port = 6262
+```
+
+**Common mistakes**
+
+| Mistake | What happens |
+|---------|----------------|
+| `data = /Temp/C:` or URI `.../Temp/C:/` | Connect fails or Studio shows nonsense `data=/Temp/C:` — do not glue `--data` and the drive letter into one string |
+| `--data C:/Temp` without `--legacy-paths`, URI `.../C:/` | Connect denied (path outside data directory) |
+| `--data C:/Temp` without `--legacy-paths`, URI `.../C:/`, ADSCDX local | Connect may succeed as **local** and touch real `C:\...` — always set `ADS_REMOTE_SERVER` for remote |
+| URI embeds the data folder in legacy mode (`.../Temp/C:/`) | Wrong; keep URI logical (`.../C:/`) and put the folder only in `--data` |
+| Backslashes in the URI | Prefer `C:/` not `C:\` — `\` is an escape in many languages |
 
 ### The Harbour client difference
 

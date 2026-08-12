@@ -1,3 +1,27 @@
+## 1.8.73 - 2026-08-12
+
+### Fixed — `--legacy-paths` ignored host files that already existed outside `--data` (Pritpal Bedi)
+
+On a Windows server, `USE "C:/Creative.RAM/..."` with
+`openads_serverd --data C:/Temp --legacy-paths` could still open a leftover
+tree at the real `C:\Creative.RAM\...` because the SAP free-table
+"OPEN if absolute path exists" exception ran **before** legacy remount.
+Linux live verification never saw this (`E:\...` does not exist on POSIX).
+
+With `--legacy-paths`, every client-absolute open/create now remounts under
+`--data` first; the host-absolute OPEN/CREATE exceptions apply only in
+strict mode.
+
+Also documented the `--data` / URI / `--legacy-paths` contract (forward
+slashes recommended) in `cookbook/docs/local-and-remote.md` and
+`connection-strings.md`, and clarified `openads_serverd --help`.
+
+### Tests
+
+- `session_connection_test`: host-absolute file outside the jail must not
+  win when `legacy_paths` is on; short `C:/Creative.RAM/...` remounts under
+  the data root.
+
 ## 1.8.72 - 2026-08-11
 
 ### Performance - ADSCDX multi-thread create ~30x faster than Harbour DBFCDX
