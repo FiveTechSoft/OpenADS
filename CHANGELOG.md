@@ -21,6 +21,8 @@ slashes recommended) in `cookbook/docs/local-and-remote.md` and
 - `session_connection_test`: host-absolute file outside the jail must not
   win when `legacy_paths` is on; short `C:/Creative.RAM/...` remounts under
   the data root.
+- `abi_mt_create_vs_dbfcdx_test`: Harbour helpers are Windows-only so
+  clang `-Werror` (Linux/macOS release) does not fail on unused stubs.
 
 ## 1.8.72 - 2026-08-11
 

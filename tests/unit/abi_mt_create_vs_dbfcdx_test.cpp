@@ -403,14 +403,10 @@ bool run_process(const std::wstring& cmdline, const fs::path& cwd,
     CloseHandle(pi.hProcess);
     return true;
 }
-#else
-bool run_process(const std::string&, const fs::path&,
-                 const std::vector<std::pair<std::string, std::string>>&,
-                 std::string&, int&, int) {
-    return false;  // Harbour MT bench is Windows-first (msvc64 hbmk2)
-}
-#endif
 
+// Harbour MT harness is Windows-first (msvc64 hbmk2). Keep helpers inside
+// the same #if so clang -Werror on Linux/macOS does not trip on unused
+// stubs (release v1.8.73 POSIX legs).
 BenchResult parse_harbour_result(const std::string& text) {
     BenchResult r;
     r.raw = text;
@@ -451,6 +447,7 @@ BenchResult parse_harbour_result(const std::string& text) {
     }
     return r;
 }
+#endif  // _WIN32
 
 BenchResult harbour_run(const fs::path& bench_exe, const fs::path& work,
                         const char* rdd, int count, int threads,
