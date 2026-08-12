@@ -6757,11 +6757,20 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
     auto& s = state();
     std::unique_lock<std::recursive_mutex> lk(s.mu);
     // M12.5 â€” remote connection handle: route through wire client.
-    // hConnect == 0 (rddads "current connection" cleared by a disconnect)
-    // resolves to a surviving live remote connection; without this the
-    // call silently fell through to a LOCAL cwd auto-connection and
-    // remote apps opened/created tables on the client filesystem.
-    const ADSHANDLE rem_h = resolve_remote_conn_handle(hConnect);
+    // An explicit local Connection handle must stay local: falling
+    // through to "any live RemoteConnection" hijacks the server ABI
+    // twin whenever an in-process client also holds a tcp:// handle
+    // (embedded-server tests + mixed local/remote apps).
+    // hConnect == 0 / stale still adopts a surviving remote (rddads
+    // "current connection" after disconnect).
+    ADSHANDLE rem_h = 0;
+    if (s.registry.lookup<openads::network::RemoteConnection>(
+            hConnect, HandleKind::RemoteConnection) != nullptr) {
+        rem_h = hConnect;
+    } else if (s.registry.lookup<Connection>(
+                   hConnect, HandleKind::Connection) == nullptr) {
+        rem_h = resolve_remote_conn_handle(hConnect);
+    }
     if (auto* rc = s.registry.lookup<openads::network::RemoteConnection>(
             rem_h, HandleKind::RemoteConnection)) {
         auto name = openads::abi::to_internal(pucName, 0);
@@ -7818,8 +7827,17 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
     // Connection (get_or_create_default_connection), so DbCreate / rddads
     // writes the .dbf next to the client app while the subsequent open
     // (remote AdsOpenTable) fails with AE_TABLE_CORRUPTED (5103).
+    // Same local-handle guard as AdsOpenTable: a valid local Connection
+    // (server ABI twin) must not be hijacked by an in-process tcp://
+    // client connection.
     {
-        ADSHANDLE rc_h = resolve_remote_conn_handle(hConn);
+        ADSHANDLE rc_h = 0;
+        if (get_remote_connection(hConn) != nullptr) {
+            rc_h = hConn;
+        } else if (state().registry.lookup<Connection>(
+                       hConn, HandleKind::Connection) == nullptr) {
+            rc_h = resolve_remote_conn_handle(hConn);
+        }
         if (auto* rc = get_remote_connection(rc_h)) {
             auto cr = rc->create_table(rel, defs,
                                        static_cast<std::uint16_t>(usTableType),
@@ -12668,6 +12686,47 @@ std::string normalize_index_path(std::string path) {
     return path;
 }
 
+// Harbour INDEX ON TO cIdxFile passes a client-absolute bag
+// ("C:/Creative.RAM/T.Z01"). Table opens remount that spelling under
+// --data when --legacy-paths is on; the bag must follow or the .z01
+// lands in the host tree while the .dbf updates in the jail
+// (Pritpal Bedi, 12/08/2026).
+std::string resolve_index_bag_for_table(Table* t, std::string bag,
+                                        const char* default_ext) {
+    bag = normalize_index_path(std::move(bag));
+    namespace fs = std::filesystem;
+    if (t != nullptr) {
+        if (auto* owner = t->owner()) {
+            if (owner->legacy_paths() && !owner->data_dir().empty()) {
+                if (bag.empty()) {
+                    return fs::path(t->path())
+                        .replace_extension(default_ext)
+                        .string();
+                }
+                auto type = openads::engine::TableType::Cdx;
+                std::string resolved =
+                    owner->resolve_table_file(bag, type, /*for_create=*/true);
+                fs::path p(resolved);
+                if (!p.has_extension()) p.replace_extension(default_ext);
+                std::error_code ec;
+                fs::create_directories(p.parent_path(), ec);
+                return p.string();
+            }
+        }
+    }
+    fs::path p;
+    if (bag.empty()) {
+        p = fs::path(t->path()).replace_extension(default_ext);
+    } else {
+        p = fs::path(bag);
+        if (!p.is_absolute() && t != nullptr) {
+            p = fs::path(t->path()).parent_path() / p;
+        }
+        if (!p.has_extension()) p.replace_extension(default_ext);
+    }
+    return p.string();
+}
+
 std::unique_ptr<openads::drivers::IIndex>
 make_index_for(const std::string& path) {
     if (path_ends_with_ci(path, ".cdx")) {
@@ -12826,7 +12885,16 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
     if (!t) {
         return fail(openads::AE_INTERNAL_ERROR, "unknown table");
     }
-    auto bag_name = openads::abi::to_internal(pucName, 0);
+    auto bag_name = normalize_index_path(
+        openads::abi::to_internal(pucName, 0));
+    if (auto* owner = t->owner()) {
+        if (owner->legacy_paths() && !owner->data_dir().empty() &&
+            openads::platform::is_client_absolute(bag_name)) {
+            auto type = openads::engine::TableType::Cdx;
+            bag_name = owner->resolve_table_file(
+                bag_name, type, /*for_create=*/false);
+        }
+    }
     namespace fs = std::filesystem;
     fs::path p(bag_name);
     if (!p.is_absolute()) {
@@ -13393,19 +13461,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
         is_adt_table = true;
     }
     const char* default_ext = is_adt_table ? ".adi" : ".cdx";
-    fs::path p;
-    if (bag.empty()) {
-        // No bag name supplied â†’ structural index bag: same stem as the
-        // table (.cdx for DBF, .adi for ADT).  Mirrors AdsOpenTable90.
-        p = fs::path(t->path()).replace_extension(default_ext);
-    } else {
-        p = fs::path(bag);
-        if (!p.is_absolute()) {
-            fs::path tdir = fs::path(t->path()).parent_path();
-            p = tdir / p;
-        }
-        if (!p.has_extension()) p.replace_extension(default_ext);
-    }
+    fs::path p(resolve_index_bag_for_table(t, bag, default_ext));
     // ACE AdsCreateIndex* option bits. include/openads/ace.h carries the
     // SDK-standard values (ADS_UNIQUE 0x01, ADS_COMPOUND 0x02, ADS_CUSTOM
     // 0x04, ADS_DESCENDING 0x08) â€” but the two RDD clients we interop with
@@ -14094,21 +14150,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex(ADSHANDLE hTable, UNSIGNED8* pucFile,
 
     // Path resolution: mirror AdsCreateIndex61 so the legacy wrapper handles
     // empty bag names, relative paths, and missing extensions the same way.
-    namespace fs = std::filesystem;
-    {
-        fs::path p;
-        if (file.empty()) {
-            p = fs::path(t->path()).replace_extension(".cdx");
-        } else {
-            p = fs::path(file);
-            if (!p.is_absolute()) {
-                fs::path tdir = fs::path(t->path()).parent_path();
-                p = tdir / p;
-            }
-            if (!p.has_extension()) p.replace_extension(".cdx");
-        }
-        file = p.string();
-    }
+    file = resolve_index_bag_for_table(t, file, ".cdx");
 
     std::unique_ptr<openads::drivers::IIndex> idx;
     if (path_ends_with_ci(file, ".cdx")) {

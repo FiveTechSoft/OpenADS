@@ -1683,3 +1683,133 @@ TEST_CASE("remote AdsCreateIndex61 with custom extension writes CDX format") {
     fs::remove_all(dir, ec);
     srv.stop();
 }
+
+// Pritpal Bedi 12/08/2026 — INDEX ON TO <client-absolute .z01> over a
+// remote --legacy-paths connection must remount the bag under --data
+// the same way AdsOpenTable remounts the .DBF. Symptom: timestamps
+// showed the .DBF updating in C:/Temp/Creative.RAM (jail) while the
+// .z01 landed in the host C:/Creative.RAM tree next to the app.
+//
+// Recipe: openads_serverd --data <jail> --legacy-paths
+//         AdsConnect60("tcp://host:port/C:/")
+//         AdsCreateTable / AdsCreateIndex61 with "C:/Creative.RAM/..."
+TEST_CASE("remote INDEX ON remounts client-absolute .z01 under legacy-paths jail") {
+    using openads::network::Server;
+    auto base = fs::temp_directory_path() / "openads_idx_legacy_z01";
+    auto jail = base / "Temp";
+    auto shadow = base / "Creative.RAM";
+    std::error_code ec;
+    fs::remove_all(base, ec);
+    fs::create_directories(jail);
+    fs::create_directories(shadow);
+
+    // Stale host-side bag: if INDEX ON leaks to the local folder this
+    // file's mtime/content will change. The ERP spelling "C:/Creative.RAM"
+    // remounts to jail/Creative.RAM; the host-absolute shadow path is a
+    // second case (folder present on local AND remote).
+    const auto stale = shadow / "T.Z01";
+    {
+        std::ofstream f(stale, std::ios::binary);
+        f << "STALE_Z01_MARKER";
+    }
+    const auto stale_mtime = fs::last_write_time(stale);
+
+    // Stage the DBF under the jail (same tree AdsCreateTable would
+    // remount to). In-process CreateTable over a live RemoteConnection
+    // deadlocks: the server ABI twin's resolve_remote_conn_handle()
+    // adopts the test's tcp handle and re-enters the same socket.
+    fs::create_directories(jail / "Creative.RAM");
+    {
+        UNSIGNED8 srvpath[512];
+        const auto sp = (jail / "Creative.RAM").string();
+        std::memcpy(srvpath, sp.c_str(), sp.size() + 1);
+        ADSHANDLE hLocal = 0;
+        REQUIRE(AdsConnect60(srvpath, ADS_LOCAL_SERVER,
+                             nullptr, nullptr, 0, &hLocal) == 0);
+        UNSIGNED8 fields[] = "NAME,C,8,0";
+        UNSIGNED8 tname[]  = "T.DBF";
+        ADSHANDLE hT = 0;
+        REQUIRE(AdsCreateTable(hLocal, tname, nullptr, ADS_CDX,
+                               0, 0, 0, 0, fields, &hT) == 0);
+        REQUIRE(AdsAppendRecord(hT) == 0);
+        UNSIGNED8 fname[] = "NAME";
+        UNSIGNED8 fval[]  = "ALPHA";
+        REQUIRE(AdsSetString(hT, fname, fval, 5) == 0);
+        REQUIRE(AdsWriteRecord(hT) == 0);
+        REQUIRE(AdsCloseTable(hT) == 0);
+        REQUIRE(AdsDisconnect(hLocal) == 0);
+    }
+
+    Server srv;
+    srv.set_data_dir(jail.generic_string());
+    srv.set_legacy_paths(true);
+    REQUIRE(srv.start("127.0.0.1", 0).has_value());
+    const std::uint16_t port = srv.port();
+
+    std::string uri = "tcp://127.0.0.1:" + std::to_string(port) + "/C:/";
+    std::vector<UNSIGNED8> ubuf(uri.begin(), uri.end());
+    ubuf.push_back(0);
+    ADSHANDLE hConn = 0;
+    REQUIRE(AdsConnect60(ubuf.data(), ADS_REMOTE_SERVER,
+                         nullptr, nullptr, 0, &hConn) == 0);
+
+    UNSIGNED8 tname[]  = "C:/Creative.RAM/T.DBF";
+    ADSHANDLE hTable = 0;
+    REQUIRE(AdsOpenTable(hConn, tname, nullptr, ADS_CDX,
+                         0, 0, 0, 0, &hTable) == 0);
+    REQUIRE(hTable != 0);
+
+    // Harbour INDEX ON NAME TO "C:/Creative.RAM/T.Z01"
+    ADSHANDLE hIndex = 0;
+    UNSIGNED8 bag[]  = "C:/Creative.RAM/T.Z01";
+    UNSIGNED8 tag[]  = "BYNAME";
+    UNSIGNED8 expr[] = "NAME";
+    REQUIRE(AdsCreateIndex61(hTable, bag, tag, expr,
+                             nullptr, nullptr, ADS_COMPOUND, 512,
+                             &hIndex) == 0);
+    REQUIRE(hIndex != 0);
+    REQUIRE(AdsCloseIndex(hIndex) == 0);
+
+    const auto jail_dbf = jail / "Creative.RAM" / "T.DBF";
+    const auto jail_z01 = jail / "Creative.RAM" / "T.Z01";
+    CHECK(fs::exists(jail_dbf));
+    CHECK(fs::exists(jail_z01));
+    CHECK_FALSE(fs::exists(shadow / "T.DBF"));
+
+    // Host shadow bag must stay the stale marker — not rewritten.
+    {
+        std::ifstream f(stale, std::ios::binary);
+        std::string got;
+        std::getline(f, got);
+        CHECK(got == "STALE_Z01_MARKER");
+        CHECK(fs::last_write_time(stale) == stale_mtime);
+    }
+
+    // Second tag via host-absolute bag path (folder exists locally).
+    {
+        auto host_bag = stale.generic_string();
+        std::vector<UNSIGNED8> hbag(host_bag.begin(), host_bag.end());
+        hbag.push_back(0);
+        UNSIGNED8 tag2[]  = "BYNAME2";
+        ADSHANDLE hIdx2 = 0;
+        REQUIRE(AdsCreateIndex61(hTable, hbag.data(), tag2, expr,
+                                 nullptr, nullptr, ADS_COMPOUND, 512,
+                                 &hIdx2) == 0);
+        REQUIRE(hIdx2 != 0);
+        REQUIRE(AdsCloseIndex(hIdx2) == 0);
+        // Still remounted — shadow marker untouched.
+        std::ifstream f(stale, std::ios::binary);
+        std::string got;
+        std::getline(f, got);
+        CHECK(got == "STALE_Z01_MARKER");
+    }
+
+    // Leaked write to the real C:/Creative.RAM (failed remount of the
+    // ERP spelling) must not happen.
+    CHECK_FALSE(fs::exists("C:/Creative.RAM/T.Z01"));
+
+    REQUIRE(AdsCloseTable(hTable) == 0);
+    REQUIRE(AdsDisconnect(hConn) == 0);
+    fs::remove_all(base, ec);
+    srv.stop();
+}

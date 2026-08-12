@@ -1,3 +1,31 @@
+## 1.8.74 - 2026-08-12
+
+### Fixed — `INDEX ON` wrote `.z01` next to the app while the `.dbf` remounted (Pritpal Bedi)
+
+Harbour `INDEX ON … TO "C:/Creative.RAM/T.Z01"` (ADSCDX) sent a
+client-absolute bag to `AdsCreateIndex61`. Table open/create already
+remounted under `--data` with `--legacy-paths`, so the `.dbf` updated in
+`C:/Temp/Creative.RAM` while the bag was created at the host
+`C:/Creative.RAM` path (folder present locally).
+
+`AdsCreateIndex61` / `AdsCreateIndex` / `AdsOpenIndex` now remount the
+bag through the table's connection the same way as the `.dbf`. The
+server `CreateIndex` path uses the same resolver.
+
+Also: an explicit local `Connection` handle is no longer hijacked by
+"any live `RemoteConnection`" (in-process server ABI twin + mixed
+local/remote apps).
+
+`DbExists` / `DbDrop` in stock Harbour rddads still use `hb_spFile` /
+`hb_fsDelete` (local disk). They work when the folder exists locally;
+true remote detect/delete is `AdsCheckExistence` / `AdsDeleteFile` or
+`OAds_FExist`.
+
+### Tests
+
+- `AdsCreateIndex61 remounts client-absolute .z01 under legacy_paths`
+- `remote INDEX ON remounts client-absolute .z01 under legacy-paths jail`
+
 ## 1.8.73 - 2026-08-12
 
 ### Fixed — `--legacy-paths` ignored host files that already existed outside `--data` (Pritpal Bedi)

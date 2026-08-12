@@ -4218,37 +4218,6 @@ DispatchResult Session::dispatch(const Frame& f) {
     return { std::move(reply), false };
 }
 
-namespace {
-
-// True when file path `p` sits inside `base_dir` — the same normalized,
-// case-insensitive containment rule Connection uses for the .DBF create
-// case (resolve_table_file). Local copy: that helper is file-static in
-// connection.cpp.
-bool path_inside_dir(const std::string&           base_dir,
-                     const std::filesystem::path& p) {
-    namespace fs = std::filesystem;
-    if (base_dir.empty()) return false;
-    auto norm = [](const fs::path& in) {
-        std::string s = in.lexically_normal().string();
-        for (auto& ch : s) {
-            if (ch == '\\') ch = '/';
-            ch = static_cast<char>(
-                std::tolower(static_cast<unsigned char>(ch)));
-        }
-        while (!s.empty() && s.back() == '/') s.pop_back();
-        return s;
-    };
-    const std::string base = norm(fs::path(base_dir));
-    const std::string dir  = norm(p.parent_path());
-    if (base.empty() || dir.empty()) return false;
-    if (dir == base) return true;
-    return dir.size() > base.size() &&
-           dir.compare(0, base.size(), base) == 0 &&
-           dir[base.size()] == '/';
-}
-
-} // namespace
-
 // Pritpal Bedi 29/07/2026 — a remote OrdCreate / AdsCreateIndex61 ignored
 // the folder in the index bag name: "cFolder/Indexes/foo.Z01" always landed
 // next to the .DBF, because the client used to strip every bag name to its
@@ -4268,47 +4237,17 @@ std::string Session::resolve_index_bag_path(const std::string& bag) const {
     std::string s = bag;
     for (char& ch : s) if (ch == '\\') ch = '/';
     if (s.find('/') == std::string::npos) return bag;   // bare filename
-    const std::string& root = sess_conn_->data_dir();
-
-    // Host-independent absolute detection: a Windows client can send
-    // "C:/dir/foo.Z01" to a POSIX server, where fs::path sees no root.
-    const bool client_absolute =
-        (s.size() >= 2 && s[1] == ':' &&
-         ((s[0] >= 'A' && s[0] <= 'Z') || (s[0] >= 'a' && s[0] <= 'z'))) ||
-        s.front() == '/';
-
-    std::string rel = s;
-    if (client_absolute) {
-        fs::path p(s);
-        if (p.is_absolute() && path_inside_dir(root, p)) {
-            // Jailed under the data root: honor verbatim, creating the
-            // folder the caller asked for when it does not exist yet.
-            std::error_code ec;
-            fs::create_directories(p.parent_path(), ec);
-            return openads::platform::resolve_case_insensitive(p.string());
-        }
-        if (srv_ && srv_->legacy_paths()) {
-            // --legacy-paths: prefix-strip a matching root (case- and
-            // drive-insensitive) before falling back to the plain fold.
-            if (auto r = openads::platform::resolve_client_path({root}, s)) {
-                std::error_code ec;
-                fs::create_directories(fs::path(*r).parent_path(), ec);
-                return *r;
-            }
-        }
-        rel = openads::platform::fold_absolute_to_relative(s);
-    }
-    auto resolved = openads::platform::resolve_under_root(root, rel);
-    if (!resolved) {
-        // Jail escape: degrade to the historical table-folder behavior.
-        return fs::path(s).filename().string();
-    }
-    // The folder the caller asked for may not exist on the server yet
-    // (a client-side app cannot mkdir there). The resolved path is jailed
-    // under the data root, so creating the intermediates is safe.
+    // Same remount as the .DBF: --legacy-paths always folds a client-
+    // absolute bag under --data (C:/Creative.RAM/T.Z01 →
+    // <jail>/Creative.RAM/T.Z01). Honouring a host-absolute path that
+    // merely existed next to the app is what put .z01 on the local
+    // tree while the table updated in the jail (Pritpal Bedi, 12/08/2026).
+    auto type = openads::engine::TableType::Cdx;
+    std::string resolved =
+        sess_conn_->resolve_table_file(s, type, /*for_create=*/true);
     std::error_code ec;
-    fs::create_directories(fs::path(*resolved).parent_path(), ec);
-    return *resolved;
+    fs::create_directories(fs::path(resolved).parent_path(), ec);
+    return resolved;
 }
 
 std::optional<std::string> Session::resolve_fs_client_path(

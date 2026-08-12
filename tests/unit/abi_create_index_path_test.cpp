@@ -442,3 +442,60 @@ TEST_CASE("AdsCreateIndex61: custom extension writes CDX format") {
     REQUIRE(AdsDisconnect(hConn) == 0);
     fs::remove_all(dir, ec);
 }
+
+// Pritpal Bedi 12/08/2026 — Harbour INDEX ON TO cIdxFile passes a
+// client-absolute bag ("C:/Creative.RAM/T.Z01"). With --legacy-paths the
+// .DBF remounts under --data; the bag must follow. Otherwise the .z01
+// is created next to the app (local timestamps) while the .dbf updates
+// in the jail (remote timestamps).
+namespace openads::abi {
+void set_connection_legacy_paths(ADSHANDLE hConnect, bool on);
+}
+
+TEST_CASE("AdsCreateIndex61 remounts client-absolute .z01 under legacy_paths") {
+    auto base = fs::temp_directory_path() / "openads_ci_legacy_z01";
+    auto jail = base / "Temp";
+    auto shadow = base / "Creative.RAM";
+    std::error_code ec;
+    fs::remove_all(base, ec);
+    fs::create_directories(jail / "Creative.RAM");
+    fs::create_directories(shadow);
+    stage_dbf(jail / "Creative.RAM", "T.DBF", 3);
+
+    const auto stale = shadow / "T.Z01";
+    {
+        std::ofstream f(stale, std::ios::binary);
+        f << "STALE_Z01_MARKER";
+    }
+    const auto stale_mtime = fs::last_write_time(stale);
+
+    auto hConn = connect_local(jail);
+    openads::abi::set_connection_legacy_paths(hConn, true);
+
+    UNSIGNED8 name[] = "C:/Creative.RAM/T.DBF";
+    ADSHANDLE hTbl = 0;
+    REQUIRE(AdsOpenTable(hConn, name, name, ADS_CDX, 1, 1, 0, 1, &hTbl) == 0);
+
+    UNSIGNED8 bag[]  = "C:/Creative.RAM/T.Z01";
+    UNSIGNED8 tag[]  = "BYNAME";
+    UNSIGNED8 expr[] = "NAME";
+    ADSHANDLE hIdx = 0;
+    REQUIRE(AdsCreateIndex61(hTbl, bag, tag, expr,
+                             nullptr, nullptr, ADS_COMPOUND, 512, &hIdx) == 0);
+    REQUIRE(hIdx != 0);
+    REQUIRE(AdsCloseIndex(hIdx) == 0);
+
+    CHECK(fs::exists(jail / "Creative.RAM" / "T.Z01"));
+    CHECK_FALSE(fs::exists("C:/Creative.RAM/T.Z01"));
+    {
+        std::ifstream f(stale, std::ios::binary);
+        std::string got;
+        std::getline(f, got);
+        CHECK(got == "STALE_Z01_MARKER");
+        CHECK(fs::last_write_time(stale) == stale_mtime);
+    }
+
+    REQUIRE(AdsCloseTable(hTbl) == 0);
+    REQUIRE(AdsDisconnect(hConn) == 0);
+    fs::remove_all(base, ec);
+}
