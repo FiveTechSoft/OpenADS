@@ -4234,3 +4234,348 @@ __declspec(dllexport) UNSIGNED32 __stdcall AdsZapTable(ADSHANDLE a0) {
     return oadsimpl_AdsZapTable(a0);
 }
 
+// stdcall wrappers for 38 functions arc32 needs
+// Parameter counts from SAP DLL @N decoration
+
+/* ---- AdsAccessVfpSystemField ---- */
+#define AdsAccessVfpSystemField oadsimpl_AdsAccessVfpSystemField
+extern UNSIGNED32 ENTRYPOINT AdsAccessVfpSystemField(UNSIGNED32 p0, UNSIGNED32 p1, UNSIGNED32 p2, UNSIGNED32 p3);
+#undef AdsAccessVfpSystemField
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsAccessVfpSystemField=_AdsAccessVfpSystemField")
+#pragma comment(linker, "/export:AdsAccessVfpSystemField=_AdsAccessVfpSystemField")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsAccessVfpSystemField(UNSIGNED32 a0, UNSIGNED32 a1, UNSIGNED32 a2, UNSIGNED32 a3) {
+    return oadsimpl_AdsAccessVfpSystemField(a0, a1, a2, a3);
+}
+/* ---- AdsClearRecordBuffer ---- */
+#define AdsClearRecordBuffer oadsimpl_AdsClearRecordBuffer
+extern UNSIGNED32 ENTRYPOINT AdsClearRecordBuffer(ADSHANDLE p0, UNSIGNED8* p1, UNSIGNED32 p2);
+#undef AdsClearRecordBuffer
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsClearRecordBuffer=_AdsClearRecordBuffer")
+#pragma comment(linker, "/export:AdsClearRecordBuffer=_AdsClearRecordBuffer")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsClearRecordBuffer(ADSHANDLE a0, UNSIGNED8* a1, UNSIGNED32 a2) {
+    return oadsimpl_AdsClearRecordBuffer(a0, a1, a2);
+}
+/* ---- AdsConvertDateToJulian ---- */
+#define AdsConvertDateToJulian oadsimpl_AdsConvertDateToJulian
+extern UNSIGNED32 ENTRYPOINT AdsConvertDateToJulian(UNSIGNED32 p0, UNSIGNED32 p1, UNSIGNED32 p2, UNSIGNED32 p3);
+#undef AdsConvertDateToJulian
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsConvertDateToJulian=_AdsConvertDateToJulian")
+#pragma comment(linker, "/export:AdsConvertDateToJulian=_AdsConvertDateToJulian")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsConvertDateToJulian(UNSIGNED32 a0, UNSIGNED32 a1, UNSIGNED32 a2, UNSIGNED32 a3) {
+    return oadsimpl_AdsConvertDateToJulian(a0, a1, a2, a3);
+}
+/* ---- AdsConvertJulianToString ---- */
+#define AdsConvertJulianToString oadsimpl_AdsConvertJulianToString
+extern UNSIGNED32 ENTRYPOINT AdsConvertJulianToString(UNSIGNED32 p0, UNSIGNED32 p1, UNSIGNED32 p2, UNSIGNED32 p3);
+#undef AdsConvertJulianToString
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsConvertJulianToString=_AdsConvertJulianToString")
+#pragma comment(linker, "/export:AdsConvertJulianToString=_AdsConvertJulianToString")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsConvertJulianToString(UNSIGNED32 a0, UNSIGNED32 a1, UNSIGNED32 a2, UNSIGNED32 a3) {
+    return oadsimpl_AdsConvertJulianToString(a0, a1, a2, a3);
+}
+/* ---- AdsConvertStringToJulian ---- */
+#define AdsConvertStringToJulian oadsimpl_AdsConvertStringToJulian
+extern UNSIGNED32 ENTRYPOINT AdsConvertStringToJulian(UNSIGNED32 p0, UNSIGNED32 p1, UNSIGNED32 p2, UNSIGNED32 p3);
+#undef AdsConvertStringToJulian
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsConvertStringToJulian=_AdsConvertStringToJulian")
+#pragma comment(linker, "/export:AdsConvertStringToJulian=_AdsConvertStringToJulian")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsConvertStringToJulian(UNSIGNED32 a0, UNSIGNED32 a1, UNSIGNED32 a2, UNSIGNED32 a3) {
+    return oadsimpl_AdsConvertStringToJulian(a0, a1, a2, a3);
+}
+/* ---- AdsDeleteTable ---- */
+#define AdsDeleteTable oadsimpl_AdsDeleteTable
+extern UNSIGNED32 ENTRYPOINT AdsDeleteTable(UNSIGNED32 p0, UNSIGNED32 p1);
+#undef AdsDeleteTable
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsDeleteTable=_AdsDeleteTable")
+#pragma comment(linker, "/export:AdsDeleteTable=_AdsDeleteTable")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsDeleteTable(UNSIGNED32 a0, UNSIGNED32 a1) {
+    return oadsimpl_AdsDeleteTable(a0, a1);
+}
+/* ---- AdsExpressionLongToShort90 ---- */
+#define AdsExpressionLongToShort90 oadsimpl_AdsExpressionLongToShort90
+extern UNSIGNED32 ENTRYPOINT AdsExpressionLongToShort90(UNSIGNED32 p0, UNSIGNED32 p1, UNSIGNED32 p2);
+#undef AdsExpressionLongToShort90
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsExpressionLongToShort90=_AdsExpressionLongToShort90")
+#pragma comment(linker, "/export:AdsExpressionLongToShort90=_AdsExpressionLongToShort90")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsExpressionLongToShort90(UNSIGNED32 a0, UNSIGNED32 a1, UNSIGNED32 a2) {
+    return oadsimpl_AdsExpressionLongToShort90(a0, a1, a2);
+}
+/* ---- AdsExpressionShortToLong90 ---- */
+#define AdsExpressionShortToLong90 oadsimpl_AdsExpressionShortToLong90
+extern UNSIGNED32 ENTRYPOINT AdsExpressionShortToLong90(UNSIGNED32 p0, UNSIGNED32 p1, UNSIGNED32 p2, UNSIGNED32 p3);
+#undef AdsExpressionShortToLong90
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsExpressionShortToLong90=_AdsExpressionShortToLong90")
+#pragma comment(linker, "/export:AdsExpressionShortToLong90=_AdsExpressionShortToLong90")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsExpressionShortToLong90(UNSIGNED32 a0, UNSIGNED32 a1, UNSIGNED32 a2, UNSIGNED32 a3) {
+    return oadsimpl_AdsExpressionShortToLong90(a0, a1, a2, a3);
+}
+/* ---- AdsGetBookmarkLength ---- */
+#define AdsGetBookmarkLength oadsimpl_AdsGetBookmarkLength
+extern UNSIGNED32 ENTRYPOINT AdsGetBookmarkLength(ADSHANDLE p0, UNSIGNED32* p1, UNSIGNED32 p2);
+#undef AdsGetBookmarkLength
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsGetBookmarkLength=_AdsGetBookmarkLength")
+#pragma comment(linker, "/export:AdsGetBookmarkLength=_AdsGetBookmarkLength")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsGetBookmarkLength(ADSHANDLE a0, UNSIGNED32* a1, UNSIGNED32 a2) {
+    return oadsimpl_AdsGetBookmarkLength(a0, a1, a2);
+}
+/* ---- AdsGetCollation ---- */
+#define AdsGetCollation oadsimpl_AdsGetCollation
+extern UNSIGNED32 ENTRYPOINT AdsGetCollation(ADSHANDLE p0, UNSIGNED8* p1, UNSIGNED16* p2);
+#undef AdsGetCollation
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsGetCollation=_AdsGetCollation")
+#pragma comment(linker, "/export:AdsGetCollation=_AdsGetCollation")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsGetCollation(ADSHANDLE a0, UNSIGNED8* a1, UNSIGNED16* a2) {
+    return oadsimpl_AdsGetCollation(a0, a1, a2);
+}
+/* ---- AdsGetColumnPermissions ---- */
+#define AdsGetColumnPermissions oadsimpl_AdsGetColumnPermissions
+extern UNSIGNED32 ENTRYPOINT AdsGetColumnPermissions(ADSHANDLE p0, UNSIGNED8* p1, UNSIGNED32 p2);
+#undef AdsGetColumnPermissions
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsGetColumnPermissions=_AdsGetColumnPermissions")
+#pragma comment(linker, "/export:AdsGetColumnPermissions=_AdsGetColumnPermissions")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsGetColumnPermissions(ADSHANDLE a0, UNSIGNED8* a1, UNSIGNED32 a2) {
+    return oadsimpl_AdsGetColumnPermissions(a0, a1, a2);
+}
+/* ---- AdsGetConnectionPath ---- */
+#define AdsGetConnectionPath oadsimpl_AdsGetConnectionPath
+extern UNSIGNED32 ENTRYPOINT AdsGetConnectionPath(ADSHANDLE p0, UNSIGNED8* p1, UNSIGNED16* p2);
+#undef AdsGetConnectionPath
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsGetConnectionPath=_AdsGetConnectionPath")
+#pragma comment(linker, "/export:AdsGetConnectionPath=_AdsGetConnectionPath")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsGetConnectionPath(ADSHANDLE a0, UNSIGNED8* a1, UNSIGNED16* a2) {
+    return oadsimpl_AdsGetConnectionPath(a0, a1, a2);
+}
+/* ---- AdsGetConnectionProperty ---- */
+#define AdsGetConnectionProperty oadsimpl_AdsGetConnectionProperty
+extern UNSIGNED32 ENTRYPOINT AdsGetConnectionProperty(ADSHANDLE p0, UNSIGNED16 p1, void* p2, UNSIGNED32* p3);
+#undef AdsGetConnectionProperty
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsGetConnectionProperty=_AdsGetConnectionProperty")
+#pragma comment(linker, "/export:AdsGetConnectionProperty=_AdsGetConnectionProperty")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsGetConnectionProperty(ADSHANDLE a0, UNSIGNED16 a1, void* a2, UNSIGNED32* a3) {
+    return oadsimpl_AdsGetConnectionProperty(a0, a1, a2, a3);
+}
+/* ---- AdsGetDataLength ---- */
+#define AdsGetDataLength oadsimpl_AdsGetDataLength
+extern UNSIGNED32 ENTRYPOINT AdsGetDataLength(ADSHANDLE p0, UNSIGNED8* p1, UNSIGNED32 p2, UNSIGNED32* p3);
+#undef AdsGetDataLength
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsGetDataLength=_AdsGetDataLength")
+#pragma comment(linker, "/export:AdsGetDataLength=_AdsGetDataLength")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsGetDataLength(ADSHANDLE a0, UNSIGNED8* a1, UNSIGNED32 a2, UNSIGNED32* a3) {
+    return oadsimpl_AdsGetDataLength(a0, a1, a2, a3);
+}
+/* ---- AdsGetFTSIndexInfoW ---- */
+#define AdsGetFTSIndexInfoW oadsimpl_AdsGetFTSIndexInfoW
+extern UNSIGNED32 ENTRYPOINT AdsGetFTSIndexInfoW(ADSHANDLE p0, void* p1, UNSIGNED32* p2, void** p3, UNSIGNED32* p4, UNSIGNED32* p5);
+#undef AdsGetFTSIndexInfoW
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsGetFTSIndexInfoW=_AdsGetFTSIndexInfoW")
+#pragma comment(linker, "/export:AdsGetFTSIndexInfoW=_AdsGetFTSIndexInfoW")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsGetFTSIndexInfoW(ADSHANDLE a0, void* a1, UNSIGNED32* a2, void** a3, UNSIGNED32* a4, UNSIGNED32* a5) {
+    return oadsimpl_AdsGetFTSIndexInfoW(a0, a1, a2, a3, a4, a5);
+}
+/* ---- AdsGetIndexCollation ---- */
+#define AdsGetIndexCollation oadsimpl_AdsGetIndexCollation
+extern UNSIGNED32 ENTRYPOINT AdsGetIndexCollation(ADSHANDLE p0, UNSIGNED8* p1, UNSIGNED16* p2, UNSIGNED32 p3);
+#undef AdsGetIndexCollation
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsGetIndexCollation=_AdsGetIndexCollation")
+#pragma comment(linker, "/export:AdsGetIndexCollation=_AdsGetIndexCollation")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsGetIndexCollation(ADSHANDLE a0, UNSIGNED8* a1, UNSIGNED16* a2, UNSIGNED32 a3) {
+    return oadsimpl_AdsGetIndexCollation(a0, a1, a2, a3);
+}
+/* ---- AdsGetIndexFlags ---- */
+#define AdsGetIndexFlags oadsimpl_AdsGetIndexFlags
+extern UNSIGNED32 ENTRYPOINT AdsGetIndexFlags(UNSIGNED32 p0, UNSIGNED32 p1);
+#undef AdsGetIndexFlags
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsGetIndexFlags=_AdsGetIndexFlags")
+#pragma comment(linker, "/export:AdsGetIndexFlags=_AdsGetIndexFlags")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsGetIndexFlags(UNSIGNED32 a0, UNSIGNED32 a1) {
+    return oadsimpl_AdsGetIndexFlags(a0, a1);
+}
+/* ---- AdsGetIndexPageSize ---- */
+#define AdsGetIndexPageSize oadsimpl_AdsGetIndexPageSize
+extern UNSIGNED32 ENTRYPOINT AdsGetIndexPageSize(UNSIGNED32 p0, UNSIGNED32 p1, UNSIGNED32 p2);
+#undef AdsGetIndexPageSize
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsGetIndexPageSize=_AdsGetIndexPageSize")
+#pragma comment(linker, "/export:AdsGetIndexPageSize=_AdsGetIndexPageSize")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsGetIndexPageSize(UNSIGNED32 a0, UNSIGNED32 a1, UNSIGNED32 a2) {
+    return oadsimpl_AdsGetIndexPageSize(a0, a1, a2);
+}
+/* ---- AdsGetKeyColumn ---- */
+#define AdsGetKeyColumn oadsimpl_AdsGetKeyColumn
+extern UNSIGNED32 ENTRYPOINT AdsGetKeyColumn(ADSHANDLE p0, UNSIGNED16* p1, UNSIGNED32 p2);
+#undef AdsGetKeyColumn
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsGetKeyColumn=_AdsGetKeyColumn")
+#pragma comment(linker, "/export:AdsGetKeyColumn=_AdsGetKeyColumn")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsGetKeyColumn(ADSHANDLE a0, UNSIGNED16* a1, UNSIGNED32 a2) {
+    return oadsimpl_AdsGetKeyColumn(a0, a1, a2);
+}
+/* ---- AdsGetNullRecord ---- */
+#define AdsGetNullRecord oadsimpl_AdsGetNullRecord
+extern UNSIGNED32 ENTRYPOINT AdsGetNullRecord(UNSIGNED32 p0);
+#undef AdsGetNullRecord
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsGetNullRecord=_AdsGetNullRecord")
+#pragma comment(linker, "/export:AdsGetNullRecord=_AdsGetNullRecord")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsGetNullRecord(UNSIGNED32 a0) {
+    return oadsimpl_AdsGetNullRecord(a0);
+}
+/* ---- AdsGetNumFTSIndexes ---- */
+#define AdsGetNumFTSIndexes oadsimpl_AdsGetNumFTSIndexes
+extern UNSIGNED32 ENTRYPOINT AdsGetNumFTSIndexes(ADSHANDLE p0, UNSIGNED16* p1, UNSIGNED32 p2, UNSIGNED32 p3, UNSIGNED32 p4, UNSIGNED32 p5);
+#undef AdsGetNumFTSIndexes
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsGetNumFTSIndexes=_AdsGetNumFTSIndexes")
+#pragma comment(linker, "/export:AdsGetNumFTSIndexes=_AdsGetNumFTSIndexes")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsGetNumFTSIndexes(ADSHANDLE a0, UNSIGNED16* a1, UNSIGNED32 a2, UNSIGNED32 a3, UNSIGNED32 a4, UNSIGNED32 a5) {
+    return oadsimpl_AdsGetNumFTSIndexes(a0, a1, a2, a3, a4, a5);
+}
+/* ---- AdsGetNumSegments ---- */
+#define AdsGetNumSegments oadsimpl_AdsGetNumSegments
+extern UNSIGNED32 ENTRYPOINT AdsGetNumSegments(UNSIGNED32 p0, UNSIGNED32 p1, UNSIGNED32 p2, UNSIGNED32 p3);
+#undef AdsGetNumSegments
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsGetNumSegments=_AdsGetNumSegments")
+#pragma comment(linker, "/export:AdsGetNumSegments=_AdsGetNumSegments")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsGetNumSegments(UNSIGNED32 a0, UNSIGNED32 a1, UNSIGNED32 a2, UNSIGNED32 a3) {
+    return oadsimpl_AdsGetNumSegments(a0, a1, a2, a3);
+}
+/* ---- AdsGetPreparedFields ---- */
+#define AdsGetPreparedFields oadsimpl_AdsGetPreparedFields
+extern UNSIGNED32 ENTRYPOINT AdsGetPreparedFields(UNSIGNED32 p0, UNSIGNED32 p1);
+#undef AdsGetPreparedFields
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsGetPreparedFields=_AdsGetPreparedFields")
+#pragma comment(linker, "/export:AdsGetPreparedFields=_AdsGetPreparedFields")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsGetPreparedFields(UNSIGNED32 a0, UNSIGNED32 a1) {
+    return oadsimpl_AdsGetPreparedFields(a0, a1);
+}
+/* ---- AdsGetSQLStmtParams ---- */
+#define AdsGetSQLStmtParams oadsimpl_AdsGetSQLStmtParams
+extern UNSIGNED32 ENTRYPOINT AdsGetSQLStmtParams(UNSIGNED32 p0, UNSIGNED32 p1);
+#undef AdsGetSQLStmtParams
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsGetSQLStmtParams=_AdsGetSQLStmtParams")
+#pragma comment(linker, "/export:AdsGetSQLStmtParams=_AdsGetSQLStmtParams")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsGetSQLStmtParams(UNSIGNED32 a0, UNSIGNED32 a1) {
+    return oadsimpl_AdsGetSQLStmtParams(a0, a1);
+}
+/* ---- AdsGetSegmentFieldname ---- */
+#define AdsGetSegmentFieldname oadsimpl_AdsGetSegmentFieldname
+extern UNSIGNED32 ENTRYPOINT AdsGetSegmentFieldname(UNSIGNED32 p0, UNSIGNED32 p1, UNSIGNED32 p2, UNSIGNED32 p3);
+#undef AdsGetSegmentFieldname
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsGetSegmentFieldname=_AdsGetSegmentFieldname")
+#pragma comment(linker, "/export:AdsGetSegmentFieldname=_AdsGetSegmentFieldname")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsGetSegmentFieldname(UNSIGNED32 a0, UNSIGNED32 a1, UNSIGNED32 a2, UNSIGNED32 a3) {
+    return oadsimpl_AdsGetSegmentFieldname(a0, a1, a2, a3);
+}
+/* ---- AdsGetTableCollation ---- */
+#define AdsGetTableCollation oadsimpl_AdsGetTableCollation
+extern UNSIGNED32 ENTRYPOINT AdsGetTableCollation(ADSHANDLE p0, UNSIGNED8* p1, UNSIGNED16* p2, UNSIGNED32 p3);
+#undef AdsGetTableCollation
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsGetTableCollation=_AdsGetTableCollation")
+#pragma comment(linker, "/export:AdsGetTableCollation=_AdsGetTableCollation")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsGetTableCollation(ADSHANDLE a0, UNSIGNED8* a1, UNSIGNED16* a2, UNSIGNED32 a3) {
+    return oadsimpl_AdsGetTableCollation(a0, a1, a2, a3);
+}
+/* ---- AdsGetTableCreationString ---- */
+#define AdsGetTableCreationString oadsimpl_AdsGetTableCreationString
+extern UNSIGNED32 ENTRYPOINT AdsGetTableCreationString(UNSIGNED32 p0, UNSIGNED32 p1, UNSIGNED32 p2, UNSIGNED32 p3, UNSIGNED32 p4, UNSIGNED32 p5);
+#undef AdsGetTableCreationString
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsGetTableCreationString=_AdsGetTableCreationString")
+#pragma comment(linker, "/export:AdsGetTableCreationString=_AdsGetTableCreationString")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsGetTableCreationString(UNSIGNED32 a0, UNSIGNED32 a1, UNSIGNED32 a2, UNSIGNED32 a3, UNSIGNED32 a4, UNSIGNED32 a5) {
+    return oadsimpl_AdsGetTableCreationString(a0, a1, a2, a3, a4, a5);
+}
+/* ---- AdsGetTransactionCount ---- */
+#define AdsGetTransactionCount oadsimpl_AdsGetTransactionCount
+extern UNSIGNED32 ENTRYPOINT AdsGetTransactionCount(ADSHANDLE p0, UNSIGNED32* p1, UNSIGNED32 p2);
+#undef AdsGetTransactionCount
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsGetTransactionCount=_AdsGetTransactionCount")
+#pragma comment(linker, "/export:AdsGetTransactionCount=_AdsGetTransactionCount")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsGetTransactionCount(ADSHANDLE a0, UNSIGNED32* a1, UNSIGNED32 a2) {
+    return oadsimpl_AdsGetTransactionCount(a0, a1, a2);
+}
+/* ---- AdsGotoBookmark ---- */
+#define AdsGotoBookmark oadsimpl_AdsGotoBookmark
+extern UNSIGNED32 ENTRYPOINT AdsGotoBookmark(ADSHANDLE p0, ADSHANDLE p1);
+#undef AdsGotoBookmark
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsGotoBookmark=_AdsGotoBookmark")
+#pragma comment(linker, "/export:AdsGotoBookmark=_AdsGotoBookmark")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsGotoBookmark(ADSHANDLE a0, ADSHANDLE a1) {
+    return oadsimpl_AdsGotoBookmark(a0, a1);
+}
+/* ---- AdsIsIndexCandidate ---- */
+#define AdsIsIndexCandidate oadsimpl_AdsIsIndexCandidate
+extern UNSIGNED32 ENTRYPOINT AdsIsIndexCandidate(ADSHANDLE p0, UNSIGNED16* p1);
+#undef AdsIsIndexCandidate
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsIsIndexCandidate=_AdsIsIndexCandidate")
+#pragma comment(linker, "/export:AdsIsIndexCandidate=_AdsIsIndexCandidate")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsIsIndexCandidate(ADSHANDLE a0, UNSIGNED16* a1) {
+    return oadsimpl_AdsIsIndexCandidate(a0, a1);
+}
+/* ---- AdsIsIndexCompound ---- */
+#define AdsIsIndexCompound oadsimpl_AdsIsIndexCompound
+extern UNSIGNED32 ENTRYPOINT AdsIsIndexCompound(ADSHANDLE p0, UNSIGNED16* p1);
+#undef AdsIsIndexCompound
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsIsIndexCompound=_AdsIsIndexCompound")
+#pragma comment(linker, "/export:AdsIsIndexCompound=_AdsIsIndexCompound")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsIsIndexCompound(ADSHANDLE a0, UNSIGNED16* a1) {
+    return oadsimpl_AdsIsIndexCompound(a0, a1);
+}
+/* ---- AdsIsIndexPrimaryKey ---- */
+#define AdsIsIndexPrimaryKey oadsimpl_AdsIsIndexPrimaryKey
+extern UNSIGNED32 ENTRYPOINT AdsIsIndexPrimaryKey(ADSHANDLE p0, UNSIGNED16* p1);
+#undef AdsIsIndexPrimaryKey
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsIsIndexPrimaryKey=_AdsIsIndexPrimaryKey")
+#pragma comment(linker, "/export:AdsIsIndexPrimaryKey=_AdsIsIndexPrimaryKey")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsIsIndexPrimaryKey(ADSHANDLE a0, UNSIGNED16* a1) {
+    return oadsimpl_AdsIsIndexPrimaryKey(a0, a1);
+}
+/* ---- AdsPrepareSQLNow ---- */
+#define AdsPrepareSQLNow oadsimpl_AdsPrepareSQLNow
+extern UNSIGNED32 ENTRYPOINT AdsPrepareSQLNow(UNSIGNED32 p0, UNSIGNED32 p1, UNSIGNED32 p2, UNSIGNED32 p3);
+#undef AdsPrepareSQLNow
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsPrepareSQLNow=_AdsPrepareSQLNow")
+#pragma comment(linker, "/export:AdsPrepareSQLNow=_AdsPrepareSQLNow")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsPrepareSQLNow(UNSIGNED32 a0, UNSIGNED32 a1, UNSIGNED32 a2, UNSIGNED32 a3) {
+    return oadsimpl_AdsPrepareSQLNow(a0, a1, a2, a3);
+}
+/* ---- AdsSetLastError ---- */
+#define AdsSetLastError oadsimpl_AdsSetLastError
+extern UNSIGNED32 ENTRYPOINT AdsSetLastError(ADSHANDLE p0, UNSIGNED8* p1, UNSIGNED32 p2, UNSIGNED32 p3);
+#undef AdsSetLastError
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsSetLastError=_AdsSetLastError")
+#pragma comment(linker, "/export:AdsSetLastError=_AdsSetLastError")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsSetLastError(ADSHANDLE a0, UNSIGNED8* a1, UNSIGNED32 a2, UNSIGNED32 a3) {
+    return oadsimpl_AdsSetLastError(a0, a1, a2, a3);
+}
+/* ---- AdsSqlPeekStatement ---- */
+#define AdsSqlPeekStatement oadsimpl_AdsSqlPeekStatement
+extern UNSIGNED32 ENTRYPOINT AdsSqlPeekStatement(ADSHANDLE p0, UNSIGNED8* p1, UNSIGNED32 p2);
+#undef AdsSqlPeekStatement
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsSqlPeekStatement=_AdsSqlPeekStatement")
+#pragma comment(linker, "/export:AdsSqlPeekStatement=_AdsSqlPeekStatement")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsSqlPeekStatement(ADSHANDLE a0, UNSIGNED8* a1, UNSIGNED32 a2) {
+    return oadsimpl_AdsSqlPeekStatement(a0, a1, a2);
+}
+/* ---- AdsStepIndexKey ---- */
+#define AdsStepIndexKey oadsimpl_AdsStepIndexKey
+extern UNSIGNED32 ENTRYPOINT AdsStepIndexKey(ADSHANDLE p0, UNSIGNED8* p1, UNSIGNED32 p2, UNSIGNED32 p3);
+#undef AdsStepIndexKey
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsStepIndexKey=_AdsStepIndexKey")
+#pragma comment(linker, "/export:AdsStepIndexKey=_AdsStepIndexKey")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsStepIndexKey(ADSHANDLE a0, UNSIGNED8* a1, UNSIGNED32 a2, UNSIGNED32 a3) {
+    return oadsimpl_AdsStepIndexKey(a0, a1, a2, a3);
+}
+/* ---- AdsStmtConstrainUpdates ---- */
+#define AdsStmtConstrainUpdates oadsimpl_AdsStmtConstrainUpdates
+extern UNSIGNED32 ENTRYPOINT AdsStmtConstrainUpdates(ADSHANDLE p0, UNSIGNED16 p1);
+#undef AdsStmtConstrainUpdates
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsStmtConstrainUpdates=_AdsStmtConstrainUpdates")
+#pragma comment(linker, "/export:AdsStmtConstrainUpdates=_AdsStmtConstrainUpdates")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsStmtConstrainUpdates(ADSHANDLE a0, UNSIGNED16 a1) {
+    return oadsimpl_AdsStmtConstrainUpdates(a0, a1);
+}
+/* ---- AdsStmtReadAllColumns ---- */
+#define AdsStmtReadAllColumns oadsimpl_AdsStmtReadAllColumns
+extern UNSIGNED32 ENTRYPOINT AdsStmtReadAllColumns(ADSHANDLE p0, UNSIGNED16 p1);
+#undef AdsStmtReadAllColumns
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsStmtReadAllColumns=_AdsStmtReadAllColumns")
+#pragma comment(linker, "/export:AdsStmtReadAllColumns=_AdsStmtReadAllColumns")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsStmtReadAllColumns(ADSHANDLE a0, UNSIGNED16 a1) {
+    return oadsimpl_AdsStmtReadAllColumns(a0, a1);
+}
