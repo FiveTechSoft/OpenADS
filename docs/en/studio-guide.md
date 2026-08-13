@@ -298,6 +298,22 @@ when scripting against the server from Python / curl / etc.
 | `POST /api/dd/<n>/users`                   | create USER |
 | `DELETE /api/dd/<n>/users/<u>`             | drop USER |
 | `POST /api/dd/<n>/dbprop`                  | set `{ key, value }` DB property |
+| `GET /api/server/backup`                   | download ZIP backup of the active data dir |
+
+## Backup endpoint
+
+The `GET /api/server/backup` endpoint creates a ZIP archive of the
+server's data directory on-the-fly and streams it to the browser.
+
+**Response:** A `application/zip` file named `openads-backup-<timestamp>.zip`.
+
+**Usage:**
+- Via browser: navigate to `http://localhost:6263/api/server/backup`
+- Via curl: `curl -o backup.zip http://localhost:6263/api/server/backup`
+
+The backup includes all tables, index files, memo files, and the data
+dictionary in the server's data directory. This is a point-in-time
+snapshot; tables being actively written may be in an inconsistent state.
 
 ## Authentication
 
