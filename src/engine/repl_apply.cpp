@@ -84,8 +84,8 @@ repl_apply_once(DataDict& dd,
         }
         Table tbl = std::move(tbl_res).value();
 
-        switch (rec.type) {
-            case ReplRecType::Insert: {
+        switch (static_cast<std::uint8_t>(rec.type)) {
+            case static_cast<std::uint8_t>(ReplRecType::Insert): {
                 if (rec.after.empty()) break;
                 if (auto r = tbl.append_record(); !r) break;
                 if (auto r = tbl.set_record_raw(rec.after.data(),
@@ -94,7 +94,7 @@ repl_apply_once(DataDict& dd,
                 result.records_applied++;
                 break;
             }
-            case ReplRecType::Update: {
+            case static_cast<std::uint8_t>(ReplRecType::Update): {
                 if (rec.after.empty()) break;
                 auto recno = find_by_identity(tbl, rec.identity);
                 if (recno == 0) break;
@@ -105,7 +105,7 @@ repl_apply_once(DataDict& dd,
                 result.records_applied++;
                 break;
             }
-            case ReplRecType::Delete: {
+            case static_cast<std::uint8_t>(ReplRecType::Delete): {
                 auto recno = find_by_identity(tbl, rec.identity);
                 if (recno == 0) break;
                 if (auto r = tbl.goto_record(recno); !r) break;

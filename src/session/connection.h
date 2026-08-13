@@ -2,6 +2,8 @@
 
 #include "engine/data_dict.h"
 #include "engine/lsn_map.h"
+#include "engine/repl_catalog.h"
+#include "engine/repl_queue.h"
 #include "engine/table.h"
 #include "engine/tx.h"
 #include "engine/tx_log.h"
@@ -87,6 +89,10 @@ public:
     util::Result<std::string> find_next_table(TableFind* find);
     util::Result<void>        find_close(TableFind* find);
 
+    // M12.33 — return all matching file names at once (for wire protocol).
+    util::Result<std::vector<std::string>>
+        find_tables(const std::string& mask);
+
     // M11.4 — AEP host. Procedures are registered against a
     // connection (DLL handle owned here, freed at disconnect) and
     // invoked through execute_procedure. Procedure ABI:
@@ -153,6 +159,13 @@ public:
     enum class Collation { Binary, NoCase };
     void       set_collation(Collation c) noexcept { collation_ = c; }
     Collation  collation() const noexcept { return collation_; }
+
+    // Replication state accessors (Phase 1).
+    engine::ReplQueue&       repl_queue()       noexcept { return repl_queue_; }
+    engine::ReplCatalog&     repl_catalog()     noexcept { return repl_catalog_; }
+    bool                     repl_queue_open() const noexcept { return repl_queue_open_; }
+    void                     set_repl_queue_open(bool v) noexcept { repl_queue_open_ = v; }
+    std::uint64_t            tx_id() const noexcept { return next_tx_id_ - 1; }
 
     // OEM national collation for CDX/NTX index keys (NTXPL852, PL852, …).
     // nullptr = raw byte order. Set via AdsSetCollation.
@@ -248,6 +261,11 @@ private:
     bool                                                       triggers_disabled_ = false;
     // sp_SetApplicationID / sp_GetApplicationID label.
     std::string                                                app_id_;
+
+    // Replication state (Phase 1: capture).
+    engine::ReplQueue                                          repl_queue_;
+    bool                                                       repl_queue_open_ = false;
+    engine::ReplCatalog                                        repl_catalog_;
 
 public:
     // Trigger disable / enable for this connection (current-user scope).

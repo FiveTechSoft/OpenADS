@@ -1924,6 +1924,48 @@ util::Result<void> DataDict::load_() {
             ViewEntry e;
             if (!json.empty()) json_to_view(json, e);
             if (!e.name.empty()) views_[e.name] = std::move(e);
+
+        } else if (obj_type == "Publication") {
+            PublicationEntry e;
+            e.name = obj_name;
+            if (!json.empty()) {
+                auto m = json_parse_flat(json);
+                if (m.count("comment")) e.comment = m.at("comment");
+            }
+            publications_[obj_name] = std::move(e);
+
+        } else if (obj_type == "Article") {
+            ArticleEntry e;
+            e.name = obj_name;
+            if (!json.empty()) {
+                auto m = json_parse_flat(json);
+                if (m.count("pub"))  e.publication  = m.at("pub");
+                if (m.count("table")) e.source_table = m.at("table");
+                if (m.count("filter")) e.filter      = m.at("filter");
+                if (m.count("enabled")) e.enabled    = (m.at("enabled") != "0");
+                if (m.count("idcols")) {
+                    auto& ids = m.at("idcols");
+                    std::string tok;
+                    for (char c : ids) {
+                        if (c == ',') { if (!tok.empty()) { e.identity_cols.push_back(tok); tok.clear(); } }
+                        else tok += c;
+                    }
+                    if (!tok.empty()) e.identity_cols.push_back(tok);
+                }
+            }
+            articles_[obj_name] = std::move(e);
+
+        } else if (obj_type == "Subscription") {
+            SubscriptionEntry e;
+            e.name = obj_name;
+            if (!json.empty()) {
+                auto m = json_parse_flat(json);
+                if (m.count("pub"))     e.publication = m.at("pub");
+                if (m.count("uri"))     e.target_uri  = m.at("uri");
+                if (m.count("lsn"))     { try { e.last_lsn = std::stoull(m.at("lsn")); } catch (...) {} }
+                if (m.count("enabled")) e.enabled = (m.at("enabled") != "0");
+            }
+            subscriptions_[obj_name] = std::move(e);
         }
         // Unknown OBJ_TYPE values are silently skipped (forward compatibility).
     }
@@ -2111,6 +2153,54 @@ util::Result<void> DataDict::save() {
         for (auto& kv : views_) keys.push_back(kv.first);
         std::sort(keys.begin(), keys.end());
         for (auto& k : keys) mk("View", k, "", view_to_json(views_.at(k)));
+    }
+
+    // Publications
+    {
+        std::vector<std::string> keys;
+        for (auto& kv : publications_) keys.push_back(kv.first);
+        std::sort(keys.begin(), keys.end());
+        for (auto& k : keys) {
+            auto& p = publications_.at(k);
+            std::string j = "{\"comment\":\"" + json_escape(p.comment) + "\"}";
+            mk("Publication", p.name, "", j);
+        }
+    }
+
+    // Articles
+    {
+        std::vector<std::string> keys;
+        for (auto& kv : articles_) keys.push_back(kv.first);
+        std::sort(keys.begin(), keys.end());
+        for (auto& k : keys) {
+            auto& a = articles_.at(k);
+            std::string j = "{\"pub\":\"" + json_escape(a.publication) + "\""
+                + ",\"table\":\"" + json_escape(a.source_table) + "\""
+                + ",\"filter\":\"" + json_escape(a.filter) + "\""
+                + ",\"enabled\":" + (a.enabled ? "1" : "0")
+                + ",\"idcols\":\"";
+            for (std::size_t i = 0; i < a.identity_cols.size(); ++i) {
+                if (i) j += ",";
+                j += json_escape(a.identity_cols[i]);
+            }
+            j += "\"}";
+            mk("Article", a.name, "", j);
+        }
+    }
+
+    // Subscriptions
+    {
+        std::vector<std::string> keys;
+        for (auto& kv : subscriptions_) keys.push_back(kv.first);
+        std::sort(keys.begin(), keys.end());
+        for (auto& k : keys) {
+            auto& s = subscriptions_.at(k);
+            std::string j = "{\"pub\":\"" + json_escape(s.publication) + "\""
+                + ",\"uri\":\"" + json_escape(s.target_uri) + "\""
+                + ",\"lsn\":" + std::to_string(s.last_lsn)
+                + ",\"enabled\":" + (s.enabled ? "1" : "0") + "}";
+            mk("Subscription", s.name, "", j);
+        }
     }
 
     // ---------- Build binary buffers ----------
@@ -3229,6 +3319,55 @@ util::Result<void> DataDict::create_view(const ViewEntry& e) {
 util::Result<void> DataDict::drop_view(const std::string& name) {
     views_.erase(name);
     return save();
+}
+
+// ---------------------------------------------------------------------------
+// PUBLICATION / ARTICLE / SUBSCRIPTION (Repl Phase 1)
+// ---------------------------------------------------------------------------
+
+util::Result<void> DataDict::create_publication(const PublicationEntry& e) {
+    if (e.name.empty())
+        return util::Error{5000, 0, "DD publication name empty", ""};
+    publications_[e.name] = e;
+    return save();
+}
+
+util::Result<void> DataDict::drop_publication(const std::string& name) {
+    publications_.erase(name);
+    return save();
+}
+
+util::Result<void> DataDict::create_article(const ArticleEntry& e) {
+    if (e.name.empty())
+        return util::Error{5000, 0, "DD article name empty", ""};
+    articles_[e.name] = e;
+    return save();
+}
+
+util::Result<void> DataDict::drop_article(const std::string& name) {
+    articles_.erase(name);
+    return save();
+}
+
+util::Result<void> DataDict::create_subscription(const SubscriptionEntry& e) {
+    if (e.name.empty())
+        return util::Error{5000, 0, "DD subscription name empty", ""};
+    subscriptions_[e.name] = e;
+    return save();
+}
+
+util::Result<void> DataDict::drop_subscription(const std::string& name) {
+    subscriptions_.erase(name);
+    return save();
+}
+
+void DataDict::set_subscription_last_lsn(const std::string& name,
+                                          std::uint64_t lsn) {
+    auto it = subscriptions_.find(name);
+    if (it != subscriptions_.end()) {
+        it->second.last_lsn = lsn;
+        save();
+    }
 }
 
 } // namespace openads::engine

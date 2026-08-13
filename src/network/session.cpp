@@ -79,6 +79,14 @@ inline bool read_lstr16(const std::vector<std::uint8_t>& pl, std::size_t& off,
     return true;
 }
 
+inline void write_lstr16(const std::string& s,
+                         std::vector<std::uint8_t>& out) {
+    auto n = static_cast<std::uint16_t>(s.size());
+    out.push_back(static_cast<std::uint8_t>(n & 0xFFu));
+    out.push_back(static_cast<std::uint8_t>((n >> 8) & 0xFFu));
+    out.insert(out.end(), s.begin(), s.end());
+}
+
 // Null-terminated UNSIGNED8 buffer for a std::string — the AdsDD* ABI takes
 // mutable UNSIGNED8* name arguments (never written through) with no const
 // C signature available.
@@ -2534,6 +2542,36 @@ DispatchResult Session::dispatch(const Frame& f) {
             break;
         }
         // ── Server filesystem (EnableFileFunc) ──────────────────────────
+        // M12.33 — remote table enumeration. NOT gated by EnableFileFunc
+        // because listing tables is a core database operation.
+        case Opcode::FindTables: {
+            if (!sess_conn_) {
+                reply = err("FindTables: not connected",
+                            openads::AE_NO_CONNECTION);
+                break;
+            }
+            std::size_t pos = 0;
+            std::string mask;
+            if (!read_lstr16(f.payload, pos, mask)) {
+                reply = err("FindTables: short payload"); break;
+            }
+            if (mask.empty()) mask = "*.dbf";
+            auto r = sess_conn_->find_tables(mask);
+            if (!r) {
+                reply = err("FindTables",
+                    static_cast<UNSIGNED32>(r.error().code));
+                break;
+            }
+            auto& matches = r.value();
+            reply.opcode = Opcode::FindTablesAck;
+            write_u32_le(static_cast<std::uint32_t>(matches.size()),
+                         reply.payload);
+            for (const auto& name : matches) {
+                write_lstr16(name, reply.payload);
+            }
+            break;
+        }
+
         case Opcode::FileExists:
         case Opcode::FileErase:
         case Opcode::FileRename:

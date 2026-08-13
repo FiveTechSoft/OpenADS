@@ -218,6 +218,17 @@ enum class Opcode : std::uint8_t {
     GetKeyNum          = 0x03,
     GetKeyNumAck       = 0x04,
 
+    // M12.33 — remote AdsFindFirstTable / AdsFindNextTable / AdsFindClose.
+    // List table files matching a glob mask in the session data directory.
+    // Unlike the Directory opcode (0xEA), this is NOT gated by
+    // EnableFileFunc — listing tables is a core database operation that
+    // arc32 and other DBA tools need.
+    // Request FindTables:  [u16 maskLen][mask]
+    // Reply FindTablesAck: [u32 nFiles][for each: u16 nameLen][name]
+    // The client caches the full list; FindNext/FindClose iterate locally.
+    FindTables         = 0x05,
+    FindTablesAck      = 0x06,
+
     // M12.29 — AdsDD* Data Dictionary property API, phase 1. Previously
     // every AdsDD* getter/setter silently returned empty/no-op over a
     // remote connection (dd_from_handle() only resolves a LOCAL Connection

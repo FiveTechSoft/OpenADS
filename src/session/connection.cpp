@@ -965,6 +965,24 @@ Connection::find_close(TableFind* find) {
     return {};
 }
 
+util::Result<std::vector<std::string>>
+Connection::find_tables(const std::string& mask) {
+    namespace fs = std::filesystem;
+    std::vector<std::string> matches;
+    std::error_code ec;
+    if (fs::exists(data_dir_, ec) && fs::is_directory(data_dir_, ec)) {
+        for (auto& entry : fs::directory_iterator(data_dir_, ec)) {
+            if (!entry.is_regular_file(ec)) continue;
+            std::string name = entry.path().filename().string();
+            if (glob_match(mask.c_str(), name.c_str())) {
+                matches.push_back(std::move(name));
+            }
+        }
+    }
+    std::sort(matches.begin(), matches.end());
+    return matches;
+}
+
 bool Connection::owns_table_ptr(const engine::Table* t) const {
     for (auto& [_, holder] : tables_) {
         if (holder.get() == t) return true;

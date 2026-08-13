@@ -272,6 +272,9 @@ public:
         const std::string& path);
     util::Result<std::vector<openads::engine::DirEntry>>
                                 directory(const std::string& mask);
+    // M12.33 — remote table enumeration (not gated by EnableFileFunc).
+    util::Result<std::vector<std::string>>
+                                find_tables(const std::string& mask);
     util::Result<bool>          dir_exist(const std::string& path);
     util::Result<void>          dir_make(const std::string& path);
     util::Result<void>          dir_remove(const std::string& path);

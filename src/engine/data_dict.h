@@ -278,6 +278,42 @@ public:
                            std::uint32_t event_mask,
                            std::uint32_t timing) const;
 
+    // ---- Publications / Articles / Subscriptions (Repl Phase 1) ----------
+    struct PublicationEntry {
+        std::string name;
+        std::string comment;
+    };
+    struct ArticleEntry {
+        std::string name;
+        std::string publication;
+        std::string source_table;
+        std::vector<std::string> identity_cols;
+        std::string filter;
+        bool enabled = true;
+    };
+    struct SubscriptionEntry {
+        std::string name;
+        std::string publication;
+        std::string target_uri;
+        std::uint64_t last_lsn = 0;
+        bool enabled = true;
+    };
+    util::Result<void> create_publication(const PublicationEntry& e);
+    util::Result<void> drop_publication(const std::string& name);
+    util::Result<void> create_article(const ArticleEntry& e);
+    util::Result<void> drop_article(const std::string& name);
+    util::Result<void> create_subscription(const SubscriptionEntry& e);
+    util::Result<void> drop_subscription(const std::string& name);
+    void set_subscription_last_lsn(const std::string& name, std::uint64_t lsn);
+    const std::unordered_map<std::string, PublicationEntry>&
+        publications() const noexcept { return publications_; }
+    const std::unordered_map<std::string, ArticleEntry>&
+        articles() const noexcept { return articles_; }
+    std::unordered_map<std::string, SubscriptionEntry>&
+        subscriptions() noexcept { return subscriptions_; }
+    const std::unordered_map<std::string, SubscriptionEntry>&
+        subscriptions() const noexcept { return subscriptions_; }
+
     // ---- Stored procedures (M-DD-PROC) ----------------------------------
     struct ProcEntry {
         std::string name;
@@ -531,6 +567,9 @@ private:
     std::unordered_map<std::string, ProcEntry>     procs_;
     std::unordered_map<std::string, FunctionEntry> functions_;
     std::unordered_map<std::string, ViewEntry>     views_;
+    std::unordered_map<std::string, PublicationEntry>  publications_;
+    std::unordered_map<std::string, ArticleEntry>      articles_;
+    std::unordered_map<std::string, SubscriptionEntry> subscriptions_;
 
     // RCB 06/30/2026: Metadata consumers often need rows scoped to one table,
     // group, RI parent/child, or trigger event. Keep these reverse lookups in
