@@ -310,6 +310,9 @@ add_executable(openads_unit_tests
     unit/repl_catalog_test.cpp
     unit/abi_repl_capture_test.cpp
     unit/repl_apply_test.cpp
+    unit/abi_seek_after_order_change_test.cpp
+    unit/abi_index_collation_persist_test.cpp
+    unit/abi_index_header_compat_test.cpp
 )
 
 # OpenADS ODBC driver (provider) test — drives the driver's SQL* exports
