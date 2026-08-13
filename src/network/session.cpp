@@ -3137,13 +3137,19 @@ DispatchResult Session::dispatch(const Frame& f) {
         // existing read-side ops can serve them through the same
         // wire opcodes.
         case Opcode::ExecuteSQL: {
+            { FILE* _dbg = fopen("C:/OpenADS/_arc32/sql_dispatch.log", "a");
+              if (_dbg) { fprintf(_dbg, "REACHED ExecuteSQL case\n"); fclose(_dbg); } }
             if (!sess_conn_) { reply = err("ExecuteSQL: not connected"); break; }
             if (abi_conn_ == 0) {
                 if (!ensure_abi_conn()) {
+                    { FILE* _dbg = fopen("C:/OpenADS/_arc32/sql_dispatch.log", "a");
+                      if (_dbg) { fprintf(_dbg, "ensure_abi_conn FAILED\n"); fclose(_dbg); } }
                     reply = err("ExecuteSQL: AdsConnect60 failed");
                     break;
                 }
                 if (AdsCreateSQLStatement(abi_conn_, &abi_stmt_) != 0) {
+                    { FILE* _dbg = fopen("C:/OpenADS/_arc32/sql_dispatch.log", "a");
+                      if (_dbg) { fprintf(_dbg, "AdsCreateSQLStatement FAILED\n"); fclose(_dbg); } }
                     reply = err("ExecuteSQL: AdsCreateSQLStatement failed");
                     break;
                 }
@@ -3154,6 +3160,10 @@ DispatchResult Session::dispatch(const Frame& f) {
                             f.payload.size());
             }
             sqlbuf[f.payload.size()] = 0;
+            { FILE* _df = fopen("C:/OpenADS/execsql.log", "a");
+              if (_df) { fprintf(_df, "EXEC SQL: abi_conn=%lu abi_stmt=%lu sql=%.80s\n",
+                    (unsigned long)abi_conn_, (unsigned long)abi_stmt_,
+                    (const char*)sqlbuf.data()); fclose(_df); } }
             ADSHANDLE hCur = 0;
             UNSIGNED32 rrc = AdsExecuteSQLDirect(abi_stmt_,
                                                  sqlbuf.data(), &hCur);
