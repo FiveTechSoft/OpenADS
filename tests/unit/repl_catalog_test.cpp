@@ -82,7 +82,7 @@ TEST_CASE("ReplCatalog: table_is_published after article") {
         CHECK(arts[0].name == "A1");
 
         // Drop article -> not published anymore
-        REQUIRE(dd.drop_article("P1", "A1").has_value());
+        REQUIRE(dd.drop_article("A1").has_value());
         cat.reload(dd);
         CHECK_FALSE(cat.table_is_published("cust"));
     }
@@ -177,7 +177,7 @@ TEST_CASE("set_subscription_last_lsn persists") {
         sub.target_uri = "tcp://127.0.0.1:6262/x";
         REQUIRE(dd.create_subscription(sub).has_value());
 
-        REQUIRE(dd.set_subscription_last_lsn("S1", 42).has_value());
+        dd.set_subscription_last_lsn("S1", 42);
     }
     {
         auto opened = DataDict::open(p.string());
