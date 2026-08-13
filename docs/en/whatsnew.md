@@ -14,6 +14,54 @@ the [CHANGELOG](https://github.com/FiveTechSoft/OpenADS/blob/main/CHANGELOG.md).
 
 ---
 
+## v1.8.74 Highlights
+
+### Fixed: INDEX ON bag remounted through table's connection
+
+`AdsCreateIndex61` / `AdsCreateIndex` / `AdsOpenIndex` now remount the
+index bag through the table's connection the same way as the `.dbf`. Fixes
+`INDEX ON` writing `.z01` next to the app while the `.dbf` remounted under
+`--legacy-paths`.
+
+Also: an explicit local `Connection` handle is no longer hijacked by
+"any live `RemoteConnection`" (in-process server ABI twin + mixed
+local/remote apps).
+
+### Tests
+
+- `AdsCreateIndex61 remounts client-absolute .z01 under legacy_paths`
+- `remote INDEX ON remounts client-absolute .z01 under legacy-paths jail`
+
+---
+
+## v1.8.73 Highlights
+
+### Fixed: `--legacy-paths` now remounts every client-absolute path under `--data`
+
+On a Windows server, `USE "C:/Creative.RAM/..."` with
+`openads_serverd --data C:/Temp --legacy-paths` could still open a leftover
+tree at the real `C:\Creative.RAM\...` because the SAP free-table
+"OPEN if absolute path exists" exception ran **before** legacy remount.
+
+With `--legacy-paths`, every client-absolute open/create now remounts under
+`--data` first; the host-absolute OPEN/CREATE exceptions apply only in
+strict mode.
+
+### Documentation
+
+- Documented the `--data` / URI / `--legacy-paths` contract (forward
+  slashes recommended) in `cookbook/docs/local-and-remote.md` and
+  `connection-strings.md`.
+
+### Tests
+
+- `session_connection_test`: host-absolute file outside the jail must not
+  win when `legacy_paths` is on.
+- `abi_mt_create_vs_dbfcdx_test`: Harbour helpers are Windows-only so
+  clang `-Werror` (Linux/macOS) does not fail on unused stubs.
+
+---
+
 ## v1.8.33 Highlights
 
 ### Fixed: Legacy `AdsCreateIndex` path resolution
