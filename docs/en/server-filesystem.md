@@ -133,6 +133,19 @@ Remote ops need **both**:
 1. Client `ace32.dll` / `ace64.dll` (v1.8.18+)
 2. `openads_serverd` (v1.8.18+) with `EnableFileFunc` enabled when desired
 
+## Table name resolution
+
+OpenADS resolves table filenames **case-insensitively by default**. This
+means `USE "Clientes"`, `USE "CLIENTES"`, and `USE "clientes"` all open
+the same file if it exists on disk. No configuration is required.
+
+- On **Windows**, the filesystem itself is case-insensitive
+- On **Linux/macOS**, `platform::resolve_case_insensitive()` scans the
+  parent directory and matches by lowercased comparison
+
+This applies to all table opens: `AdsOpenTable`, `AdsCreateTable`, and
+SQL `SELECT FROM`. Data Dictionary aliases remain case-sensitive.
+
 ## See also
 
 - [What's New — v1.8.18]({{ site.baseurl }}/en/whatsnew/)

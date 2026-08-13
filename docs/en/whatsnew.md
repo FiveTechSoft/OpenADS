@@ -34,6 +34,27 @@ mirrors `AdsCreateIndex61`'s path resolution logic.
 with extension, absolute paths, empty bag, subdirectory, backslash,
 legacy wrapper, and create+reopen round-trip.
 
+### Case-insensitive DBF name resolution
+
+OpenADS resolves table filenames **case-insensitively by default** — no
+configuration needed. When a client opens `Clientes.dbf`, `CLIENTES.DBF`,
+or `clientes`, the server scans the data directory and returns the
+on-disk casing automatically.
+
+| Scenario | Behaviour |
+|----------|-----------|
+| `USE "Clientes"` on a directory holding `CLIENTES.DBF` | Opens `CLIENTES.DBF` |
+| `USE "MYTABLE"` on Linux with `mytable.dbf` on disk | Opens `mytable.dbf` |
+| `AdsOpenTable("tbl")` when `Tbl.adt` exists | Opens `Tbl.adt` |
+
+Implementation: `platform::resolve_case_insensitive()` in
+`src/platform/path.cpp:35-67`. Two-pass scan of the parent directory:
+exact match first, then lowercased comparison. Called automatically by
+`Connection::resolve_table_file()` (`src/session/connection.cpp:351`).
+
+> **Note:** Data Dictionary aliases remain case-sensitive. Only
+> physical filenames on disk are resolved case-insensitively.
+
 ---
 
 ## v1.8.32 Highlights
