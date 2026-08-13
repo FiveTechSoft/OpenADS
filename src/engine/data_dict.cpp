@@ -1936,7 +1936,6 @@ util::Result<void> DataDict::load_() {
 
         } else if (obj_type == "Article") {
             ArticleEntry e;
-            e.name = obj_name;
             if (!json.empty()) {
                 auto m = json_parse_flat(json);
                 if (m.count("pub"))  e.publication  = m.at("pub");
@@ -1952,6 +1951,16 @@ util::Result<void> DataDict::load_() {
                     }
                     if (!tok.empty()) e.identity_cols.push_back(tok);
                 }
+            }
+            // obj_name may be "P1::A1" (composite) or just "A1" (legacy).
+            auto sep = obj_name.find("::");
+            if (sep != std::string::npos && e.publication.empty()) {
+                e.publication = obj_name.substr(0, sep);
+                e.name = obj_name.substr(sep + 2);
+            } else if (sep != std::string::npos) {
+                e.name = obj_name.substr(sep + 2);
+            } else {
+                e.name = obj_name;
             }
             articles_[obj_name] = std::move(e);
 
@@ -2184,7 +2193,7 @@ util::Result<void> DataDict::save() {
                 j += json_escape(a.identity_cols[i]);
             }
             j += "\"}";
-            mk("Article", a.name, "", j);
+            mk("Article", k, "", j);
         }
     }
 
@@ -3328,11 +3337,26 @@ util::Result<void> DataDict::drop_view(const std::string& name) {
 util::Result<void> DataDict::create_publication(const PublicationEntry& e) {
     if (e.name.empty())
         return util::Error{5000, 0, "DD publication name empty", ""};
+    if (publications_.count(e.name))
+        return util::Error{5000, 0, "DD publication already exists: " + e.name, ""};
     publications_[e.name] = e;
     return save();
 }
 
 util::Result<void> DataDict::drop_publication(const std::string& name) {
+    if (!publications_.count(name))
+        return util::Error{5000, 0, "DD publication not found: " + name, ""};
+    for (auto& kv : subscriptions_) {
+        if (kv.second.publication == name)
+            return util::Error{5000, 0,
+                "Cannot drop publication: subscription " + kv.first +
+                " still references it", ""};
+    }
+    std::vector<std::string> to_drop;
+    for (auto& kv : articles_) {
+        if (kv.second.publication == name) to_drop.push_back(kv.first);
+    }
+    for (auto& k : to_drop) articles_.erase(k);
     publications_.erase(name);
     return save();
 }
@@ -3340,11 +3364,23 @@ util::Result<void> DataDict::drop_publication(const std::string& name) {
 util::Result<void> DataDict::create_article(const ArticleEntry& e) {
     if (e.name.empty())
         return util::Error{5000, 0, "DD article name empty", ""};
-    articles_[e.name] = e;
+    if (e.identity_cols.empty())
+        return util::Error{5000, 0, "DD article identity columns must not be empty", ""};
+    if (tables_.find(e.source_table) == tables_.end())
+        return util::Error{5000, 0,
+            "DD article source table not in dictionary: " + e.source_table, ""};
+    articles_[e.publication + "::" + e.name] = e;
     return save();
 }
 
 util::Result<void> DataDict::drop_article(const std::string& name) {
+    for (auto it = articles_.begin(); it != articles_.end(); ++it) {
+        auto sep = it->first.find("::");
+        if (sep != std::string::npos && it->first.substr(sep + 2) == name) {
+            articles_.erase(it);
+            return save();
+        }
+    }
     articles_.erase(name);
     return save();
 }

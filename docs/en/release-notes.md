@@ -12,6 +12,22 @@ Complete history of releases with categorized improvements.
 
 ---
 
+## v1.8.75 — 2026-08-13
+
+### New Features
+
+- **ADS-compatible replication (Phase 1)** — One-way async replication between OpenADS servers via publications, articles, and subscriptions. The DataDict now supports `Publication`, `Article`, and `Subscription` object types with full CRUD and round-trip persistence. A durable CRC-32C queue (`ReplQueue`) captures INSERT/UPDATE/DELETE mutations through best-effort capture hooks, and `repl_apply_once()` drains the queue to apply changes to a local target table. 35 unit tests (464 assertions).
+- **M12.33 remote FindTables** — `AdsOpenTable` and the server `OpenTable` dispatcher now strip `tcp://host:port/` URI prefixes that legacy Delphi TAdsTable components embed in table names.
+
+### Tests
+
+- `repl_queue_test`: 10 cases — append, read_from, CRC corruption, empty file
+- `repl_catalog_test`: 8 cases — DD round-trip, table_is_published, cascade, rejects
+- `abi_repl_capture_test`: 1 case — capture hooks fire on INSERT/UPDATE/DELETE
+- `repl_apply_test`: 23 cases — subscription resolution, INSERT/UPDATE/DELETE apply, mixed batches, idempotency, last_lsn persistence, error paths
+
+---
+
 ## v1.8.74 — 2026-08-12
 
 ### Bug Fixes

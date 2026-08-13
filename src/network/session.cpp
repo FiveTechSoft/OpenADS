@@ -1169,10 +1169,26 @@ DispatchResult Session::dispatch(const Frame& f) {
             } else {
                 rel.assign(f.payload.begin(), f.payload.end());
             }
+            // M12.33 — strip a full tcp:// URI prefix that legacy Delphi
+            // TAdsTable components embed in the table name.  arc32 sends
+            // "tcp://host:port/C:/data/dir\table.dbf" instead of bare
+            // "table.dbf"; the server must strip the URI to resolve
+            // relative to its data root.
+            if (rel.size() > 8 &&
+                (rel.rfind("tcp://", 0) == 0 || rel.rfind("TCP://", 0) == 0)) {
+                auto last_sep = rel.find_last_of("/\\");
+                if (last_sep != std::string::npos && last_sep > 6) {
+                    std::string stripped = rel.substr(last_sep + 1);
+                    if (!stripped.empty()) rel = std::move(stripped);
+                }
+            }
             auto th = sess_conn_->open_table(rel,
                 openads::engine::TableType::Cdx,
                 open_mode);
             if (!th) {
+                std::fprintf(stderr, "[srv] OpenTable FAILED rel='%s' code=%d msg='%s'\n",
+                             rel.c_str(), th.error().code,
+                             th.error().message.c_str());
                 reply = err("OpenTable: open failed",
                             static_cast<UNSIGNED32>(th.error().code));
                 break;

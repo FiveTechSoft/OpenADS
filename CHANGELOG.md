@@ -1,3 +1,46 @@
+## 1.8.75 - 2026-08-13
+
+### Added — ADS-compatible replication (Phase 1): publications, articles, subscriptions, capture hooks, durable queue, local apply
+
+One-way async replication between two OpenADS servers, modelled on SAP
+ADS publications/articles/subscriptions.  Phase 1 is local apply only
+(queue → target table on the same machine).
+
+- **DataDict**: new `Publication`, `Article`, `Subscription` DD object
+  types with full CRUD and round-trip persistence.  Articles are keyed
+  as `publication::article` and carry identity columns, source table,
+  filter expression, and an enabled flag.
+- **ReplQueue**: append-only durable queue with CRC-32C integrity,
+  28-byte header + variable payload, monotonically increasing LSN.
+- **ReplCatalog**: fast in-memory lookup mapping table aliases to the
+  articles that publish them (built from DataDict).
+- **ReplCapture**: best-effort capture hooks wired into
+  `writeback_record_()` (INSERT/UPDATE) and `mark_deleted()` (DELETE);
+  never returns a failing Result to the writer.
+- **ReplApply**: `repl_apply_once()` drains the queue for a single
+  subscription, resolving the target table from DataDict + subscription
+  `target_uri`, applying INSERT/UPDATE/DELETE with `OpenMode::Exclusive`
+  (single-writer async replication).  Persists `last_lsn` via
+  `dd.set_subscription_last_lsn()`.
+- **35 unit tests** (464 assertions) covering queue operations, DD
+  round-trip, capture hooks, and 23 `repl_apply_once` scenarios
+  (INSERT, UPDATE, DELETE, mixed batches, idempotency, error paths).
+
+### Added — M12.33 remote FindTables + URI stripping for legacy Delphi clients
+
+- `AdsOpenTable` and the server `OpenTable` dispatcher now strip
+  `tcp://host:port/` URI prefixes that legacy Delphi TAdsTable
+  components embed in table names (e.g.
+  `tcp://host:port/C:/data\table.dbf` → `table.dbf`).
+
+### Tests
+
+- `repl_queue_test`: 10 cases — append, read_from, CRC corruption, empty file
+- `repl_catalog_test`: 8 cases — DD round-trip, table_is_published, cascade, rejects
+- `abi_repl_capture_test`: 1 case — capture hooks fire on INSERT/UPDATE/DELETE
+- `repl_apply_test`: 23 cases — subscription resolution, INSERT/UPDATE/DELETE
+  apply, mixed batches, idempotency, last_lsn persistence, error paths
+
 ## 1.8.74 - 2026-08-12
 
 ### Fixed — `INDEX ON` wrote `.z01` next to the app while the `.dbf` remounted (Pritpal Bedi)

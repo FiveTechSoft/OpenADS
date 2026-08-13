@@ -6776,6 +6776,17 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
     if (auto* rc = s.registry.lookup<openads::network::RemoteConnection>(
             rem_h, HandleKind::RemoteConnection)) {
         auto name = openads::abi::to_internal(pucName, 0);
+        // M12.33 — strip tcp:// URI prefix that legacy Delphi TAdsTable
+        // components embed in the table name (e.g.
+        // "tcp://host:port/C:/data\table.dbf" → "table.dbf").
+        if (name.size() > 8 &&
+            (name.rfind("tcp://", 0) == 0 || name.rfind("TCP://", 0) == 0)) {
+            auto last_sep = name.find_last_of("/\\");
+            if (last_sep != std::string::npos && last_sep > 6) {
+                std::string stripped = name.substr(last_sep + 1);
+                if (!stripped.empty()) name = std::move(stripped);
+            }
+        }
         // Callers (incl. X#'s ADSRDD) commonly pass the bare table name
         // without an extension. Send it through unchanged -- the server's
         // Connection::resolve_table_file() already falls back from .dbf to
