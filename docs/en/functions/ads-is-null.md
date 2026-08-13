@@ -65,5 +65,5 @@ AdsCloseTable(hTable);
 
 ---
 
-[← AdsIsConnectionAlive]({{ site.baseurl }}/en/functions/ads-is-connection-alive/)
-[AdsIsTableLocked →]({{ site.baseurl }}/en/functions/ads-is-table-locked/)
+[← AdsIsIndexUnique]({{ site.baseurl }}/en/functions/ads-is-index-unique/)
+[AdsIsRecordInAOF →]({{ site.baseurl }}/en/functions/ads-is-record-in-aof/)

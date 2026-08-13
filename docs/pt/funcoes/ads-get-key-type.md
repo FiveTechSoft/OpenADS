@@ -8,59 +8,60 @@ permalink: /pt/funcoes/ads-get-key-type/
 
 # AdsGetKeyType
 
-Retorna o tipo de dados da expressão de chave do índice.
+Retorna o tipo de codificação da chave de índice para a ordem ativa.
 
 ## Sintaxe
 
 ```c
-UNSIGNED32 AdsGetKeyType(ADSHANDLE hIndex, UNSIGNED16* p);
+UNSIGNED32 AdsGetKeyType(ADSHANDLE hIndex, UNSIGNED16 *pusKeyType);
 ```
 
 ## Parâmetros
 
 | Parâmetro | Tipo | Descrição |
 |-----------|------|-----------|
-| `hIndex` | `ADSHANDLE` | Handle do índice. |
-| `p` | `UNSIGNED16*` | Ponteiro para receber o tipo da chave. |
+| `hIndex` | `ADSHANDLE` | Handle da ordem de índice. |
+| `pusKeyType` | `UNSIGNED16*` | Saída — constante do tipo de chave. |
 
 ## Valor de Retorno
 
-`AE_SUCCESS` (0) em caso de sucesso. `AE_INTERNAL_ERROR` (5000) se o handle for desconhecido.
+`AE_SUCCESS` (0) em caso de sucesso.
 
-## Descrição
-
-`AdsGetKeyType` informa o tipo do resultado da expressão de chave do
-índice, usando as constantes de *tipo de campo*:
+## Constantes de Tipo de Chave
 
 | Constante | Valor | Descrição |
 |-----------|-------|-----------|
-| `ADS_LOGICAL` | 1 | Expressão de chave lógica. |
-| `ADS_NUMERIC` | 2 | Expressão de chave numérica. |
-| `ADS_DATE` | 3 | Expressão de chave de data. |
-| `ADS_STRING` | 4 | Expressão de chave de caracteres. |
-| `ADS_RAW` | 16 | Expressão de chave raw (concatenação `;` de ADT). |
+| `ADS_RAWKEY` | 0 | Bytes de chave binária bruta. |
+| `ADS_STRINGKEY` | 1 | Chave de string de caractere/preenchida com espaços. |
+| `ADS_DOUBLEKEY` | 2 | Chave numérica ou de data (codificação FoxNumeric/NtxNumeric de 8 bytes). |
 
-Não são as constantes de codificação de buffer (`ADS_STRINGKEY` /
-`ADS_DOUBLEKEY` / `ADS_RAWKEY`) usadas por `AdsSeek` e `AdsSetScope`.
-Uma chave de campo simples responde pelo esquema da tabela; expressões
-calculadas respondem pelo tipo do resultado (`UPPER(name)` →
-`ADS_STRING`, `Val(code)` → `ADS_NUMERIC`). O rddads do Harbour usa
-este valor para escolher a codificação da chave de `OrdScope()`.
+## Descrição
+
+`AdsGetKeyType` inspeciona o `KeyEncoding` do índice ativo
+e o mapeia para as constantes de tipo de chave do ACE. Índices
+de expressão de caractere retornam `ADS_STRINGKEY`; índices de
+expressão numérica e de data retornam `ADS_DOUBLEKEY`.
 
 ## Exemplo
 
 ```c
-UNSIGNED16 usKeyType;
-AdsGetKeyType(hIndex, &usKeyType);
-// usKeyType é ADS_STRING, ADS_NUMERIC, ADS_DATE ou ADS_LOGICAL
+ADSHANDLE hIndex;
+UNSIGNED16 keyType = 0;
+AdsGetIndexHandle(hTable, "amount", &hIndex);
+AdsGetKeyType(hIndex, &keyType);
+if (keyType == ADS_DOUBLEKEY)
+    printf("Numeric index key\n");
+else
+    printf("Character index key\n");
 ```
 
 ## Ver Também
 
 - [AdsGetKeyLength]({{ site.baseurl }}/pt/funcoes/ads-get-key-length/)
-- [AdsGetKeyCount]({{ site.baseurl }}/pt/funcoes/ads-get-key-count/)
+- [AdsGetIndexExpr]({{ site.baseurl }}/pt/funcoes/ads-get-index-expr/)
 - [AdsExtractKey]({{ site.baseurl }}/pt/funcoes/ads-extract-key/)
 
 ---
 
-[AdsGetIndexHandle →]({{ site.baseurl }}/pt/funcoes/ads-get-index-handle/)
+[← AdsGetKeyLength]({{ site.baseurl }}/pt/funcoes/ads-get-key-length/)
+[AdsGetLastTableUpdate →]({{ site.baseurl }}/pt/funcoes/ads-get-last-table-update/)

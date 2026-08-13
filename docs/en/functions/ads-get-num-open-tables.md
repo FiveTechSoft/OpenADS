@@ -55,5 +55,5 @@ printf("Open tables: %u\n", numTables);  // 2
 
 ---
 
-[← AdsGetNumActiveLinks]({{ site.baseurl }}/en/functions/ads-get-num-active-links/)
-[AdsGetTableAlias →]({{ site.baseurl }}/en/functions/ads-get-table-alias/)
+[← AdsGetNumLocks]({{ site.baseurl }}/en/functions/ads-get-num-locks/)
+[AdsGetRecord →]({{ site.baseurl }}/en/functions/ads-get-record/)

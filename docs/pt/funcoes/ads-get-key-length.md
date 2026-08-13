@@ -8,43 +8,51 @@ permalink: /pt/funcoes/ads-get-key-length/
 
 # AdsGetKeyLength
 
-Retorna o comprimento da chave do índice.
+Retorna o comprimento em bytes da chave de índice para a ordem ativa.
 
 ## Sintaxe
 
 ```c
-UNSIGNED32 AdsGetKeyLength(ADSHANDLE hIndex, UNSIGNED16* p);
+UNSIGNED32 AdsGetKeyLength(ADSHANDLE hIndex, UNSIGNED16 *pusKeyLen);
 ```
 
 ## Parâmetros
 
 | Parâmetro | Tipo | Descrição |
 |-----------|------|-----------|
-| `hIndex` | `ADSHANDLE` | Handle do índice. |
-| `p` | `UNSIGNED16*` | Ponteiro para receber o comprimento da chave. |
+| `hIndex` | `ADSHANDLE` | Handle da ordem de índice. |
+| `pusKeyLen` | `UNSIGNED16*` | Saída — comprimento da chave em bytes. |
 
 ## Valor de Retorno
 
-`AE_SUCCESS` (0) em caso de sucesso. `AE_INTERNAL_ERROR` (5000) se o handle for desconhecido.
+`AE_SUCCESS` (0) em caso de sucesso. Código de erro diferente de zero se o handle
+não resolver para um índice ativo.
 
 ## Descrição
 
-`AdsGetKeyLength` retorna o comprimento em bytes da chave do índice.
+`AdsGetKeyLength` retorna a largura de uma única entrada de chave no
+índice B+tree ativo. O comprimento da chave é determinado no momento da
+criação do índice a partir da expressão e dos tipos de campo. Para chaves
+de caractere, isso é tipicamente a soma das larguras dos campos; para chaves
+numéricas/data, são 8 bytes (codificação FoxNumeric).
 
 ## Exemplo
 
 ```c
-UNSIGNED16 usKeyLen;
-AdsGetKeyLength(hIndex, &usKeyLen);
-// usKeyLen contém o comprimento da chave
+ADSHANDLE hIndex;
+UNSIGNED16 keyLen = 0;
+AdsGetIndexHandle(hTable, "lastname", &hIndex);
+AdsGetKeyLength(hIndex, &keyLen);
+printf("Key length: %u bytes\n", keyLen);
 ```
 
 ## Ver Também
 
 - [AdsGetKeyType]({{ site.baseurl }}/pt/funcoes/ads-get-key-type/)
-- [AdsGetKeyCount]({{ site.baseurl }}/pt/funcoes/ads-get-key-count/)
+- [AdsGetIndexExpr]({{ site.baseurl }}/pt/funcoes/ads-get-index-expr/)
 - [AdsExtractKey]({{ site.baseurl }}/pt/funcoes/ads-extract-key/)
 
 ---
 
+[← AdsGetKeyNum]({{ site.baseurl }}/pt/funcoes/ads-get-key-num/)
 [AdsGetKeyType →]({{ site.baseurl }}/pt/funcoes/ads-get-key-type/)
