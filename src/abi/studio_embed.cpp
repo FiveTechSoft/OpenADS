@@ -76,6 +76,15 @@ void try_auto_start() {
     int port_i = std::atoi(port_s.c_str());
     if (port_i <= 0 || port_i > 65535) return;
 
+    // Auth is now mandatory for the in-process console, same rule as
+    // AdsStudioStart() below (see there for the full rationale).
+    // Auto-start stays silent-by-default in spirit — it just refuses
+    // to bind at all without credentials, instead of ever exposing an
+    // unauthenticated listener.
+    std::string user = env_or("OPENADS_STUDIO_USER", "");
+    std::string pass = env_or("OPENADS_STUDIO_PASSWORD", "");
+    if (user.empty() || pass.empty()) return;
+
     std::string host = env_or("OPENADS_STUDIO_HOST", "127.0.0.1");
     std::string data = env_or("OPENADS_STUDIO_DATA", ".");
 
@@ -90,6 +99,7 @@ void try_auto_start() {
         // explicitly later and inspect the return code.
         return;
     }
+    c->add_user(user, pass);
     g_console = std::move(c);
     g_port    = static_cast<std::uint16_t>(port_i);
 }
@@ -107,12 +117,30 @@ UNSIGNED32 ENTRYPOINT AdsStudioStart(UNSIGNED16 usPort,
     std::string data(reinterpret_cast<const char*>(pucDataDir));
     std::string host = ::env_or("OPENADS_STUDIO_HOST", "127.0.0.1");
 
+    // Auth is now MANDATORY for the in-process console, not opt-in.
+    // The previous behaviour (bind first, only add_user() if the env
+    // vars happened to be set) meant any other process on the box
+    // that loads this DLL and calls AdsStudioStart() *without* setting
+    // OPENADS_STUDIO_USER/PASSWORD got a fully open console — a host's
+    // own gates (a license check, say) don't protect an export any
+    // caller can invoke directly (ctypes/P-Invoke/a 10-line .c).
+    // Refusing to bind at all without credentials closes that at the
+    // one choke point every caller has to go through, instead of
+    // trusting each host to remember to opt in. No in-repo caller
+    // currently relies on the old no-auth default.
+    std::string user = ::env_or("OPENADS_STUDIO_USER", "");
+    std::string pass = ::env_or("OPENADS_STUDIO_PASSWORD", "");
+    if (user.empty() || pass.empty()) {
+        return openads::AE_LOGIN_FAILED;
+    }
+
     std::lock_guard<std::mutex> lk(g_mu);
     if (g_console) return openads::AE_SUCCESS;   // idempotent
     auto c = std::make_unique<openads::studio::HttpConsole>();
     if (!c->start(host, usPort, data, /*wire_srv=*/nullptr)) {
         return openads::AE_INTERNAL_ERROR;
     }
+    c->add_user(user, pass);
     g_console = std::move(c);
     g_port    = usPort;
     return openads::AE_SUCCESS;
