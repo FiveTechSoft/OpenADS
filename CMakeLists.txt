@@ -358,6 +358,7 @@ add_subdirectory(tools/bench)
 add_subdirectory(tools/stress)
 add_subdirectory(tools/mgprobe)
 add_subdirectory(tools/import_dd)
+add_subdirectory(tools/adi_inspect)
 
 if(OPENADS_BUILD_TESTS)
     enable_testing()

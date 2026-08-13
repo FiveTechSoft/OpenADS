@@ -2419,21 +2419,29 @@ util::Result<AdiIndex> AdiIndex::add_tag(const std::string& adi_path,
         return util::Error{5000, 0, "ADI add_tag: short dense leaf write", ""};
     }
 
-    // APPEND the tag-directory entry so tag ORDINALS follow creation order,
-    // as CDX does. Prepending reverses them: DBSETORDER(1) then selects the
-    // LAST tag created, and an application that navigates orders by NUMBER --
-    // OrdSetFocus(n) / OrdName(n), which is what a browse doing click-to-sort
-    // on a column does -- lands on the wrong order. Callers cannot compensate
-    // without knowing how many tags the bag will end up holding.
-    std::size_t new_off = ADI_TAGDIR_ENTRY_START
-                        + static_cast<std::size_t>(count) * ADI_TAGDIR_ENTRY_SIZE;
-    // u32 LE: hdr_pg is a page number in a bag that is already several MB
-    // by the time the second tag is added, so a one-byte store silently
-    // lost it (see scan_tagdir). Entry bytes 1..3 were unused zeros, so
-    // widening the field keeps every existing bag readable.
-    set_u32_le( pg2.data() + new_off, hdr_pg );
-    if (!params.field_name.empty()) {
-        pg2[new_off + 5] = static_cast<std::uint8_t>(params.field_name[0]);
+    // Tag directory entry ordering: append (default) or prepend.
+    //   append  — ordinals follow creation order (matches CDX/Harbour convention)
+    //   prepend — ordinals are reversed (matches SAP Advantage Data Architect)
+    if (params.prepend_tag_dir) {
+        // Prepend: shift existing entries down and write new entry at start.
+        for (std::int32_t i = static_cast<std::int32_t>(count) - 1; i >= 0; --i) {
+            std::size_t src = ADI_TAGDIR_ENTRY_START
+                            + static_cast<std::size_t>(i) * ADI_TAGDIR_ENTRY_SIZE;
+            std::size_t dst = src + ADI_TAGDIR_ENTRY_SIZE;
+            std::memmove(pg2.data() + dst, pg2.data() + src, ADI_TAGDIR_ENTRY_SIZE);
+        }
+        set_u32_le( pg2.data() + ADI_TAGDIR_ENTRY_START, hdr_pg );
+        if (!params.field_name.empty()) {
+            pg2[ADI_TAGDIR_ENTRY_START + 5] = static_cast<std::uint8_t>(params.field_name[0]);
+        }
+    } else {
+        // Append: new entry goes at the end (default, creation-order).
+        std::size_t new_off = ADI_TAGDIR_ENTRY_START
+                            + static_cast<std::size_t>(count) * ADI_TAGDIR_ENTRY_SIZE;
+        set_u32_le( pg2.data() + new_off, hdr_pg );
+        if (!params.field_name.empty()) {
+            pg2[new_off + 5] = static_cast<std::uint8_t>(params.field_name[0]);
+        }
     }
     set_u16_le(pg2.data() + 2, count + 1);
 

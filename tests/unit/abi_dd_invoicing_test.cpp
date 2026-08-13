@@ -1,6 +1,6 @@
 ﻿// abi_dd_invoicing_test.cpp
 //
-// Comprehensive DD creation test â€” a complete invoicing system DD built from
+// Comprehensive DD creation test -- a complete invoicing system DD built from
 // scratch using the C++ DataDict API on top of ABI-created ADT/ADI tables.
 //
 // Schema:
@@ -426,10 +426,10 @@ private:
 }  // namespace
 
 // ===========================================================================
-// Test cases â€” each reopens the DD from disk to verify round-trip persistence
+// Test cases -- each reopens the DD from disk to verify round-trip persistence
 // ===========================================================================
 
-TEST_CASE("DD invoicing â€” ADT and ADI files created on disk") {
+TEST_CASE("DD invoicing -- ADT and ADI files created on disk") {
     InvoicingFixture f;
     REQUIRE(f.ok);
 
@@ -447,7 +447,7 @@ TEST_CASE("DD invoicing â€” ADT and ADI files created on disk") {
     CHECK(fs::exists(f.add_path));
 }
 
-TEST_CASE("DD invoicing â€” tables registered in DD") {
+TEST_CASE("DD invoicing -- tables registered in DD") {
     InvoicingFixture f;
     REQUIRE(f.ok);
     DataDict dd = f.reopen();
@@ -464,7 +464,7 @@ TEST_CASE("DD invoicing â€” tables registered in DD") {
     CHECK(dd.resolve("payments")   == "./payments.adt");
 }
 
-TEST_CASE("DD invoicing â€” index files registered in DD") {
+TEST_CASE("DD invoicing -- index files registered in DD") {
     InvoicingFixture f;
     REQUIRE(f.ok);
     DataDict dd = f.reopen();
@@ -483,7 +483,7 @@ TEST_CASE("DD invoicing â€” index files registered in DD") {
     CHECK(has_index("payments",   "./payments.adi"));
 }
 
-TEST_CASE("DD invoicing â€” functions round-trip") {
+TEST_CASE("DD invoicing -- functions round-trip") {
     InvoicingFixture f;
     REQUIRE(f.ok);
     DataDict dd = f.reopen();
@@ -506,7 +506,7 @@ TEST_CASE("DD invoicing â€” functions round-trip") {
     CHECK(out.implementation.find("payments") != std::string::npos);
 }
 
-TEST_CASE("DD invoicing â€” stored procedures round-trip") {
+TEST_CASE("DD invoicing -- stored procedures round-trip") {
     InvoicingFixture f;
     REQUIRE(f.ok);
     DataDict dd = f.reopen();
@@ -527,7 +527,7 @@ TEST_CASE("DD invoicing â€” stored procedures round-trip") {
     CHECK(ap.output_params == "pay_id:C;balance:N");
 }
 
-TEST_CASE("DD invoicing â€” triggers round-trip") {
+TEST_CASE("DD invoicing -- triggers round-trip") {
     InvoicingFixture f;
     REQUIRE(f.ok);
     DataDict dd = f.reopen();
@@ -559,7 +559,7 @@ TEST_CASE("DD invoicing â€” triggers round-trip") {
     CHECK(tp->procedure   == "UpdateInvoiceStatus");
 }
 
-TEST_CASE("DD invoicing â€” referential integrity rules round-trip") {
+TEST_CASE("DD invoicing -- referential integrity rules round-trip") {
     InvoicingFixture f;
     REQUIRE(f.ok);
     DataDict dd = f.reopen();
@@ -587,7 +587,7 @@ TEST_CASE("DD invoicing â€” referential integrity rules round-trip") {
     CHECK(r3.child  == "payments");
 }
 
-TEST_CASE("DD invoicing â€” groups, users, memberships round-trip") {
+TEST_CASE("DD invoicing -- groups, users, memberships round-trip") {
     InvoicingFixture f;
     REQUIRE(f.ok);
     DataDict dd = f.reopen();
@@ -610,13 +610,13 @@ TEST_CASE("DD invoicing â€” groups, users, memberships round-trip") {
     CHECK(dd.is_member_of("clerk1",   "Clerks"));
     CHECK(dd.is_member_of("auditor1", "Auditors"));
 
-    // Negative checks â€” no cross-group leakage
+    // Negative checks -- no cross-group leakage
     CHECK_FALSE(dd.is_member_of("clerk1",   "Managers"));
     CHECK_FALSE(dd.is_member_of("auditor1", "Clerks"));
     CHECK_FALSE(dd.is_member_of("clerk1",   "DB:Admin"));
 }
 
-TEST_CASE("DD invoicing â€” table permissions round-trip") {
+TEST_CASE("DD invoicing -- table permissions round-trip") {
     InvoicingFixture f;
     REQUIRE(f.ok);
     DataDict dd = f.reopen();
@@ -640,7 +640,7 @@ TEST_CASE("DD invoicing â€” table permissions round-trip") {
     CHECK(dd.get_effective_permission("clerk1", "products") == 1);
 }
 
-TEST_CASE("DD invoicing â€” SP and function execute permissions round-trip") {
+TEST_CASE("DD invoicing -- SP and function execute permissions round-trip") {
     InvoicingFixture f;
     REQUIRE(f.ok);
     DataDict dd = f.reopen();
@@ -670,7 +670,7 @@ TEST_CASE("DD invoicing â€” SP and function execute permissions round-trip"
         CHECK(find_perm("StoredProc", sp, "Auditors") == nullptr);
     }
 
-    // Function execute grants â€” all three groups
+    // Function execute grants -- all three groups
     for (const char* fn : {"fn_discount", "fn_tax", "fn_outstanding"}) {
         for (const char* grp : {"Managers", "Clerks", "Auditors"}) {
             const auto* pe = find_perm("Function", fn, grp);
@@ -680,7 +680,7 @@ TEST_CASE("DD invoicing â€” SP and function execute permissions round-trip"
     }
 }
 
-TEST_CASE("DD invoicing â€” DB:Admin user can open tables via ABI") {
+TEST_CASE("DD invoicing -- DB:Admin user can open tables via ABI") {
     InvoicingFixture f;
     REQUIRE(f.ok);
 

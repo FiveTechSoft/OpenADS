@@ -162,6 +162,10 @@ public:
         // `INDEX ON ... TAG ... TO <other path>` form). When empty, the
         // companion ADT path is derived from the .adi stem (structural bag).
         std::string   adt_path;
+        // Tag directory ordering mode for add_tag().
+        //   true  = prepend (SAP Advantage Data Architect convention, reversed ordinals)
+        //   false = append  (default, CDX/Harbour convention, creation-order ordinals)
+        bool          prepend_tag_dir = false;
     };
 
     // Build a fresh 7-page .adi matching the legacy single-tag layout
@@ -171,8 +175,8 @@ public:
         create(const std::string& adi_path, const CreateParams& params);
 
     // Append a new tag to an existing .adi (3 pages at EOF: per-tag
-    // header + F-marker + empty dense root).  New entry is prepended in
-    // the tag directory (legacy convention observed in dual-tag fixtures).
+    // header + F-marker + empty dense root).  Ordering controlled by
+    // CreateParams::prepend_tag_dir (false=append, true=prepend).
     static util::Result<AdiIndex>
         add_tag(const std::string& adi_path, const CreateParams& params);
 

@@ -1,11 +1,11 @@
-﻿// abi_dd_remote_test.cpp â€” M12.29: AdsDD* Data Dictionary property API over
+﻿// abi_dd_remote_test.cpp -- M12.29: AdsDD* Data Dictionary property API over
 // a remote (tcp://) connection.
 //
 // Root cause pinned here: dd_from_handle() in ace_exports.cpp only ever
 // resolved a LOCAL Connection handle, so every AdsDD* getter/setter silently
 // returned empty/no-op for a remote connection instead of erroring or
 // forwarding. Each test below creates the object through a LOCAL connection
-// (Phase 1 doesn't cover every Create* function â€” see wire-protocol.md
+// (Phase 1 doesn't cover every Create* function -- see wire-protocol.md
 // Â§5.24 for what's deferred), then reads/writes it through a REMOTE
 // connection to the same .add, and cross-checks against a second LOCAL
 // connection that the write actually reached disk.
@@ -207,7 +207,7 @@ TEST_CASE("M12.29 remote AdsDDCreateTrigger + Get/SetTriggerProperty + DropTrigg
     AdsDisconnect(hRemote);
 }
 
-TEST_CASE("M12.29 remote AdsDDCreateProcedure + Get/SetProcProperty â€” "
+TEST_CASE("M12.29 remote AdsDDCreateProcedure + Get/SetProcProperty -- "
          "the exact bug reported via DA-Web DD Health") {
     DdRemoteFixture f;
     ADSHANDLE hRemote = f.connect_remote();
@@ -218,7 +218,7 @@ TEST_CASE("M12.29 remote AdsDDCreateProcedure + Get/SetProcProperty â€” "
                                  input, nullptr, nullptr) == 0);
 
     // Before the fix this returned rc==0 with len==0 (silent empty), not an
-    // error and not the real value â€” exactly what DD Health flagged as
+    // error and not the real value -- exactly what DD Health flagged as
     // "Stored procedure has no body or external container metadata."
     CHECK(get_str(hRemote, "proc", "sp_restock", ADS_DD_PROC_INPUT) == "qty:N");
 
@@ -252,7 +252,7 @@ TEST_CASE("M12.29 remote AdsDDCreateFunction + Get/SetFunctionProperty") {
 
 TEST_CASE("M12.29 remote AdsDDGetViewProperty/SetViewProperty + DropView") {
     DdRemoteFixture f;
-    // View creation is Phase 2 â€” create it locally first.
+    // View creation is Phase 2 -- create it locally first.
     ADSHANDLE hLocal = f.connect_local();
     UNSIGNED8 vname[32] = "v_all";
     UNSIGNED8 sql0[64]  = "SELECT * FROM stock";
@@ -276,7 +276,7 @@ TEST_CASE("M12.29 remote AdsDDGetViewProperty/SetViewProperty + DropView") {
 
 TEST_CASE("M12.29 remote AdsDDGetRefIntegrityProperty/SetRefIntegrityProperty") {
     DdRemoteFixture f;
-    // RI creation is Phase 2 â€” create it locally first (self-referencing RI
+    // RI creation is Phase 2 -- create it locally first (self-referencing RI
     // on "stock" just to exercise the property get/set shape).
     ADSHANDLE hLocal = f.connect_local();
     UNSIGNED8 riName[32]   = "ri_self";
@@ -302,7 +302,7 @@ TEST_CASE("M12.29 remote AdsDDGetRefIntegrityProperty/SetRefIntegrityProperty") 
 
 TEST_CASE("M12.29 remote AdsDDGetUserProperty/SetUserProperty") {
     DdRemoteFixture f;
-    // User creation is Phase 2 â€” create it locally first.
+    // User creation is Phase 2 -- create it locally first.
     ADSHANDLE hLocal = f.connect_local();
     UNSIGNED8 group[8] = "";
     UNSIGNED8 user[16] = "bob";
@@ -311,7 +311,7 @@ TEST_CASE("M12.29 remote AdsDDGetUserProperty/SetUserProperty") {
 
     ADSHANDLE hRemote = f.connect_remote();
     UNSIGNED8 userBuf[16] = "bob";
-    // 1150: an arbitrary (non-special-cased) property id â€” this test only
+    // 1150: an arbitrary (non-special-cased) property id -- this test only
     // pins the generic prop_<id> get/set round-trip over the wire, not any
     // named property's semantics (1102/1103 are special-cased computed
     // values; anything else round-trips through dd->get/set_user_property).
@@ -324,7 +324,7 @@ TEST_CASE("M12.29 remote AdsDDGetUserProperty/SetUserProperty") {
 
 TEST_CASE("M12.29 remote AdsDDDropLink") {
     DdRemoteFixture f;
-    // Link creation is Phase 2 â€” create it locally first.
+    // Link creation is Phase 2 -- create it locally first.
     ADSHANDLE hLocal = f.connect_local();
     UNSIGNED8 alias[16] = "lnk1";
     UNSIGNED8 path[260];
