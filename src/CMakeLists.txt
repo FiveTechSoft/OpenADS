@@ -199,7 +199,7 @@ target_link_libraries(openads_core PRIVATE openads_aes_impl)
 # equivalent -Wa,-mbig-obj. Neither flag exists on ELF/Mach-O toolchains, so
 # guard by compiler â€” never pass /bigobj to GCC/Clang.
 if(MSVC)
-    set_source_files_properties(abi/ace_exports.cpp PROPERTIES COMPILE_OPTIONS "/bigobj")
+    set_source_files_properties(abi/ace_exports.cpp PROPERTIES COMPILE_OPTIONS "/bigobj;/utf-8")
 elseif(MINGW)
     set_source_files_properties(abi/ace_exports.cpp PROPERTIES COMPILE_OPTIONS "-Wa,-mbig-obj")
 endif()

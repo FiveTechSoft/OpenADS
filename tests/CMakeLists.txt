@@ -2,8 +2,11 @@
 # literals and `buf[int_index]` accesses. Under clang/gcc -Werror those
 # trip -Wconversion / -Wsign-conversion even though the narrowing is
 # intentional (masking bytes). Relax just those two for test code — the
-# library in src/ keeps the full strict warning set. MSVC is unaffected.
-if(NOT MSVC)
+# library in src/ keeps the full strict warning set. MSVC gets /utf-8
+# to avoid C4566 on non-ASCII identifiers in test source files.
+if(MSVC)
+    add_compile_options(/utf-8)
+elseif(NOT MSVC)
     add_compile_options(-Wno-conversion -Wno-sign-conversion)
     # __COUNTER__ is a widely-supported GCC/Clang extension used by doctest.
     # Clang 19+ pedantically classifies it as -Wc2y-extensions; suppress it.
