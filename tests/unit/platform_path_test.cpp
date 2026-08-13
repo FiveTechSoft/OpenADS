@@ -35,6 +35,35 @@ TEST_CASE("Case-insensitive resolve matches by case-folded leaf") {
     fs::remove_all(dir);
 }
 
+#if defined(_WIN32)
+// RCB 2026-08-09 -- production crash (reported as ADSADT/7017 "indice
+// corrupto" on an unrelated table): resolve_case_insensitive scans every
+// entry of the parent directory with fs::directory_iterator and converts
+// each name via path::string(), which THROWS std::system_error on Windows
+// when a name has no narrow-codepage representation -- notably the NTFS
+// PUA remap (U+F000-U+F0FF) left behind by a botched robocopy/redirect
+// that dropped an illegal character (":") into a filename. One such
+// neighbour must not abort resolving every OTHER file in the directory.
+TEST_CASE("Case-insensitive resolve skips a neighbour with an unconvertible name") {
+    const auto dir = fs::temp_directory_path() / "openads_path_t4";
+    fs::create_directories(dir);
+    const auto file = dir / "Clientes.dbf";
+    { std::ofstream(file) << "x"; }
+
+    std::wstring trap_name = L"trap_";
+    trap_name.push_back(static_cast<wchar_t>(0xF03A));  // PUA remap of ':'
+    trap_name += L".tmp";
+    const auto trap = dir / trap_name;
+    { std::ofstream trap_stream(trap); trap_stream << "x"; }
+
+    auto resolved = resolve_case_insensitive((dir / "clientes.dbf").string());
+    CHECK(resolved == file.string());
+
+    fs::remove(trap);
+    fs::remove_all(dir);
+}
+#endif
+
 TEST_CASE("Case-insensitive resolve returns input on miss") {
     const auto dir = fs::temp_directory_path() / "openads_path_t3";
     fs::create_directories(dir);
