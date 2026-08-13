@@ -325,7 +325,7 @@ encode_compact_leaf_static(
             return util::Error{5000, 0, "CDX leaf entry overflow", ""};
         }
         // Entry headers grow right; suffix area grows left. They MUST
-        // NOT overlap â€” without this check the encoder silently
+        // NOT overlap -- without this check the encoder silently
         // corrupts the page once `(i+1)*key_bytes > buf_pos`, which
         // surfaces as 6106 dup/trl-out-of-range on the next decode.
         if (static_cast<std::uint32_t>((i + 1) * key_bytes) > buf_pos) {
@@ -829,7 +829,7 @@ CdxIndex::open_named(const std::string& path,
         std::uint32_t abs_pos = 512u + static_cast<std::uint32_t>(fep_pos);
         std::uint32_t abs_end = abs_pos + fep_len;
         // Fail loud on a corrupt header: silently dropping the FOR would
-        // reopen a conditional tag as unconditional â€” the very data-integrity
+        // reopen a conditional tag as unconditional -- the very data-integrity
         // defect this change exists to prevent.
         if (abs_pos < 512 || abs_end > CDX_HEADER_LEN) {
             return util::Error{6106, 0,
@@ -904,7 +904,7 @@ int CdxIndex::compare_keys_(const char* a, const char* b,
                             std::size_t len) const noexcept {
     // FoxNumeric and NtxNumeric keys are binary order-preserving encodings
     // (FoxPro/Harbour HB_DBL2ORD / NTX zero-padded magnitude).  They MUST
-    // be compared with raw memcmp â€” the OEM collation sort table remaps
+    // be compared with raw memcmp -- the OEM collation sort table remaps
     // bytes and destroys the binary ordering, causing DbSeek to miss keys
     // that were correctly inserted during CREATE INDEX.  (#130 regression
     // for numeric Val() CDX seek.)
@@ -2181,7 +2181,7 @@ util::Result<void> CdxIndex::free_tree_(std::uint32_t off) {
     if (!w) return w.error();
     if (w.value() < link.size()) {
         // A short write would leave a dangling free-list head pointing at a
-        // page whose next-free link was never fully stored â€” fail loud
+        // page whose next-free link was never fully stored -- fail loud
         // rather than silently corrupt the chain.
         return util::Error{6106, 0,
             "CDX free-list link short write", ""};
@@ -2226,7 +2226,7 @@ std::uint32_t CdxIndex::allocate_page_() {
         return off;
     }
     // Otherwise extend the file. The global tail map (keyed by path) keeps
-    // concurrent tags on the same .cdx from handing out the same offset â€”
+    // concurrent tags on the same .cdx from handing out the same offset --
     // the multi-tag allocator invariant.
     std::lock_guard<std::mutex> lk(g_cdx_alloc_mu);
     auto& tail = g_cdx_alloc_tail[path_];

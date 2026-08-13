@@ -147,7 +147,10 @@ std::optional<std::string> resolve_client_path(
         if (want == r) return resolve_under_root(root, ".");
         if (want.size() > r.size() && want.compare(0, r.size(), r) == 0 &&
             want[r.size()] == '/') {
-            if (auto res = resolve_under_root(root, pc.substr(r.size() + 1))) {
+            std::string rest = pc.substr(r.size() + 1);
+            while (!rest.empty() && rest.back() == '/') rest.pop_back();
+            if (rest.empty()) return resolve_under_root(root, ".");
+            if (auto res = resolve_under_root(root, rest)) {
                 return res;
             }
         }

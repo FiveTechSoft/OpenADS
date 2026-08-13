@@ -50,6 +50,10 @@ add_library(openads_core STATIC
     engine/dd_native.cpp
     engine/backup.cpp
     engine/fts.cpp
+    engine/repl_queue.cpp
+    engine/repl_catalog.cpp
+    engine/repl_capture.cpp
+    engine/repl_apply.cpp
     engine/codepage.cpp
     engine/oem_collation.cpp
     engine/script/value.cpp

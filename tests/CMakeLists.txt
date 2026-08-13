@@ -236,6 +236,7 @@ add_executable(openads_unit_tests
     unit/cdx_build_bulk_collation_test.cpp
     unit/abi_ntxpl852_seek_test.cpp
     unit/abi_ntxpl852_collation_abi_test.cpp
+    unit/abi_index_collation_persist_test.cpp
     unit/network_socket_test.cpp
     unit/network_server_test.cpp
     unit/network_pool_test.cpp
@@ -305,6 +306,10 @@ add_executable(openads_unit_tests
     unit/abi_pritpal_empty_index_test.cpp
     unit/abi_remote_pritpal_empty_index_test.cpp
     unit/abi_multiuser_nav_visibility_test.cpp
+    unit/repl_queue_test.cpp
+    unit/repl_catalog_test.cpp
+    unit/abi_repl_capture_test.cpp
+    unit/repl_apply_test.cpp
 )
 
 # OpenADS ODBC driver (provider) test — drives the driver's SQL* exports
