@@ -33,6 +33,7 @@ struct ReplRecord {
     std::vector<ReplIdent> identity;
     std::vector<std::uint8_t> before;
     std::vector<std::uint8_t> after;
+    std::string            origin_id;  // M12.34 — originating server identity
 };
 
 // Append-only durable replication queue. Each record has a 28-byte
@@ -41,7 +42,7 @@ struct ReplRecord {
 //
 //   bytes 0-3   : magic 0x52504C51 ("RPLQ")
 //   byte  4     : type (1..6)
-//   byte  5     : flags (bit0=has_before, bit1=has_after)
+//   byte  5     : flags (bit0=has_before, bit1=has_after, bit2=has_origin_id)
 //   bytes 6-7   : payload length (uint16)
 //   bytes 8-15  : lsn (uint64)
 //   bytes 16-23 : tx_id (uint64)
@@ -50,7 +51,8 @@ struct ReplRecord {
 //
 // Row payload (types 1-3): source_table u16-len + utf8, then
 // u16 nident, then nident * (u16 klen + key + u16 vlen + value),
-// then if has_before u32 blen + bytes, then if has_after u32 alen + bytes.
+// then if has_before u32 blen + bytes, then if has_after u32 alen + bytes,
+// then if has_origin_id u16 olen + origin_id utf8 bytes.
 // TX_* payloads are empty.
 
 class ReplQueue {

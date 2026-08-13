@@ -69,6 +69,10 @@ public:
     // platform::resolve_under_any_root.
     void set_data_dir(const std::string& dir) { data_dir_ = dir; }
 
+    // M12.34 — persistent server identity for replication.
+    const std::string& server_id() const noexcept { return server_id_; }
+    void ensure_server_id();
+
     // When false (default), remote oads_*/Ads* filesystem opcodes return
     // AE_ACCESS_DENIED. Set via openads.ini EnableFileFunc=1 or
     // --enable-file-func.
@@ -181,6 +185,10 @@ private:
     std::string                                   data_dir_;
     bool                                          enable_file_func_ = false;
     bool                                          legacy_paths_ = false;
+
+    // M12.34 — persistent server identity for replication loop prevention.
+    std::string                                   server_id_;
+    std::string                                   server_id_path();
 
     // M12.9 — credential map (user -> password). Protected by creds_mu_
     // because add_credential() may run while sessions authenticate.

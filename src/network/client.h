@@ -71,6 +71,12 @@ public:
                                const std::string& password = "");
 
     void               disconnect() noexcept;
+
+    // M12.34 — remote transaction lifecycle.
+    util::Result<void> begin_transaction();
+    util::Result<void> commit_transaction();
+    util::Result<void> rollback_transaction();
+
     bool               valid() const noexcept {
         return transport_ && transport_->valid();
     }
@@ -328,6 +334,10 @@ public:
                                             std::uint32_t recno);
     util::Result<void>          goto_bottom(RemoteTable* rt);
     util::Result<void>          flush_table(std::uint32_t id);
+    // M12.34 — find record by identity columns. Returns recno (0 = not found).
+    util::Result<std::uint32_t>
+        find_record(std::uint32_t id,
+                    const std::vector<std::pair<std::string, std::string>>& identity);
     // M12.7 — remote SQL exec. Returns cursor table-id (0 = no cursor,
     // i.e. INSERT / UPDATE / DELETE / DDL).
     util::Result<std::uint32_t> execute_sql(const std::string& sql);

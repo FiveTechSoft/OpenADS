@@ -229,6 +229,22 @@ enum class Opcode : std::uint8_t {
     FindTables         = 0x05,
     FindTablesAck      = 0x06,
 
+    // M12.34 — Transaction lifecycle over the wire. Request payloads are
+    // empty; ack payloads are empty. Success is indicated by the matching
+    // Ack opcode; failure by Opcode::Error.
+    BeginTransaction       = 0x07,
+    BeginTransactionAck    = 0x08,
+    CommitTransaction      = 0x09,
+    CommitTransactionAck   = 0x0A,
+    RollbackTransaction    = 0x0B,
+    RollbackTransactionAck = 0x0C,
+
+    // M12.34 — find a record by identity columns over the wire.
+    // Request:  [u32 tid][u16 nident][for each: u16 nlen][name][u16 vlen][value]
+    // Reply:    [u32 recno] (0 = not found)
+    FindRecord          = 0x0D,
+    FindRecordAck       = 0x0E,
+
     // M12.29 — AdsDD* Data Dictionary property API, phase 1. Previously
     // every AdsDD* getter/setter silently returned empty/no-op over a
     // remote connection (dd_from_handle() only resolves a LOCAL Connection

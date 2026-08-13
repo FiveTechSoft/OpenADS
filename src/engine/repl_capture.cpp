@@ -99,6 +99,9 @@ void repl_capture_row(session::Connection* c, Table& t, ReplRecType type,
         if (before) rec.before = *before;
         if (after)  rec.after  = *after;
 
+        // M12.34 — stamp origin for loop prevention.
+        rec.origin_id = c->origin_id();
+
         auto r = q.append(rec);
         if (!r) {
             g_repl_enqueue_failures.fetch_add(1, std::memory_order_relaxed);

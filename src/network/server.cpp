@@ -18,7 +18,9 @@
 #include <algorithm>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <memory>
+#include <random>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -140,6 +142,44 @@ util::Result<void> write_frame(ITransport& t, const Frame& f) {
 Server::Server() = default;
 
 Server::~Server() { stop(); }
+
+std::string Server::server_id_path() {
+    namespace fs = std::filesystem;
+    fs::path p = data_dir_;
+    if (p.empty()) p = ".";
+    return (p / ".openads_server_id").string();
+}
+
+void Server::ensure_server_id() {
+    namespace fs = std::filesystem;
+    auto path = server_id_path();
+    std::ifstream fin(path);
+    if (fin.good()) {
+        std::getline(fin, server_id_);
+        if (!server_id_.empty()) return;
+    }
+    // Generate a new UUID v4.
+    std::random_device rd;
+    std::mt19937_64 gen(rd());
+    std::uniform_int_distribution<std::uint64_t> dis;
+    std::uint64_t a = dis(gen), b = dis(gen);
+    b = (b & 0xFFFFFFFFFFFF0FFFull) | 0x0000000000004000ull; // version 4
+    a = (a & 0x3FFFFFFFFFFFFFFFull) | 0x8000000000000000ull; // variant 1
+    char buf[37];
+    std::snprintf(buf, sizeof(buf),
+        "%016llx-%04llx-%04llx-%04llx-%012llx",
+        static_cast<unsigned long long>(a >> 32),
+        static_cast<unsigned long long>((a >> 16) & 0xFFFF),
+        static_cast<unsigned long long>(a & 0xFFFF),
+        static_cast<unsigned long long>((b >> 48) & 0xFFFF),
+        static_cast<unsigned long long>(b & 0xFFFFFFFFFFFFull));
+    server_id_ = buf;
+    // Persist to disk.
+    fs::path dir = fs::path(path).parent_path();
+    if (!dir.empty()) fs::create_directories(dir);
+    std::ofstream fout(path);
+    if (fout.good()) fout << server_id_;
+}
 
 void Server::add_credential(const std::string& user,
                             const std::string& password) {
@@ -431,6 +471,7 @@ util::Result<void> Server::start(const std::string& host,
         std::string("OpenADS ") + OPENADS_VERSION_STR +
             " server started on port " + std::to_string(port_));
     running_.store(true);
+    ensure_server_id();
     // Enterprise step 3 — if the sharded-reactor pool is enabled, stand it up
     // before the accept loop so accept_loop hands sockets to it. Env-read (not
     // the cached config singleton) so it is honored even when the singleton was

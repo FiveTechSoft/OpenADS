@@ -167,6 +167,10 @@ public:
     void                     set_repl_queue_open(bool v) noexcept { repl_queue_open_ = v; }
     std::uint64_t            tx_id() const noexcept { return next_tx_id_ - 1; }
 
+    // M12.34 — server origin identity for replication loop prevention.
+    void                     set_origin_id(const std::string& id) noexcept { origin_id_ = id; }
+    const std::string&       origin_id() const noexcept { return origin_id_; }
+
     // OEM national collation for CDX/NTX index keys (NTXPL852, PL852, …).
     // nullptr = raw byte order. Set via AdsSetCollation.
     const std::uint8_t* oem_sort_table() const noexcept {
@@ -266,6 +270,7 @@ private:
     engine::ReplQueue                                          repl_queue_;
     bool                                                       repl_queue_open_ = false;
     engine::ReplCatalog                                        repl_catalog_;
+    std::string                                                origin_id_;  // M12.34
 
 public:
     // Trigger disable / enable for this connection (current-user scope).

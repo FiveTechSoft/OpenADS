@@ -1133,6 +1133,8 @@ DispatchResult Session::dispatch(const Frame& f) {
             }
             sess_conn_ = std::make_unique<openads::session::Connection>(
                 std::move(co).value());
+            // M12.34 — propagate server identity for replication loop prevention.
+            sess_conn_->set_origin_id(srv_->server_id());
             // --legacy-paths: the session's table opens must resolve
             // client-absolute paths the same way the Connect jail above
             // accepted the connect dir.
@@ -1148,6 +1150,133 @@ DispatchResult Session::dispatch(const Frame& f) {
         case Opcode::Disconnect: {
             cleanup();
             return { std::nullopt, true };
+        }
+        case Opcode::BeginTransaction: {
+            if (!sess_conn_) {
+                reply = err("BeginTransaction: not connected",
+                            openads::AE_NO_CONNECTION);
+                break;
+            }
+            auto r = sess_conn_->begin_tx();
+            if (!r) {
+                reply = err("BeginTransaction: " + r.error().message,
+                            r.error().code);
+                break;
+            }
+            reply.opcode = Opcode::BeginTransactionAck;
+            break;
+        }
+        case Opcode::CommitTransaction: {
+            if (!sess_conn_) {
+                reply = err("CommitTransaction: not connected",
+                            openads::AE_NO_CONNECTION);
+                break;
+            }
+            auto r = sess_conn_->commit_tx();
+            if (!r) {
+                reply = err("CommitTransaction: " + r.error().message,
+                            r.error().code);
+                break;
+            }
+            reply.opcode = Opcode::CommitTransactionAck;
+            break;
+        }
+        case Opcode::RollbackTransaction: {
+            if (!sess_conn_) {
+                reply = err("RollbackTransaction: not connected",
+                            openads::AE_NO_CONNECTION);
+                break;
+            }
+            auto r = sess_conn_->rollback_tx();
+            if (!r) {
+                reply = err("RollbackTransaction: " + r.error().message,
+                            r.error().code);
+                break;
+            }
+            reply.opcode = Opcode::RollbackTransactionAck;
+            break;
+        }
+        case Opcode::FindRecord: {
+            if (!sess_conn_) {
+                reply = err("FindRecord: not connected",
+                            openads::AE_NO_CONNECTION);
+                break;
+            }
+            if (f.payload.size() < 6) {
+                reply = err("FindRecord: bad payload"); break;
+            }
+            {
+                std::uint32_t id = read_u32_le(f.payload.data());
+                std::uint16_t nident = static_cast<std::uint16_t>(
+                    static_cast<std::uint16_t>(f.payload[4]) |
+                    (static_cast<std::uint16_t>(f.payload[5]) << 8));
+                auto it = tbls_.find(id);
+                if (it == tbls_.end()) {
+                    reply = err("FindRecord: bad table id"); break;
+                }
+                auto* tbl = sess_conn_->lookup_table(it->second);
+                if (!tbl) {
+                    reply = err("FindRecord: lookup failed"); break;
+                }
+                std::size_t off = 6;
+                std::vector<std::pair<std::string, std::string>> ident;
+                for (std::uint16_t i = 0; i < nident; ++i) {
+                    if (off + 4 > f.payload.size()) {
+                        reply = err("FindRecord: truncated identity"); break;
+                    }
+                    std::uint16_t nlen = static_cast<std::uint16_t>(
+                        static_cast<std::uint16_t>(f.payload[off]) |
+                        (static_cast<std::uint16_t>(f.payload[off + 1]) << 8));
+                    off += 2;
+                    if (off + nlen > f.payload.size()) {
+                        reply = err("FindRecord: truncated name"); break;
+                    }
+                    std::string name(f.payload.begin() + off,
+                                     f.payload.begin() + off + nlen);
+                    off += nlen;
+                    if (off + 2 > f.payload.size()) {
+                        reply = err("FindRecord: truncated vlen"); break;
+                    }
+                    std::uint16_t vlen = static_cast<std::uint16_t>(
+                        static_cast<std::uint16_t>(f.payload[off]) |
+                        (static_cast<std::uint16_t>(f.payload[off + 1]) << 8));
+                    off += 2;
+                    if (off + vlen > f.payload.size()) {
+                        reply = err("FindRecord: truncated value"); break;
+                    }
+                    std::string val(f.payload.begin() + off,
+                                    f.payload.begin() + off + vlen);
+                    off += vlen;
+                    ident.emplace_back(std::move(name), std::move(val));
+                }
+                if (reply.opcode == Opcode::Error) break;
+                // Sequential scan matching local find_by_identity logic.
+                if (auto gr = tbl->goto_top(); !gr) {
+                    reply.opcode = Opcode::FindRecordAck;
+                    reply.payload.assign(4, 0);
+                    break;
+                }
+                std::uint32_t found = 0;
+                while (!tbl->eof()) {
+                    bool match = true;
+                    for (auto& [n, v] : ident) {
+                        auto idx = tbl->field_index(n);
+                        if (idx < 0) { match = false; break; }
+                        auto val = tbl->read_field(static_cast<std::uint16_t>(idx));
+                        if (!val) { match = false; break; }
+                        if (val.value().as_string != v) { match = false; break; }
+                    }
+                    if (match) { found = tbl->recno(); break; }
+                    if (auto sr = tbl->skip(1); !sr) break;
+                }
+                reply.opcode = Opcode::FindRecordAck;
+                reply.payload.resize(4);
+                reply.payload[0] = static_cast<std::uint8_t>( found        & 0xFFu);
+                reply.payload[1] = static_cast<std::uint8_t>((found >>  8) & 0xFFu);
+                reply.payload[2] = static_cast<std::uint8_t>((found >> 16) & 0xFFu);
+                reply.payload[3] = static_cast<std::uint8_t>((found >> 24) & 0xFFu);
+            }
+            break;
         }
         case Opcode::OpenTable: {
             if (!sess_conn_) {

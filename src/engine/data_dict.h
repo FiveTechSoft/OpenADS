@@ -291,12 +291,21 @@ public:
         std::string filter;
         bool enabled = true;
     };
+    // M12.34 — conflict resolution mode for replication subscriptions.
+    enum class ConflictMode : std::uint8_t {
+        Overwrite = 0,  // last-writer-wins (default)
+        Skip      = 1,  // skip incoming record on conflict
+        Trigger   = 2,  // fire on_conflict trigger
+    };
+
     struct SubscriptionEntry {
         std::string name;
         std::string publication;
         std::string target_uri;
         std::uint64_t last_lsn = 0;
         bool enabled = true;
+        ConflictMode conflict_mode = ConflictMode::Overwrite;
+        std::string on_conflict_proc;  // stored procedure to call on conflict
     };
     util::Result<void> create_publication(const PublicationEntry& e);
     util::Result<void> drop_publication(const std::string& name);

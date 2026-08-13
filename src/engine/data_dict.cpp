@@ -1973,6 +1973,8 @@ util::Result<void> DataDict::load_() {
                 if (m.count("uri"))     e.target_uri  = m.at("uri");
                 if (m.count("lsn"))     { try { e.last_lsn = std::stoull(m.at("lsn")); } catch (...) {} }
                 if (m.count("enabled")) e.enabled = (m.at("enabled") != "0");
+                if (m.count("conflict")) { try { e.conflict_mode = static_cast<ConflictMode>(std::stoul(m.at("conflict"))); } catch (...) {} }
+                if (m.count("on_conflict")) e.on_conflict_proc = m.at("on_conflict");
             }
             subscriptions_[obj_name] = std::move(e);
         }
@@ -2207,7 +2209,10 @@ util::Result<void> DataDict::save() {
             std::string j = "{\"pub\":\"" + json_escape(s.publication) + "\""
                 + ",\"uri\":\"" + json_escape(s.target_uri) + "\""
                 + ",\"lsn\":" + std::to_string(s.last_lsn)
-                + ",\"enabled\":" + (s.enabled ? "1" : "0") + "}";
+                + ",\"enabled\":" + (s.enabled ? "1" : "0")
+                + ",\"conflict\":" + std::to_string(static_cast<int>(s.conflict_mode))
+                + ",\"on_conflict\":\"" + json_escape(s.on_conflict_proc) + "\""
+                + "}";
             mk("Subscription", s.name, "", j);
         }
     }

@@ -305,6 +305,45 @@ void RemoteConnection::disconnect() noexcept {
     transport_.reset();
 }
 
+util::Result<void> RemoteConnection::begin_transaction() {
+    Frame req;
+    req.opcode = Opcode::BeginTransaction;
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::BeginTransactionAck) {
+        return util::Error{5000, 0, "BeginTransaction: server error",
+                           std::string(rep.value().payload.begin(),
+                                       rep.value().payload.end())};
+    }
+    return {};
+}
+
+util::Result<void> RemoteConnection::commit_transaction() {
+    Frame req;
+    req.opcode = Opcode::CommitTransaction;
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::CommitTransactionAck) {
+        return util::Error{5000, 0, "CommitTransaction: server error",
+                           std::string(rep.value().payload.begin(),
+                                       rep.value().payload.end())};
+    }
+    return {};
+}
+
+util::Result<void> RemoteConnection::rollback_transaction() {
+    Frame req;
+    req.opcode = Opcode::RollbackTransaction;
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::RollbackTransactionAck) {
+        return util::Error{5000, 0, "RollbackTransaction: server error",
+                           std::string(rep.value().payload.begin(),
+                                       rep.value().payload.end())};
+    }
+    return {};
+}
+
 util::Result<RemoteConnection::OpenTableResult>
 RemoteConnection::open_table(const std::string& rel, std::uint16_t mode) {
     Frame req;
@@ -704,6 +743,34 @@ util::Result<void> RemoteConnection::flush_table(std::uint32_t id) {
         return util::Error{5000, 0, "FlushTable: server error", ""};
     }
     return {};
+}
+
+util::Result<std::uint32_t>
+RemoteConnection::find_record(
+    std::uint32_t id,
+    const std::vector<std::pair<std::string, std::string>>& identity) {
+    Frame req;
+    req.opcode = Opcode::FindRecord;
+    write_u32_le(id, req.payload);
+    write_u16_le(static_cast<std::uint16_t>(identity.size()), req.payload);
+    for (auto& [n, v] : identity) {
+        write_u16_le(static_cast<std::uint16_t>(n.size()), req.payload);
+        req.payload.insert(req.payload.end(), n.begin(), n.end());
+        write_u16_le(static_cast<std::uint16_t>(v.size()), req.payload);
+        req.payload.insert(req.payload.end(), v.begin(), v.end());
+    }
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::FindRecordAck) {
+        return util::Error{5000, 0, "FindRecord: server error",
+                           std::string(rep.value().payload.begin(),
+                                       rep.value().payload.end())};
+    }
+    if (rep.value().payload.size() < 4) {
+        return util::Error{5000, 0, "FindRecord: ack too short", ""};
+    }
+    std::uint32_t recno = read_u32_le(rep.value().payload.data());
+    return recno;
 }
 
 util::Result<void> RemoteConnection::reindex(std::uint32_t id) {

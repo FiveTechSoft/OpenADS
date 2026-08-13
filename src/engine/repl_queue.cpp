@@ -78,8 +78,9 @@ ReplScan scan_replq_buffer(const std::uint8_t* buf, std::size_t got_n) {
         r.tx_id  = tx_id;
 
         const std::uint8_t* p = buf + pos + RPLQ_HEADER_LEN;
-        bool has_before = (flags_byte & 0x01) != 0;
-        bool has_after  = (flags_byte & 0x02) != 0;
+        bool has_before    = (flags_byte & 0x01) != 0;
+        bool has_after     = (flags_byte & 0x02) != 0;
+        bool has_origin_id = (flags_byte & 0x04) != 0;
 
         if (type_byte >= 1 && type_byte <= 3 && plen >= 2) {
             // Row payload
@@ -115,6 +116,13 @@ ReplScan scan_replq_buffer(const std::uint8_t* buf, std::size_t got_n) {
                 std::uint32_t alen = read_u32_le(p + off); off += 4;
                 if (off + alen > plen) { out.records.push_back(std::move(r)); pos += rec_size; continue; }
                 r.after.assign(p + off, p + off + alen);
+                off += alen;
+            }
+            if (has_origin_id) {
+                if (off + 2 > plen) { out.records.push_back(std::move(r)); pos += rec_size; continue; }
+                std::uint16_t olen = read_u16_le(p + off); off += 2;
+                if (off + olen > plen) { out.records.push_back(std::move(r)); pos += rec_size; continue; }
+                r.origin_id.assign(reinterpret_cast<const char*>(p + off), olen);
             }
         }
         out.records.push_back(std::move(r));
@@ -192,7 +200,8 @@ util::Result<std::uint64_t> ReplQueue::append(const ReplRecord& rec) {
             plen += 2 + id.name.size() + 2 + id.value.size();
         }
         if (!rec.before.empty()) plen += 4 + rec.before.size();
-        if (!rec.after.empty())  plen += 4 + rec.after.size();
+        if (!rec.after.empty()) plen += 4 + rec.after.size();
+        if (!rec.origin_id.empty()) plen += 2 + rec.origin_id.size();
         if (plen > 0xFFFFu) {
             return util::Error{5000, 0, "replq payload too large", ""};
         }
@@ -219,6 +228,10 @@ util::Result<std::uint64_t> ReplQueue::append(const ReplRecord& rec) {
             write_u32_le(p + off, static_cast<std::uint32_t>(rec.after.size())); off += 4;
             std::memcpy(p + off, rec.after.data(), rec.after.size()); off += rec.after.size();
         }
+        if (!rec.origin_id.empty()) {
+            write_u16_le(p + off, static_cast<std::uint16_t>(rec.origin_id.size())); off += 2;
+            std::memcpy(p + off, rec.origin_id.data(), rec.origin_id.size()); off += rec.origin_id.size();
+        }
     }
     // TX_* types: empty payload
 
@@ -228,6 +241,7 @@ util::Result<std::uint64_t> ReplQueue::append(const ReplRecord& rec) {
     std::uint8_t flags_byte = 0;
     if (!rec.before.empty()) flags_byte |= 0x01;
     if (!rec.after.empty())  flags_byte |= 0x02;
+    if (!rec.origin_id.empty()) flags_byte |= 0x04;
 
     std::vector<std::uint8_t> rec_buf(RPLQ_HEADER_LEN + payload.size() + 4, 0);
     write_u32_le(rec_buf.data() + 0, RPLQ_MAGIC);
