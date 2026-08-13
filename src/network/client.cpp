@@ -41,6 +41,18 @@ inline void write_lstr16(const std::string& s, std::vector<std::uint8_t>& out) {
     out.insert(out.end(), s.begin(), s.end());
 }
 
+// M12.33 — read a [u16 len][bytes] string from a payload buffer.
+inline bool read_lstr16(const std::vector<std::uint8_t>& pl,
+                        std::size_t& off, std::string& out) {
+    if (off + 2 > pl.size()) return false;
+    std::uint16_t len = read_u16_le(pl.data() + off);
+    off += 2;
+    if (off + len > pl.size()) return false;
+    out.assign(reinterpret_cast<const char*>(pl.data() + off), len);
+    off += len;
+    return true;
+}
+
 } // namespace
 
 // M12.18 — parse the per-row trailer the server appends to every
@@ -1935,6 +1947,32 @@ RemoteConnection::directory(const std::string& mask) {
         if (!openads::engine::unpack_dir_entry(rep.value().payload, off, e))
             return util::Error{5000, 0, "Directory: bad entry", mask};
         out.push_back(std::move(e));
+    }
+    return out;
+}
+
+util::Result<std::vector<std::string>>
+RemoteConnection::find_tables(const std::string& mask) {
+    Frame req;
+    req.opcode = Opcode::FindTables;
+    push_lp_str(req.payload, mask);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::FindTablesAck ||
+        rep.value().payload.size() < 4)
+        return fs_wire_err(rep.value(), "FindTables");
+    std::size_t off = 0;
+    std::uint32_t n = read_u32_le(rep.value().payload.data());
+    off = 4;
+    if (n > 100000u)
+        return util::Error{5000, 0, "FindTables: count too large", mask};
+    std::vector<std::string> out;
+    out.reserve(n);
+    for (std::uint32_t i = 0; i < n; ++i) {
+        std::string name;
+        if (!read_lstr16(rep.value().payload, off, name))
+            return util::Error{5000, 0, "FindTables: bad entry", mask};
+        out.push_back(std::move(name));
     }
     return out;
 }

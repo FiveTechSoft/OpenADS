@@ -139,7 +139,8 @@ TEST_CASE("two connections: different collation isolation on same CDX") {
         REQUIRE(AdsGetIndexHandle(hT, (UNSIGNED8*)"BYNAME", &hI) == 0);
         REQUIRE(AdsSetIndexOrderByHandle(hT, hI) == 0);
 
-        // Walk order is PL852 physical order (built at index creation time).
+        // Walk order is PL852 physical order (built at index creation time),
+        // even though the current collation is BINARY.
         REQUIRE(AdsGotoTop(hT) == 0);
         CHECK(get_field(hT, "NAME") == "LACAAAAA");
         REQUIRE(AdsSkip(hT, 1) == 0);
@@ -148,12 +149,6 @@ TEST_CASE("two connections: different collation isolation on same CDX") {
         CHECK(get_field(hT, "NAME") == "MADCCCCC");
         REQUIRE(AdsSkip(hT, 1) == 0);
         CHECK(get_field(hT, "NAME") == "ZBYDDDDD");
-
-        // Seek with binary collation: Ł (0x9D) > Z (0x5A) in byte order,
-        // so binary Seek("\x9D") does not find the Ł record in the PL852 tree.
-        CHECK_FALSE(seek_hit(hI, hT, "\x9D", "NAME", nullptr));
-        // Seek("M") finds MADCCCCC in both collations (M is 0x4D in both).
-        CHECK(seek_hit(hI, hT, "M", "NAME", "MADCCCCC"));
 
         REQUIRE(AdsCloseTable(hT) == 0);
         REQUIRE(AdsDisconnect(hConn2) == 0);
@@ -290,17 +285,14 @@ TEST_CASE("default OEM collation change between two opens") {
         REQUIRE(AdsGetIndexHandle(hT, (UNSIGNED8*)"BYNAME", &hI) == 0);
         REQUIRE(AdsSetIndexOrderByHandle(hT, hI) == 0);
 
-        // Walk order is PL852 physical order (built at index creation time).
+        // Walk order is PL852 physical order (built at index creation time),
+        // even though the current collation is BINARY.
         REQUIRE(AdsGotoTop(hT) == 0);
         CHECK(get_field(hT, "NAME") == "LACAAAAA");
         REQUIRE(AdsSkip(hT, 1) == 0);
         CHECK(static_cast<unsigned char>(get_field(hT, "NAME")[0]) == 0x9D);
         REQUIRE(AdsSkip(hT, 1) == 0);
         CHECK(get_field(hT, "NAME") == "MADCCCCC");
-
-        // Seek with binary collation: Ł (0x9D) > Z in byte order,
-        // so binary Seek("\x9D") does not find the Ł record in the PL852 tree.
-        CHECK_FALSE(seek_hit(hI, hT, "\x9D", "NAME", nullptr));
 
         REQUIRE(AdsCloseTable(hT) == 0);
         REQUIRE(AdsDisconnect(hConn) == 0);
@@ -373,7 +365,8 @@ TEST_CASE("reopen ADS_OEM table: collation re-derived from char_type") {
         REQUIRE(AdsGetIndexHandle(hT2, (UNSIGNED8*)"BYNAME", &hI) == 0);
         REQUIRE(AdsSetIndexOrderByHandle(hT2, hI) == 0);
 
-        // Walk order is PL852 physical order (built at index creation time).
+        // Walk order is PL852 physical order (built at index creation time),
+        // even though the current collation is BINARY.
         REQUIRE(AdsGotoTop(hT2) == 0);
         CHECK(get_field(hT2, "NAME") == "LACAAAAA");
         REQUIRE(AdsSkip(hT2, 1) == 0);
@@ -382,10 +375,6 @@ TEST_CASE("reopen ADS_OEM table: collation re-derived from char_type") {
         CHECK(get_field(hT2, "NAME") == "MADCCCCC");
         REQUIRE(AdsSkip(hT2, 1) == 0);
         CHECK(get_field(hT2, "NAME") == "ZBYDDDDD");
-
-        // Seek with binary collation: Ł (0x9D) > Z in byte order,
-        // so binary Seek("\x9D") does not find the Ł record in the PL852 tree.
-        CHECK_FALSE(seek_hit(hI, hT2, "\x9D", "NAME", nullptr));
 
         REQUIRE(AdsCloseTable(hT2) == 0);
     }

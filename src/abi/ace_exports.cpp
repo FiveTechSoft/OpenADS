@@ -160,6 +160,8 @@ struct ProcessState {
     std::recursive_mutex                                          mu;
     openads::session::HandleRegistry                              registry;
     std::unordered_map<Handle, std::unique_ptr<Connection>>       conns;
+    // M12.33 — remote find handles (owned here, not in a Connection).
+    std::vector<std::unique_ptr<Connection::TableFind>>            remote_finds;
 };
 
 ProcessState& state() {
@@ -19334,14 +19336,36 @@ UNSIGNED32 ENTRYPOINT AdsFindFirstTable(ADSHANDLE   hConnect,
                              ADSHANDLE*  phFind) {
     auto& s = state();
     std::lock_guard<std::recursive_mutex> lk(s.mu);
-    Connection* c = s.registry.lookup<Connection>(hConnect, HandleKind::Connection);
-    if (c == nullptr || phFind == nullptr || pusFileNameLen == nullptr) {
+    if (phFind == nullptr || pusFileNameLen == nullptr) {
         return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
     }
     std::string mask = pucMask
         ? openads::abi::to_internal(pucMask, 0)
         : std::string("*.dbf");
     if (mask.empty()) mask = "*.dbf";
+
+    // M12.33 — remote path: send FindTables opcode, cache results locally.
+    ADSHANDLE rc_h = resolve_remote_conn_handle(hConnect);
+    if (auto* rc = get_remote_connection(rc_h)) {
+        auto r = rc->find_tables(mask);
+        if (!r) return fail(r.error());
+        auto matches = std::move(r).value();
+        if (matches.empty())
+            return fail(openads::AE_NO_FILE_FOUND, mask.c_str());
+        auto find = std::make_unique<Connection::TableFind>();
+        find->matches = std::move(matches);
+        find->cursor = 1;
+        Connection::TableFind* raw = find.get();
+        s.remote_finds.emplace_back(std::move(find));
+        Handle gh = s.registry.register_object(HandleKind::Find, raw);
+        *phFind = to_ads_handle(gh);
+        return emit_name(pucFileName, pusFileNameLen, raw->matches.front());
+    }
+
+    Connection* c = s.registry.lookup<Connection>(hConnect, HandleKind::Connection);
+    if (c == nullptr) {
+        return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
+    }
 
     auto r = c->find_first_table(mask);
     if (!r) return fail(r.error());
@@ -19358,29 +19382,26 @@ UNSIGNED32 ENTRYPOINT AdsFindNextTable(ADSHANDLE   hConnect,
                             UNSIGNED16* pusFileNameLen) {
     auto& s = state();
     std::lock_guard<std::recursive_mutex> lk(s.mu);
-    Connection* c = s.registry.lookup<Connection>(hConnect, HandleKind::Connection);
-    if (c == nullptr || pusFileNameLen == nullptr) {
+    if (pusFileNameLen == nullptr) {
         return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
     }
     auto* find = s.registry.lookup<Connection::TableFind>(hFind, HandleKind::Find);
     if (find == nullptr) {
         return fail(openads::AE_INTERNAL_ERROR, "invalid find handle");
     }
-    auto r = c->find_next_table(find);
-    if (!r) return fail(r.error());
-    return emit_name(pucFileName, pusFileNameLen, r.value());
+    if (find->cursor >= find->matches.size()) {
+        return fail(openads::AE_NO_FILE_FOUND, "no more files");
+    }
+    return emit_name(pucFileName, pusFileNameLen, find->matches[find->cursor++]);
 }
 
 UNSIGNED32 ENTRYPOINT AdsFindClose(ADSHANDLE hConnect, ADSHANDLE hFind) {
     auto& s = state();
     std::lock_guard<std::recursive_mutex> lk(s.mu);
-    Connection* c = s.registry.lookup<Connection>(hConnect, HandleKind::Connection);
-    if (c == nullptr) return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
     auto* find = s.registry.lookup<Connection::TableFind>(hFind, HandleKind::Find);
     if (find == nullptr) {
         return fail(openads::AE_INTERNAL_ERROR, "invalid find handle");
     }
-    (void)c->find_close(find);
     s.registry.release(hFind);
     return ok();
 }
