@@ -13199,6 +13199,15 @@ UNSIGNED32 ENTRYPOINT AdsCloseAllIndexes(ADSHANDLE hTable) {
     if (auto* rt = get_remote_table(hTable)) {
         auto r = rt->conn->close_all_indexes(rt->id);
         if (!r) return fail(r.error());
+        // Drop the client-side index cache too: the server hands out fresh
+        // wire index ids on the next open_index, so the stale tag->id map
+        // would otherwise make the reopen dedup keep dead ids (SetOrder
+        // 5000) and leave index_handles empty (DbSetOrder fails, seek
+        // raises ADSCDX/301 "Workarea not indexed" -- Pritpal's
+        // TestIndexes() repro: INDEX ON x3 + ordListClear + ordListAdd).
+        rt->index_by_tag.clear();
+        rt->index_handles.clear();
+        rt->active_index_id = 0;
         return ok();
     }
     Table* t = get_table(hTable);
