@@ -165,7 +165,10 @@ void Server::ensure_server_id() {
     std::uint64_t a = dis(gen), b = dis(gen);
     b = (b & 0xFFFFFFFFFFFF0FFFull) | 0x0000000000004000ull; // version 4
     a = (a & 0x3FFFFFFFFFFFFFFFull) | 0x8000000000000000ull; // variant 1
-    char buf[37];
+    // 36 chars + NUL suffices for a UUID, but clang's -Wformat-truncation
+    // counts the worst-case expansion of each %llx field (16+4+4+4+12+4
+    // dashes+NUL = 45) -- size the buffer for that to keep -Werror happy.
+    char buf[45];
     std::snprintf(buf, sizeof(buf),
         "%016llx-%04llx-%04llx-%04llx-%012llx",
         static_cast<unsigned long long>(a >> 32),
