@@ -605,6 +605,7 @@ private:
     // Pre-edit index keys captured on the first dirty mutation of the
     // current row; applied once by commit_dirty_record().
     std::vector<std::pair<drivers::IIndex*, std::string>> index_snap_;
+    bool                                          snap_was_append_ = false;
     bool                                          cache_enabled_  = false;
     std::uint64_t                                 live_gen_       = 0;
     bool                                          last_seek_found_ = false;

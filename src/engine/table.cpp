@@ -272,14 +272,21 @@ util::Result<void> Table::sync_all_indexes_(
     for (auto& [idx, prev_key] : snap) {
         std::string new_key = compute_index_key_(idx);
         if (prev_key == new_key) continue;
-        // Erase prior (recno, prev_key).  On a genuine UPDATE the old
-        // entry MUST exist — a missing key means the B-tree is corrupt
-        // (stale separators, duplicate keys).  Propagate the error so
-        // the caller can abort before inserting the new key on top of
-        // a stale entry.
+        // Erase prior (recno, prev_key).
+        //
+        // On a genuine UPDATE the old entry MUST exist — a missing key
+        // means the B-tree is corrupt (stale separators, duplicate keys)
+        // and we propagate the error so the caller can abort before
+        // inserting the new key on top of a stale entry.
+        //
+        // On a fresh APPEND the snapshot was taken before fields were set,
+        // so prev_key is the blank-key encoding (spaces/zeros) that was
+        // never inserted.  5044 ("key not found") is expected here and
+        // tolerated so the insert below can proceed.
         if (!prev_key.empty()) {
             if (auto e = idx->erase(recno_, prev_key); !e) {
-                return e.error();
+                if (!snap_was_append_) return e.error();
+                // Fresh append: tolerate missing key (blank-key snapshot).
             }
         }
         // Enforce uniqueness before inserting: seek for the new key and reject
@@ -332,14 +339,16 @@ util::Result<void> Table::begin_dirty_edit_() {
     if (auto w = ensure_writable_(); !w) return w.error();
     // Snapshot index keys once, before the first mutation of this row.
     if (!record_dirty_) {
-        index_snap_   = snapshot_index_keys_();
-        record_dirty_ = true;
+        index_snap_       = snapshot_index_keys_();
+        snap_was_append_  = pending_append_;
+        record_dirty_     = true;
     }
     return {};
 }
 
 void Table::discard_dirty_() noexcept {
-    record_dirty_ = false;
+    record_dirty_    = false;
+    snap_was_append_ = false;
     index_snap_.clear();
 }
 
