@@ -1,4 +1,33 @@
-## 1.8.75 - 2026-08-13
+## 1.8.75 - 2026-08-14
+
+### Fixed — `ordListClear()` + `ordListAdd()` left stale index cache causing "SetOrder 5000" / "Workarea not indexed 301" on reopen (Pritpal Bedi)
+
+Harbour/Xbase++ ADSCDX clients saw two errors with `INDEX ON … TAG`,
+`ordListClear()`, `ordListAdd()`, `SET ORDER TO`, `dbGoBottom()` /
+`dbSeek()` against a remote server:
+
+1. **Error 301** ("Workarea not indexed") when the CDX was created
+   in the same session and then reopened via `ordListAdd()`.
+2. **Error 5000** ("SetOrder") when the CDX was already on disk and
+   auto-opened at table open time.
+
+**Root cause**: the client-side remote `AdsCloseAllIndexes` sent the wire
+close but never invalidated the cached `index_handles` / `index_by_tag` /
+`index_by_name` state in `RemoteTable`. The subsequent `AdsOpenIndex`
+dedup check found stale tag entries in `index_by_tag` and skipped pushing
+the new wire handle into `index_handles` → `GetIndexHandleByOrder`
+returned 5000; or left `index_handles` empty → seek returned 301.
+
+Additionally, `AdsOpenIndex`'s remote path had a premature `break` before
+returning the handle array on success, so the caller never received the
+opened index handles.
+
+**Fix**:
+- `AdsCloseAllIndexes`: clear `index_handles`, `index_by_tag`,
+  `index_by_name`, `index_by_order`, `index_by_path`, and
+  `index_by_order_map` on successful wire close.
+- `AdsOpenIndex`: restructure remote path to return handles on success
+  (remove premature `break`).
 
 ### Added — ADS-compatible replication (Phase 1): publications, articles, subscriptions, capture hooks, durable queue, local apply
 
@@ -40,6 +69,8 @@ ADS publications/articles/subscriptions.  Phase 1 is local apply only
 - `abi_repl_capture_test`: 1 case — capture hooks fire on INSERT/UPDATE/DELETE
 - `repl_apply_test`: 23 cases — subscription resolution, INSERT/UPDATE/DELETE
   apply, mixed batches, idempotency, last_lsn persistence, error paths
+- `abi_remote_index_reopen_test`: 2 cases — `ordListClear()` + `ordListAdd()` round-trip
+  for fresh-created and auto-opened CDX bags against a remote server
 
 ## 1.8.74 - 2026-08-12
 
