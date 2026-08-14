@@ -40,31 +40,36 @@ void dll_close(DllHandle h) noexcept {
 std::string dll_probe_ace(const std::string& path) noexcept {
     HMODULE m = LoadLibraryA(path.c_str());
     if (!m) return {};
-    // On x86 the OpenADS DLL exports each entry point twice: the plain
-    // undecorated name and the __stdcall-decorated (_AdsXxx@N) form, and
-    // BOTH alias the same __stdcall wrapper (see abi/ace_stdcall_x86.c's
-    // /export:AdsXxx=_AdsXxx@N lines). So GetProcAddress("AdsGetVersion")
-    // succeeds on x86 and the target is __stdcall -- calling it through a
-    // __cdecl pointer corrupts ESP by 20 bytes on return (serverd crashed
-    // at startup whenever an ace32/openace32 DLL sat next to the exe --
-    // Pritpal's "Server does not launch"). Declare the pointer __stdcall:
-    // harmless on x64 (single convention) and correct on x86. SAP DLLs
-    // only export the @N-decorated names, so the probe still skips them.
-    using pfnGetVer = unsigned int(__stdcall*)(
-        unsigned int*, unsigned int*,
-        unsigned char*, unsigned char*, unsigned short*);
-    auto* fn = reinterpret_cast<pfnGetVer>(
-        GetProcAddress(m, "AdsGetVersion"));
+    // Identify an OpenADS build WITHOUT calling anything: the oads_* VFS
+    // helpers are exported only by OpenADS (SAP's DLL has no such names).
+    // Pretty-printing the version requires calling AdsGetVersion, whose
+    // calling convention on x86 differs per vendor: in the OpenADS DLL
+    // the undecorated export is a __cdecl implementation (v1.8.74
+    // behavior, restored after the stdcall-alias regression), while SAP's
+    // undecorated exports are __stdcall. Probing with the wrong
+    // convention corrupts ESP and crashes serverd at startup (Pritpal's
+    // "Server does not launch") -- so only make the call once the DLL is
+    // known to be OpenADS, and use __cdecl.
+    const bool is_openads =
+        GetProcAddress(m, "oads_CheckExistence") != nullptr;
     std::string result;
-    if (fn) {
-        unsigned char desc[256] = {};
-        unsigned short len = static_cast<unsigned short>(sizeof(desc) - 1);
-        fn(nullptr, nullptr, nullptr, desc, &len);
-        result.assign(reinterpret_cast<char*>(desc),
-                      static_cast<std::size_t>(len));
+    if (is_openads) {
+        using pfnGetVer = unsigned int(__cdecl*)(
+            unsigned int*, unsigned int*,
+            unsigned char*, unsigned char*, unsigned short*);
+        auto* fn = reinterpret_cast<pfnGetVer>(
+            GetProcAddress(m, "AdsGetVersion"));
+        if (fn) {
+            unsigned char desc[256] = {};
+            unsigned short len = static_cast<unsigned short>(sizeof(desc) - 1);
+            fn(nullptr, nullptr, nullptr, desc, &len);
+            result.assign(reinterpret_cast<char*>(desc),
+                          static_cast<std::size_t>(len));
+        }
+        if (result.find("OpenADS") == std::string::npos)
+            result = "OpenADS";
     }
     FreeLibrary(m);
-    if (result.find("OpenADS") == std::string::npos) return {};
     return result;
 }
 

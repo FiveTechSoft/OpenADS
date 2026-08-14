@@ -28,7 +28,10 @@ ADSHANDLE remote_connect(const fs::path& dir, std::uint16_t port) {
 }
 
 [[maybe_unused]] ADSHANDLE local_connect(const fs::path& dir) {
-    std::vector<UNSIGNED8> buf(dir.string().begin(), dir.string().end());
+    // Named string first: iterators of two dir.string() temporaries must
+    // never be mixed in one vector range (UB, flaky "vector too long").
+    const std::string dir_str = dir.string();
+    std::vector<UNSIGNED8> buf(dir_str.begin(), dir_str.end());
     buf.push_back(0);
     ADSHANDLE hConn = 0;
     REQUIRE(AdsConnect60(buf.data(), ADS_LOCAL_SERVER, nullptr, nullptr, 0,

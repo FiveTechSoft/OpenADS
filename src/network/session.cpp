@@ -1160,7 +1160,7 @@ DispatchResult Session::dispatch(const Frame& f) {
             auto r = sess_conn_->begin_tx();
             if (!r) {
                 reply = err("BeginTransaction: " + r.error().message,
-                            r.error().code);
+                            static_cast<UNSIGNED32>(r.error().code));
                 break;
             }
             reply.opcode = Opcode::BeginTransactionAck;
@@ -1175,7 +1175,7 @@ DispatchResult Session::dispatch(const Frame& f) {
             auto r = sess_conn_->commit_tx();
             if (!r) {
                 reply = err("CommitTransaction: " + r.error().message,
-                            r.error().code);
+                            static_cast<UNSIGNED32>(r.error().code));
                 break;
             }
             reply.opcode = Opcode::CommitTransactionAck;
@@ -1190,7 +1190,7 @@ DispatchResult Session::dispatch(const Frame& f) {
             auto r = sess_conn_->rollback_tx();
             if (!r) {
                 reply = err("RollbackTransaction: " + r.error().message,
-                            r.error().code);
+                            static_cast<UNSIGNED32>(r.error().code));
                 break;
             }
             reply.opcode = Opcode::RollbackTransactionAck;
@@ -1231,8 +1231,10 @@ DispatchResult Session::dispatch(const Frame& f) {
                     if (off + nlen > f.payload.size()) {
                         reply = err("FindRecord: truncated name"); break;
                     }
-                    std::string name(f.payload.begin() + off,
-                                     f.payload.begin() + off + nlen);
+                    std::string name(f.payload.begin() +
+                                         static_cast<std::ptrdiff_t>(off),
+                                     f.payload.begin() +
+                                         static_cast<std::ptrdiff_t>(off + nlen));
                     off += nlen;
                     if (off + 2 > f.payload.size()) {
                         reply = err("FindRecord: truncated vlen"); break;

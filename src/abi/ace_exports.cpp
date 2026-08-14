@@ -13424,6 +13424,14 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
                                          cond, kf,
                                          ulOptions, usPageSize);
         if (!r) return fail(r.error());
+        // Creating a tag opens EVERY tag in the bag (ADS semantics -- the
+        // server-side create binds siblings as parked views), so refresh
+        // the client registry from the server: OrdCount() (AdsGetNumIndexes)
+        // and tag lookup (AdsGetIndexHandle) must reflect the whole bag
+        // immediately, not only after close+reopen (Pritpal Bedi). Wire
+        // round-trip BEFORE taking s.mu (see the deadlock note at the
+        // production auto-open in AdsOpenTable).
+        auto refr = rt->conn->open_index(rt->id, path);
         auto& s = state();
         std::lock_guard<std::recursive_mutex> lk(s.mu);
         static std::unordered_map<Handle,
@@ -13439,6 +13447,56 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
         *phIndex = to_ads_handle(gh);
         remote_indexes.emplace(gh, std::move(ri));
         rt->index_by_tag.emplace_back(tag, r.value());
+        rt->index_handles.push_back(static_cast<std::uint64_t>(gh));
+        if (refr) {
+            const auto& entries = refr.value();
+            auto in_bag = [&](const std::string& tg) {
+                for (const auto& e : entries)
+                    if (e.tag == tg) return true;
+                return false;
+            };
+            // Keep other bags' entries, then re-add this bag in bag order,
+            // reusing the gh of tags the client already knows.
+            std::vector<std::pair<std::string, std::uint32_t>> keep_tags;
+            std::vector<std::uint64_t> keep_handles;
+            for (std::size_t i = 0; i < rt->index_by_tag.size(); ++i) {
+                if (in_bag(rt->index_by_tag[i].first)) continue;
+                keep_tags.push_back(rt->index_by_tag[i]);
+                if (i < rt->index_handles.size())
+                    keep_handles.push_back(rt->index_handles[i]);
+            }
+            for (const auto& ent : entries) {
+                std::uint64_t egh = 0;
+                for (std::size_t i = 0; i < rt->index_by_tag.size(); ++i) {
+                    if (rt->index_by_tag[i].first == ent.tag &&
+                        i < rt->index_handles.size()) {
+                        egh = rt->index_handles[i];
+                        break;
+                    }
+                }
+                if (egh == 0) {
+                    auto nri = std::make_unique<openads::network::RemoteIndex>();
+                    nri->conn          = rt->conn;
+                    nri->id            = ent.id;
+                    nri->tbl_id        = rt->id;
+                    nri->parent        = rt;
+                    nri->tag_name      = ent.tag;
+                    nri->bag_path      = ent.bag_path;
+                    nri->expression    = ent.expression;
+                    nri->is_unique     = ent.is_unique;
+                    nri->is_descending = ent.is_descending;
+                    Handle nh = s.registry.register_object(
+                        HandleKind::RemoteIndex, nri.get());
+                    remote_indexes.emplace(nh, std::move(nri));
+                    egh = static_cast<std::uint64_t>(to_ads_handle(nh));
+                }
+                keep_tags.emplace_back(ent.tag, ent.id);
+                keep_handles.push_back(egh);
+            }
+            rt->index_by_tag  = std::move(keep_tags);
+            rt->index_handles = std::move(keep_handles);
+        }
+        if (rt->active_index_id == 0) rt->active_index_id = r.value();
         return ok();
     }
     Table* t = get_table(hTable);

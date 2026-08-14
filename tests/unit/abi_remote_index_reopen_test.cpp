@@ -33,7 +33,11 @@ void make_testindex_table(const fs::path& dir, bool with_bag) {
     fs::remove_all(dir, ec);
     fs::create_directories(dir);
 
-    std::vector<UNSIGNED8> srv(dir.string().begin(), dir.string().end());
+    // NOTE: build the byte vector from a NAMED string -- constructing it
+    // from dir.string().begin()/dir.string().end() mixes iterators of two
+    // different temporaries (UB; flaky "vector too long" length_error).
+    const std::string dir_str = dir.string();
+    std::vector<UNSIGNED8> srv(dir_str.begin(), dir_str.end());
     srv.push_back(0);
     ADSHANDLE hConn = 0;
     REQUIRE(AdsConnect60(srv.data(), ADS_LOCAL_SERVER,
