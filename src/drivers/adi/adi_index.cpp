@@ -1049,6 +1049,30 @@ AdiIndex::list_tags(const std::string& adi_path, const std::string& adt_path) {
     auto tags = scan_tagdir(adi_f);
     if (!tags) return tags.error();
 
+    // Report tags in CREATION order, not directory-slot order.
+    //
+    // A tag directory can be laid out either way: append, which add_tag()
+    // writes by default (CreateParams::prepend_tag_dir == false), or
+    // prepend, which it writes when that flag is set and which is also what
+    // SAP's Advantage Data Architect produces. Both appear in the wild and a
+    // bag cannot be assumed to have been written by this engine at all, so
+    // reading raw slot order silently reverses the ordinals of every
+    // prepend-laid-out bag.
+    //
+    // Per-tag header pages are allocated at end-of-file, monotonically, in
+    // creation order, regardless of which directory slot the entry ends up
+    // in. Sorting on that page number therefore recovers one canonical
+    // ordering for either layout, with no format detection and no migration.
+    //
+    // This matters to any caller that navigates orders by NUMBER rather than
+    // by name -- OrdSetFocus(n) / DBSETORDER(n), which is what a browse doing
+    // click-to-sort on a column does. Such a caller cannot compensate for a
+    // reversal without knowing in advance how many tags the bag holds.
+    std::sort(tags.value().begin(), tags.value().end(),
+              [](const TagEntry& a, const TagEntry& b) {
+                  return a.root_pg < b.root_pg;
+              });
+
     std::string adt_p = adt_path.empty() ? adt_path_for(adi_path) : adt_path;
     auto fa = platform::File::open(adt_p, platform::OpenMode::ReadOnly);
     if (!fa) return fa.error();

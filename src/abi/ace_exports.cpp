@@ -13031,6 +13031,11 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
         if (!r) return fail(r.error());
         tags = std::move(r).value();
     } else if (is_adi) {
+        // AdiIndex::list_tags sorts by per-tag header page (creation order),
+        // not raw directory-slot order, so it is correct whether this bag's
+        // directory is laid out append or prepend. No reversal needed here:
+        // ordinal 1 is already the first tag created, which is what
+        // DBSETORDER(n) / OrdSetFocus(n) callers expect.
         auto r = openads::drivers::adi::AdiIndex::list_tags(path, t->path());
         if (!r) return fail(r.error());
         tags = std::move(r).value();
