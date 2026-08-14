@@ -66,3 +66,20 @@ data = .
 # controlled here — it always lives under each connection's data=
 # directory. If data= is a drive root (C:\), journaling may be disabled
 # on that connection (tables in subfolders still work). See docs/en/error-log.md.
+
+# --- Multi-port (optional) ---
+# Additional listeners with their own data directories.  Each [port:NNNN]
+# section creates a separate TCP listener on port NNNN that serves tables
+# from the data= folder below it.  Clients connecting to that port see
+# only its data directory — different apps can share one server process
+# while isolating their data.  (LetoDB-style multi-port.)
+#
+# The primary [server] port (default 6262) always exists and uses the
+# global data= above.  Extra ports must not collide with it or with
+# each other.
+#
+# [port:6263]
+# data = C:\app1
+#
+# [port:6264]
+# data = C:\app2

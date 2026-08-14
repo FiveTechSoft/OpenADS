@@ -43,7 +43,7 @@ TEST_CASE("WorkerPool serves connections over a bounded worker set") {
         REQUIRE(c.has_value());
         auto a = accept_one(l.value());
         REQUIRE(a.has_value());
-        pool.submit(a.value());       // pool now owns the accepted socket
+        pool.submit(a.value(), std::string(), port.value());       // pool now owns the accepted socket
         clients.push_back(c.value());
     }
 
@@ -87,7 +87,7 @@ TEST_CASE("WorkerPool keeps thread count at M with idle connections") {
         REQUIRE(c.has_value());
         auto a = accept_one(l.value());
         REQUIRE(a.has_value());
-        pool.submit(a.value());
+        pool.submit(a.value(), std::string(), port.value());
         clients.push_back(c.value());
     }
 

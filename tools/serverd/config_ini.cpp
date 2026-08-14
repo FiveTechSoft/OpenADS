@@ -48,6 +48,8 @@ bool parse_ini(const std::string& text, IniConfig& out, std::string& error) {
     std::istringstream in(text);
     std::string line;
     int lineno = 0;
+    // Track which [port:NNNN] section we're inside. -1 = [server] or global.
+    int current_port_idx = -1;
     while (std::getline(in, line)) {
         ++lineno;
         // Tolerate CRLF input on POSIX builds.
@@ -55,7 +57,38 @@ bool parse_ini(const std::string& text, IniConfig& out, std::string& error) {
         std::string t = trim(line);
         if (t.empty()) continue;
         if (t[0] == '#' || t[0] == ';') continue;          // comment
-        if (t.front() == '[' && t.back() == ']') continue;  // section header
+
+        // Section headers: [server] is ignored; [port:NNNN] creates an
+        // extra listener entry.
+        if (t.front() == '[' && t.back() == ']') {
+            std::string sec = trim(t.substr(1, t.size() - 2));
+            if (sec.rfind("port:", 0) == 0) {
+                // "[port:6263]" → parse port number
+                std::string num = sec.substr(5);
+                unsigned long n = 0;
+                if (!parse_uint(num, 65535, n) || n == 0) {
+                    error = "line " + std::to_string(lineno) +
+                            ": invalid port number in section [" + sec + "]";
+                    return false;
+                }
+                // Check for duplicate port
+                for (const auto& pe : out.extra_ports) {
+                    if (pe.port == static_cast<std::uint16_t>(n)) {
+                        error = "line " + std::to_string(lineno) +
+                                ": duplicate port section [" + sec + "]";
+                        return false;
+                    }
+                }
+                PortEntry pe;
+                pe.port = static_cast<std::uint16_t>(n);
+                out.extra_ports.push_back(std::move(pe));
+                current_port_idx = static_cast<int>(out.extra_ports.size()) - 1;
+            } else {
+                // Unknown or [server] section — back to global scope
+                current_port_idx = -1;
+            }
+            continue;
+        }
 
         auto eq = t.find('=');
         if (eq == std::string::npos) {
@@ -65,6 +98,20 @@ bool parse_ini(const std::string& text, IniConfig& out, std::string& error) {
         }
         std::string key = to_lower(trim(t.substr(0, eq)));
         std::string val = trim(t.substr(eq + 1));
+
+        // Inside a [port:NNNN] section — accept data= only
+        if (current_port_idx >= 0) {
+            if (key == "data" || key == "data_dir" || key == "datadir") {
+                out.extra_ports[current_port_idx].data_dir = val;
+            } else {
+                error = "line " + std::to_string(lineno) +
+                        ": unknown key '" + key + "' in port section";
+                return false;
+            }
+            continue;
+        }
+
+        // Global [server] keys (unchanged from original)
 
         if (key == "host") {
             out.host = val;
@@ -168,6 +215,10 @@ bool load_ini_file(const std::string& path, IniConfig& out,
     std::ostringstream ss;
     ss << f.rdbuf();
     return parse_ini(ss.str(), out, error);
+}
+
+bool parse_port(const std::string& s, unsigned long& out) {
+    return parse_uint(s, 65535, out);
 }
 
 }  // namespace openads::serverd

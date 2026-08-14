@@ -18,7 +18,24 @@
 
 namespace openads::network {
 
+// Hash functor for Socket so it can be used as a key in unordered_map.
+struct SocketHash {
+    std::size_t operator()(const Socket& s) const noexcept {
+        return std::hash<std::uintptr_t>{}(s.handle);
+    }
+};
+
 class WorkerPool;   // enterprise step 3 — sharded reactor (network/worker_pool.h)
+
+// An extra TCP listener binding (multi-port support). Each entry maps a
+// port to its own data directory root, so clients connecting to that port
+// are jailed under a different folder. The primary listener (port_, listener_)
+// uses the global data_dir_; extras live in extra_listeners_.
+struct ListenerEntry {
+    std::uint16_t port     = 0;
+    std::string   data_dir;     // semicolon-separated roots for this port
+    Socket        listener = Socket{};  // bound listening socket
+};
 
 // M12.3 — Phase 2 server skeleton. Spawns an accept thread that
 // hands each connection to a dedicated session thread. The session
@@ -69,6 +86,17 @@ public:
     // platform::resolve_under_any_root.
     void set_data_dir(const std::string& dir) { data_dir_ = dir; }
 
+    // Multi-port: register an additional listener on `port` serving tables
+    // from `data_dir`. Must be called before start(). Returns error if the
+    // port is already in use (by the primary listener or another extra).
+    util::Result<void> add_listener(const std::string& host,
+                                   std::uint16_t port,
+                                   const std::string& data_dir);
+
+    // Return the data_dir roots that a given listener socket serves.
+    // Returns nullptr for the primary listener (caller uses data_dir_).
+    const std::string* data_dir_for_listener(const Socket& s) const;
+
     // M12.34 — persistent server identity for replication.
     const std::string& server_id() const noexcept { return server_id_; }
     void ensure_server_id();
@@ -106,6 +134,7 @@ public:
         std::uint64_t                                       id = 0;
         std::string                                         peer_ip;
         std::uint16_t                                       peer_port = 0;
+        std::uint16_t                                       listener_port = 0;  // which port the client connected to
         std::string                                         user;
         std::string                                         data_dir;
         std::chrono::system_clock::time_point               connected_at{};
@@ -152,7 +181,8 @@ public:
 
 private:
     void accept_loop();
-    void session_loop(Socket s);
+    void session_loop(Socket s, std::string default_data_dir,
+                      std::uint16_t listener_port);
     // Join + drop every session thread whose loop has returned. Bounds the
     // live thread set on a long-running server. Caller must NOT hold
     // sessions_mu_ (this takes it).
@@ -160,6 +190,10 @@ private:
 
     Socket                   listener_;
     std::uint16_t            port_ = 0;
+    // Multi-port: extra listeners with their own data directories.
+    std::vector<ListenerEntry> extra_listeners_;
+    // Map from listener socket → data_dir roots for that port.
+    std::unordered_map<Socket, std::string, SocketHash> listener_data_dir_;
     std::atomic<bool>        running_{false};
     std::thread              accept_thread_;
     mutable std::mutex       sessions_mu_;

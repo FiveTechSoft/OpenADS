@@ -34,7 +34,8 @@ struct DispatchResult {
 // and drives it through dispatch(). Zero behavior change.
 class Session {
 public:
-    Session(Server& srv, Socket s);      // computes peer addr, register_session, install_session_socket
+    Session(Server& srv, Socket s, std::string default_data_dir,
+            std::uint16_t listener_port);  // computes peer addr, register_session, install_session_socket
     ~Session();                          // cleanup(); srv_->erase_session_socket(sid_); srv_->unregister_session(sid_);
     Session(const Session&) = delete;
     Session& operator=(const Session&) = delete;
@@ -65,6 +66,10 @@ private:
     // Reassembles complete frames from partial non-blocking reads (reactor
     // path). Harmless on the blocking path — each read yields a whole frame.
     FrameReader   reader_;
+    // Default data directory for this connection, determined by which TCP
+    // port the client connected to. Empty means use the server's global
+    // data_dir_ (primary listener).
+    std::string   default_data_dir_;
 
     // M12.4 — per-session state. Connection is opened by the
     // Connect frame; OpenTable allocates a session-scoped 32-bit

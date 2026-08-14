@@ -234,7 +234,9 @@ Frame err(const std::string& msg,
 
 } // namespace
 
-Session::Session(Server& srv, Socket s) : srv_(&srv), s_(s), sid_(0) {
+Session::Session(Server& srv, Socket s, std::string default_data_dir,
+                 std::uint16_t listener_port)
+    : srv_(&srv), s_(s), sid_(0), default_data_dir_(std::move(default_data_dir)) {
     // studio.web.0.4 — register an entry in the live sessions
     // registry so the Studio "Sessions" tab can list this peer.
     Server::SessionInfo init;
@@ -242,6 +244,7 @@ Session::Session(Server& srv, Socket s) : srv_(&srv), s_(s), sid_(0) {
         init.peer_ip   = pa.value().ip;
         init.peer_port = pa.value().port;
     }
+    init.listener_port = listener_port;
     init.connected_at  = std::chrono::system_clock::now();
     init.last_activity = init.connected_at;
     sid_ = srv_->register_session(init);
@@ -1042,15 +1045,20 @@ DispatchResult Session::dispatch(const Frame& f) {
             // drives/shares; the client path just has to fall under any one
             // of them.
             //
+            // Multi-port: when the client connected on an extra port, use
+            // that port's data_dir instead of the global one.
+            //
             // --legacy-paths: route through platform::resolve_client_path
             // instead — case-insensitive, drive-letter-ignoring prefix
             // strip ("C:/TEMP" maps onto root "c:\temp"), drive fold for
             // foreign absolute paths ("E:\CLIENT" -> "<root>/CLIENT"), and
             // an empty/drive-root dir maps to the first root itself, so a
             // legacy ERP connect string needs no server-side spelling.
+            const std::string& effective_data_dir =
+                default_data_dir_.empty() ? srv_->data_dir_ : default_data_dir_;
             std::string resolved = dir;
-            if (!srv_->data_dir_.empty()) {
-                auto roots = openads::platform::split_data_roots(srv_->data_dir_);
+            if (!effective_data_dir.empty()) {
+                auto roots = openads::platform::split_data_roots(effective_data_dir);
                 std::optional<std::string> jail;
                 if (srv_->legacy_paths()) {
                     jail = openads::platform::resolve_client_path(roots, dir);
@@ -3139,19 +3147,13 @@ DispatchResult Session::dispatch(const Frame& f) {
         // existing read-side ops can serve them through the same
         // wire opcodes.
         case Opcode::ExecuteSQL: {
-            { FILE* _dbg = fopen("C:/OpenADS/_arc32/sql_dispatch.log", "a");
-              if (_dbg) { fprintf(_dbg, "REACHED ExecuteSQL case\n"); fclose(_dbg); } }
             if (!sess_conn_) { reply = err("ExecuteSQL: not connected"); break; }
             if (abi_conn_ == 0) {
                 if (!ensure_abi_conn()) {
-                    { FILE* _dbg = fopen("C:/OpenADS/_arc32/sql_dispatch.log", "a");
-                      if (_dbg) { fprintf(_dbg, "ensure_abi_conn FAILED\n"); fclose(_dbg); } }
                     reply = err("ExecuteSQL: AdsConnect60 failed");
                     break;
                 }
                 if (AdsCreateSQLStatement(abi_conn_, &abi_stmt_) != 0) {
-                    { FILE* _dbg = fopen("C:/OpenADS/_arc32/sql_dispatch.log", "a");
-                      if (_dbg) { fprintf(_dbg, "AdsCreateSQLStatement FAILED\n"); fclose(_dbg); } }
                     reply = err("ExecuteSQL: AdsCreateSQLStatement failed");
                     break;
                 }
@@ -3162,10 +3164,6 @@ DispatchResult Session::dispatch(const Frame& f) {
                             f.payload.size());
             }
             sqlbuf[f.payload.size()] = 0;
-            { FILE* _df = fopen("C:/OpenADS/execsql.log", "a");
-              if (_df) { fprintf(_df, "EXEC SQL: abi_conn=%lu abi_stmt=%lu sql=%.80s\n",
-                    (unsigned long)abi_conn_, (unsigned long)abi_stmt_,
-                    (const char*)sqlbuf.data()); fclose(_df); } }
             ADSHANDLE hCur = 0;
             UNSIGNED32 rrc = AdsExecuteSQLDirect(abi_stmt_,
                                                  sqlbuf.data(), &hCur);

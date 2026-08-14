@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace openads::network {
@@ -31,7 +32,8 @@ public:
     void start();
     // Hand a freshly-accepted connection socket to the least-loaded worker.
     // Takes ownership of the socket. Safe to call from the accept thread.
-    void submit(Socket s);
+    void submit(Socket s, std::string default_data_dir,
+                std::uint16_t listener_port);
     void stop();
 
     std::uint32_t worker_count() const noexcept { return nworkers_; }

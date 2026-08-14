@@ -52,6 +52,7 @@ void usage(const char* argv0) {
         "          [--http-port PORT] [--data DIR] [--auth-user U:P]...\n"
         "          [--http-user U:P]... [--error-log-path DIR]\n"
         "          [--error-log-max KB]\n"
+        "          [--listen PORT:DIR]...\n"
         "  --host       bind address (default 0.0.0.0)\n"
         "  --port       TCP wire port (default 6262, 0 = ephemeral)\n"
         "  --backlog    listen() backlog (default 16)\n"
@@ -62,6 +63,9 @@ void usage(const char* argv0) {
         "               e.g. --data \"C:/data;D:/more-data\"\n"
         "               (default = current working directory). Do NOT put\n"
         "               the URI drive letter here (not \"/Temp/C:\").\n"
+        "  --listen PORT:DIR  extra listener on PORT serving tables from DIR.\n"
+        "               Repeatable: --listen 6263:C:/app1 --listen 6264:C:/app2\n"
+        "               Each port gets its own data jail (LetoDB-style).\n"
         "  --enable-file-func   allow remote oads_*/Ads* filesystem ops\n"
         "               under --data (default OFF; see EnableFileFunc)\n"
         "  --legacy-paths       remount client-absolute paths onto --data\n"
@@ -108,6 +112,8 @@ struct Args {
     std::uint32_t error_log_max_kb = 0;
     std::vector<std::pair<std::string, std::string>> http_users;
     std::vector<std::pair<std::string, std::string>> auth_users;
+    // Multi-port: extra listeners from --listen PORT:DIR or [port:NNNN] INI.
+    std::vector<openads::serverd::PortEntry> extra_listeners;
 };
 
 bool parse_args(int argc, char** argv, Args& out) {
@@ -127,6 +133,33 @@ bool parse_args(int argc, char** argv, Args& out) {
         else if (a == "--disable-file-func") out.enable_file_func = false;
         else if (a == "--legacy-paths") out.legacy_paths = true;
         else if (a == "--disable-legacy-paths") out.legacy_paths = false;
+        else if (a == "--listen" && i + 1 < argc) {
+            // --listen PORT:DIR  (e.g. --listen 6263:C:/app1)
+            std::string spec = argv[++i];
+            auto colon = spec.find(':');
+            if (colon == std::string::npos || colon == 0) {
+                std::fprintf(stderr,
+                    "--listen expects PORT:DIR (e.g. 6263:C:/app1)\n");
+                return false;
+            }
+            unsigned long pn = 0;
+            if (!openads::serverd::parse_port(spec.substr(0, colon), pn)) {
+                std::fprintf(stderr,
+                    "--listen: invalid port number '%s'\n",
+                    spec.substr(0, colon).c_str());
+                return false;
+            }
+            std::string dir = spec.substr(colon + 1);
+            if (dir.empty()) {
+                std::fprintf(stderr,
+                    "--listen: empty data directory for port %lu\n", pn);
+                return false;
+            }
+            openads::serverd::PortEntry pe;
+            pe.port = static_cast<std::uint16_t>(pn);
+            pe.data_dir = std::move(dir);
+            out.extra_listeners.push_back(std::move(pe));
+        }
         else if (a == "--error-log-path" && i + 1 < argc)
             out.error_log_path = argv[++i];
         else if (a == "--error-log-max"  && i + 1 < argc)
@@ -177,6 +210,7 @@ void apply_ini(const openads::serverd::IniConfig& cfg, Args& out) {
     if (cfg.has_error_log_max)  out.error_log_max_kb = cfg.error_log_max_kb;
     for (const auto& u : cfg.http_users) out.http_users.push_back(u);
     for (const auto& u : cfg.auth_users) out.auth_users.push_back(u);
+    for (const auto& pe : cfg.extra_ports) out.extra_listeners.push_back(pe);
 }
 
 // Resolve the effective Args from defaults, an optional `--config <path>`
@@ -315,10 +349,25 @@ int run_server(const Args& args, bool console) {
         }
         return 1;
     }
+
+    // Multi-port: bind extra listeners.
+    for (const auto& pe : args.extra_listeners) {
+        auto er = srv.add_listener(args.host, pe.port, pe.data_dir);
+        if (!er) {
+            std::fprintf(stderr, "extra listener on port %u failed: %s\n",
+                         pe.port, er.error().message.c_str());
+            return 1;
+        }
+    }
+
     if (console) {
         std::printf("openads_serverd %s listening on %s:%u (backlog=%d)\n",
                     OPENADS_VERSION_STR, args.host.c_str(), srv.port(),
                     args.backlog);
+        for (const auto& pe : args.extra_listeners) {
+            std::printf("  extra listener on port %u (data=%s)\n",
+                        pe.port, pe.data_dir.c_str());
+        }
         probe_ace_dlls(console);
     }
 

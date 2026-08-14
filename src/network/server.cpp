@@ -446,6 +446,8 @@ util::Result<void> Server::start(const std::string& host,
         return p.error();
     }
     port_ = p.value();
+    // Record the primary listener's data_dir in the map.
+    listener_data_dir_[listener_] = data_dir_;
     // M9.25 — fix the telemetry uptime origin at server start.
     openads::mgmt::process_mg_stats().start_time =
         std::chrono::system_clock::now();
@@ -488,6 +490,55 @@ util::Result<void> Server::start(const std::string& host,
     return {};
 }
 
+util::Result<void> Server::add_listener(const std::string& host,
+                                        std::uint16_t port,
+                                        const std::string& data_dir) {
+    // Validate: port must not collide with the primary or other extras.
+    if (port == port_) {
+        return util::Error{0, 0,
+            "port " + std::to_string(port) +
+                " conflicts with the primary listener"};
+    }
+    for (const auto& e : extra_listeners_) {
+        if (e.port == port) {
+            return util::Error{0, 0,
+                "port " + std::to_string(port) + " is already registered"};
+        }
+    }
+    if (data_dir.empty()) {
+        return util::Error{0, 0,
+            "data directory required for extra port " + std::to_string(port)};
+    }
+
+    const auto& ecfg = openads::sql_backend::enterprise_config();
+    ListenerOptions opts;
+    opts.host = host;
+    opts.port = port;
+    opts.backlog = static_cast<int>(ecfg.server_listen_backlog);
+    auto l = listen_tcp(opts);
+    if (!l) return l.error();
+
+    auto p = socket_local_port(l.value());
+    if (!p) {
+        sock_close(l.value());
+        return p.error();
+    }
+
+    ListenerEntry entry;
+    entry.port = p.value();
+    entry.data_dir = data_dir;
+    entry.listener = l.value();
+    listener_data_dir_[entry.listener] = entry.data_dir;
+    extra_listeners_.push_back(std::move(entry));
+    return {};
+}
+
+const std::string* Server::data_dir_for_listener(const Socket& s) const {
+    auto it = listener_data_dir_.find(s);
+    if (it == listener_data_dir_.end()) return nullptr;
+    return &it->second;
+}
+
 void Server::stop() noexcept {
     if (!running_.exchange(false)) return;
     // Unpublish the sp_mg* hooks before teardown so no SQL dispatch can
@@ -506,6 +557,17 @@ void Server::stop() noexcept {
         if (wake) sock_close(wake.value());
     }
     sock_close(listener_);
+    // Close extra listeners (multi-port).
+    for (auto& e : extra_listeners_) {
+        auto eport = socket_local_port(e.listener);
+        if (eport) {
+            auto wake = connect_tcp("127.0.0.1", eport.value());
+            if (wake) sock_close(wake.value());
+        }
+        sock_close(e.listener);
+    }
+    extra_listeners_.clear();
+    listener_data_dir_.clear();
     if (accept_thread_.joinable()) accept_thread_.join();
     // Enterprise step 3 — tear the reactor pool down (joins its workers, which
     // close + unregister every live session). No-op in the legacy path.
@@ -542,60 +604,85 @@ void Server::stop() noexcept {
 }
 
 void Server::accept_loop() {
+    // Build poll set: primary listener + all extra listeners.
+    // We use socket_poll to multiplex across all listeners so a single
+    // accept thread handles connections on every port.
+    std::vector<PollItem> poll_items;
+    auto add_listener_poll = [&](Socket s) {
+        PollItem pi;
+        pi.sock = s;
+        pi.events = static_cast<std::uint8_t>(PollEvent::Readable);
+        poll_items.push_back(pi);
+    };
+    add_listener_poll(listener_);
+    for (auto& e : extra_listeners_)
+        add_listener_poll(e.listener);
+
     while (running_.load()) {
-        auto cli = accept_one(listener_);
-        if (!cli) {
-            // accept failed — listener closed by stop().
-            break;
-        }
-        // M12.3 — stop() may have used a self-connect to drain a
-        // BSD accept that doesn't honor close-during-accept. If
-        // running_ is now false, the connection is the wake-up
-        // probe; drop it and exit.
-        if (!running_.load()) {
+        auto n = socket_poll(poll_items, /*timeout_ms=*/200);
+        if (!n || n.value() <= 0) continue;
+
+        for (auto& pi : poll_items) {
+            if (!(pi.events & static_cast<std::uint8_t>(PollEvent::Readable)))
+                continue;
+            // Reset events for the next poll cycle.
+            pi.events = static_cast<std::uint8_t>(PollEvent::Readable);
+
+            auto cli = accept_one(pi.sock);
+            if (!cli) {
+                // accept failed — listener closed by stop().
+                break;
+            }
+            // M12.3 — stop() may have used a self-connect to drain a
+            // BSD accept that doesn't honor close-during-accept. If
+            // running_ is now false, the connection is the wake-up
+            // probe; drop it and exit.
+            if (!running_.load()) {
+                Socket s = cli.value();
+                sock_close(s);
+                return;
+            }
             Socket s = cli.value();
-            sock_close(s);
-            break;
-        }
-        Socket s = cli.value();
-        // Enterprise step 3 — sharded-reactor path: hand the socket to the
-        // least-loaded worker instead of spawning a per-connection thread.
-        // The cap counts live pooled connections rather than session threads.
-        if (pool_) {
-            if (max_sessions_ != 0 &&
-                pool_->live_connections() >= max_sessions_) {
-                rejected_sessions_.fetch_add(1);
-                sock_close(s);
+
+            // Determine the default data_dir and port for this listener.
+            std::string dd;
+            const std::string* dd_ptr = data_dir_for_listener(pi.sock);
+            if (dd_ptr) dd = *dd_ptr;
+            auto lport = socket_local_port(pi.sock);
+            std::uint16_t listener_port = lport ? lport.value() : port_;
+
+            // Enterprise step 3 — sharded-reactor path: hand the socket to the
+            // least-loaded worker instead of spawning a per-connection thread.
+            if (pool_) {
+                if (max_sessions_ != 0 &&
+                    pool_->live_connections() >= max_sessions_) {
+                    rejected_sessions_.fetch_add(1);
+                    sock_close(s);
+                    continue;
+                }
+                pool_->submit(s, std::move(dd), listener_port);
                 continue;
             }
-            pool_->submit(s);
-            continue;
-        }
-        // Reap threads whose session_loop already returned so the live set
-        // stays bounded on a long-running server.
-        reap_finished_threads_();
-        {
-            std::lock_guard<std::mutex> lk(sessions_mu_);
-            if (max_sessions_ != 0 &&
-                session_threads_.size() >= max_sessions_) {
-                // At capacity: refuse this connection instead of spawning an
-                // unbounded number of threads. The client sees a dropped
-                // connection (a future milestone can send a "busy" frame).
-                rejected_sessions_.fetch_add(1);
-                sock_close(s);
-                continue;
+            // Reap threads whose session_loop already returned so the live set
+            // stays bounded on a long-running server.
+            reap_finished_threads_();
+            {
+                std::lock_guard<std::mutex> lk(sessions_mu_);
+                if (max_sessions_ != 0 &&
+                    session_threads_.size() >= max_sessions_) {
+                    rejected_sessions_.fetch_add(1);
+                    sock_close(s);
+                    continue;
+                }
+                std::uint64_t tid = thread_seq_.fetch_add(1);
+                session_threads_.emplace(tid,
+                    std::thread([this, s, tid, dd = std::move(dd),
+                                 listener_port]() mutable {
+                        this->session_loop(s, std::move(dd), listener_port);
+                        std::lock_guard<std::mutex> lk2(sessions_mu_);
+                        finished_threads_.push_back(tid);
+                    }));
             }
-            std::uint64_t tid = thread_seq_.fetch_add(1);
-            // The session records its own id in finished_threads_ when its loop
-            // returns; the next reap joins and drops it. The push takes
-            // sessions_mu_, which this scope holds during emplace, so the id is
-            // in the map before the thread can mark itself finished.
-            session_threads_.emplace(tid,
-                std::thread([this, s, tid]() mutable {
-                    this->session_loop(s);
-                    std::lock_guard<std::mutex> lk2(sessions_mu_);
-                    finished_threads_.push_back(tid);
-                }));
         }
     }
 }
@@ -626,10 +713,11 @@ std::uint32_t Server::active_session_threads() const {
     return static_cast<std::uint32_t>(session_threads_.size());
 }
 
-void Server::session_loop(Socket s) {
+void Server::session_loop(Socket s, std::string default_data_dir,
+                          std::uint16_t listener_port) {
     // The per-frame contract (read → dispatch → reply → telemetry) lives in
     // Session::handle_readable so the reactor WorkerPool shares it verbatim.
-    Session sess(*this, s);
+    Session sess(*this, s, std::move(default_data_dir), listener_port);
     while (sess.handle_readable()) {}
     sock_close(s);
 }

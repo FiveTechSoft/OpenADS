@@ -12,11 +12,16 @@ namespace openads::network {
 // Per-worker state. `sessions`/`session_socks` are touched ONLY by the
 // owning worker thread (affinity invariant); `incoming` is the cross-thread
 // handoff queue filled by submit() and drained by the worker.
+struct PendingConnection {
+    Socket        sock;
+    std::string   default_data_dir;
+    std::uint16_t listener_port = 0;
+};
 struct WorkerPool::Worker {
     Socket                                wake_read;   // polled; readable => drain incoming
     Socket                                wake_write;  // submit() pokes a byte here
     std::mutex                            mu;          // guards `incoming`
-    std::vector<Socket>                   incoming;
+    std::vector<PendingConnection>        incoming;
     std::vector<std::unique_ptr<Session>> sessions;        // owned by this thread
     std::vector<Socket>                   session_socks;    // parallel to sessions
     std::atomic<std::uint32_t>            live{0};
@@ -88,7 +93,8 @@ void WorkerPool::start() {
     }
 }
 
-void WorkerPool::submit(Socket s) {
+void WorkerPool::submit(Socket s, std::string default_data_dir,
+                        std::uint16_t listener_port) {
     if (!running_.load() || workers_.empty()) { sock_close(s); return; }
     // Least-loaded worker wins so connections spread evenly across shards.
     Worker* best = workers_[0].get();
@@ -97,7 +103,7 @@ void WorkerPool::submit(Socket s) {
     }
     {
         std::lock_guard<std::mutex> lk(best->mu);
-        best->incoming.push_back(s);
+        best->incoming.push_back({s, std::move(default_data_dir), listener_port});
     }
     std::uint8_t b = 1;
     Socket ww = best->wake_write;
@@ -109,15 +115,17 @@ void WorkerPool::worker_loop(Worker& w) {
         // 1. Adopt any newly-submitted sockets BEFORE building the poll set,
         //    so the index mapping items[j+1] <-> sessions[j] stays aligned.
         {
-            std::vector<Socket> news;
+            std::vector<PendingConnection> news;
             { std::lock_guard<std::mutex> lk(w.mu); news.swap(w.incoming); }
-            for (Socket sock : news) {
+            for (auto& pc : news) {
                 // Reactor reads are non-blocking: a partial/stalled frame must
                 // yield the worker back to its other connections rather than
                 // park it in recv (Session::handle_readable buffers partials).
-                (void)socket_set_nonblocking(sock, true);
-                w.sessions.push_back(std::make_unique<Session>(*srv_, sock));
-                w.session_socks.push_back(sock);
+                (void)socket_set_nonblocking(pc.sock, true);
+                w.sessions.push_back(std::make_unique<Session>(
+                    *srv_, pc.sock, std::move(pc.default_data_dir),
+                    pc.listener_port));
+                w.session_socks.push_back(pc.sock);
                 w.live.fetch_add(1);
             }
         }

@@ -20,6 +20,14 @@
 
 namespace openads::serverd {
 
+// A port-specific data directory entry parsed from a [port:NNNN] section.
+// Each extra listener binds its own TCP port and serves tables from a
+// different data root — matching LetoDB's per-port DataPath capability.
+struct PortEntry {
+    std::uint16_t port     = 0;
+    std::string   data_dir;
+};
+
 // Values read from an openads.ini. Each scalar carries a `has_*` flag so
 // the caller can apply only the keys that were actually present — the file
 // overrides the built-in defaults, and the command line in turn overrides
@@ -55,6 +63,9 @@ struct IniConfig {
     std::uint32_t error_log_max_kb   = 0;
     std::vector<std::pair<std::string, std::string>> http_users;
     std::vector<std::pair<std::string, std::string>> auth_users;
+    // Extra listeners from [port:NNNN] sections. Each entry creates a
+    // separate TCP listener with its own data directory root.
+    std::vector<PortEntry> extra_ports;
 };
 
 // Parse INI *text* (already loaded into memory). Returns true on success.
@@ -64,12 +75,17 @@ struct IniConfig {
 //   several roots separated by ';', e.g. "C:\data;D:\more-data" — see
 //   Server::set_data_dir / platform::split_data_roots),
 //   http_user (value is user:password, repeatable),
-//   auth_user (value is user:password, repeatable; required by TCP clients).
+//   auth_user (value is user:password, repeatable; required by TCP clients),
+//   [port:NNNN] sections with data= key (extra listeners).
 bool parse_ini(const std::string& text, IniConfig& out, std::string& error);
 
 // Convenience wrapper: read the file at `path` then parse_ini() it.
 // Returns false (with `error` set) if the file cannot be opened.
 bool load_ini_file(const std::string& path, IniConfig& out,
                    std::string& error);
+
+// Parse a port number string into an unsigned long. Returns false on
+// invalid input. Used by --listen CLI parsing.
+bool parse_port(const std::string& s, unsigned long& out);
 
 }  // namespace openads::serverd

@@ -22,6 +22,8 @@ struct Socket {
     bool valid() const noexcept {
         return handle != static_cast<std::uintptr_t>(-1);
     }
+    bool operator==(const Socket& o) const noexcept { return handle == o.handle; }
+    bool operator!=(const Socket& o) const noexcept { return handle != o.handle; }
 };
 
 struct ListenerOptions {
