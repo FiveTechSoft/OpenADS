@@ -40,10 +40,17 @@ void dll_close(DllHandle h) noexcept {
 std::string dll_probe_ace(const std::string& path) noexcept {
     HMODULE m = LoadLibraryA(path.c_str());
     if (!m) return {};
-    // OpenADS DLLs export all functions as __cdecl (undecorated names).
-    // SAP DLLs use __stdcall, but GetProcAddress("AdsGetVersion") won't
-    // find the @N-decorated symbol so fn stays null and we skip safely.
-    using pfnGetVer = unsigned int(__cdecl*)(
+    // On x86 the OpenADS DLL exports each entry point twice: the plain
+    // undecorated name and the __stdcall-decorated (_AdsXxx@N) form, and
+    // BOTH alias the same __stdcall wrapper (see abi/ace_stdcall_x86.c's
+    // /export:AdsXxx=_AdsXxx@N lines). So GetProcAddress("AdsGetVersion")
+    // succeeds on x86 and the target is __stdcall -- calling it through a
+    // __cdecl pointer corrupts ESP by 20 bytes on return (serverd crashed
+    // at startup whenever an ace32/openace32 DLL sat next to the exe --
+    // Pritpal's "Server does not launch"). Declare the pointer __stdcall:
+    // harmless on x64 (single convention) and correct on x86. SAP DLLs
+    // only export the @N-decorated names, so the probe still skips them.
+    using pfnGetVer = unsigned int(__stdcall*)(
         unsigned int*, unsigned int*,
         unsigned char*, unsigned char*, unsigned short*);
     auto* fn = reinterpret_cast<pfnGetVer>(
