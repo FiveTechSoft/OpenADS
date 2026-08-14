@@ -19402,6 +19402,7 @@ UNSIGNED32 ENTRYPOINT AdsFindNextTable(ADSHANDLE   hConnect,
                             UNSIGNED16* pusFileNameLen) {
     auto& s = state();
     std::lock_guard<std::recursive_mutex> lk(s.mu);
+    (void)hConnect;  // find state keyed by hFind only; silence C4100 (C2220 in CI)
     if (pusFileNameLen == nullptr) {
         return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
     }
@@ -19418,6 +19419,7 @@ UNSIGNED32 ENTRYPOINT AdsFindNextTable(ADSHANDLE   hConnect,
 UNSIGNED32 ENTRYPOINT AdsFindClose(ADSHANDLE hConnect, ADSHANDLE hFind) {
     auto& s = state();
     std::lock_guard<std::recursive_mutex> lk(s.mu);
+    (void)hConnect;  // find state keyed by hFind only; silence C4100 (C2220 in CI)
     auto* find = s.registry.lookup<Connection::TableFind>(hFind, HandleKind::Find);
     if (find == nullptr) {
         return fail(openads::AE_INTERNAL_ERROR, "invalid find handle");
