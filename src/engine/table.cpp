@@ -272,10 +272,15 @@ util::Result<void> Table::sync_all_indexes_(
     for (auto& [idx, prev_key] : snap) {
         std::string new_key = compute_index_key_(idx);
         if (prev_key == new_key) continue;
-        // Erase prior (recno, prev_key); ignore failure — the index
-        // may not have a prior entry (fresh APPEND case).
+        // Erase prior (recno, prev_key).  On a genuine UPDATE the old
+        // entry MUST exist — a missing key means the B-tree is corrupt
+        // (stale separators, duplicate keys).  Propagate the error so
+        // the caller can abort before inserting the new key on top of
+        // a stale entry.
         if (!prev_key.empty()) {
-            (void)idx->erase(recno_, prev_key);
+            if (auto e = idx->erase(recno_, prev_key); !e) {
+                return e.error();
+            }
         }
         // Enforce uniqueness before inserting: seek for the new key and reject
         // if another record already carries it.
@@ -396,7 +401,9 @@ void Table::set_recno_sequence(std::vector<std::uint32_t> seq) {
 util::Result<void> Table::goto_top() {
     // Settle any pending field edits before leaving the current row
     // (empty-table paths never call load_record_).
-    if (auto r = commit_dirty_record(); !r) return r.error();
+    // If the dirty record cannot be flushed (shared mode + no lock),
+    // discard it silently — goto_top is a navigation operation.
+    if (auto r = commit_dirty_record(); !r) discard_dirty_();
     // Absolute reposition: drop any read-ahead block so we observe
     // writes made through another handle and start the scan fresh.
     driver_->invalidate_read_cache();
@@ -1848,7 +1855,10 @@ Table::seek_key(const std::string& key, bool soft, bool last) {
         return util::Error{6105, 0, "no active index for seek", ""};
     }
     // GoCold before repositioning via the index.
-    if (auto cr = commit_dirty_record(); !cr) return cr.error();
+    // If the dirty record cannot be flushed (shared mode + no lock),
+    // discard it silently — DBSEEK is a read operation and must not
+    // fail because of a pending edit.  Matches DBFCDX behaviour.
+    if (auto cr = commit_dirty_record(); !cr) discard_dirty_();
     auto* idx = order_->index();
     auto r = idx->seek_key(key, soft);
     if (!r) return r.error();
