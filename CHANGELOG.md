@@ -1,3 +1,24 @@
+## 1.8.78 - 2026-08-15
+
+### Added — Multi-port server
+
+A single `openads_serverd` instance can now listen on multiple TCP ports,
+each with its own data directory.  Configure additional ports with
+`[port:NNNN]` sections in `openads.ini`, each specifying a `data` path.
+Matches LetoDB's `Port=` / `DataPath=` capability: one process, one
+config file, multiple logical servers.
+
+### Fixed — CDX index corruption on record update (macOS)
+
+`sync_all_indexes_()` silently discarded the B-tree erase result when
+updating a record, so the old index entry stayed in the tree and the new
+entry was inserted on top — creating duplicate/stale keys that corrupted
+B-tree separators.  The erase error is now propagated so the caller can
+abort before inserting.  For fresh appends, the blank-key snapshot
+(fields not yet set) is tolerated because those keys were never inserted.
+
+---
+
 ## 1.8.75 - 2026-08-14
 
 ### Fixed — `ordListClear()` + `ordListAdd()` left stale index cache causing "SetOrder 5000" / "Workarea not indexed 301" on reopen (Pritpal Bedi)

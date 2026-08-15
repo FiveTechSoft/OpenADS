@@ -12,6 +12,42 @@ Complete history of releases with categorized improvements.
 
 ---
 
+## v1.8.78 — 2026-08-15
+
+### New Features
+
+- **Multi-port server** — A single `openads_serverd` instance can now listen on multiple TCP ports, each with its own data directory. Configure additional ports with `[port:NNNN]` sections in `openads.ini`, each specifying a `data` path. Matches LetoDB's `Port=` / `DataPath=` capability: one process, one config file, multiple logical servers.
+
+### Bug Fixes
+
+- **CDX index corruption on record update (macOS)** — `sync_all_indexes_()` silently discarded the B-tree erase result when updating a record, so the old index entry stayed in the tree and the new entry was inserted on top — creating duplicate/stale keys that corrupted B-tree separators. The erase error is now propagated so the caller can abort before inserting. For fresh appends, the blank-key snapshot (fields not yet set) is tolerated because those keys were never inserted. (Commit `df9c2cc`.)
+
+### Tests
+
+- `abi_alternating_append_test`: 4 cases — alternating local/remote appends maintain all CDX tag keys.
+- `abi_adt_scope_validation_test`: M5 stress append + index order + memo round-trip.
+- Full unit suite: 524/524 on Windows, same on macOS.
+
+---
+
+## v1.8.77 — 2026-08-14
+
+### Bug Fixes
+
+- **Remote `ordListClear()` + `ordListAdd()` left the workarea without an order** — The client-side remote `AdsCloseAllIndexes` closed the indexes on the server but never invalidated the cached tag/handle map in the ACE client DLL. The next `AdsOpenIndex` / `SET ORDER TO` reused dead server wire-ids (`SetOrder` 5000 on run 2) or found no order at all (ADSCDX/301 "Workarea not indexed" on `dbSeek` on run 1). The client cache is now dropped on close-all. (Reported by Pritpal Bedi — Harbour 32-bit `TestIndexes()`.)
+- **`OrdCount()` stale after `OrdCreate()` without reopen** — The remote create path never registered the new tag in the client's index handle list, so `AdsGetNumIndexes` / `AdsGetIndexHandle` lagged until close+reopen. After a successful `create_index` the client now refreshes the whole bag from the server (ADS semantics: creating a tag opens every tag in the bag), in bag order. (Reported by Pritpal Bedi.)
+- **x86 `openads_serverd` crashed at startup** — `dll_probe_ace` called `AdsGetVersion` through a mismatched calling convention whenever an `ace32.dll`/`openace32.dll` sat next to the exe. The probe now identifies OpenADS builds via the OpenADS-only `oads_*` exports before calling anything, and calls `__cdecl`. (Reported by Pritpal Bedi: "Server does not launch".)
+- **x86 undecorated exports restored to the `__cdecl` implementations (v1.8.74 behavior)** — The stdcall rework had aliased the plain `AdsXxx` export names to the `__stdcall` wrappers, so `__cdecl` callers (FWH apps such as `B_BIG.exe`, `GetProcAddress` probes, Xbase++) crashed with `ACCESS_VIOLATION` on the first ACE call (`ADS_GETFUNCTABLE`). The plain names now target the `__cdecl` implementations again; `_AdsXxx@N` remains on the `__stdcall` wrappers. (Reported by Pritpal Bedi.)
+- **Release CI unblocked** — C4100 in `AdsFindNextTable`/`AdsFindClose` (MSVC `/WX`), UUID buffer worst-case `%llx` sizing (clang `-Wformat-truncation`), and sign-conversion casts in `session.cpp` transaction dispatch (clang `-Wsign-conversion`).
+
+### Tests
+
+- `abi_remote_index_reopen_test`: 2 cases — remote `ordListClear` + `ordListAdd` leaves a usable order (created bag and auto-opened bag variants).
+- Fixed iterator-of-two-temporaries UB in `abi_server_fs_test` / `abi_remote_index_reopen_test` (flaky `vector too long`).
+- Import libraries under `dist/import-libs` regenerated from the current DLLs.
+
+---
+
 ## v1.8.75 — 2026-08-13
 
 ### New Features
