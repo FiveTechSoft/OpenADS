@@ -88,7 +88,7 @@ TEST_CASE("two connections: different collation isolation on same CDX") {
                                ADS_OEM, 0, 0, 0, def, &hT) == 0);
 
         const char* rows[] = {
-            "LACAAAAA", "\x9DABBBBB", "MADCCCCC", "ZBYDDDDD" };
+            "LACAAAAA", "\235ABBBBB", "MADCCCCC", "ZBYDDDDD" };
         UNSIGNED8 fName[] = "NAME";
         for (const char* row : rows) {
             REQUIRE(AdsAppendRecord(hT) == 0);
@@ -253,7 +253,7 @@ TEST_CASE("default OEM collation change between two opens") {
                                ADS_OEM, 0, 0, 0, def, &hT) == 0);
 
         const char* rows[] = {
-            "LACAAAAA", "\x9DABBBBB", "MADCCCCC" };
+            "LACAAAAA", "\235ABBBBB", "MADCCCCC" };
         UNSIGNED8 fName[] = "NAME";
         for (const char* row : rows) {
             REQUIRE(AdsAppendRecord(hT) == 0);
@@ -326,7 +326,7 @@ TEST_CASE("reopen ADS_OEM table: collation re-derived from char_type") {
                            ADS_OEM, 0, 0, 0, def, &hT) == 0);
 
     const char* rows[] = {
-        "LACAAAAA", "\x9DABBBBB", "MADCCCCC", "ZBYDDDDD" };
+        "LACAAAAA", "\235ABBBBB", "MADCCCCC", "ZBYDDDDD" };
     UNSIGNED8 fName[] = "NAME";
     for (const char* row : rows) {
         REQUIRE(AdsAppendRecord(hT) == 0);
