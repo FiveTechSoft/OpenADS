@@ -70,6 +70,7 @@ add_executable(openads_unit_tests
     unit/abi_aggregate_test.cpp
     unit/aof_eval_test.cpp
     unit/abi_aof_test.cpp
+    unit/abi_bitmap_filter_test.cpp
     unit/abi_cdx_tag_order_test.cpp
     unit/abi_cdx_expr_index_scale_test.cpp
     unit/abi_multitag_order_nav_test.cpp

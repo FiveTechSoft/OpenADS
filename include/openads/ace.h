@@ -1486,6 +1486,30 @@ UNSIGNED32 ENTRYPOINT AdsIsServerLoaded    (UNSIGNED8* pucServer,
 UNSIGNED32 ENTRYPOINT AdsIsTableLocked     (ADSHANDLE hTable,
                                              UNSIGNED16* pbLocked);
 UNSIGNED32 ENTRYPOINT AdsRefreshAOF        (ADSHANDLE hTable);
+
+// --- M-BM.1 Bitmap filter from recno array (BMDBFCDX compat) ---
+UNSIGNED32 ENTRYPOINT AdsBmSetFilter      (ADSHANDLE hTable,
+                                            UNSIGNED32* pRecnos,
+                                            UNSIGNED32 ulCount);
+UNSIGNED32 ENTRYPOINT AdsBmGetFilterArray  (ADSHANDLE hTable,
+                                            UNSIGNED32* pRecnos,
+                                            UNSIGNED32* pulCount);
+UNSIGNED32 ENTRYPOINT AdsBmFilterAdd      (ADSHANDLE hTable,
+                                            UNSIGNED32* pRecnos,
+                                            UNSIGNED32 ulCount);
+UNSIGNED32 ENTRYPOINT AdsBmFilterDel      (ADSHANDLE hTable,
+                                            UNSIGNED32* pRecnos,
+                                            UNSIGNED32 ulCount);
+UNSIGNED32 ENTRYPOINT AdsBmTurbo          (ADSHANDLE hTable,
+                                            UNSIGNED16 usOnOff);
+UNSIGNED32 ENTRYPOINT AdsBmSeekWild       (ADSHANDLE hTable,
+                                            UNSIGNED8* pucPattern,
+                                            UNSIGNED16 usSoftSeek,
+                                            UNSIGNED16 usFindLast,
+                                            UNSIGNED16 usNext,
+                                            UNSIGNED16 usAll,
+                                            ADSHANDLE* phResult);
+
 UNSIGNED32 ENTRYPOINT AdsRegisterCallbackFunction(void* pCallback);
 UNSIGNED32 ENTRYPOINT AdsRegisterCallbackFunction101(void* pCallback, SIGNED64 qCallbackID);
 UNSIGNED32 ENTRYPOINT AdsRegisterProgressCallback(void* pCallback);

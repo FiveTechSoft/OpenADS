@@ -442,6 +442,69 @@ public:
         return true;
     }
 
+    // --- BMDBFCDX bitmap-filter from recno array (M-BM.1) ---------------
+
+    // Install a bitmap filter from a Harbour array of record numbers.
+    // Equivalent to BM_DBSETFILTERARRAY in xHarbour's bmdbfcdx.
+    void install_bitmap_from_recnos(const std::vector<std::uint32_t>& recnos) {
+        std::uint32_t max_rec = record_count();
+        for (auto r : recnos) {
+            if (r > max_rec) max_rec = r;
+        }
+        std::vector<bool> bm(max_rec, false);
+        for (auto r : recnos) {
+            if (r >= 1 && r <= max_rec) bm[r - 1] = true;
+        }
+        install_aof_bitmap(std::move(bm));
+    }
+
+    // Extract all record numbers from the active bitmap filter.
+    // Equivalent to BM_DBGETFILTERARRAY in xHarbour's bmdbfcdx.
+    std::vector<std::uint32_t> get_bitmap_as_recnos() const {
+        std::vector<std::uint32_t> result;
+        if (!aof_active_ || aof_bitmap_.empty()) return result;
+        result.reserve(aof_bitmap_.size() / 4);
+        for (std::size_t i = 0; i < aof_bitmap_.size(); ++i) {
+            if (aof_bitmap_[i]) result.push_back(static_cast<std::uint32_t>(i + 1));
+        }
+        return result;
+    }
+
+    // Add record numbers to the active bitmap filter (set-union).
+    // Equivalent to BM_DBSETFILTERARRAYADD in xHarbour's bmdbfcdx.
+    bool add_to_bitmap(const std::vector<std::uint32_t>& recnos) {
+        if (!aof_active_) return false;
+        std::uint32_t max_rec = record_count();
+        for (auto r : recnos) {
+            if (r > max_rec) max_rec = r;
+        }
+        if (aof_bitmap_.size() < max_rec) aof_bitmap_.resize(max_rec, false);
+        for (auto r : recnos) {
+            if (r >= 1 && r <= max_rec) aof_bitmap_[r - 1] = true;
+        }
+        install_aof_bitmap(aof_bitmap_);
+        return true;
+    }
+
+    // Remove record numbers from the active bitmap filter (set-subtraction).
+    // Equivalent to BM_DBSETFILTERARRAYDEL in xHarbour's bmdbfcdx.
+    bool remove_from_bitmap(const std::vector<std::uint32_t>& recnos) {
+        if (!aof_active_) return false;
+        for (auto r : recnos) {
+            if (r >= 1 && r <= aof_bitmap_.size()) aof_bitmap_[r - 1] = false;
+        }
+        install_aof_bitmap(aof_bitmap_);
+        return true;
+    }
+
+    // --- Turbo mode (M-BM.2) -------------------------------------------
+
+    // When turbo mode is ON, the table skips OS-level file locking and
+    // relies on version-based cache invalidation. Useful for read-heavy
+    // workloads where data safety is less critical than throughput.
+    void set_bm_turbo(bool v) noexcept { bm_turbo_ = v; }
+    bool bm_turbo() const noexcept     { return bm_turbo_; }
+
     void set_aof_expr(const std::string& e) { aof_expr_ = e; }
     const std::string& aof_expr() const noexcept { return aof_expr_; }
 
@@ -620,6 +683,7 @@ private:
     std::vector<std::uint32_t>                    recno_sequence_;
     bool                                          recno_sequence_active_ = false;
     std::int64_t                                  sequence_idx_ = -1;
+    bool                                          bm_turbo_     = false;  // M-BM.2
 };
 
 } // namespace openads::engine

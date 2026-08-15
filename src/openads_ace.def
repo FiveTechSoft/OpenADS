@@ -296,6 +296,12 @@ EXPORTS
     AdsMgKillUser90
     AdsMgResetCommStats
     AdsRefreshAOF
+    AdsBmSetFilter
+    AdsBmGetFilterArray
+    AdsBmFilterAdd
+    AdsBmFilterDel
+    AdsBmTurbo
+    AdsBmSeekWild
     AdsRefreshRecord
     AdsRegisterCallbackFunction
     AdsRegisterCallbackFunction101
