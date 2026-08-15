@@ -1254,8 +1254,8 @@ DispatchResult Session::dispatch(const Frame& f) {
                     if (off + vlen > f.payload.size()) {
                         reply = err("FindRecord: truncated value"); break;
                     }
-                    std::string val(f.payload.begin() + off,
-                                    f.payload.begin() + off + vlen);
+                    std::string val(f.payload.begin() + static_cast<std::ptrdiff_t>(off),
+                                    f.payload.begin() + static_cast<std::ptrdiff_t>(off + vlen));
                     off += vlen;
                     ident.emplace_back(std::move(name), std::move(val));
                 }

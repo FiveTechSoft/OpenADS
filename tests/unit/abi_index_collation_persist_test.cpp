@@ -237,7 +237,8 @@ TEST_CASE("default OEM collation change between two opens") {
 
     // Create table with PL852 default.
     {
-        auto guard = openads::engine::set_default_oem_collation("NTXPL852");
+        auto _collation_guard = openads::engine::set_default_oem_collation("NTXPL852");
+        (void)_collation_guard;
 
         UNSIGNED8 srv[256];
         std::memcpy(srv, dir.string().c_str(), dir.string().size() + 1);
@@ -309,7 +310,8 @@ TEST_CASE("reopen ADS_OEM table: collation re-derived from char_type") {
     fs::remove_all(dir, ec);
     fs::create_directories(dir);
 
-    auto guard = openads::engine::set_default_oem_collation("NTXPL852");
+    auto _collation_guard2 = openads::engine::set_default_oem_collation("NTXPL852");
+    (void)_collation_guard2;
 
     UNSIGNED8 srv[256];
     std::memcpy(srv, dir.string().c_str(), dir.string().size() + 1);

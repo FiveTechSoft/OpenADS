@@ -497,17 +497,17 @@ util::Result<void> Server::add_listener(const std::string& host,
     if (port == port_) {
         return util::Error{0, 0,
             "port " + std::to_string(port) +
-                " conflicts with the primary listener"};
+                " conflicts with the primary listener", ""};
     }
     for (const auto& e : extra_listeners_) {
         if (e.port == port) {
             return util::Error{0, 0,
-                "port " + std::to_string(port) + " is already registered"};
+                "port " + std::to_string(port) + " is already registered", ""};
         }
     }
     if (data_dir.empty()) {
         return util::Error{0, 0,
-            "data directory required for extra port " + std::to_string(port)};
+            "data directory required for extra port " + std::to_string(port), ""};
     }
 
     const auto& ecfg = openads::sql_backend::enterprise_config();

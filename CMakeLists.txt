@@ -26,6 +26,7 @@ if(GIT_FOUND AND EXISTS "${CMAKE_SOURCE_DIR}/.git")
     if(_git_rc EQUAL 0 AND NOT _git_describe STREQUAL "")
         # Strip a leading "v" so tags v1.0.0-rc13 surface as 1.0.0-rc13.
         string(REGEX REPLACE "^v" "" OPENADS_VERSION_STR "${_git_describe}")
+        string(REGEX REPLACE "-dirty$" "" OPENADS_VERSION_STR "${OPENADS_VERSION_STR}")
     endif()
 endif()
 message(STATUS "OpenADS version: ${OPENADS_VERSION_STR}")

@@ -134,8 +134,6 @@ TEST_CASE("seek after order change: char tag A then char tag B") {
     make_tag(hT, "BYCOD",  "COD");
     make_tag(hT, "BYNAME", "NAME");
 
-    UNSIGNED8 bag[] = "data.cdx";
-
     // Reopen so production CDX auto-attaches all tags.
     REQUIRE(AdsCloseTable(hT) == 0);
     hT = 0;
@@ -245,7 +243,8 @@ TEST_CASE("seek after order change: ADS_OEM PL852 dual-tag switch") {
     fs::remove_all(dir, ec);
     fs::create_directories(dir);
 
-    auto guard = openads::engine::set_default_oem_collation("NTXPL852");
+    auto _collation_guard = openads::engine::set_default_oem_collation("NTXPL852");
+    (void)_collation_guard;
 
     UNSIGNED8 srv[256];
     std::memcpy(srv, dir.string().c_str(), dir.string().size() + 1);
