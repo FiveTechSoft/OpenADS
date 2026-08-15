@@ -1524,7 +1524,12 @@ util::Result<void> Table::reindex() {
             if (!raw) return raw.error();
             load_record_for_bulk_scan(std::move(raw.value()), r);
 
-            if (is_deleted()) continue;
+            // DBFCDX keeps deleted rows in the index -- the index is a
+            // logical mirror of the table and SET DELETED hides them at
+            // navigation time. The CREATE INDEX bulk path already follows
+            // this rule; REINDEX must too, or an OrdListRebuild silently
+            // drops deleted rows' keys (OrdKeyCount drift vs DBFCDX,
+            // found by the dballcmp conformance harness).
             if (!for_expr.empty() &&
                 !evaluate_index_expr_truthy(*this, for_expr)) {
                 continue;
@@ -1573,7 +1578,7 @@ util::Result<void> Table::reindex() {
             if (!raw) return raw.error();
             load_record_for_bulk_scan(std::move(raw.value()), r);
 
-            if (is_deleted()) continue;
+            // Deleted rows keep their keys (see the CDX rebuild above).
             if (!for_expr.empty() &&
                 !evaluate_index_expr_truthy(*this, for_expr)) {
                 continue;

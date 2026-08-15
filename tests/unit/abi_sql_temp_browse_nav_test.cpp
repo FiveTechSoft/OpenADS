@@ -136,11 +136,17 @@ TEST_CASE("SQL single-table ORDER BY result: browse nav stays in sync") {
         CHECK(field(hCur, "TAG") == exp_val[i + 1]);
     }
 
-    // RelKeyPos: first sorted row -> 0.0, last -> 1.0 (scrollbar thumb).
+    // RelKeyPos on this materialised cursor takes the no-active-order
+    // (natural recno) path, which follows the ADS convention rddads
+    // documents ("ADS counts relative record position in this way"):
+    // (0.5 + recno) / reccount, clamped to 1.0. For 4 rows that is
+    // 0.375 at the first sorted row and 1.0 at the last -- the index
+    // path instead reports bucket centres ((keyno - 0.5) / count, the
+    // DBFCDX formula), which the dballcmp harness verifies separately.
     REQUIRE(AdsGotoRecord(hCur, exp_recno[0]) == 0);
     double p0 = -1.0;
     REQUIRE(AdsGetRelKeyPos(hCur, &p0) == 0);
-    CHECK(p0 == doctest::Approx(0.0));
+    CHECK(p0 == doctest::Approx(0.375));
     REQUIRE(AdsGotoRecord(hCur, exp_recno[3]) == 0);
     double p3 = -1.0;
     REQUIRE(AdsGetRelKeyPos(hCur, &p3) == 0);

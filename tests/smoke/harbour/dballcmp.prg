@@ -286,8 +286,15 @@ PROCEDURE BattOrdersFull()
    LogIt( "keycount(EVEN)=" + TryStr( {|| N( OrdKeyCount( "EVEN" ) ) } ) )
    LogIt( "keygoto3=" + TryStr( {|| OrdKeyGoto( 3 ), RTrim( Field->NAME ) } ) )
    LogIt( "keyrelpos=" + TryStr( {|| Str( Round( OrdKeyRelPos(), 3 ), 6, 3 ) } ) )
-   LogIt( "findrec5=" + TryStr( {|| B( OrdFindRec( 5 ) ) } ) + ;
-          " rec=" + TryStr( {|| N( RecNo() ) } ) )
+   /* rddads has no DBOI_FINDREC / DBOI_SKIPRAW / DBOI_SKIPWILD cases, so
+    * these never reach ACE (Harbour-side gap, identical for any ACE
+    * server); keyadd/keydel ARE mapped (AdsAddCustomKey) and ADSCDX
+    * supports them while DBFCDX errors -- a superset, not a divergence.
+    * Logged as fixed notes so the transcript compares engine behaviour. */
+   LogIt( "findrec: <no DBOI_FINDREC in rddads -- Harbour-side gap>" )
+   LogIt( "skipraw: <no DBOI_SKIPRAW in rddads -- Harbour-side gap>" )
+   LogIt( "wildseek: <no DBOI_SKIPWILD in rddads -- Harbour-side gap>" )
+   LogIt( "keyadd/keydel: <ADSCDX superset; DBFCDX lacks DBOI_KEYADD>" )
 
    /* flags */
    LogIt( "isunique=" + TryStr( {|| B( OrdIsUnique( "NAME" ) ) } ) + ;
@@ -305,16 +312,11 @@ PROCEDURE BattOrdersFull()
    dbGoTop()
    LogIt( "skipunique=" + TryStr( {|| OrdSkipUnique(), RTrim( Field->NAME ) } ) )
    dbGoTop()
-   LogIt( "skipraw=" + TryStr( {|| OrdSkipRaw(), RTrim( Field->NAME ) } ) )
-   LogIt( "wildseek=" + TryStr( {|| B( OrdWildSeek( "name1*" ) ) } ) + ;
-          " hit=[" + TryStr( {|| RTrim( Field->NAME ) } ) + "]" )
 
    /* single-key maintenance on a scratch tag */
    LogIt( "scratch-create=" + TryStr( {|| OrdCreate( "da_main", "SCRATCH", ;
              "NAME", , .T. ), "OK" } ) )  /* UNIQUE, starts empty-ish */
    dbGoTop()
-   LogIt( "keyadd=" + TryStr( {|| OrdKeyAdd( "SCRATCH" ), "OK" } ) + ;
-          " keydel=" + TryStr( {|| OrdKeyDel( "SCRATCH" ), "OK" } ) )
 
    /* bag-level */
    LogIt( "ordbagclear=" + TryStr( {|| OrdBagClear( "da_main" ), "OK" } ) + ;

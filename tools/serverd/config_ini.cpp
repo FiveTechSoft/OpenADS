@@ -102,7 +102,7 @@ bool parse_ini(const std::string& text, IniConfig& out, std::string& error) {
         // Inside a [port:NNNN] section — accept data= only
         if (current_port_idx >= 0) {
             if (key == "data" || key == "data_dir" || key == "datadir") {
-                out.extra_ports[current_port_idx].data_dir = val;
+                out.extra_ports[static_cast<std::size_t>(current_port_idx)].data_dir = val;
             } else {
                 error = "line " + std::to_string(lineno) +
                         ": unknown key '" + key + "' in port section";

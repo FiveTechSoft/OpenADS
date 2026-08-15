@@ -1,3 +1,52 @@
+## 1.8.81 - 2026-08-15
+
+### Fixed — DBFCDX conformance sweep (dballcmp harness, Pritpal Bedi)
+
+All found by the new `tests/smoke/harbour/dballcmp.prg` transcript
+comparison (Harbour DBFCDX as golden reference); each fix verified by
+re-running the harness until the transcripts are byte-identical:
+
+- **`LUpdate()` empty via rddads** — `AdsGetLastTableUpdate` used the
+  shared `copy_ace_string`, whose cap-1 (reserve-a-NUL) behaviour
+  truncated the 8-digit date to 7 chars when rddads passed the leftover
+  length of its previous `AdsGetDateFormat` call as the capacity.
+  rddads NUL-terminates the buffer itself; the date now fills it.
+- **`OrdBagName()` returned a full path** — `AdsGetIndexFilename`
+  ignored its option parameter; it now honours `ADS_FULLPATHNAME` /
+  `ADS_BASENAMEANDEXT` / `ADS_BASENAME`.
+- **Conditional tags created via `OrdCondSet` + `OrdCreate` ignored the
+  FOR clause when it contained arithmetic** — the index-expression
+  evaluator had no `+ - * / %` level, so `"NUM % 2 == 0"` parsed as a
+  bare `NUM` (truthy) and indexed the wrong rows.
+- **`REINDEX` / `OrdListRebuild` dropped deleted rows' keys** — the
+  rebuild paths skipped deleted records while CREATE INDEX kept them;
+  DBFCDX keeps them in both (SET DELETED hides them at navigation).
+  Also fixes `OrdKeyCount` drift after a rebuild.
+- **`OrdKeyRelPos` arithmetic** — now the ADS convention rddads
+  documents (`(n + 0.5) / count`) instead of `pos / (count - 1)`.
+- **`OrdDestroy` only detached the tag** — `AdsDeleteIndex` now rewrites
+  the CDX bag on disk via the new `CdxIndex::delete_tag` (struct-leaf
+  entry removal; tree pages intentionally not reclaimed).
+- **Production-bag semantics** — tags of the structural bag (named after
+  the table) now stay attached through `OrdListClear` / `OrdBagClear`
+  while the table is open, matching DBFCDX; `OrdDestroy` still removes
+  a structural tag permanently.
+
+### Fixed — pre-existing unit-test failures on main
+
+- `abi_find_table_test`: `AdsFindFirstTable`/`AdsFindNextTable` returned
+  `AE_NO_MATCHING_FILE` (5059) instead of the documented
+  `AE_NO_FILE_FOUND` (5018) that rddads' `AdsDirectory` loop expects.
+- `abi_remote_create_table_test`: a remote `AdsDropTable` died with
+  "recv() failed" because the in-process server's ABI-twin call took the
+  any-remote-connection fallback and hijacked the client's own wire
+  connection.  `AdsDropTable` now has the same local-handle guard as
+  `AdsCreateTable`/`AdsOpenTable`.
+- CI Linux/macOS legs: `-Wsign-conversion` error in
+  `tools/serverd/config_ini.cpp` ([port:NNNN] section indexing).
+
+---
+
 ## 1.8.80 - 2026-08-15
 
 ### Fixed — `dbGoBottom()` ignored natural order after plain `USE` via ADSCDX (Pritpal Bedi)

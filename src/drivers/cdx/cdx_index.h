@@ -215,6 +215,14 @@ public:
     static util::Result<std::vector<std::string>>
         list_tags(const std::string& path);
 
+    // Remove a tag from the structure-tag leaf (OrdDestroy /
+    // AdsDeleteIndex semantics). The tag's B+tree pages are NOT
+    // reclaimed -- they stay allocated past EOF, inert, exactly like a
+    // FoxPro CDX whose free-list we do not maintain; the bag stays
+    // valid and list_tags no longer reports the tag.
+    static util::Result<void>
+        delete_tag(const std::string& path, const std::string& tag_name);
+
     using Page = std::array<std::uint8_t, CDX_PAGE_LEN>;
 
 private:

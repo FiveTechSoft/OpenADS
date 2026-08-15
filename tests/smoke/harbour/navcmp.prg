@@ -104,6 +104,7 @@ PROCEDURE RunRDD( c )
    BattExplicitIndex()
    BattDeleted()
    BattSeek()
+   BattScope()
 
    FClose( nLog )
    nLog := -1
@@ -272,6 +273,64 @@ PROCEDURE StateF( cTag )
           " rec=" + LTrim( Str( RecNo() ) ) + ;
           " eof=" + iif( Eof(), "1", "0" ) + ;
           " bof=" + iif( Bof(), "1", "0" ) )
+   RETURN
+
+/* SIXDRIVER SetScope(desde, hasta) pattern: select the client-code
+ * index, scope to one value (or a range), then WHILE !EOF() / BROWSE
+ * only sees the scoped rows. Harbour mapping: OrdScope(0,x) +
+ * OrdScope(1,x) -> AdsSetScope* on the ACE side. */
+PROCEDURE BattScope()
+   LOCAL n
+   Sect( "scope: sixdriver setscope pattern" )
+   USE nv_idx INDEX nv_idx VIA ( cRDD )
+   OrdSetFocus( "NAME" )
+
+   /* facturas de UN cliente: SetScope(cod, cod) */
+   OrdScope( 0, "name5" )
+   OrdScope( 1, "name5" )
+   n := 0
+   dbGoTop()
+   DO WHILE ! Eof()
+      n++
+      LogIt( "  scoped row rec=" + LTrim( Str( RecNo() ) ) + ;
+             " name=[" + RTrim( FIELD->NAME ) + "]" )
+      dbSkip()
+   ENDDO
+   LogIt( "scope name5..name5 rows=" + LTrim( Str( n ) ) + ;
+          " eof=" + iif( Eof(), "T", "F" ) )
+
+   /* rango: name3..name5 (orden alfabético de claves) */
+   OrdScope( 0, "name3" )
+   OrdScope( 1, "name5" )
+   n := 0
+   dbGoTop()
+   DO WHILE ! Eof()
+      n++
+      dbSkip()
+   ENDDO
+   LogIt( "scope name3..name5 rows=" + LTrim( Str( n ) ) )
+   dbGoBottom()
+   LogIt( "scoped gobottom=[" + RTrim( FIELD->NAME ) + "]" )
+
+   /* scope fuera de rango: 0 filas, EOF inmediato */
+   OrdScope( 0, "zzz" )
+   OrdScope( 1, "zzz" )
+   dbGoTop()
+   LogIt( "scope zzz..zzz eof=" + iif( Eof(), "T", "F" ) + ;
+          " bof=" + iif( Bof(), "T", "F" ) )
+
+   /* limpiar: walk completo otra vez */
+   OrdScope( 0, "" )
+   OrdScope( 1, "" )
+   n := 0
+   dbGoTop()
+   DO WHILE ! Eof()
+      n++
+      dbSkip()
+   ENDDO
+   LogIt( "scope cleared rows=" + LTrim( Str( n ) ) )
+   USE
+   LogIt( "" )
    RETURN
 
 PROCEDURE LogIt( cLine )

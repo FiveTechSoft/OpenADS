@@ -8363,7 +8363,20 @@ UNSIGNED32 ENTRYPOINT AdsDropTable(ADSHANDLE     hConnect,
 #endif
 
     {
-        ADSHANDLE rc_h = resolve_remote_conn_handle(hConnect);
+        // Same local-handle guard as AdsCreateTable/AdsOpenTable: a
+        // valid local Connection (the in-process server's ABI twin) must
+        // not be hijacked by an in-process tcp:// client connection via
+        // the any-remote fallback -- that desynced the wire protocol
+        // (server thread writing a request into the client's own
+        // socket), so a remote AdsDropTable died with recv() failed
+        // (abi_remote_create_table_test).
+        ADSHANDLE rc_h = 0;
+        if (get_remote_connection(hConnect) != nullptr) {
+            rc_h = hConnect;
+        } else if (state().registry.lookup<Connection>(
+                       hConnect, HandleKind::Connection) == nullptr) {
+            rc_h = resolve_remote_conn_handle(hConnect);
+        }
         if (auto* rc = get_remote_connection(rc_h)) {
             auto dr = rc->drop_table(rel, /*delete_files=*/1);
             if (!dr) return fail(dr.error());
@@ -13321,6 +13334,19 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
     return ok();
 }
 
+namespace {
+// AdsDeleteIndex (OrdDestroy) rewrites the bag and must detach the tag
+// even when it belongs to the STRUCTURAL bag -- AdsCloseIndex refuses
+// to close structural tags on purpose (xBase production-index
+// convention). This scoped guard lets the delete path reuse
+// AdsCloseIndex without that refusal.
+struct ForceIndexClose {
+    ForceIndexClose()  { flag() = true; }
+    ~ForceIndexClose() { flag() = false; }
+    static bool& flag() { static thread_local bool f = false; return f; }
+};
+} // namespace
+
 UNSIGNED32 ENTRYPOINT AdsCloseIndex(ADSHANDLE hIndex) {
     arc2_trace("AdsCloseIndex");
 #if defined(OPENADS_WITH_SQLITE)
@@ -13382,6 +13408,27 @@ UNSIGNED32 ENTRYPOINT AdsCloseIndex(ADSHANDLE hIndex) {
     auto& act = active_binding_for();
     auto it = m.find(hIndex);
     if (it == m.end()) return fail(openads::AE_INTERNAL_ERROR, "unknown index");
+    // xBase production-index convention: a tag of the STRUCTURAL bag
+    // (the one named after the table) cannot be merely closed while the
+    // table is open -- DBFCDX leaves it attached on OrdBagClear
+    // (dballcmp: DBFCDX OrdCount() unchanged). OrdDestroy is the only
+    // way to drop a structural tag, and that goes through
+    // AdsDeleteIndex which rewrites the bag first.
+    if (it->second.table != nullptr && !ForceIndexClose::flag()) {
+        namespace fs = std::filesystem;
+        auto stem_ci = [](const std::string& p) {
+            std::string s = fs::path(p).stem().string();
+            for (auto& c : s)
+                c = static_cast<char>(std::tolower(
+                        static_cast<unsigned char>(c)));
+            return s;
+        };
+        if (stem_ci(it->second.path) ==
+            stem_ci(it->second.table->path())) {
+            if (it->second.parked) (void)it->second.parked->flush();
+            return ok();
+        }
+    }
     Table* t = it->second.table;
     if (t != nullptr) {
         auto act_it = act.find(t);
@@ -13417,8 +13464,23 @@ UNSIGNED32 ENTRYPOINT AdsCloseAllIndexes(ADSHANDLE hTable) {
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
     auto& m = index_bindings();
     auto& act = active_binding_for();
+    // xBase production-index convention: tags of the STRUCTURAL bag
+    // (named after the table) stay attached through OrdListClear --
+    // DBFCDX still reports OrdCount()=1 after it (dballcmp conformance
+    // harness). Only non-structural bindings are dropped; the order
+    // falls back to natural.
+    namespace fs = std::filesystem;
+    auto stem_ci = [](const std::string& p) {
+        std::string s = fs::path(p).stem().string();
+        for (auto& c : s)
+            c = static_cast<char>(std::tolower(
+                    static_cast<unsigned char>(c)));
+        return s;
+    };
+    const std::string tbl_stem = stem_ci(t->path());
     for (auto it = m.begin(); it != m.end(); ) {
-        if (it->second.table == t) {
+        if (it->second.table == t &&
+            stem_ci(it->second.path) != tbl_stem) {
             if (it->second.parked) {
                 t->unregister_extra_index_view(it->second.parked.get());
                 (void)it->second.parked->flush();
@@ -13428,9 +13490,17 @@ UNSIGNED32 ENTRYPOINT AdsCloseAllIndexes(ADSHANDLE hTable) {
             ++it;
         }
     }
-    act.erase(t);
-    t->clear_order();
-    t->clear_extra_index_views();
+    // Natural order after the clear: park a kept (structural) active
+    // binding into its slot; a dropped one just loses the order object.
+    auto act_it = act.find(t);
+    if (act_it != act.end()) {
+        if (m.find(act_it->second) != m.end()) {
+            park_active_order(t);
+        } else {
+            t->clear_order();
+            act.erase(act_it);
+        }
+    }
     return ok();
 }
 
@@ -14547,6 +14617,27 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex(ADSHANDLE hTable, UNSIGNED8* pucFile,
 
 UNSIGNED32 ENTRYPOINT AdsDeleteIndex(ADSHANDLE hIndex) {
     arc2_trace("AdsDeleteIndex");
+    // OrdDestroy semantics (rddads DBOI_DESTROY): drop the tag from the
+    // CDX bag on disk, not just detach the handle -- the old close-only
+    // behaviour left the tag in the bag, so it reappeared on the next
+    // OrdListAdd / USE (dballcmp conformance harness).
+    {
+        std::lock_guard<std::recursive_mutex> lk(index_bindings_mu());
+        auto& m = index_bindings();
+        auto it = m.find(hIndex);
+        if (it != m.end() &&
+            path_ends_with_ci(it->second.path, ".cdx")) {
+            // Flush the in-memory tree before rewriting the struct leaf.
+            if (it->second.parked) (void)it->second.parked->flush();
+            else if (it->second.table && it->second.table->order() &&
+                     it->second.table->order()->index())
+                (void)it->second.table->order()->index()->flush();
+            auto r = openads::drivers::cdx::CdxIndex::delete_tag(
+                it->second.path, it->second.tag_name);
+            if (!r) return fail(r.error());
+        }
+    }
+    ForceIndexClose force_close;
     return AdsCloseIndex(hIndex);
 }
 
@@ -19766,7 +19857,7 @@ UNSIGNED32 ENTRYPOINT AdsFindFirstTable(ADSHANDLE   hConnect,
         if (!r) return fail(r.error());
         auto matches = std::move(r).value();
         if (matches.empty())
-            return fail(openads::AE_NO_MATCHING_FILE, mask.c_str());
+            return fail(openads::AE_NO_FILE_FOUND, mask.c_str());
         auto find = std::make_unique<Connection::TableFind>();
         find->matches = std::move(matches);
         find->cursor = 1;
@@ -19808,7 +19899,7 @@ UNSIGNED32 ENTRYPOINT AdsFindNextTable(ADSHANDLE   hConnect,
         return fail(openads::AE_INTERNAL_ERROR, "invalid find handle");
     }
     if (find->cursor >= find->matches.size()) {
-        return fail(openads::AE_NO_MATCHING_FILE, "no more files");
+        return fail(openads::AE_NO_FILE_FOUND, "no more files");
     }
     return emit_name(pucFileName, pusFileNameLen, find->matches[find->cursor++]);
 }
@@ -34240,16 +34331,37 @@ UNSIGNED32 ENTRYPOINT AdsGetIndexCondition(ADSHANDLE hIndex, UNSIGNED8* p,
     openads::abi::copy_to_caller(p, l, cond);
     return ok();
 }
-UNSIGNED32 ENTRYPOINT AdsGetIndexFilename(ADSHANDLE hIndex, UNSIGNED16 /*usOrder*/,
+UNSIGNED32 ENTRYPOINT AdsGetIndexFilename(ADSHANDLE hIndex, UNSIGNED16 usOption,
                                UNSIGNED8* p, UNSIGNED16* l) {
     arc2_trace("AdsGetIndexFilename");
     if (l == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    // usOption: ADS_FULLPATHNAME (1) / ADS_BASENAMEANDEXT (2) /
+    // ADS_BASENAME (3). rddads' DBOI_BAGNAME passes ADS_BASENAME and
+    // Harbour compares it against DBFCDX's extension-less bag name
+    // ("da_main"); the option used to be ignored and every caller got
+    // the stored (full-ish) path.
+    auto shape = [usOption](const std::string& stored) -> std::string {
+        namespace fs = std::filesystem;
+        fs::path sp(stored);
+        switch (usOption) {
+        case ADS_BASENAME:
+            return sp.stem().string();
+        case ADS_BASENAMEANDEXT:
+            return sp.filename().string();
+        case ADS_FULLPATHNAME:
+        default: {
+            std::error_code ec;
+            fs::path abs = fs::absolute(sp, ec);
+            return ec ? stored : abs.string();
+        }
+        }
+    };
     // Remote index: return the bag_path stored when the index was opened.
     // This lets FWH/rddads serve OrdBagName() / DBOI_BAGNAME without a
     // wire round-trip.
     if (auto* ri = get_remote_index(hIndex)) {
         if (!ri->bag_path.empty()) {
-            openads::abi::copy_to_caller(p, l, ri->bag_path);
+            openads::abi::copy_to_caller(p, l, shape(ri->bag_path));
             return ok();
         }
         // Fallback: derive from the parent table name if bag_path is empty
@@ -34265,7 +34377,7 @@ UNSIGNED32 ENTRYPOINT AdsGetIndexFilename(ADSHANDLE hIndex, UNSIGNED16 /*usOrder
             if (ext == ".dbf")      fallback = tp.stem().string() + ".cdx";
             else if (ext == ".adt") fallback = tp.stem().string() + ".adi";
             else                    fallback = ri->parent->name;
-            openads::abi::copy_to_caller(p, l, fallback);
+            openads::abi::copy_to_caller(p, l, shape(fallback));
             return ok();
         }
         if (p && *l > 0) p[0] = 0;
@@ -34279,7 +34391,7 @@ UNSIGNED32 ENTRYPOINT AdsGetIndexFilename(ADSHANDLE hIndex, UNSIGNED16 /*usOrder
         *l = 0;
         return ok();
     }
-    openads::abi::copy_to_caller(p, l, it->second.path);
+    openads::abi::copy_to_caller(p, l, shape(it->second.path));
     return ok();
 }
 // 1-based position of the order `hIndex` within its table's ordinal
@@ -34458,7 +34570,25 @@ UNSIGNED32 ENTRYPOINT AdsGetLastTableUpdate(ADSHANDLE hTable, UNSIGNED8* pucDate
         auto hd = read_header_date(tbl);
         y = hd.y; m = hd.m; d = hd.d;
     }
-    copy_ace_string(format_ace_date(g_date_format, y, m, d), pucDate, pusLen);
+    // rddads' DBI_LASTUPDATE passes the leftover length of its previous
+    // AdsGetDateFormat call as this call's capacity (8 for "MM/DD/YY")
+    // and NUL-terminates the buffer itself, so the date must fill the
+    // buffer WITHOUT reserving a byte for NUL -- copy_ace_string's
+    // cap-1 behaviour truncated "20260815" to "2026081" and Harbour
+    // showed an empty LUpdate(). Native ACE semantics: copy
+    // min(len, cap) bytes, NUL only when there is room.
+    {
+        std::string s = format_ace_date(g_date_format, y, m, d);
+        if (pusLen != nullptr) {
+            const std::size_t cap = *pusLen;
+            const std::size_t n = std::min(s.size(), cap);
+            if (pucDate != nullptr && cap > 0) {
+                std::memcpy(pucDate, s.data(), n);
+                if (n < cap) pucDate[n] = 0;
+            }
+            *pusLen = static_cast<UNSIGNED16>(n);
+        }
+    }
     return ok();
 }
 UNSIGNED32 ENTRYPOINT AdsGetLogical(ADSHANDLE hTable, UNSIGNED8* pucField, UNSIGNED16* pb) {
@@ -34669,16 +34799,17 @@ UNSIGNED32 ENTRYPOINT AdsGetRelKeyPos(ADSHANDLE h, double* p) {
         if (auto* cdx =
                 dynamic_cast<openads::drivers::cdx::CdxIndex*>(idx)) {
             const auto& walk = cdx->ordered_recnos_cached();
-            if (walk.size() <= 1) { *p = 0.0; return ok(); }
+            if (walk.empty()) { *p = 0.0; return ok(); }
             std::uint32_t pos = cdx->pos_of_recno_cached(rn);
             if (pos == 0xFFFFFFFFu) {
                 if (rn > rc) rn = rc;
-                *p = static_cast<double>(rn - 1) /
-                     static_cast<double>(rc - 1);
+                *p = (static_cast<double>(rn) + 0.5) /
+                     static_cast<double>(rc);
+                if (*p > 1.0) *p = 1.0;
                 return ok();
             }
-            *p = static_cast<double>(pos) /
-                 static_cast<double>(walk.size() - 1);
+            *p = (static_cast<double>(pos) + 0.5) /
+                 static_cast<double>(walk.size());
             return ok();
         }
         // Non-CDX: O(1) via the cached ordered-recno walk (built once,
@@ -34686,31 +34817,33 @@ UNSIGNED32 ENTRYPOINT AdsGetRelKeyPos(ADSHANDLE h, double* p) {
         if (auto* ntx =
                 dynamic_cast<openads::drivers::ntx::NtxIndex*>(idx)) {
             const auto& walk = ntx->ordered_recnos_cached();
-            if (walk.size() <= 1) { *p = 0.0; return ok(); }
+            if (walk.empty()) { *p = 0.0; return ok(); }
             std::uint32_t pos = ntx->pos_of_recno_cached(rn);
             if (pos == 0xFFFFFFFFu) {
                 if (rn > rc) rn = rc;
-                *p = static_cast<double>(rn - 1) /
-                     static_cast<double>(rc - 1);
+                *p = (static_cast<double>(rn) + 0.5) /
+                     static_cast<double>(rc);
+                if (*p > 1.0) *p = 1.0;
                 return ok();
             }
-            *p = static_cast<double>(pos) /
-                 static_cast<double>(walk.size() - 1);
+            *p = (static_cast<double>(pos) + 0.5) /
+                 static_cast<double>(walk.size());
             return ok();
         }
         if (auto* adi =
                 dynamic_cast<openads::drivers::adi::AdiIndex*>(idx)) {
             const auto& walk = adi->ordered_recnos_cached();
-            if (walk.size() <= 1) { *p = 0.0; return ok(); }
+            if (walk.empty()) { *p = 0.0; return ok(); }
             std::uint32_t pos = adi->pos_of_recno_cached(rn);
             if (pos == 0xFFFFFFFFu) {
                 if (rn > rc) rn = rc;
-                *p = static_cast<double>(rn - 1) /
-                     static_cast<double>(rc - 1);
+                *p = (static_cast<double>(rn) + 0.5) /
+                     static_cast<double>(rc);
+                if (*p > 1.0) *p = 1.0;
                 return ok();
             }
-            *p = static_cast<double>(pos) /
-                 static_cast<double>(walk.size() - 1);
+            *p = (static_cast<double>(pos) + 0.5) /
+                 static_cast<double>(walk.size());
             return ok();
         }
         // Unknown index type: legacy per-call O(n) walk.
@@ -34737,18 +34870,22 @@ UNSIGNED32 ENTRYPOINT AdsGetRelKeyPos(ADSHANDLE h, double* p) {
             // Cursor recno not present in the index -- fall back to
             // recno-based fraction so the result stays monotonic.
             if (rn > rc) rn = rc;
-            *p = static_cast<double>(rn - 1) /
-                 static_cast<double>(rc - 1);
+            *p = (static_cast<double>(rn) + 0.5) /
+                 static_cast<double>(rc);
+            if (*p > 1.0) *p = 1.0;
             return ok();
         }
-        *p = static_cast<double>(pos) /
-             static_cast<double>(walk.size() - 1);
+        *p = (static_cast<double>(pos) + 0.5) /
+             static_cast<double>(walk.size());
         return ok();
     }
 
-    // No active order: relative position in raw recno space.
+    // No active order: relative position in raw recno space, using the
+    // ADS convention rddads documents ("ADS counts relative record
+    // position in this way"): (0.5 + recno) / reccount.
     if (rn > rc) rn = rc;
-    *p = static_cast<double>(rn - 1) / static_cast<double>(rc - 1);
+    *p = (static_cast<double>(rn) + 0.5) / static_cast<double>(rc);
+    if (*p > 1.0) *p = 1.0;
     return ok();
 }
 UNSIGNED32 ENTRYPOINT AdsGetSearchPath(UNSIGNED8* p, UNSIGNED16* l) {

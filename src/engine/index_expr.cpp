@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -860,6 +861,68 @@ Value parse_atom(Lex& lx, Table& t) {
     return v;
 }
 
+// Arithmetic between atoms: xBase FOR/conditional expressions use it
+// (e.g. "NUM % 2 == 0"). eval_cmp used to call parse_atom directly, so
+// "NUM % 2 == 0" parsed as bare "NUM" (truthy for NUM<>0) and the FOR
+// clause silently matched the wrong rows (found by the dballcmp
+// conformance harness: OrdCondSet("NUM % 2 == 0") + OrdCreate indexed
+// 11 rows instead of 6).
+Value arith_apply(char op, const Value& a, const Value& b) {
+    Value r;
+    // xBase '+' with a string operand concatenates.
+    if (op == '+' && (!a.is_number || !b.is_number)) {
+        auto as_str = [](const Value& v) {
+            if (!v.is_number) return v.s;
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "%.10g", v.n);
+            return std::string(buf);
+        };
+        r.is_number = false;
+        r.s = as_str(a) + as_str(b);
+        return r;
+    }
+    const double x = a.is_number ? a.n : std::strtod(a.s.c_str(), nullptr);
+    const double y = b.is_number ? b.n : std::strtod(b.s.c_str(), nullptr);
+    r.is_number = true;
+    switch (op) {
+    case '+': r.n = x + y; break;
+    case '-': r.n = x - y; break;
+    case '*': r.n = x * y; break;
+    case '/': r.n = (y != 0.0) ? x / y : 0.0; break;
+    case '%': r.n = (y != 0.0) ? std::fmod(x, y) : 0.0; break;
+    default:  r.n = 0.0; break;
+    }
+    return r;
+}
+
+Value parse_term(Lex& lx, Table& t) {
+    Value a = parse_atom(lx, t);
+    for (;;) {
+        lx.skip_ws();
+        if (lx.i >= lx.s.size()) break;
+        const char c = lx.s[lx.i];
+        if (c != '*' && c != '/' && c != '%') break;
+        ++lx.i;
+        Value b = parse_atom(lx, t);
+        a = arith_apply(c, a, b);
+    }
+    return a;
+}
+
+Value parse_add(Lex& lx, Table& t) {
+    Value a = parse_term(lx, t);
+    for (;;) {
+        lx.skip_ws();
+        if (lx.i >= lx.s.size()) break;
+        const char c = lx.s[lx.i];
+        if (c != '+' && c != '-') break;
+        ++lx.i;
+        Value b = parse_term(lx, t);
+        a = arith_apply(c, a, b);
+    }
+    return a;
+}
+
 bool eval_cmp(Lex& lx, Table& t) {
     lx.skip_ws();
     if (lx.match_char('(')) {
@@ -867,7 +930,7 @@ bool eval_cmp(Lex& lx, Table& t) {
         lx.match_char(')');
         return inner;
     }
-    Value lhs = parse_atom(lx, t);
+    Value lhs = parse_add(lx, t);
     lx.skip_ws();
 
     // xBase '$' (substring / "contains"): `needle $ haystack` — True if
@@ -876,7 +939,7 @@ bool eval_cmp(Lex& lx, Table& t) {
     // comparison tokens.
     if (lx.i < lx.s.size() && lx.s[lx.i] == '$') {
         ++lx.i;
-        Value rhs = parse_atom(lx, t);
+        Value rhs = parse_add(lx, t);
         // Needle $ Haystack → check if Haystack contains Needle.
         const std::string& needle = lhs.s;
         const std::string& haystack = rhs.s;
@@ -901,7 +964,7 @@ bool eval_cmp(Lex& lx, Table& t) {
         // No comparison operator → treat lhs as truthy.
         return lhs.is_number ? (lhs.n != 0.0) : !lhs.s.empty();
     }
-    Value rhs = parse_atom(lx, t);
+    Value rhs = parse_add(lx, t);
     int cmp;
     if (lhs.is_number || rhs.is_number) {
         double a = lhs.is_number ? lhs.n : std::strtod(lhs.s.c_str(), nullptr);

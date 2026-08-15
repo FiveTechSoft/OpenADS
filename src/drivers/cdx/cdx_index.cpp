@@ -2563,4 +2563,77 @@ CdxIndex::add_tag(const std::string& path,
     return ix;
 }
 
+util::Result<void>
+CdxIndex::delete_tag(const std::string& path, const std::string& tag_name) {
+    auto fres = platform::File::open(path, platform::OpenMode::OpenExisting);
+    if (!fres) return fres.error();
+    platform::File file = std::move(fres).value();
+
+    // Same serialisation point as add_tag (Harbour's index write byte).
+    auto wl = acquire_cdx_os_lock_(file, platform::LockKind::Exclusive);
+    if (!wl) return wl.error();
+
+    std::array<std::uint8_t, CDX_HEADER_LEN> fh{};
+    auto got = file.read_at(0, fh.data(), fh.size());
+    if (!got) return got.error();
+    if (got.value() < CDX_HEADER_LEN) {
+        return util::Error{6106, 0, "CDX header truncated", path};
+    }
+    std::uint32_t struct_root = read_u32_le(fh.data() + 0);
+    if (struct_root == 0) {
+        return util::Error{6106, 0, "CDX has no structure tag root", path};
+    }
+
+    Page leaf{};
+    auto got2 = file.read_at(struct_root, leaf.data(), leaf.size());
+    if (!got2) return got2.error();
+    // Decode the raw padded struct keys (NOT struct_tag_entries, which
+    // canonicalises names -- we must re-encode the original keys).
+    auto dec = decode_compact_leaf_static(leaf, CDX_STRUCT_KEY_LEN);
+    if (!dec) return dec.error();
+    auto entries = std::move(dec).value();
+
+    auto canon = [](std::string s) {
+        while (!s.empty() && s.back() == ' ') s.pop_back();
+        for (auto& c : s)
+            c = static_cast<char>(std::toupper(
+                    static_cast<unsigned char>(c)));
+        return s;
+    };
+    const std::string want = canon(tag_name);
+    auto it = std::find_if(entries.begin(), entries.end(),
+                           [&](const auto& e) {
+                               return canon(e.first) == want; });
+    if (it == entries.end()) {
+        return util::Error{5043, 0, "CDX tag not found", tag_name};
+    }
+    entries.erase(it);
+
+    // Re-encode the struct leaf without the tag, keeping the ROOT bit
+    // (see add_tag) and creation order of the survivors.
+    Page new_leaf{};
+    auto enc = encode_compact_leaf_static(new_leaf, CDX_STRUCT_KEY_LEN,
+                                          entries,
+                                          0xFFFFFFFFu, 0xFFFFFFFFu,
+                                          /*req_byte=*/5);
+    if (!enc) return enc.error();
+    write_u16_le(new_leaf.data() + 0,
+                 read_u16_le(new_leaf.data() + 0) | CDX_NODE_ROOT);
+    auto wrote = file.write_at(struct_root, new_leaf.data(), new_leaf.size());
+    if (!wrote) return wrote.error();
+
+    // Bump the FILE-header version counter so peers re-read the bag.
+    std::uint32_t file_ctr = read_u32_be(fh.data() + 8) + 1;
+    {
+        std::uint8_t fver[4]{};
+        write_u32_be(fver, file_ctr);
+        auto fw = file.write_at(8, fver, sizeof(fver));
+        if (!fw) return fw.error();
+    }
+    if (want_fsync_()) {
+        if (auto s = file.sync(); !s) return s.error();
+    }
+    return {};
+}
+
 } // namespace openads::drivers::cdx
