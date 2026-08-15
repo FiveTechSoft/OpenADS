@@ -6034,12 +6034,23 @@ static bool arc2_on() {
 }
 static void arc2_stamp(FILE* f) {
     std::time_t t = std::time(nullptr);
-    struct tm tmv; localtime_s(&tmv, &t);
+    struct tm tmv;
+#if defined(_MSC_VER)
+    localtime_s(&tmv, &t);
+#else
+    localtime_r(&t, &tmv);
+#endif
     fprintf(f, "%02d:%02d:%02d ", tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
 }
 static void arc2_trace(const char* name) {
     if (!arc2_on()) return;
-    if (auto* f = fopen("C:/OpenADS/_arc32/ace_calls.log", "a")) {
+    const char* path =
+#if defined(_MSC_VER)
+        "C:/OpenADS/_arc32/ace_calls.log";
+#else
+        "/tmp/ace_calls.log";
+#endif
+    if (auto* f = fopen(path, "a")) {
         arc2_stamp(f);
         fprintf(f, "%s\n", name);
         fclose(f);
@@ -6047,7 +6058,13 @@ static void arc2_trace(const char* name) {
 }
 static void arc2_log(const char* fmt, ...) {
     if (!arc2_on()) return;
-    if (auto* f = fopen("C:/OpenADS/_arc32/ace_calls.log", "a")) {
+    const char* path =
+#if defined(_MSC_VER)
+        "C:/OpenADS/_arc32/ace_calls.log";
+#else
+        "/tmp/ace_calls.log";
+#endif
+    if (auto* f = fopen(path, "a")) {
         arc2_stamp(f);
         va_list ap; va_start(ap, fmt);
         vfprintf(f, fmt, ap);
