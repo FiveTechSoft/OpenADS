@@ -46,6 +46,11 @@ enum : std::uint32_t {
     AE_LOCK_FAILED              = 5013,
     AE_NO_CONNECTION            = 5036,
     AE_NO_FILE_FOUND            = 5018,
+    // SAP ACE returns 5059 ("no matching file" / "no more files") from
+    // AdsFindFirstTable / AdsFindNextTable when a mask matches nothing or
+    // the enumeration is exhausted. 5018 there makes ARC abort its table
+    // listing (verified against ace32.dll.sap, 2026-08-13).
+    AE_NO_MATCHING_FILE         = 5059,
     AE_COLUMN_NOT_FOUND         = 5063,
     AE_TABLE_NOT_FOUND          = 5066,
     AE_TABLE_CORRUPTED          = 5103,
