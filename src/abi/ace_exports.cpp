@@ -6609,6 +6609,12 @@ namespace spproc { void drop_all_events_for(const void* conn); }
 // S4 -- session #temp / trigger-image cleanup (defined by the sess
 // namespace further down, near the trigger machinery).
 extern "C++" void sess_forget_connection(Connection* c);
+// park_active_order lives with the index-binding helpers further down
+// (anonymous namespace). The production-index auto-open in AdsOpenTable
+// calls it to undo AdsOpenIndex's optimistic first-tag activation --
+// ADS semantics leave the controlling order natural (0) after an
+// auto-open until DbSetOrder picks a tag.
+namespace { void park_active_order(Table* t); }
 }
 
 UNSIGNED32 ENTRYPOINT AdsDisconnect(ADSHANDLE hConnect) {
@@ -7364,6 +7370,15 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
             (void)AdsOpenIndex(to_ads_handle(gh), b.data(), arr, &alen);
         }
     }
+    // ADS semantics: auto-opening the production index leaves the
+    // controlling order natural (0) until DbSetOrder picks one.
+    // AdsOpenIndex optimistically marks the first tag active; park it
+    // back so dbGoBottom()/dbSkip() walk natural record order until the
+    // app selects a tag. Mirrors the remote path, which resets
+    // RemoteTable::active_index_id to 0 after the same auto-open.
+    // (Pritpal Bedi: dbGoBottom() landed on the last index key instead
+    // of LastRec() after a plain USE via ADSCDX.)
+    park_active_order(tbl);
     return ok();
 }
 

@@ -142,6 +142,7 @@ add_executable(openads_unit_tests
     unit/abi_open_index_order_test.cpp
     unit/abi_ordlistadd_path_test.cpp
     unit/abi_gobottom_filtered_test.cpp
+    unit/abi_navigation_test.cpp
     unit/abi_rddtst_repro_test.cpp
     unit/engine_navigation_empty_test.cpp
     unit/abi_deleted_records_test.cpp

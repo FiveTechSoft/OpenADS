@@ -1,5 +1,42 @@
 # OpenADS Harbour smoke tests
 
+## DBFCDX-conformance comparison harnesses (2026-08-15)
+
+Three self-comparing harnesses run the same battery under Harbour's
+DBFCDX (golden reference) and OpenADS' ADSCDX, write one transcript per
+RDD, and verdict on a byte-compare of the transcripts. All three link
+against `rddads.lib` + OpenADS `ace64.lib` and must be built with
+`-gtcgi` (the default GT driver writes nothing to a redirected console).
+
+| File | Covers | Verdict file |
+|------|--------|--------------|
+| `navcmp.prg` | Navigation: dbGoTop/GoBottom/Skip(±1,±n)/dbGoto at and past both boundaries, empty-table Limbo, SET DELETED on/off, structural-CDX auto-open staying in natural order, USE...INDEX, seek+skip | `navcmp_verdict.txt` |
+| `dballcmp.prg` | Every `Db*` and `Ord*` user function in Harbour's `src/rdd/dbcmd*.c` (state, fields, append/put, delete/recall, orders, scopes, seek, filters, relations, locking, dbEval, PACK/ZAP, file ops, dbInfo/dbFieldInfo/dbRecordInfo) | `dballcmp_verdict.txt` |
+| `memocmp.prg` | Memo fields: same rows+payloads written through both RDDs, then byte-compares the `.dbf` and `.fpt` files and cross-reads each RDD's files with the other | `memocmp_verdict.txt` |
+
+Known, documented deltas (deliberately normalised in `navcmp.prg`;
+still visible as diffs in `dballcmp.prg` / `memocmp.prg`):
+
+- Harbour's rddads wrapper never forwards a skip to ACE when the
+  workarea is unpositioned (empty table), so skip-on-empty keeps both
+  BOF+EOF with ANY ACE server (native SAP ADS included); DBFCDX
+  transitions to a single flag. The engine-level transition is covered
+  by `tests/unit/abi_navigation_test.cpp` instead.
+- `memocmp` currently reports DIFF: the FPT is format-compatible
+  (cross-reads pass both ways) but not byte-identical -- Harbour stamps
+  a `"Harbour"` signature in the FPT header and allocates blocks
+  slightly differently; the DBF field descriptors differ in the legacy
+  displacement byte (Harbour writes 0, OpenADS writes the 1-based
+  field offset).
+
+Build example (see `build.cmd` for the toolchain setup):
+
+```cmd
+hbmk2 -comp=msvc64 -gtcgi -iC:\harbour\include -iC:\harbour\contrib\rddads ^
+      -lrddads -L<openads-build>\src\Release -lace64 navcmp.prg
+navcmp.exe   && type navcmp_verdict.txt
+```
+
 ## Invoice fixture (`openads_cdx_invoice_fixture.prg`)
 
 Creates four related free DBF/CDX tables under `F:\OpenADS\testdata\invoices\`

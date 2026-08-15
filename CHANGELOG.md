@@ -1,3 +1,48 @@
+## 1.8.80 - 2026-08-15
+
+### Fixed — `dbGoBottom()` ignored natural order after plain `USE` via ADSCDX (Pritpal Bedi)
+
+Opening a `.dbf` auto-opens the structural/production `.cdx` next to it
+(ADS convention).  `AdsOpenIndex` optimistically activates the first tag
+as the controlling order; the remote-client path already undid that
+(`active_index_id = 0`), but the local `AdsOpenTable` path did not — so
+after a plain `USE table VIA "ADSCDX"` the first tag stayed active.
+
+Result: `dbGoBottom()` navigated in index order and landed on the last
+*key* instead of the last *record* (`LastRec()`), and the browse showed
+index order where DBFCDX shows natural order.  DBFCDX keeps the order
+natural until `SET ORDER TO`, which is the correct ADS behaviour.
+
+Fix: after the production-index auto-open in `AdsOpenTable`
+(src/abi/ace_exports.cpp), `park_active_order()` now leaves the
+controlling order natural (0), mirroring the remote path.  The tags stay
+open and maintained; `dbSetOrder()` / `OrdSetFocus()` activate one as
+before, and `USE ... INDEX ...` is unaffected.
+
+### Added — DBFCDX conformance harnesses (Harbour)
+
+Self-comparing harnesses under `tests/smoke/harbour/` run the same
+battery under Harbour DBFCDX (golden reference) and ADSCDX and
+byte-compare the transcripts: `navcmp.prg` (navigation battery — PASS),
+`dballcmp.prg` (every `Db*` / `Ord*` function in Harbour's
+`src/rdd/dbcmd*.c`), `memocmp.prg` (memo fields: byte-level file
+compare + cross-RDD interop reads — format-compatible both ways, not
+yet byte-identical).  `tests/unit/abi_navigation_test.cpp` encodes the
+DBFCDX golden navigation values at the ACE ABI level (ctest-covered).
+
+### Build — incremental rebuilds are incremental again
+
+`OPENADS_VERSION_STR` moved from a global `add_compile_definitions()`
+to a `configure_file()`-generated header
+(`cmake/openads_version.h.in`).  Every commit changes the
+`git describe` output, and the global define used to change the command
+line of all ~340 translation units on the next re-configure, forcing a
+full serial rebuild.  `configure_file` is copy-if-different, so now
+only the ~7 consumer TUs recompile.  `/MP` added for MSVC so multi-TU
+rebuilds compile in parallel.
+
+---
+
 ## 1.8.79 - 2026-08-15
 
 ### Added — Connection switching + optional hConn for OAds_F* functions
