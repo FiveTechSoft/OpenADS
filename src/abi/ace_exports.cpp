@@ -10300,7 +10300,19 @@ SIGNED32 to_julian(int y, int m, int d) {
 // ask for it keeps the legacy single-field bag byte for byte. Read on every
 // call -- index creation is not a hot path -- so a test or an application can turn
 // it on for one process without a restart.
+//
+// g_adi_v2_override lets a caller flip this from AdsSetAdiV2() instead of the
+// environment. Windows does not share a CRT's cached _environ across modules
+// linked against separate ucrtbase instances (confirmed: an env var set from
+// a Harbour host process via its own putenv/SetEnvironmentVariable is not
+// visible to this DLL's std::getenv() without a fresh process) -- an in-DLL
+// flag sidesteps that entirely. -1 = unset (fall back to the env var), 0/1 =
+// explicit override.
+std::atomic<int> g_adi_v2_override{-1};
+
 bool adi_v2_enabled() noexcept {
+    const int ov = g_adi_v2_override.load(std::memory_order_relaxed);
+    if (ov >= 0) return ov != 0;
     const char* e = std::getenv("OPENADS_ADI_V2");
     if (e == nullptr || *e == 0) return false;
     return !(e[0] == '0' && e[1] == 0);
@@ -35073,6 +35085,21 @@ UNSIGNED32 ENTRYPOINT AdsSetExact22(ADSHANDLE /*hObj*/,
                                     UNSIGNED16 bIgnoreSpaces) {
     arc2_trace("AdsSetExact22");
     return AdsSetExact(bIgnoreSpaces);
+}
+// OpenADS extension (RusSoft Ltda): explicit in-process override for the ADI
+// v2 tag layout (see adi_v2_enabled() near the top of this file). Lets a host
+// process flip v2 on/off for itself without OPENADS_ADI_V2 -- which, being an
+// environment variable, only reaches this DLL if set before the process
+// starts. Not part of the SAP ACE API; not in openads_ace.def's Advantage
+// compatibility block, listed as its own extension entry.
+//
+// bEnable: 0 = off, 1 = on, 2 = clear the override (fall back to the env var
+// again). The reset value exists for test teardown; a host application never
+// needs it -- it decides v2 on/off once and stays there.
+UNSIGNED32 ENTRYPOINT AdsSetAdiV2(UNSIGNED16 bEnable) {
+    const int v = (bEnable == 2) ? -1 : (bEnable != 0 ? 1 : 0);
+    g_adi_v2_override.store(v, std::memory_order_relaxed);
+    return openads::AE_SUCCESS;
 }
 UNSIGNED32 ENTRYPOINT AdsSetFilter(ADSHANDLE hTable, UNSIGNED8* pucFilter) {
     arc2_trace("AdsSetFilter");
