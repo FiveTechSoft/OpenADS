@@ -259,6 +259,18 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
                     if (fs::exists(adt, ec)) {
                         cand = adt;
                         type = engine::TableType::Adt;
+                    } else {
+                        // RusSoft/Zerus (and other legacy ERPs) keep every
+                        // table -- ADT or DBF alike -- under a literal .dat
+                        // extension on disk; probe it last so a "real"
+                        // .dbf/.adt sibling still wins. align_type_with_file()
+                        // below sniffs the header, so we do not guess a type
+                        // here.
+                        fs::path dat = cand;
+                        dat.replace_extension(".dat");
+                        if (fs::exists(dat, ec)) {
+                            cand = dat;
+                        }
                     }
                 }
             }
@@ -326,12 +338,19 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
         const bool adt_first = (type == engine::TableType::Adt);
         fs::path dbf_cand = full; dbf_cand.replace_extension(".dbf");
         fs::path adt_cand = full; adt_cand.replace_extension(".adt");
+        fs::path dat_cand = full; dat_cand.replace_extension(".dat");
         const fs::path& first  = adt_first ? adt_cand : dbf_cand;
         const fs::path& second = adt_first ? dbf_cand : adt_cand;
         if (fs::exists(first, ec)) {
             full = first;
         } else if (fs::exists(second, ec)) {
             full = second;
+        } else if (fs::exists(dat_cand, ec)) {
+            // RusSoft/Zerus (and other legacy ERPs) keep every table --
+            // ADT or DBF alike -- under a literal .dat extension on disk.
+            // Probe it last so a "real" .dbf/.adt sibling still wins;
+            // align_type_with_file() below sniffs the header to set `type`.
+            full = dat_cand;
         } else {
             full = dbf_cand;   // report the .dbf name when nothing exists
         }
