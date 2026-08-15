@@ -12,6 +12,20 @@ Complete history of releases with categorized improvements.
 
 ---
 
+## v1.8.79 — 2026-08-15
+
+### New Features
+
+- **Connection switching + optional hConn for OAds_F*** — `OAds_SetConnection( hConn )` sets the thread-local default connection; `OAds_GetConnection()` retrieves it. All `OAds_F*` Harbour functions (`OAds_FOpen`, `OAds_FCreate`, `OAds_CheckExistence`, `OAds_DeleteFile`, `OAds_RenameFile`, `OAds_GetFileSize`, `OAds_GetFileDate`, `OAds_GetFileTime`, `OAds_DirMake`, `OAds_DirRemove`, `OAds_DirExist`, `OAds_Directory`, `OAds_FExist`) now accept hConn as optional. When omitted, the thread-local default is used. Backward compatible — existing code passing hConn continues to work.
+
+  Use case: single-connection apps set the default once; multi-connection apps switch via `OAds_SetConnection(hConn)` before each call — handy for transparent backup across two endpoints.
+
+### Bug Fixes
+
+- **macOS build** — `arc2_stamp()` now uses `localtime_r` on POSIX (was Windows-only `localtime_s`); trace log uses `/tmp/ace_calls.log` on POSIX. `AE_NO_MATCHING_FILE` (5059) added to the error enum.
+
+---
+
 ## v1.8.78 — 2026-08-15
 
 ### New Features
