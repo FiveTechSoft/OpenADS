@@ -167,7 +167,7 @@ TEST_CASE("seek after order change: collation preserved through swap") {
 
     // PL852 order: LAC < ŁAB (0x9D) < MAD < ZBY.
     struct { const char* name; const char* code; } rows[] = {
-        {"LACAAAAA", "L001"}, { "\x9D""ABBBBB", "X002" },
+        {"LACAAAAA", "L001"}, { "\235ABBBBB", "X002" },
         {"MADCCCCC", "M003"}, {"ZBYDDDDD", "Z004"},
     };
     for (auto& r : rows) {
@@ -238,7 +238,7 @@ TEST_CASE("seek after order change: ADS_OEM PL852 dual-tag switch") {
                            ADS_OEM, 0, 0, 0, def, &hT) == 0);
 
     struct { const char* name; const char* cat; } rows[] = {
-        {"AAAA", "Z01"}, {"\x88""BBBB", "M02"},  // ł(0x88) under PL852
+        {"AAAA", "Z01"}, {"\210BBBB", "M02"},  // ł(0x88) under PL852
         {"CCCC", "A03"}, {"ZZZZ", "K04"},
     };
     for (auto& r : rows) {

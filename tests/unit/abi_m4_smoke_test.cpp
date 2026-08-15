@@ -51,7 +51,7 @@ TEST_CASE("ABI M4 smoke: open table with auto-attached FPT, write memo, read bac
     const auto dir = fs::temp_directory_path() / "openads_m4_abi_smoke";
     std::error_code ec;
     fs::remove_all(dir, ec);
-    auto dbf = make_dbf_with_memo(dir, "data.dbf", 0x83);
+    make_dbf_with_memo(dir, "data.dbf", 0x83);
 
     // Pre-create the .fpt sibling so Connection auto-attach finds it.
     auto fpt_path = (dir / "data.fpt");

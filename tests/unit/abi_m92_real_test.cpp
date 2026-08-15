@@ -82,7 +82,7 @@ TEST_CASE("M9.4 AdsGetRecordLength + AdsGetTableType + AdsGetTableFilename") {
     const auto dir = fs::temp_directory_path() / "openads_m94_meta";
     std::error_code ec;
     fs::remove_all(dir, ec);
-    auto dbf = stage_dbf(dir, "data.dbf");
+    stage_dbf(dir, "data.dbf");
 
     UNSIGNED8 srv[256];
     std::memcpy(srv, dir.string().c_str(), dir.string().size() + 1);
