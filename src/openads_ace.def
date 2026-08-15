@@ -310,6 +310,8 @@ EXPORTS
     AdsSetEpoch
     AdsSetExact
     AdsSetExact22
+    ; RusSoft extension, not part of the SAP ACE API -- see ace_exports.cpp
+    AdsSetAdiV2
     AdsSetFieldRaw
     AdsSetFilter
     AdsSetFilter100
