@@ -1495,6 +1495,8 @@ UNSIGNED32 ENTRYPOINT AdsSetDateFormat60   (ADSHANDLE hConnect,
 UNSIGNED32 ENTRYPOINT AdsGetDecimals       (UNSIGNED16* pusDecimals);
 UNSIGNED32 ENTRYPOINT AdsSetDecimals       (UNSIGNED16 usDecimals);
 UNSIGNED32 ENTRYPOINT AdsSetDefault        (UNSIGNED8* pucDir);
+UNSIGNED32 ENTRYPOINT AdsSetDefaultConnection(ADSHANDLE hConn);
+UNSIGNED32 ENTRYPOINT AdsGetDefaultConnection(ADSHANDLE* phConn);
 UNSIGNED32 ENTRYPOINT AdsSetEpoch          (UNSIGNED16 usEpoch);
 UNSIGNED32 ENTRYPOINT AdsSetExact          (UNSIGNED16 bExact);
 UNSIGNED32 ENTRYPOINT AdsSetExact22        (ADSHANDLE hObj,
@@ -2170,6 +2172,13 @@ UNSIGNED32 ENTRYPOINT AdsAggregateValue (ADSHANDLE   hRes,
                                          UNSIGNED8*  pucBuf,
                                          UNSIGNED16* pusLen);
 UNSIGNED32 ENTRYPOINT AdsAggregateClose (ADSHANDLE hRes);
+
+/* ------------------------------------------------------------------ */
+/*  oads_*() legacy C API — thin forwarding wrappers                   */
+/* ------------------------------------------------------------------ */
+
+UNSIGNED32 OADSAPI oads_SetConnection( ADSHANDLE hConnect );
+UNSIGNED32 OADSAPI oads_GetConnection( ADSHANDLE *phConnect );
 
 #ifdef __cplusplus
 }

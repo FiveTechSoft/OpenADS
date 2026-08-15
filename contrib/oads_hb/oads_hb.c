@@ -16,6 +16,15 @@
  *
  * Or if oads_*() are already exported by the DLL (openace64.dll):
  *   hbmk2 myproject.hbp oads_hb.c -L/path/to/openads/importlib -lace64
+ *
+ * Connection management:
+ *   OAds_SetConnection( hConn )  -- set default connection for this thread
+ *   OAds_GetConnection()         -> hConn  -- get current default connection
+ *
+ * All OAds_F* functions accept hConn as the first (optional) parameter.
+ * When omitted, the thread-local default connection is used:
+ *   OAds_FOpen( cFileName, nMode )             -- uses default connection
+ *   OAds_FOpen( hConn, cFileName, nMode )      -- uses explicit connection
  */
 
 #include "hbapi.h"
@@ -23,15 +32,50 @@
 #include "openads/ace.h"
 
 /* ------------------------------------------------------------------ */
+/*  OADS_SETCONNECTION( hConn ) -> lOk                                 */
+/*  Set the default connection for the calling thread.                 */
+/* ------------------------------------------------------------------ */
+HB_FUNC( OADS_SETCONNECTION )
+{
+    ADSHANDLE hConn = ( ADSHANDLE ) hb_parnint( 1 );
+    hb_retl( AdsSetDefaultConnection( hConn ) == 0 );
+}
+
+/* ------------------------------------------------------------------ */
+/*  OADS_GETCONNECTION() -> hConn                                      */
+/*  Get the current default connection for the calling thread.         */
+/* ------------------------------------------------------------------ */
+HB_FUNC( OADS_GETCONNECTION )
+{
+    ADSHANDLE hConn = 0;
+    AdsGetDefaultConnection( &hConn );
+    hb_retnint( ( HB_MAXINT ) hConn );
+}
+
+/* ------------------------------------------------------------------ */
 /*  OADS_FCreate( hConn, cFileName, nAttribute ) -> hFile (0 on fail) */
+/*  OADS_FCreate( cFileName, nAttribute )          -> hFile (default)  */
 /* ------------------------------------------------------------------ */
 HB_FUNC( OADS_FCREATE )
 {
-    ADSHANDLE  hConn   = ( ADSHANDLE ) hb_parnint( 1 );
-    const char *szName = hb_parc( 2 );
-    UNSIGNED16 usAttr  = ( UNSIGNED16 ) hb_parni( 3 );
+    ADSHANDLE  hConn;
+    const char *szName;
+    UNSIGNED16 usAttr;
     ADSHANDLE  hFile   = 0;
     UNSIGNED32 ulRc    = 1;
+
+    if( hb_pcount() >= 3 )
+    {
+        hConn  = ( ADSHANDLE ) hb_parnint( 1 );
+        szName = hb_parc( 2 );
+        usAttr = ( UNSIGNED16 ) hb_parni( 3 );
+    }
+    else
+    {
+        AdsGetDefaultConnection( &hConn );
+        szName = hb_parc( 1 );
+        usAttr = ( UNSIGNED16 ) hb_parni( 2 );
+    }
 
     if( szName )
         ulRc = oads_FCreate( hConn, ( UNSIGNED8 * ) szName, usAttr, &hFile );
@@ -40,14 +84,28 @@ HB_FUNC( OADS_FCREATE )
 
 /* ------------------------------------------------------------------ */
 /*  OADS_FOpen( hConn, cFileName, nMode ) -> hFile (0 on fail)       */
+/*  OADS_FOpen( cFileName, nMode )          -> hFile (default conn)   */
 /* ------------------------------------------------------------------ */
 HB_FUNC( OADS_FOPEN )
 {
-    ADSHANDLE  hConn   = ( ADSHANDLE ) hb_parnint( 1 );
-    const char *szName = hb_parc( 2 );
-    UNSIGNED16 usMode  = ( UNSIGNED16 ) hb_parni( 3 );
+    ADSHANDLE  hConn;
+    const char *szName;
+    UNSIGNED16 usMode;
     ADSHANDLE  hFile   = 0;
     UNSIGNED32 ulRc    = 1;
+
+    if( hb_pcount() >= 3 )
+    {
+        hConn  = ( ADSHANDLE ) hb_parnint( 1 );
+        szName = hb_parc( 2 );
+        usMode = ( UNSIGNED16 ) hb_parni( 3 );
+    }
+    else
+    {
+        AdsGetDefaultConnection( &hConn );
+        szName = hb_parc( 1 );
+        usMode = ( UNSIGNED16 ) hb_parni( 2 );
+    }
 
     if( szName )
         ulRc = oads_FOpen( hConn, ( UNSIGNED8 * ) szName, usMode, &hFile );
@@ -144,12 +202,24 @@ HB_FUNC( OADS_FSEEK )
 
 /* ------------------------------------------------------------------ */
 /*  OADS_CheckExistence( hConn, cName ) -> lExists                    */
+/*  OADS_CheckExistence( cName )          -> lExists (default conn)   */
 /* ------------------------------------------------------------------ */
 HB_FUNC( OADS_CHECKEXISTENCE )
 {
-    ADSHANDLE  hConn   = ( ADSHANDLE ) hb_parnint( 1 );
-    const char *szName = hb_parc( 2 );
+    ADSHANDLE  hConn;
+    const char *szName;
     UNSIGNED16 usExists = 0;
+
+    if( hb_pcount() >= 2 )
+    {
+        hConn  = ( ADSHANDLE ) hb_parnint( 1 );
+        szName = hb_parc( 2 );
+    }
+    else
+    {
+        AdsGetDefaultConnection( &hConn );
+        szName = hb_parc( 1 );
+    }
 
     if( szName )
         oads_CheckExistence( hConn, ( UNSIGNED8 * ) szName, &usExists );
@@ -158,12 +228,24 @@ HB_FUNC( OADS_CHECKEXISTENCE )
 
 /* ------------------------------------------------------------------ */
 /*  OADS_DeleteFile( hConn, cName ) -> lOk                            */
+/*  OADS_DeleteFile( cName )          -> lOk (default conn)           */
 /* ------------------------------------------------------------------ */
 HB_FUNC( OADS_DELETEFILE )
 {
-    ADSHANDLE  hConn   = ( ADSHANDLE ) hb_parnint( 1 );
-    const char *szName = hb_parc( 2 );
+    ADSHANDLE  hConn;
+    const char *szName;
     UNSIGNED32 ulRc    = 1;
+
+    if( hb_pcount() >= 2 )
+    {
+        hConn  = ( ADSHANDLE ) hb_parnint( 1 );
+        szName = hb_parc( 2 );
+    }
+    else
+    {
+        AdsGetDefaultConnection( &hConn );
+        szName = hb_parc( 1 );
+    }
 
     if( szName )
         ulRc = oads_DeleteFile( hConn, ( UNSIGNED8 * ) szName );
@@ -172,13 +254,27 @@ HB_FUNC( OADS_DELETEFILE )
 
 /* ------------------------------------------------------------------ */
 /*  OADS_RenameFile( hConn, cOld, cNew ) -> lOk                       */
+/*  OADS_RenameFile( cOld, cNew )          -> lOk (default conn)      */
 /* ------------------------------------------------------------------ */
 HB_FUNC( OADS_RENAMEFILE )
 {
-    ADSHANDLE  hConn  = ( ADSHANDLE ) hb_parnint( 1 );
-    const char *szOld = hb_parc( 2 );
-    const char *szNew = hb_parc( 3 );
+    ADSHANDLE  hConn;
+    const char *szOld;
+    const char *szNew;
     UNSIGNED32 ulRc   = 1;
+
+    if( hb_pcount() >= 3 )
+    {
+        hConn = ( ADSHANDLE ) hb_parnint( 1 );
+        szOld = hb_parc( 2 );
+        szNew = hb_parc( 3 );
+    }
+    else
+    {
+        AdsGetDefaultConnection( &hConn );
+        szOld = hb_parc( 1 );
+        szNew = hb_parc( 2 );
+    }
 
     if( szOld && szNew )
         ulRc = oads_RenameFile( hConn, ( UNSIGNED8 * ) szOld,
@@ -188,12 +284,24 @@ HB_FUNC( OADS_RENAMEFILE )
 
 /* ------------------------------------------------------------------ */
 /*  OADS_GetFileSize( hConn, cName ) -> nSize                         */
+/*  OADS_GetFileSize( cName )          -> nSize (default conn)        */
 /* ------------------------------------------------------------------ */
 HB_FUNC( OADS_GETFILESIZE )
 {
-    ADSHANDLE  hConn   = ( ADSHANDLE ) hb_parnint( 1 );
-    const char *szName = hb_parc( 2 );
+    ADSHANDLE  hConn;
+    const char *szName;
     UNSIGNED32 ulSize  = 0;
+
+    if( hb_pcount() >= 2 )
+    {
+        hConn  = ( ADSHANDLE ) hb_parnint( 1 );
+        szName = hb_parc( 2 );
+    }
+    else
+    {
+        AdsGetDefaultConnection( &hConn );
+        szName = hb_parc( 1 );
+    }
 
     if( szName )
         oads_GetFileSize( hConn, ( UNSIGNED8 * ) szName, &ulSize );
@@ -202,13 +310,25 @@ HB_FUNC( OADS_GETFILESIZE )
 
 /* ------------------------------------------------------------------ */
 /*  OADS_GetFileDate( hConn, cName ) -> cDate                         */
+/*  OADS_GetFileDate( cName )          -> cDate (default conn)        */
 /* ------------------------------------------------------------------ */
 HB_FUNC( OADS_GETFILEDATE )
 {
-    ADSHANDLE  hConn   = ( ADSHANDLE ) hb_parnint( 1 );
-    const char *szName = hb_parc( 2 );
+    ADSHANDLE  hConn;
+    const char *szName;
     UNSIGNED8  aucDate[ 32 ] = { 0 };
     UNSIGNED16 usLen   = sizeof( aucDate );
+
+    if( hb_pcount() >= 2 )
+    {
+        hConn  = ( ADSHANDLE ) hb_parnint( 1 );
+        szName = hb_parc( 2 );
+    }
+    else
+    {
+        AdsGetDefaultConnection( &hConn );
+        szName = hb_parc( 1 );
+    }
 
     if( szName )
         oads_GetFileDate( hConn, ( UNSIGNED8 * ) szName, aucDate, &usLen );
@@ -217,13 +337,25 @@ HB_FUNC( OADS_GETFILEDATE )
 
 /* ------------------------------------------------------------------ */
 /*  OADS_GetFileTime( hConn, cName ) -> cTime                         */
+/*  OADS_GetFileTime( cName )          -> cTime (default conn)        */
 /* ------------------------------------------------------------------ */
 HB_FUNC( OADS_GETFILETIME )
 {
-    ADSHANDLE  hConn   = ( ADSHANDLE ) hb_parnint( 1 );
-    const char *szName = hb_parc( 2 );
+    ADSHANDLE  hConn;
+    const char *szName;
     UNSIGNED8  aucTime[ 32 ] = { 0 };
     UNSIGNED16 usLen   = sizeof( aucTime );
+
+    if( hb_pcount() >= 2 )
+    {
+        hConn  = ( ADSHANDLE ) hb_parnint( 1 );
+        szName = hb_parc( 2 );
+    }
+    else
+    {
+        AdsGetDefaultConnection( &hConn );
+        szName = hb_parc( 1 );
+    }
 
     if( szName )
         oads_GetFileTime( hConn, ( UNSIGNED8 * ) szName, aucTime, &usLen );
@@ -232,12 +364,24 @@ HB_FUNC( OADS_GETFILETIME )
 
 /* ------------------------------------------------------------------ */
 /*  OADS_DirMake( hConn, cPath ) -> lOk                               */
+/*  OADS_DirMake( cPath )          -> lOk (default conn)              */
 /* ------------------------------------------------------------------ */
 HB_FUNC( OADS_DIRMAKE )
 {
-    ADSHANDLE  hConn  = ( ADSHANDLE ) hb_parnint( 1 );
-    const char *szPath = hb_parc( 2 );
+    ADSHANDLE  hConn;
+    const char *szPath;
     UNSIGNED32 ulRc    = 1;
+
+    if( hb_pcount() >= 2 )
+    {
+        hConn  = ( ADSHANDLE ) hb_parnint( 1 );
+        szPath = hb_parc( 2 );
+    }
+    else
+    {
+        AdsGetDefaultConnection( &hConn );
+        szPath = hb_parc( 1 );
+    }
 
     if( szPath )
         ulRc = oads_DirMake( hConn, ( UNSIGNED8 * ) szPath );
@@ -246,12 +390,24 @@ HB_FUNC( OADS_DIRMAKE )
 
 /* ------------------------------------------------------------------ */
 /*  OADS_DirRemove( hConn, cPath ) -> lOk                             */
+/*  OADS_DirRemove( cPath )          -> lOk (default conn)            */
 /* ------------------------------------------------------------------ */
 HB_FUNC( OADS_DIRREMOVE )
 {
-    ADSHANDLE  hConn  = ( ADSHANDLE ) hb_parnint( 1 );
-    const char *szPath = hb_parc( 2 );
+    ADSHANDLE  hConn;
+    const char *szPath;
     UNSIGNED32 ulRc    = 1;
+
+    if( hb_pcount() >= 2 )
+    {
+        hConn  = ( ADSHANDLE ) hb_parnint( 1 );
+        szPath = hb_parc( 2 );
+    }
+    else
+    {
+        AdsGetDefaultConnection( &hConn );
+        szPath = hb_parc( 1 );
+    }
 
     if( szPath )
         ulRc = oads_DirRemove( hConn, ( UNSIGNED8 * ) szPath );
@@ -260,12 +416,24 @@ HB_FUNC( OADS_DIRREMOVE )
 
 /* ------------------------------------------------------------------ */
 /*  OADS_DirExist( hConn, cPath ) -> lExists                          */
+/*  OADS_DirExist( cPath )          -> lExists (default conn)         */
 /* ------------------------------------------------------------------ */
 HB_FUNC( OADS_DIREXIST )
 {
-    ADSHANDLE  hConn   = ( ADSHANDLE ) hb_parnint( 1 );
-    const char *szPath = hb_parc( 2 );
+    ADSHANDLE  hConn;
+    const char *szPath;
     UNSIGNED16 usExists = 0;
+
+    if( hb_pcount() >= 2 )
+    {
+        hConn  = ( ADSHANDLE ) hb_parnint( 1 );
+        szPath = hb_parc( 2 );
+    }
+    else
+    {
+        AdsGetDefaultConnection( &hConn );
+        szPath = hb_parc( 1 );
+    }
 
     if( szPath )
         oads_DirExist( hConn, ( UNSIGNED8 * ) szPath, &usExists );
@@ -274,15 +442,29 @@ HB_FUNC( OADS_DIREXIST )
 
 /* ------------------------------------------------------------------ */
 /*  OADS_Directory( hConn, cMask, nAttr ) -> cBuf                     */
+/*  OADS_Directory( cMask, nAttr )          -> cBuf (default conn)    */
 /* ------------------------------------------------------------------ */
 HB_FUNC( OADS_DIRECTORY )
 {
-    ADSHANDLE  hConn  = ( ADSHANDLE ) hb_parnint( 1 );
-    const char *szMask = hb_parc( 2 );
-    UNSIGNED16 usAttr  = ( UNSIGNED16 ) hb_parni( 3 );
+    ADSHANDLE  hConn;
+    const char *szMask;
+    UNSIGNED16 usAttr;
     UNSIGNED32 ulLen   = 0;
     unsigned char *buf;
     UNSIGNED32 ulRc;
+
+    if( hb_pcount() >= 3 )
+    {
+        hConn  = ( ADSHANDLE ) hb_parnint( 1 );
+        szMask = hb_parc( 2 );
+        usAttr = ( UNSIGNED16 ) hb_parni( 3 );
+    }
+    else
+    {
+        AdsGetDefaultConnection( &hConn );
+        szMask = hb_parc( 1 );
+        usAttr = ( UNSIGNED16 ) hb_parni( 2 );
+    }
 
     if( szMask )
         oads_Directory( hConn, ( UNSIGNED8 * ) szMask, usAttr, NULL, &ulLen );
@@ -305,13 +487,25 @@ HB_FUNC( OADS_DIRECTORY )
 
 /* ------------------------------------------------------------------ */
 /*  OAds_FExist( hConn, cFileName ) -> lExists                         */
+/*  OAds_FExist( cFileName )          -> lExists (default conn)        */
 /*  Alias for OAds_CheckExistence, file-specific naming                */
 /* ------------------------------------------------------------------ */
 HB_FUNC( OADS_FEXIST )
 {
-    ADSHANDLE  hConn   = ( ADSHANDLE ) hb_parnint( 1 );
-    const char *szName = hb_parc( 2 );
+    ADSHANDLE  hConn;
+    const char *szName;
     UNSIGNED16 usExists = 0;
+
+    if( hb_pcount() >= 2 )
+    {
+        hConn  = ( ADSHANDLE ) hb_parnint( 1 );
+        szName = hb_parc( 2 );
+    }
+    else
+    {
+        AdsGetDefaultConnection( &hConn );
+        szName = hb_parc( 1 );
+    }
 
     if( szName )
         oads_CheckExistence( hConn, ( UNSIGNED8 * ) szName, &usExists );

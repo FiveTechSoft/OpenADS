@@ -110,6 +110,20 @@ UNSIGNED32 OADSAPI oads_DirMake( ADSHANDLE hConnect,
     return AdsDirMake( hConnect, pucPath );
 }
 
+/* ------------------------------------------------------------------ */
+/*  Connection switching                                              */
+/* ------------------------------------------------------------------ */
+
+UNSIGNED32 OADSAPI oads_SetConnection( ADSHANDLE hConnect )
+{
+    return AdsSetDefaultConnection( hConnect );
+}
+
+UNSIGNED32 OADSAPI oads_GetConnection( ADSHANDLE *phConnect )
+{
+    return AdsGetDefaultConnection( phConnect );
+}
+
 UNSIGNED32 OADSAPI oads_DirRemove( ADSHANDLE hConnect,
                                       UNSIGNED8 *pucPath )
 {
