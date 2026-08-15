@@ -79,7 +79,7 @@ util::Result<Socket> listen_tcp(const ListenerOptions& opts) {
 
 util::Result<std::uint16_t> socket_local_port(const Socket& sock) {
     sockaddr_in addr{};
-    int len = sizeof(addr);
+    int len = static_cast<int>(sizeof(addr));
     if (getsockname(static_cast<SOCKET>(sock.handle),
                     reinterpret_cast<sockaddr*>(&addr), &len) ==
         SOCKET_ERROR) {
@@ -91,7 +91,7 @@ util::Result<std::uint16_t> socket_local_port(const Socket& sock) {
 
 util::Result<PeerAddr> socket_peer_addr(const Socket& sock) {
     sockaddr_in addr{};
-    int len = sizeof(addr);
+    int len = static_cast<int>(sizeof(addr));
     if (getpeername(static_cast<SOCKET>(sock.handle),
                     reinterpret_cast<sockaddr*>(&addr), &len) ==
         SOCKET_ERROR) {
@@ -118,7 +118,7 @@ static void disable_nagle(SOCKET s) {
 
 util::Result<Socket> accept_one(Socket& listener) {
     sockaddr_in addr{};
-    int len = sizeof(addr);
+    int len = static_cast<int>(sizeof(addr));
     SOCKET c = ::accept(static_cast<SOCKET>(listener.handle),
                         reinterpret_cast<sockaddr*>(&addr), &len);
     if (c == INVALID_SOCKET) {
@@ -166,6 +166,14 @@ util::Result<Socket> connect_tcp(const std::string& host,
         return util::Error{5000, WSAGetLastError(), "connect() failed", host};
     }
     disable_nagle(s);
+    // M12.33 — set receive timeout so blocking recv() doesn't hang forever
+    // when the remote side is slow or the connection drops silently.
+    {
+        DWORD timeout_ms = 30000;  // 30 seconds
+        ::setsockopt(s, SOL_SOCKET, SO_RCVTIMEO,
+                     reinterpret_cast<const char*>(&timeout_ms),
+                     sizeof(timeout_ms));
+    }
     Socket out;
     out.handle = static_cast<std::uintptr_t>(s);
     return out;
