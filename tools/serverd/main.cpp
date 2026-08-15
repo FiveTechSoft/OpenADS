@@ -15,6 +15,7 @@
 #include "mgmt/error_log.h"
 #include "network/server.h"
 #include "platform/dll.h"
+#include "openads_version.h"  // OPENADS_VERSION_STR (CMake-generated)
 #include "platform/path.h"
 #include "tools/serverd/config_ini.h"
 #include "tools/serverd/setup_wizard.h"

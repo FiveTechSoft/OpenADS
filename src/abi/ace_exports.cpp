@@ -1,6 +1,7 @@
 #include <cstdarg>
 #include "openads/ace.h"
 #include "openads/error.h"
+#include "openads_version.h"  // OPENADS_VERSION_STR (CMake-generated)
 #include "abi/lock_retry_policy.h"
 
 // Expose lock_retry_policy() at file scope so ADS_SETLOCKCYCLE etc. can use it.

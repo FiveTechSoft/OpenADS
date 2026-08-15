@@ -9,6 +9,8 @@
 
 #include "rpc_bridge.h"
 
+#include "openads_version.h"  // OPENADS_VERSION_STR (CMake-generated)
+
 #include <cstring>
 #include <algorithm>
 #include <chrono>

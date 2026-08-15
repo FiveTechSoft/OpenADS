@@ -1,5 +1,10 @@
 #include "network/server.h"
 
+// OPENADS_VERSION_STR from the CMake-generated header (configure_file,
+// copy-if-different) -- not a global compile definition, so a version
+// bump only recompiles this TU.
+#include "openads_version.h"
+
 #include "engine/aof_eval.h"
 #include "engine/aof_expr.h"
 #include "engine/table.h"

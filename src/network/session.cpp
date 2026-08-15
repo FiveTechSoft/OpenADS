@@ -1,5 +1,7 @@
 #include "network/session.h"
 
+#include "openads_version.h"  // OPENADS_VERSION_STR (CMake-generated)
+
 #include "engine/aof_eval.h"
 #include "engine/index_expr.h"
 #include "engine/aof_expr.h"

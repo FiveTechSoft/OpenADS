@@ -30,7 +30,17 @@ if(GIT_FOUND AND EXISTS "${CMAKE_SOURCE_DIR}/.git")
     endif()
 endif()
 message(STATUS "OpenADS version: ${OPENADS_VERSION_STR}")
-add_compile_definitions(OPENADS_VERSION_STR="${OPENADS_VERSION_STR}")
+# Deliver the version through a generated header instead of a global
+# compile definition: a new commit used to change the command line of
+# EVERY translation unit (add_compile_definitions), forcing a full
+# 340-TU rebuild on the next build. configure_file() is
+# copy-if-different, so the header's timestamp only moves when the
+# version string really changes and only its ~7 consumers recompile.
+configure_file(
+    "${CMAKE_SOURCE_DIR}/cmake/openads_version.h.in"
+    "${CMAKE_BINARY_DIR}/generated/openads_version.h"
+    @ONLY)
+include_directories("${CMAKE_BINARY_DIR}/generated")
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -331,7 +341,9 @@ if(OPENADS_WITH_MARIADB)
 endif()
 
 if(MSVC)
-    add_compile_options(/W4 /permissive-)
+    # /MP: compile TUs of each project in parallel (one cl.exe per core).
+    # Without it a full rebuild of the ~340-TU tree runs serially.
+    add_compile_options(/W4 /permissive- /MP)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
     if(OPENADS_WARNINGS_AS_ERRORS)
         add_compile_options(/WX)

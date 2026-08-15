@@ -1,5 +1,7 @@
 #include "tools/serverd/http_server.h"
 
+#include "openads_version.h"  // OPENADS_VERSION_STR (CMake-generated)
+
 #if defined(OPENADS_WITH_HTTP)
 
 #include "tools/serverd/spa_index.h"

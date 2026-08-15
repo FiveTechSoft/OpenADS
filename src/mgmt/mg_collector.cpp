@@ -1,6 +1,8 @@
 #include "mgmt/mg_collector.h"
 #include "engine/data_dict.h"
 
+#include "openads_version.h"  // OPENADS_VERSION_STR (CMake-generated)
+
 #include <algorithm>
 #include <cctype>
 #include <chrono>
