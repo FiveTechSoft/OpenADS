@@ -16,14 +16,6 @@ namespace fs = std::filesystem;
 
 namespace {
 
-void set_str(ADSHANDLE h, const char* field, const char* val) {
-    UNSIGNED8 f[16];
-    std::memcpy(f, field, std::strlen(field) + 1);
-    UNSIGNED8 v[64];
-    std::memcpy(v, val, std::strlen(val) + 1);
-    AdsSetString(h, f, v, static_cast<UNSIGNED32>(std::strlen(val)));
-}
-
 void make_tag(ADSHANDLE hTable, const char* tag, const char* expr) {
     UNSIGNED8 fn[16];
     std::memcpy(fn, "data", 5);
@@ -45,20 +37,6 @@ std::string get_field(ADSHANDLE hT, const char* field) {
     std::string s(reinterpret_cast<char*>(buf), len);
     while (!s.empty() && s.back() == ' ') s.pop_back();
     return s;
-}
-
-bool seek_hit(ADSHANDLE hI, ADSHANDLE hT, const char* key,
-              const char* field, const char* expect_prefix) {
-    UNSIGNED16 found = 0;
-    AdsSeek(hI, reinterpret_cast<UNSIGNED8*>(const_cast<char*>(key)),
-            static_cast<UNSIGNED16>(std::strlen(key)),
-            ADS_STRINGKEY, /*hard*/ 0, &found);
-    if (found != 1) return false;
-    if (expect_prefix) {
-        std::string got = get_field(hT, field);
-        return got.substr(0, std::strlen(expect_prefix)) == expect_prefix;
-    }
-    return true;
 }
 
 } // namespace
