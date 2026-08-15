@@ -52,20 +52,6 @@ void make_tag_desc(ADSHANDLE hTable, const char* tag, const char* expr) {
                              0x0A, 512, &hIdx) == 0);
 }
 
-void make_tag_cond(ADSHANDLE hTable, const char* tag, const char* expr,
-                   const char* cond) {
-    UNSIGNED8 fn[16];
-    std::memcpy(fn, "data", 5);
-    UNSIGNED8 t[64];
-    std::memcpy(t, tag, std::strlen(tag) + 1);
-    UNSIGNED8 e[64];
-    std::memcpy(e, expr, std::strlen(expr) + 1);
-    UNSIGNED8 c[64];
-    std::memcpy(c, cond, std::strlen(cond) + 1);
-    ADSHANDLE hIdx = 0;
-    REQUIRE(AdsCreateIndex61(hTable, fn, t, e, c, nullptr, 0, 512, &hIdx) == 0);
-}
-
 std::string get_field(ADSHANDLE hT, const char* field) {
     UNSIGNED8 buf[64];
     UNSIGNED32 len = sizeof(buf);
@@ -91,12 +77,6 @@ bool seek_hit_soft(ADSHANDLE hI, const char* key) {
             static_cast<UNSIGNED16>(std::strlen(key)),
             ADS_STRINGKEY, /*soft*/ 1, &found);
     return found == 1;
-}
-
-void set_order(ADSHANDLE h, const char* tag) {
-    UNSIGNED8 t[64];
-    std::memcpy(t, tag, std::strlen(tag) + 1);
-    REQUIRE(AdsSetIndexOrder(h, t) == 0);
 }
 
 } // namespace
