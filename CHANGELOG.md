@@ -1,3 +1,29 @@
+## 1.8.83 - 2026-08-15
+
+### Fixed — AdsUnlockTable must release ALL locks (Pritpal Bedi)
+
+The original SAP Advantage Client Engine released every lock (FLock AND
+all RLocks) when `AdsUnlockTable` was called.  Harbour rddads delegates
+all lock tracking to the server (no client-side `pLocksPos` list) and
+trusts `AdsUnlockTable` to release everything.  OpenADS previously only
+released the FLock and then **re-asserted** the RLocks — the opposite
+of what rddads expects, causing `dbUnlock()` to leave record locks held
+and other sessions stuck in lock-retry loops.
+
+- **`Table::unlock_table()`** now calls `release_all_record_locks_()`
+  (new) instead of `reassert_record_locks_()`, matching the ACE
+  contract.
+- **`release_all_record_locks_()`** releases every OS byte-range lock
+  held by the table and clears `recno_locks_` entirely.
+- **`AdsUnlockTable`** now calls `remove_all_for_table()` on the
+  `LockRegistry` (removes both table and record lock entries).
+- **Session `UnlockTable` handler** now routes through the ABI shadow
+  handle when one exists (same dual-handle pattern as
+  `LockRecord`/`UnlockRecord`), so the ABI-side `LockMgr` also
+  releases its locks.
+- `reassert_record_locks_()` is preserved for the `lock_table_excl`
+  failure path (best-effort restore when FLock acquisition fails).
+
 ## 1.8.81 - 2026-08-15
 
 ### Fixed — DBFCDX conformance sweep (dballcmp harness, Pritpal Bedi)

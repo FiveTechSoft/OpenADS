@@ -2247,9 +2247,21 @@ DispatchResult Session::dispatch(const Frame& f) {
                     break;
                 }
             } else {
-                auto r = tbl->unlock_table();
-                if (!r) { reply = err("UnlockTable: failed",
-                    static_cast<UNSIGNED32>(r.error().code)); break; }
+                // M12.16 dual-handle: route through the ABI shadow handle
+                // when it exists (same as LockRecord/UnlockRecord) so the
+                // ABI-side Table's LockMgr releases its own locks.
+                if (auto hit = tbls_h_.find(id); hit != tbls_h_.end()) {
+                    UNSIGNED32 rrc = AdsUnlockTable(hit->second);
+                    // Also release engine-side locks (best-effort cleanup).
+                    (void)tbl->unlock_table();
+                    if (rrc != 0) {
+                        reply = err("UnlockTable: failed", rrc); break;
+                    }
+                } else {
+                    auto r = tbl->unlock_table();
+                    if (!r) { reply = err("UnlockTable: failed",
+                        static_cast<UNSIGNED32>(r.error().code)); break; }
+                }
             }
             reply.opcode = (f.opcode == Opcode::LockTable)
                 ? Opcode::LockTableAck
