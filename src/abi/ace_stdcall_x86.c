@@ -1940,6 +1940,18 @@ __declspec(dllexport) UNSIGNED32 __stdcall AdsGetDefault(UNSIGNED8* a0, UNSIGNED
     return rc;
 }
 
+/* ---- AdsGetDefaultConnection ---- */
+#define AdsGetDefaultConnection oadsimpl_AdsGetDefaultConnection
+extern UNSIGNED32 ENTRYPOINT AdsGetDefaultConnection(ADSHANDLE* phConn);
+#undef AdsGetDefaultConnection
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsGetDefaultConnection=_AdsGetDefaultConnection")
+#pragma comment(linker, "/export:AdsGetDefaultConnection=_AdsGetDefaultConnection")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsGetDefaultConnection(ADSHANDLE* a0) {
+    UNSIGNED32 rc = oadsimpl_AdsGetDefaultConnection(a0);
+    arc_log_rc("AdsGetDefaultConnection", rc, 1, (uintptr_t)a0);
+    return rc;
+}
+
 /* ---- AdsGetDeleted ---- */
 #define AdsGetDeleted oadsimpl_AdsGetDeleted
 extern UNSIGNED32 ENTRYPOINT AdsGetDeleted(UNSIGNED16* pbShow);
@@ -3713,6 +3725,18 @@ extern UNSIGNED32 ENTRYPOINT AdsSetDefault(UNSIGNED8* pucDir);
 __declspec(dllexport) UNSIGNED32 __stdcall AdsSetDefault(UNSIGNED8* a0) {
     UNSIGNED32 rc = oadsimpl_AdsSetDefault(a0);
     arc_log_rc("AdsSetDefault", rc, 1, (uintptr_t)a0);
+    return rc;
+}
+
+/* ---- AdsSetDefaultConnection ---- */
+#define AdsSetDefaultConnection oadsimpl_AdsSetDefaultConnection
+extern UNSIGNED32 ENTRYPOINT AdsSetDefaultConnection(ADSHANDLE hConn);
+#undef AdsSetDefaultConnection
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsSetDefaultConnection=_AdsSetDefaultConnection")
+#pragma comment(linker, "/export:AdsSetDefaultConnection=_AdsSetDefaultConnection")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsSetDefaultConnection(ADSHANDLE a0) {
+    UNSIGNED32 rc = oadsimpl_AdsSetDefaultConnection(a0);
+    arc_log_rc("AdsSetDefaultConnection", rc, 1, (uintptr_t)a0);
     return rc;
 }
 

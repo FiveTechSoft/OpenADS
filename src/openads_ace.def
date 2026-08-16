@@ -148,6 +148,8 @@ EXPORTS
     oads_DirRemove
     oads_DirExist
     oads_Directory
+    oads_SetConnection
+    oads_GetConnection
     AdsClearCallbackFunction
     AdsClearFilter
     AdsClearRelation
@@ -220,6 +222,7 @@ EXPORTS
     AdsGetDecimals
     AdsGetDateFormat
     AdsGetDefault
+    AdsGetDefaultConnection
     AdsGetDeleted
     AdsGetDouble
     AdsGetEpoch
@@ -313,6 +316,7 @@ EXPORTS
     AdsSetDateFormat60
     AdsSetDecimals
     AdsSetDefault
+    AdsSetDefaultConnection
     AdsSetEpoch
     AdsSetExact
     AdsSetExact22

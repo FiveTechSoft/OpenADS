@@ -34,6 +34,8 @@ EXPORTS
     oads_DirRemove
     oads_DirExist
     oads_Directory
+    oads_SetConnection
+    oads_GetConnection
 
     ; Legacy MSVC2013-era CRT shims (M8.2). Harbour's msvc64 prebuilt
     ; libs reference these symbols; modern UCRT no longer ships them.
