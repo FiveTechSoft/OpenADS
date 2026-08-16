@@ -194,6 +194,8 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
     namespace fs = std::filesystem;
     std::string effective = relative_path;
     if (dd_.has_value()) effective = dd_->resolve(relative_path);
+    std::fprintf(stderr, "[resolve] input=\"%s\" effective=\"%s\" data_dir=\"%s\"\n",
+                 relative_path.c_str(), effective.c_str(), data_dir_.c_str());
     // The connection's data_dir is the directory the server owns; every
     // table name is resolved *relative to* it. Clients (Harbour rddads,
     // X# ADSRDD, …) routinely pass an absolute or drive-rooted path that
@@ -242,8 +244,12 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
             if (auto r = platform::resolve_client_path({data_dir_},
                                                        effective)) {
                 rel = fs::path(*r);
+                std::fprintf(stderr, "[resolve] LEGACY remap: \"%s\" -> \"%s\"\n",
+                             effective.c_str(), rel.string().c_str());
             } else {
                 rel = fs::path(platform::fold_absolute_to_relative(effective));
+                std::fprintf(stderr, "[resolve] LEGACY fold: \"%s\" -> \"%s\"\n",
+                             effective.c_str(), rel.string().c_str());
             }
         } else if (!for_create) {
             std::error_code ec;
@@ -286,6 +292,8 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
                     std::string resolved =
                         platform::resolve_case_insensitive(cand.string());
                     align_type_with_file(resolved, type);
+                    std::fprintf(stderr, "[resolve] FALLBACK client path: \"%s\" (exists=%d)\n",
+                                 resolved.c_str(), (int)fs::exists(cand, ec));
                     return resolved;
                 }
             }
@@ -376,6 +384,7 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
     // path names a file that does not exist yet (and if it does, the
     // caller is deliberately overwriting it with a chosen format).
     if (!for_create) align_type_with_file(resolved, type);
+    std::fprintf(stderr, "[resolve] RESOLVED=\"%s\" (sandboxed)\n", resolved.c_str());
     return resolved;
 }
 
