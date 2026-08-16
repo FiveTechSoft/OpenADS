@@ -187,6 +187,7 @@ endif()
 target_include_directories(openads_core
     PUBLIC
         ${CMAKE_SOURCE_DIR}/include
+        ${CMAKE_SOURCE_DIR}/include/openads
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_SOURCE_DIR}/third_party/tinyaes
@@ -351,6 +352,7 @@ endif()
 
 target_include_directories(openads_ace
     PUBLIC  ${CMAKE_SOURCE_DIR}/include
+            ${CMAKE_SOURCE_DIR}/include/openads
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
             ${CMAKE_SOURCE_DIR}/third_party/tinyaes
 )
