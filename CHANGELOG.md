@@ -1,3 +1,22 @@
+## 1.8.88 - 2026-08-17
+
+### Fixed — `oads_hb.c` includes `"ace.h"` (Pritpal Bedi)
+
+`contrib/oads_hb/oads_hb.c` is compiled into the Harbour application,
+not into the OpenADS library. It now includes `"ace.h"` the same way
+`contrib/rddads` does, so it builds against `HB_WITH_ADS` / the ACE
+SDK without editing the file every time. `"openads/ace.h"` only
+resolves inside the OpenADS source tree.
+
+### Release packaging — no more `*-win-*.zip` duplicates
+
+Canonical GitHub Release assets are `openads-<ver>-windows-x64.zip`
+and `openads-<ver>-windows-x86.zip`. Do not upload a parallel
+`*-win-x64.zip` / `*-win-x86.zip` (that short name was a hand-rolled
+slim kit with a different `ace64.dll`). The release workflow rejects
+those names in CI artifacts and drops leftovers from the GitHub
+Release.
+
 ## 1.8.87 - 2026-08-17
 
 ### Added — resolve audit trail (Pritpal Bedi)

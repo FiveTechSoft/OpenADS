@@ -12,6 +12,10 @@
 test_oads_file.prg
 ../oads_hb.c
 
+# oads_hb.c includes "ace.h" (rddads / ACE SDK spelling). In this
+# tree that file lives at include/openads/ace.h.
+-I../../../include/openads
+
 -comp=mingw64
 
 -w3

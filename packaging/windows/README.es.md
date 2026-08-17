@@ -50,6 +50,23 @@ El `.exe` se genera en `output\`.
 
 La desinstalación detiene el servicio primero y luego elimina los archivos.
 
+## Nombres de los ZIP de release
+
+Los assets canónicos de GitHub Release (los genera
+`.github/workflows/release.yml` y CPack) son:
+
+- `openads-<ver>-windows-x64.zip`
+- `openads-<ver>-windows-x86.zip`
+
+**No** crear ni subir un `openads-<ver>-win-x64.zip` /
+`openads-<ver>-win-x86.zip` en paralelo. Ese nombre corto era un kit
+manual (cuenta FiveTechSoft, 5 ficheros, otro `ace64.dll`) que en
+v1.8.84–v1.8.86 convivía con el ZIP de CI y parecía un duplicado.
+
+Para publicar: empujar el tag `v*` y dejar que CI adjunte los
+`windows-*`. No usar `gh release create` / `gh release upload` con un
+`*-win-*.zip` local.
+
 ## Notas
 
 - El instalador requiere elevación (`PrivilegesRequired=admin`) porque tanto el

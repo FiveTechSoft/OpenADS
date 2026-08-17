@@ -12,6 +12,22 @@ Complete history of releases with categorized improvements.
 
 ---
 
+## v1.8.88 — 2026-08-17
+
+### Bug Fixes
+
+- **`oads_hb.c` includes `"ace.h"`** — Harbour drop-in glue now uses
+  the same header as `contrib/rddads`, so it compiles in a consumer
+  project without editing the file each time (Pritpal Bedi).
+
+### Packaging
+
+- **Windows ZIP names** — only `openads-<ver>-windows-x64.zip` /
+  `windows-x86.zip`. The parallel `*-win-*.zip` slim kit is no longer
+  published (it was a different `ace64.dll` and confused downloads).
+
+---
+
 ## v1.8.87 — 2026-08-17
 
 ### New Features

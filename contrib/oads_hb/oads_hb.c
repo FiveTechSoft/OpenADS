@@ -11,8 +11,13 @@
  * The actual C implementations live in adsfunc.c (or inside the
  * OpenADS DLL).  This file only contains the Harbour<->C glue.
  *
- * Build (hbmk2):
- *   hbmk2 myproject.hbp oads_hb.c adsfunc.c -I/path/to/openads/include
+ * Build (hbmk2) — this file is compiled into YOUR project, not the
+ * OpenADS library, so it includes "ace.h" the same way rddads does
+ * (Harbour HB_WITH_ADS, the ACE SDK, or a copy of include/openads/ace.h).
+ * Do not use "openads/ace.h" here: that path only exists inside the
+ * OpenADS source tree and forces every consumer to edit this file.
+ *
+ *   hbmk2 myproject.hbp oads_hb.c adsfunc.c -I/path/to/dir/with/ace.h
  *
  * Or if oads_*() are already exported by the DLL (openace64.dll):
  *   hbmk2 myproject.hbp oads_hb.c -L/path/to/openads/importlib -lace64
@@ -29,7 +34,7 @@
 
 #include "hbapi.h"
 #include "hbapiitm.h"
-#include "openads/ace.h"
+#include "ace.h"
 
 /* ------------------------------------------------------------------ */
 /*  OADS_SETCONNECTION( hConn ) -> lOk                                 */

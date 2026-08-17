@@ -80,6 +80,18 @@ Details: [`bindings/php_ext/README.md`](bindings/php_ext/README.md).
 `main` on the upstream repo. Every change lands through an open PR
 that the project owner reviews and merges.
 
+### Releasing (maintainers)
+
+Push a `v*` tag and let `.github/workflows/release.yml` create the
+GitHub Release. Windows assets **must** be named
+`openads-<ver>-windows-x64.zip` / `openads-<ver>-windows-x86.zip`.
+
+Do **not** also upload `openads-<ver>-win-x64.zip` /
+`openads-<ver>-win-x86.zip`. Those short names were a hand-rolled
+slim kit that shipped beside the CI zip (v1.8.84–v1.8.86) with a
+different `ace64.dll` and a different layout. See
+[`packaging/windows/README.md`](packaging/windows/README.md).
+
 ### Every PR must be documented
 
 The PR description should include:

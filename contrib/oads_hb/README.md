@@ -1,4 +1,4 @@
-# oads_hb — Harbour HB_FUNC wrappers for `oads_*()` C API
+# oads_hb ï¿½ Harbour HB_FUNC wrappers for `oads_*()` C API
 
 Provides `OADS_FCREATE()`, `OADS_FOPEN()`, `OADS_FCLOSE()`,
 `OADS_FWRITE()`, `OADS_FREAD()`, and `OADS_FSEEK()` as callable
@@ -6,7 +6,7 @@ Harbour functions.
 
 These are thin wrappers over the `oads_*()` exports from the OpenADS
 DLL. The `oads_*()` functions are themselves ABI aliases for the
-canonical `AdsF*()` functions — same engine, different name.
+canonical `AdsF*()` functions ï¿½ same engine, different name.
 
 ## Why?
 
@@ -67,12 +67,18 @@ RETURN
 
 ## Build
 
+`oads_hb.c` is compiled into **your** Harbour project (not the OpenADS
+DLL). It includes `"ace.h"` the same way `contrib/rddads` does â€” from
+`HB_WITH_ADS`, the ACE SDK, or a copy of `include/openads/ace.h` on
+the include path. Do not change this back to `"openads/ace.h"`: that
+path only exists inside the OpenADS source tree.
+
 ```cmd
 set OPENADS_LIB=C:\OpenADS\dist\import-libs\x64\mingw
 hbmk2 myproject.hbp oads_hb.c -L%OPENADS_LIB% -lace64
 ```
 
-Or add `oads_hb.c` to your `.hbp` recipe alongside `../oads_hb.c`.
+Or add `oads_hb.c` to your `.hbp` recipe.
 
 ## Test
 

@@ -45,6 +45,22 @@ The `.exe` lands in `output\`.
 
 Uninstall removes the service first, then the files.
 
+## Release ZIP names
+
+Canonical GitHub Release assets (produced by `.github/workflows/release.yml`
+and by CPack) are:
+
+- `openads-<ver>-windows-x64.zip`
+- `openads-<ver>-windows-x86.zip`
+
+**Do not** create or upload a parallel `openads-<ver>-win-x64.zip` /
+`openads-<ver>-win-x86.zip`. That short name was a hand-rolled slim kit
+(FiveTechSoft account, 5 files, a different `ace64.dll`) that sat next
+to the CI zip on v1.8.84–v1.8.86 and looked like a duplicate.
+
+To publish: push the `v*` tag and let CI attach the `windows-*` zips.
+Do not `gh release create` / `gh release upload` a local `*-win-*.zip`.
+
 ## Notes
 
 - The installer requires elevation (`PrivilegesRequired=admin`) because the

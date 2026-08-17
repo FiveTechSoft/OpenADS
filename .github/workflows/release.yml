@@ -110,6 +110,11 @@ jobs:
           ls -la "$STAGE.tar.gz"
           echo "ASSET=$STAGE.tar.gz" >> "$GITHUB_ENV"
 
+      # Canonical Windows ZIP name is openads-<ver>-windows-<arch>.zip
+      # (CPack and this workflow). Never emit openads-<ver>-win-<arch>.zip —
+      # that short name was a hand-rolled slim kit uploaded beside the CI
+      # zip on v1.8.84–v1.8.86 and shipped a different ace64.dll. See
+      # packaging/windows/README.md ("Release ZIP names").
       - name: Stage release files (Windows)
         if: always() && runner.os == 'Windows'
         shell: pwsh
@@ -227,9 +232,41 @@ jobs:
           done
           echo "Windows asset check complete."
 
+      # The short *-win-x64.zip / *-win-x86.zip names are forbidden.
+      # They were a manual FiveTechSoft kit that sat next to the CI
+      # *-windows-*.zip and confused users (different binary + layout).
+      - name: Reject leftover *-win-*.zip names
+        shell: bash
+        run: |
+          shopt -s nullglob
+          bad=(out/openads-*-win-*.zip)
+          if ((${#bad[@]})); then
+            echo "::error::Do not ship *-win-x64.zip / *-win-x86.zip."
+            echo "Canonical names are *-windows-x64.zip / *-windows-x86.zip."
+            printf '%s\n' "${bad[@]}"
+            exit 1
+          fi
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
           generate_release_notes: true
           files: out/*
+
+      # If the tag was published by hand with the old slim kit already
+      # attached, drop those assets so only the CI windows-* zips remain.
+      - name: Drop leftover manual *-win-*.zip assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          mapfile -t names < <(
+            gh release view "$TAG" --json assets --jq '.assets[].name' \
+              | grep -E '^openads-.+-win-(x64|x86)\.zip$' || true
+          )
+          for name in "${names[@]}"; do
+            echo "Removing leftover duplicate asset: $name"
+            gh release delete-asset "$TAG" "$name" --yes
+          done
