@@ -20,6 +20,9 @@ HYT673 00000001 2026-08-16 22:12:13.826 RESOLVED="C:/temp/creative.ram/USERS.dbf
   `(sandboxed)|(client)|(remote)` say where it landed.
 - A remote `AdsOpenTable` on the client writes
   `RESOLVED="(remote)" asked="..." via=remote` (no local file).
+- One physical file (table or index bag) emits **one** `RESOLVED` line
+  per connection. `AdsOpenTable` + `find_open_table` + index-bag
+  resolve no longer double-log `sy900877.dbf` / `.z01`.
 
 ### Fixed — remote server never opens a leftover host path (Pritpal Bedi)
 
