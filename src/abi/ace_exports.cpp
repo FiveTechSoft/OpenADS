@@ -10603,7 +10603,8 @@ UNSIGNED32 ENTRYPOINT AdsGetRecordCount(ADSHANDLE hTable, UNSIGNED16 bFilterOpti
         std::uint32_t pass = 0;
         for (std::uint32_t r = 1; r <= rc; ++r) {
             if (auto g = t->goto_record(r); !g) continue;
-            if (t->is_deleted()) continue;
+            if (!t->show_deleted_records() &&
+                t->is_deleted()) continue;
             if (!t->passes_filter()) continue;
             ++pass;
         }
@@ -26092,7 +26093,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 }
                 for (std::uint32_t r2 : recnos) {
                     if (auto g2 = src_tbl->goto_record(r2); !g2) continue;
-                    if (src_tbl->is_deleted()) continue;
+                    if (!src_tbl->show_deleted_records() &&
+                        src_tbl->is_deleted()) continue;
                     if (!src_tbl->passes_filter()) continue;
                     std::vector<std::string> row;
                     for (std::uint16_t k2 : cols2) {
@@ -26468,7 +26470,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 std::uint32_t rcount = src->record_count();
                 for (std::uint32_t r = 1; r <= rcount; ++r) {
                     if (auto g = src->goto_record(r); !g) continue;
-                    if (src->is_deleted()) continue;
+                    if (!src->show_deleted_records() &&
+                        src->is_deleted()) continue;
                     if (!src->passes_filter()) continue;
                     recnos.push_back(r);
                 }
@@ -26935,7 +26938,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         std::uint32_t rcount = tbl->record_count();
         for (std::uint32_t r = 1; r <= rcount; ++r) {
             if (auto g = tbl->goto_record(r); !g) continue;
-            if (tbl->is_deleted()) continue;
+            if (!tbl->show_deleted_records() &&
+                tbl->is_deleted()) continue;
             if (pred(*tbl)) matches.push_back(r);
         }
 
@@ -27304,7 +27308,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             std::uint32_t rcount = tbl->record_count();
             for (std::uint32_t r = 1; r <= rcount; ++r) {
                 if (auto g = tbl->goto_record(r); !g) continue;
-                if (tbl->is_deleted()) continue;
+                if (!tbl->show_deleted_records() &&
+                    tbl->is_deleted()) continue;
                 if (!tbl->passes_filter()) continue;
 
                 // Evaluate the SET list once for this row (expressions
@@ -27528,7 +27533,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             std::uint32_t rcount = tbl->record_count();
             for (std::uint32_t r = 1; r <= rcount; ++r) {
                 if (auto g = tbl->goto_record(r); !g) continue;
-                if (tbl->is_deleted()) continue;
+                if (!tbl->show_deleted_records() &&
+                    tbl->is_deleted()) continue;
                 if (!tbl->passes_filter()) continue;
                 TrigFieldMap_ old_img;
                 bool row_instead = false;
@@ -27709,7 +27715,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 std::uint32_t rcount = src->record_count();
                 for (std::uint32_t r = 1; r <= rcount; ++r) {
                     if (auto g = src->goto_record(r); !g) continue;
-                    if (src->is_deleted()) continue;
+                    if (!src->show_deleted_records() &&
+                        src->is_deleted()) continue;
                     if (!src->passes_filter()) continue;
                     recnos.push_back(r);
                 }
@@ -28125,7 +28132,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     std::uint32_t rc = mt->record_count();
                     for (std::uint32_t r = 1; r <= rc; ++r) {
                         if (auto g = mt->goto_record(r); !g) continue;
-                        if (mt->is_deleted()) continue;
+                        if (!mt->show_deleted_records() &&
+                            mt->is_deleted()) continue;
                         if (!mt->passes_filter()) continue;
                         recnos.push_back(r);
                     }
@@ -28810,7 +28818,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             std::uint32_t rc = tbls[i]->record_count();
             for (std::uint32_t r = 1; r <= rc; ++r) {
                 if (auto g = tbls[i]->goto_record(r); !g) continue;
-                if (tbls[i]->is_deleted()) continue;
+                if (!tbls[i]->show_deleted_records() &&
+                    tbls[i]->is_deleted()) continue;
                 recs[i] = r;
                 bool keep = true;
                 for (const auto* cj : pure[i])
@@ -28974,7 +28983,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 std::uint32_t rc = tbls[0]->record_count();
                 for (std::uint32_t r = 1; r <= rc; ++r) {
                     if (auto g = tbls[0]->goto_record(r); !g) continue;
-                    if (tbls[0]->is_deleted()) continue;
+                    if (!tbls[0]->show_deleted_records() &&
+                        tbls[0]->is_deleted()) continue;
                     recs[0] = r;
                     if (pass_bucket(0)) walk(1);   // prune table-0 filters early
                 }
@@ -29332,7 +29342,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             std::uint32_t lrc_for_hash = ltbl->record_count();
             for (std::uint32_t r = 1; r <= lrc_for_hash; ++r) {
                 if (auto g = ltbl->goto_record(r); !g) continue;
-                if (ltbl->is_deleted()) continue;
+                if (!ltbl->show_deleted_records() &&
+                    ltbl->is_deleted()) continue;
                 auto v = ltbl->read_field(
                     static_cast<std::uint16_t>(lcol));
                 if (!v) continue;
@@ -29343,7 +29354,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             std::uint32_t rrc = rtbl->record_count();
             for (std::uint32_t r = 1; r <= rrc; ++r) {
                 if (auto g = rtbl->goto_record(r); !g) continue;
-                if (rtbl->is_deleted()) continue;
+                if (!rtbl->show_deleted_records() &&
+                    rtbl->is_deleted()) continue;
                 auto v = rtbl->read_field(
                     static_cast<std::uint16_t>(rcol));
                 if (!v) continue;
@@ -29456,7 +29468,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             std::uint32_t rrc = rtbl->record_count();
             for (std::uint32_t r = 1; r <= rrc; ++r) {
                 if (auto g = rtbl->goto_record(r); !g) continue;
-                if (rtbl->is_deleted()) continue;
+                if (!rtbl->show_deleted_records() &&
+                    rtbl->is_deleted()) continue;
                 auto rv = rtbl->read_field(
                     static_cast<std::uint16_t>(rcol));
                 if (!rv) continue;
@@ -29478,7 +29491,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             std::uint32_t lrc = ltbl->record_count();
             for (std::uint32_t l = 1; l <= lrc; ++l) {
                 if (auto g = ltbl->goto_record(l); !g) continue;
-                if (ltbl->is_deleted()) continue;
+                if (!ltbl->show_deleted_records() &&
+                    ltbl->is_deleted()) continue;
                 auto lv = ltbl->read_field(
                     static_cast<std::uint16_t>(lcol));
                 if (!lv) continue;
@@ -29503,7 +29517,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 for (std::uint32_t r = 1; r <= rrc; ++r) {
                     if (matched_right.find(r) != matched_right.end()) continue;
                     if (auto g = rtbl->goto_record(r); !g) continue;
-                    if (rtbl->is_deleted()) continue;
+                    if (!rtbl->show_deleted_records() &&
+                        rtbl->is_deleted()) continue;
                     emit_merged(false, true);
                 }
             }
@@ -30817,7 +30832,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             std::uint32_t rcount = tbl->record_count();
             for (std::uint32_t r = 1; r <= rcount; ++r) {
                 if (auto g = tbl->goto_record(r); !g) continue;
-                if (tbl->is_deleted()) continue;
+                if (!tbl->show_deleted_records() &&
+                    tbl->is_deleted()) continue;
                 // A derived-table / VIEW source arrives as a live cursor
                 // with its own filter (the view's WHERE) -- rows it hides
                 // must not reach the aggregate.
@@ -31304,7 +31320,15 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         std::uint32_t rcount = tbl->record_count();
         for (std::uint32_t r = 1; r <= rcount; ++r) {
             if (auto g = tbl->goto_record(r); !g) continue;
-            if (tbl->is_deleted()) continue;
+            // SAP's SQL honours AdsShowDeleted (default TRUE): deleted DBF
+            // rows are counted, filtered, ordered, UPDATEd and copied like
+            // live rows (oracle-probed on users.dbf: COUNT 18 not 10; an
+            // UPDATE touches all 18; SELECT INTO copies 18). Every SQL
+            // walk therefore skips deleted rows ONLY when the flag hides
+            // them; the navigational paths always worked this way. ADT
+            // never surfaces deleted rows, so this is DBF-only by nature.
+            if (!tbl->show_deleted_records() &&
+                tbl->is_deleted()) continue;
             // Same rule as the grouped walk: honour a view/derived
             // cursor's own filter.
             if (!tbl->passes_filter()) continue;
@@ -31628,7 +31652,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     std::uint32_t srcount = stbl->record_count();
                     for (std::uint32_t r = 1; r <= srcount; ++r) {
                         if (auto g = stbl->goto_record(r); !g) continue;
-                        if (stbl->is_deleted()) continue;
+                        if (!stbl->show_deleted_records() &&
+                            stbl->is_deleted()) continue;
                         if (!sub->where) { any = true; break; }
                         if (evalw(*sub->where)) { any = true; break; }
                     }
@@ -31778,7 +31803,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                             for (std::uint32_t r = 1; r <= srcount; ++r) {
                                 if (auto g = stbl->goto_record(r); !g)
                                     continue;
-                                if (stbl->is_deleted()) continue;
+                                if (!stbl->show_deleted_records() &&
+                                    stbl->is_deleted()) continue;
                                 if (sub->where && !evalw(*sub->where))
                                     continue;
                                 auto sv = stbl->read_field(
@@ -31825,7 +31851,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     std::uint32_t srcount = stbl->record_count();
                     for (std::uint32_t r = 1; r <= srcount; ++r) {
                         if (auto g = stbl->goto_record(r); !g) continue;
-                        if (stbl->is_deleted()) continue;
+                        if (!stbl->show_deleted_records() &&
+                            stbl->is_deleted()) continue;
                         auto v = stbl->read_field(
                             static_cast<std::uint16_t>(scol));
                         if (!v) continue;
@@ -32004,7 +32031,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                             double maxv = -std::numeric_limits<double>::infinity();
                             for (std::uint32_t r = 1; r <= srcount; ++r) {
                                 if (auto g = stbl->goto_record(r); !g) continue;
-                                if (stbl->is_deleted()) continue;
+                                if (!stbl->show_deleted_records() &&
+                                    stbl->is_deleted()) continue;
                                 if (sub->where && !evalw(*sub->where)) continue;
                                 if (a.kind ==
                                     openads::sql::AggregateKind::CountStar) {
@@ -32048,7 +32076,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                             }
                             for (std::uint32_t r = 1; r <= srcount; ++r) {
                                 if (auto g = stbl->goto_record(r); !g) continue;
-                                if (stbl->is_deleted()) continue;
+                                if (!stbl->show_deleted_records() &&
+                                    stbl->is_deleted()) continue;
                                 if (sub->where && !evalw(*sub->where)) continue;
                                 auto v = stbl->read_field(
                                     static_cast<std::uint16_t>(scol));
@@ -32133,7 +32162,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     std::uint32_t srcount = stbl->record_count();
                     for (std::uint32_t r = 1; r <= srcount; ++r) {
                         if (auto g = stbl->goto_record(r); !g) continue;
-                        if (stbl->is_deleted()) continue;
+                        if (!stbl->show_deleted_records() &&
+                            stbl->is_deleted()) continue;
                         if (a.kind == openads::sql::AggregateKind::CountStar) {
                             ++cnt;
                             continue;
@@ -32192,7 +32222,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     std::uint32_t srcount = stbl->record_count();
                     for (std::uint32_t r = 1; r <= srcount; ++r) {
                         if (auto g = stbl->goto_record(r); !g) continue;
-                        if (stbl->is_deleted()) continue;
+                        if (!stbl->show_deleted_records() &&
+                            stbl->is_deleted()) continue;
                         auto v = stbl->read_field(
                             static_cast<std::uint16_t>(scol));
                         if (!v) continue;
@@ -32355,7 +32386,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         std::uint32_t rcount = tbl->record_count();
         for (std::uint32_t r = 1; r <= rcount; ++r) {
             if (auto g = tbl->goto_record(r); !g) continue;
-            if (tbl->is_deleted()) continue;
+            if (!tbl->show_deleted_records() &&
+                tbl->is_deleted()) continue;
             if (!tbl->passes_filter()) continue;
             matched.push_back(r);
         }
@@ -32424,7 +32456,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             seq.reserve(rcount);
             for (std::uint32_t r = 1; r <= rcount; ++r) {
                 if (auto g = tbl->goto_record(r); !g) continue;
-                if (tbl->is_deleted()) continue;
+                if (!tbl->show_deleted_records() &&
+                    tbl->is_deleted()) continue;
                 if (!tbl->passes_filter()) continue;
                 seq.push_back(r);
             }
@@ -32843,7 +32876,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             std::uint32_t rcount = tbl->record_count();
             for (std::uint32_t r = 1; r <= rcount; ++r) {
                 if (auto g = tbl->goto_record(r); !g) continue;
-                if (tbl->is_deleted()) continue;
+                if (!tbl->show_deleted_records() &&
+                    tbl->is_deleted()) continue;
                 if (!tbl->passes_filter()) continue;
                 walk_seq.push_back(r);
             }
@@ -34090,7 +34124,8 @@ UNSIGNED32 ENTRYPOINT AdsCopyTableContent(ADSHANDLE hSrc, ADSHANDLE hDst) {
     std::uint32_t rcount = src->record_count();
     for (std::uint32_t r = 1; r <= rcount; ++r) {
         if (auto g = src->goto_record(r); !g) continue;
-        if (src->is_deleted()) continue;
+        if (!src->show_deleted_records() &&
+            src->is_deleted()) continue;
         if (auto ar = dst->append_record(); !ar) return fail(ar.error());
         for (auto& fp : pairs) {
             auto v = src->read_field(fp.si);

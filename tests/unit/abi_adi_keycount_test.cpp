@@ -102,12 +102,14 @@ TEST_CASE("ADI keycount: AdsGetKeyCount honours SET DELETED ON") {
 
     UNSIGNED32 count = 0;
 
-    // SET DELETED OFF: all 20 keys are counted.
+    // ADT: AdsShowDeleted "has no effect upon ADT tables" — deleted rows
+    // can never be retrieved, so their keys are not counted under EITHER
+    // flag state (oracle-probed on SAP ace64: keycount and record count
+    // are 15 for IGNOREFILTERS and RESPECTFILTERS alike).
     REQUIRE(AdsShowDeleted(1) == AE_SUCCESS);
     REQUIRE(AdsGetKeyCount(hIdx, 0, &count) == AE_SUCCESS);
-    CHECK(count == 20u);
+    CHECK(count == 15u);
 
-    // SET DELETED ON: only the 15 live keys are counted.
     REQUIRE(AdsShowDeleted(0) == AE_SUCCESS);
     REQUIRE(AdsGetKeyCount(hIdx, 0, &count) == AE_SUCCESS);
     CHECK(count == 15u);

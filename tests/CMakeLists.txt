@@ -147,6 +147,7 @@ add_executable(openads_unit_tests
     unit/abi_rddtst_repro_test.cpp
     unit/engine_navigation_empty_test.cpp
     unit/abi_deleted_records_test.cpp
+    unit/abi_sql_show_deleted_test.cpp
     unit/abi_scoped_deleted_keycount_test.cpp
     unit/abi_keycount_deleted_scan_test.cpp
     unit/abi_index_key_count_test.cpp

@@ -45,6 +45,13 @@ namespace openads::abi {
 
 inline bool show_deleted_for(const openads::engine::Table* t) noexcept {
     if (t != nullptr) {
+        // SAP: AdsShowDeleted "has no effect upon ADT tables" — rows
+        // deleted in an ADT "can never be retrieved by a client
+        // application" (ace_adsshowdeleted). Only DBF-family tables
+        // (CDX/NTX/VFP) surface deleted rows under the TRUE default.
+        if (t->table_type() == openads::engine::TableType::Adt) {
+            return false;
+        }
         if (auto* owner = t->owner()) {
             return owner->show_deleted();
         }
@@ -1909,11 +1916,13 @@ Table::seek_key(const std::string& key, bool soft, bool last) {
     // if the only matching rows are deleted, Found() is .F. and the cursor
     // sits on the next live record or Eof).
     if (!openads::abi::show_deleted_for(this)) {
+        bool moved = false;
         while (r.value().positioned) {
             if (auto ld = load_record_(r.value().recno); !ld) return ld.error();
             if (!is_deleted()) break;
             r = idx->next();
             if (!r) return r.error();
+            moved = true;
         }
         if (!r.value().positioned) {
             state_ = (driver_->record_count() == 0) ? State::Limbo
@@ -1922,7 +1931,16 @@ Table::seek_key(const std::string& key, bool soft, bool last) {
             last_seek_found_ = false;
             return false;
         }
-        exact = key_prefix_matches(idx->current_key(), key, idx->key_length());
+        // Re-derive `exact` ONLY when we skipped past deleted rows: the
+        // byte-wise prefix compare is valid for character keys (the only
+        // kind a deleted-DBF skip walks over in practice) but wrong for
+        // transformed numeric/date ADI keys, where `key` is the caller's
+        // raw form and current_key() the index encoding. If the landing
+        // row was live, the driver's own hit verdict is already right.
+        if (moved) {
+            exact = key_prefix_matches(idx->current_key(), key,
+                                       idx->key_length());
+        }
     }
     // DESCEND order treats the FIRST match in walk direction as
     // the LAST entry in the equal-key group when sorted ASC. Walk

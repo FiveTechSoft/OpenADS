@@ -2,7 +2,7 @@
 
 Living checklist of SAP-parity gaps. Two S4 gates now run:
 `tools/qa-diff/s4_parity.ps1` (pmsys, 41/1 — the 1 is sandbox counter drift, not
-a defect) and `tools/qa-diff/s4_parity_mp.ps1` (mp, 32/23 as of 2026-08-05).
+a defect) and `tools/qa-diff/s4_parity_mp.ps1` (mp, 37/18 as of 2026-08-11).
 This file tracks what's left and what still needs verification against
 current code.
 
@@ -262,11 +262,32 @@ TimeStampAdd; 2 views; 3 procs.
 **First run: 27 identical, 18 diverged.** Every divergence below is a real
 OpenADS gap (test-case bugs already fixed). Grouped by root cause:
 
-- [ ] **Deleted-record visibility on DBF** *(new class, 2 cases)* — SAP counts
-      deleted rows (`SET DELETED OFF` default), OpenADS filters them.
-      `users.dbf` 18 physical / 8 deleted → SAP 18, OA 10; `provider.dbf`
-      20/4 → SAP 20, OA 16; `Forms.dbf` 64/0 → both 64 (control). Invisible on
-      pmsys because it is ADT-only. Affects every DBF table with deletions.
+- [x] **Deleted-record visibility on DBF — FIXED 2026-08-11** *(2 cases,
+      gate 35→37)*. SAP's SQL honours `AdsShowDeleted` (default TRUE): deleted
+      DBF rows are counted, filtered, ordered, UPDATEd and copied
+      (oracle-probed on a `users.dbf` copy: COUNT 18 not 10, UPDATE touched
+      all 18, SELECT INTO copied 18 as live rows). All 28 SQL walks now skip
+      deleted rows only when the flag hides them. ADT is the documented
+      exception — "no effect upon ADT tables", deleted ADT rows are *never*
+      retrievable — enforced at the `show_deleted_for` chokepoint (caught
+      live: visible ADT-deleted audit rows briefly broke the pmsys trigger
+      gate). Guarded by `abi_sql_show_deleted_test.cpp` (fails 5 assertions
+      with the walks reverted).
+      Found while probing, still open:
+      - [ ] free-connection `DROP TABLE` on a DD-registered DBF deletes the
+            file but leaves the `system.tables` row behind (SAP removes
+            both); second DROP then raises 5018 on the orphan.
+      - [ ] real-table `SELECT ... INTO t FROM ...` is unsupported (parser
+            only knows `INTO #temp`; raises 2115 "expected FROM"). SAP
+            accepts bare and quoted targets and copies deleted DBF source
+            rows as live rows.
+      - [ ] `AdsGetRecordCount(ADS_IGNOREFILTERS)` on an ADT with deleted
+            rows returns the physical count (20) where SAP excludes them
+            (15 for every filter option — oracle-probed; RESPECTFILTERS
+            already matches).
+      - [ ] `AdsCopyTable` still skips deleted DBF rows under the TRUE
+            default; SAP's doc says they are copied (the sibling
+            `AdsCopyTableContent` walk is fixed and test-pinned).
 - [x] **SQL feature gaps — ALL FIVE FIXED.** ~~COUNT(DISTINCT)~~ /
       ~~expression aggregates~~ 2026-08-02; ~~Length()~~ 2026-08-05;
       ~~`SELECT ... FROM <view>`~~ 2026-08-05: views resolve via the

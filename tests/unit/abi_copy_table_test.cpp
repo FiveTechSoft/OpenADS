@@ -127,9 +127,12 @@ TEST_CASE("AdsCopyTableContent copies matching fields by name") {
 
     REQUIRE(AdsCopyTableContent(hSrc, hDst) == 0);
 
+    // SAP (ace_adscopytablecontents): with "show deleted" True — the
+    // default — "records marked for deletion will be copied in DBF
+    // tables"; only AdsShowDeleted(0) filters them out.
     UNSIGNED32 cnt = 0;
     REQUIRE(AdsGetRecordCount(hDst, 0, &cnt) == 0);
-    CHECK(cnt == 3u);   // deleted record not copied
+    CHECK(cnt == 4u);
 
     REQUIRE(AdsGotoRecord(hDst, 1) == 0);
     UNSIGNED8 tag_fld[8]   = "TAG";
@@ -148,7 +151,7 @@ TEST_CASE("AdsCopyTableContent copies matching fields by name") {
     REQUIRE(AdsGotoRecord(hDst, 2) == 0);
     cap = sizeof(buf); std::memset(buf, 0, sizeof(buf));
     REQUIRE(AdsGetField(hDst, tag_fld, buf, &cap, 0) == 0);
-    CHECK(std::string(reinterpret_cast<const char*>(buf), cap) == "CCCC");
+    CHECK(std::string(reinterpret_cast<const char*>(buf), cap) == "BBBB");
 
     REQUIRE(AdsCloseTable(hSrc) == 0);
     REQUIRE(AdsCloseTable(hDst) == 0);
