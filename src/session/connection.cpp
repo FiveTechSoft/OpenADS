@@ -214,9 +214,11 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
         }
         if (!logged_resolves_.insert(std::move(key)).second) return;
         const std::uint32_t entry = next_entry_serial_++;
+        const std::uint32_t seq   = util::next_audit_seq();
+        last_audit_seq_ = seq;
         for (const auto& d : pending_details) {
             util::write_audit(util::AuditKind::Detail, conn_serial_,
-                              entry, d, ts);
+                              entry, seq, d, ts);
         }
         std::string msg = "RESOLVED=\"";
         msg += path;
@@ -225,7 +227,8 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
         msg += " asked=\"";
         msg += relative_path;
         msg += remote_server_ ? "\" via=remote" : "\" via=local";
-        util::write_audit(util::AuditKind::Resolved, conn_serial_, entry, msg, ts);
+        util::write_audit(util::AuditKind::Resolved, conn_serial_, entry, seq,
+                          msg, ts);
     };
     log_detail(std::string("input=\"") + relative_path +
                "\" effective=\"" + effective +
@@ -519,6 +522,7 @@ util::Result<Handle> Connection::open_table(const std::string& relative_path,
             util::write_audit(
                 util::AuditKind::Detail, connection_serial(),
                 next_entry_serial_ > 1 ? next_entry_serial_ - 1 : 1,
+                last_audit_seq_ != 0 ? last_audit_seq_ : 1,
                 std::string("OPEN mode=") + ms + " path=\"" + resolved + "\"");
         }
     }

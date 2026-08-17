@@ -269,6 +269,7 @@ private:
     bool                                                       remote_server_ = false;
     std::string                                                conn_serial_;
     std::uint32_t                                              next_entry_serial_ = 1;
+    std::uint32_t                                              last_audit_seq_ = 0;
     // Normalized RESOLVED paths already emitted on this connection.
     // open_table + find_open_table + index-bag resolve the same file
     // more than once; the audit trail keeps one line per file.

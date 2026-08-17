@@ -289,20 +289,22 @@ struct ResolveAuditGuard {
 };
 
 bool has_audit_prefix(const std::string& line, const std::string& conn) {
-    // CONN(6) SPACE ENTRY(8) SPACE YYYY-MM-DD HH:MM:SS.mmm SPACE
-    if (line.size() < 6 + 1 + 8 + 1 + 23 + 1) return false;
+    // CONN(6) SPACE ENTRY(8) SPACE SEQ(8) SPACE YYYY-MM-DD HH:MM:SS.mmm
+    if (line.size() < 6 + 1 + 8 + 1 + 8 + 1 + 23 + 1) return false;
     if (line.compare(0, 6, conn) != 0) return false;
     if (line[6] != ' ') return false;
     for (int i = 0; i < 8; ++i) {
         if (line[7 + i] < '0' || line[7 + i] > '9') return false;
+        if (line[16 + i] < '0' || line[16 + i] > '9') return false;
     }
-    // date space at 26; millisecond dot at 35 (…13.826)
-    return line[15] == ' ' && line[26] == ' ' && line[35] == '.';
+    // after SEQ; date/time space at 35; millisecond dot at 44
+    return line[15] == ' ' && line[24] == ' ' &&
+           line[35] == ' ' && line[44] == '.';
 }
 
 }  // namespace
 
-TEST_CASE("resolve logs RESOLVED with connection serial, entry serial, timestamp") {
+TEST_CASE("resolve logs RESOLVED with connection, entry, seq, timestamp") {
     ResolveAuditGuard g;
     auto dir = tmp_dir("audit_resolved");
     write_minimal_dbf(dir / "data.dbf");
@@ -413,6 +415,34 @@ TEST_CASE("resolve entry serial increments per call on the same connection") {
         CHECK(g.file.str().find(c.connection_serial() + " 00000001 ") !=
               std::string::npos);
         CHECK(g.file.str().find(c.connection_serial() + " 00000002 ") !=
+              std::string::npos);
+    }
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("resolve process seq is global; entry serial stays per connection") {
+    ResolveAuditGuard g;
+    auto dir = tmp_dir("audit_global_seq");
+    write_minimal_dbf(dir / "a.dbf");
+    write_minimal_dbf(dir / "b.dbf");
+    {
+        auto oa = Connection::open(dir.string());
+        auto ob = Connection::open(dir.string());
+        REQUIRE(oa.has_value());
+        REQUIRE(ob.has_value());
+        Connection ca = std::move(oa).value();
+        Connection cb = std::move(ob).value();
+        REQUIRE(ca.connection_serial() != cb.connection_serial());
+        auto type = TableType::Cdx;
+        (void)ca.resolve_table_file("a.dbf", type);
+        type = TableType::Cdx;
+        (void)cb.resolve_table_file("b.dbf", type);
+        const std::string& file = g.file.str();
+        // Each connection's first file is entry 00000001.
+        CHECK(file.find(ca.connection_serial() + " 00000001 00000001 ") !=
+              std::string::npos);
+        CHECK(file.find(cb.connection_serial() + " 00000001 00000002 ") !=
               std::string::npos);
     }
     std::error_code ec;

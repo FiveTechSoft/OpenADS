@@ -12,6 +12,17 @@ Complete history of releases with categorized improvements.
 
 ---
 
+## v1.8.89 — 2026-08-17
+
+### New Features
+
+- **Process-wide audit sequence** — each `RESOLVED` line is now
+  `CONN ENTRY SEQ TIMESTAMP …`. `ENTRY` still restarts per connection;
+  `SEQ` is a single incrementing number for the process so two
+  connections no longer look like a repeated counter (Pritpal Bedi).
+
+---
+
 ## v1.8.88 — 2026-08-17
 
 ### Bug Fixes

@@ -26,8 +26,13 @@ private:
 LogLevel log_level_from_string(std::string_view s) noexcept;
 
 // ---------------------------------------------------------------------------
-// Audit lines:  CONN(6) ENTRY(8) TIMESTAMP  message
-// HYT673 00000001 2026-08-16 22:12:13.826 RESOLVED="..." (sandboxed)
+// Audit lines:  CONN(6) ENTRY(8) SEQ(8) TIMESTAMP  message
+// HYT673 00000001 00000014 2026-08-16 22:12:13.826 RESOLVED="..." (sandboxed)
+//
+// ENTRY is per connection (restarts at 1 on each AdsConnect).
+// SEQ is process-wide and never restarts — one increment per RESOLVED
+// event so two connections interleaving no longer look like repeats.
+// Detail lines of the same resolve reuse both ENTRY and SEQ.
 //
 // Resolved lines go to the console and, if configured, the log file.
 // Detail lines (input=, LEGACY remap, FALLBACK) are console-only and
@@ -42,12 +47,17 @@ std::string format_entry_serial(std::uint32_t n);
 std::string format_log_timestamp();
 std::string format_log_prefix(std::string_view conn_serial,
                               std::uint32_t    entry_serial,
+                              std::uint32_t    seq,
                               std::string_view timestamp = {});
 std::string make_connection_serial();
+// Process-wide RESOLVED sequence. Starts at 1. reset_audit_config()
+// puts it back to 1 (tests only).
+std::uint32_t next_audit_seq();
 
 void write_audit(AuditKind       kind,
                  std::string_view conn_serial,
                  std::uint32_t    entry_serial,
+                 std::uint32_t    seq,
                  std::string_view message,
                  std::string_view timestamp = {});
 

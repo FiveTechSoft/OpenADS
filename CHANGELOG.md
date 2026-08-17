@@ -1,3 +1,22 @@
+## 1.8.89 - 2026-08-17
+
+### Added — process-wide audit sequence (Pritpal Bedi)
+
+RESOLVED lines now carry three id columns:
+
+```
+TGZZDM 00000001 00000007 2026-08-16 20:39:46.910 RESOLVED="C:/..."
+^^^^^^ ^^^^^^^^ ^^^^^^^^
+conn   per-conn process
+```
+
+- Connection serial (6) — which AdsConnect.
+- Entry serial (8) — 1, 2, 3… on that connection only.
+- Process sequence (8) — 1, 2, 3… across the whole process, never
+  restarts. Two connections interleaving no longer repeat a number
+  in this column. Detail lines of the same resolve reuse both
+  numbers.
+
 ## 1.8.88 - 2026-08-17
 
 ### Fixed — `oads_hb.c` includes `"ace.h"` (Pritpal Bedi)

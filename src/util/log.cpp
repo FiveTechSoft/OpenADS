@@ -52,6 +52,7 @@ Details g_details = Details::Auto;
 bool    g_file_sink_set = false;            // true when set_audit_file() used
 std::mutex g_audit_mu;
 std::atomic<std::uint32_t> g_next_conn{0};
+std::atomic<std::uint32_t> g_next_seq{1};
 std::atomic<bool> g_seeded{false};
 std::uint32_t g_conn_seed = 0;
 std::unordered_set<std::string> g_remote_asked;
@@ -146,6 +147,7 @@ std::string format_log_timestamp() {
 
 std::string format_log_prefix(std::string_view conn_serial,
                               std::uint32_t    entry_serial,
+                              std::uint32_t    seq,
                               std::string_view timestamp) {
     std::string ts{timestamp};
     if (ts.empty()) ts = format_log_timestamp();
@@ -156,7 +158,12 @@ std::string format_log_prefix(std::string_view conn_serial,
         conn.assign(6 - conn_serial.size(), '0');
         conn.append(conn_serial);
     }
-    return conn + ' ' + format_entry_serial(entry_serial) + ' ' + ts;
+    return conn + ' ' + format_entry_serial(entry_serial) + ' ' +
+           format_entry_serial(seq) + ' ' + ts;
+}
+
+std::uint32_t next_audit_seq() {
+    return g_next_seq.fetch_add(1);
 }
 
 std::string make_connection_serial() {
@@ -194,15 +201,19 @@ void reset_audit_config() {
     g_file_sink_set = false;
     g_details = Details::Auto;
     g_remote_asked.clear();
+    g_next_seq.store(1);
 }
 
 void write_audit(AuditKind       kind,
                  std::string_view conn_serial,
                  std::uint32_t    entry_serial,
+                 std::uint32_t    seq,
                  std::string_view message,
                  std::string_view timestamp) {
     if (kind == AuditKind::Detail && !audit_details_enabled()) return;
-    std::string line = format_log_prefix(conn_serial, entry_serial, timestamp);
+    if (seq == 0) seq = next_audit_seq();
+    std::string line =
+        format_log_prefix(conn_serial, entry_serial, seq, timestamp);
     line.push_back(' ');
     line.append(message.data(), message.size());
     line.push_back('\n');
@@ -222,7 +233,8 @@ void write_remote_open_audit(std::string_view asked_name) {
     std::string msg = "RESOLVED=\"(remote)\" asked=\"";
     msg.append(asked_name.data(), asked_name.size());
     msg += "\" via=remote";
-    write_audit(AuditKind::Resolved, id, n.fetch_add(1), msg);
+    write_audit(AuditKind::Resolved, id, n.fetch_add(1),
+                next_audit_seq(), msg);
 }
 
 } // namespace openads::util

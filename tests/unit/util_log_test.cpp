@@ -47,8 +47,8 @@ TEST_CASE("Log parses level from environment-style string") {
 }
 
 // ---------------------------------------------------------------------------
-// Audit prefix: connection serial (6) + entry serial (8) + timestamp
-// HYT673 00000001 2026-08-16 22:12:13.826 RESOLVED="..." (sandboxed)
+// Audit prefix: CONN(6) ENTRY(8) SEQ(8) TIMESTAMP
+// HYT673 00000001 00000014 2026-08-16 22:12:13.826 RESOLVED="..." (sandboxed)
 // ---------------------------------------------------------------------------
 
 using openads::util::AuditKind;
@@ -93,10 +93,19 @@ TEST_CASE("format_entry_serial is 8 zero-padded decimal digits") {
     CHECK(openads::util::format_entry_serial(99999999) == "99999999");
 }
 
-TEST_CASE("format_log_prefix is connection, entry, timestamp") {
+TEST_CASE("format_log_prefix is connection, entry, seq, timestamp") {
     const std::string p = openads::util::format_log_prefix(
-        "HYT673", 1, "2026-08-16 22:12:13.826");
-    CHECK(p == "HYT673 00000001 2026-08-16 22:12:13.826");
+        "HYT673", 1, 14, "2026-08-16 22:12:13.826");
+    CHECK(p == "HYT673 00000001 00000014 2026-08-16 22:12:13.826");
+}
+
+TEST_CASE("next_audit_seq is process-wide and reset by reset_audit_config") {
+    openads::util::reset_audit_config();
+    CHECK(openads::util::next_audit_seq() == 1);
+    CHECK(openads::util::next_audit_seq() == 2);
+    CHECK(openads::util::next_audit_seq() == 3);
+    openads::util::reset_audit_config();
+    CHECK(openads::util::next_audit_seq() == 1);
 }
 
 TEST_CASE("format_log_timestamp matches YYYY-MM-DD HH:MM:SS.mmm") {
@@ -118,12 +127,12 @@ TEST_CASE("make_connection_serial is unique 6-char [0-9A-Z]") {
 TEST_CASE("write_audit RESOLVED goes to console and file") {
     AuditGuard g;
     openads::util::write_audit(
-        AuditKind::Resolved, "HYT673", 1,
+        AuditKind::Resolved, "HYT673", 1, 14,
         "RESOLVED=\"C:/temp/t.dbf\" (sandboxed)",
         "2026-08-16 22:12:13.826");
 
     const std::string want =
-        "HYT673 00000001 2026-08-16 22:12:13.826 "
+        "HYT673 00000001 00000014 2026-08-16 22:12:13.826 "
         "RESOLVED=\"C:/temp/t.dbf\" (sandboxed)\n";
     CHECK(g.console.str() == want);
     CHECK(g.file.str() == want);
@@ -132,11 +141,11 @@ TEST_CASE("write_audit RESOLVED goes to console and file") {
 TEST_CASE("write_audit Detail is omitted from console by default") {
     AuditGuard g;
     openads::util::write_audit(
-        AuditKind::Detail, "HYT673", 1,
+        AuditKind::Detail, "HYT673", 1, 1,
         "input=\"t\" effective=\"t\" data_dir=\".\"",
         "2026-08-16 22:12:13.826");
     openads::util::write_audit(
-        AuditKind::Resolved, "HYT673", 1,
+        AuditKind::Resolved, "HYT673", 1, 1,
         "RESOLVED=\"t.dbf\" (sandboxed)",
         "2026-08-16 22:12:13.826");
 
@@ -174,15 +183,15 @@ TEST_CASE("write_audit Detail appears on console when enabled, never in file") {
     AuditGuard g;
     openads::util::set_audit_details_enabled(true);
     openads::util::write_audit(
-        AuditKind::Detail, "HYT673", 1,
+        AuditKind::Detail, "HYT673", 1, 1,
         "input=\"t\" effective=\"t\" data_dir=\".\"",
         "2026-08-16 22:12:13.826");
     openads::util::write_audit(
-        AuditKind::Detail, "HYT673", 1,
+        AuditKind::Detail, "HYT673", 1, 1,
         "LEGACY remap: \"a\" -> \"b\"",
         "2026-08-16 22:12:13.826");
     openads::util::write_audit(
-        AuditKind::Resolved, "HYT673", 1,
+        AuditKind::Resolved, "HYT673", 1, 1,
         "RESOLVED=\"b\" (sandboxed)",
         "2026-08-16 22:12:13.826");
 
@@ -192,6 +201,6 @@ TEST_CASE("write_audit Detail appears on console when enabled, never in file") {
     CHECK(g.file.str().find("input=") == std::string::npos);
     CHECK(g.file.str().find("LEGACY remap") == std::string::npos);
     CHECK(g.file.str() ==
-          "HYT673 00000001 2026-08-16 22:12:13.826 "
+          "HYT673 00000001 00000001 2026-08-16 22:12:13.826 "
           "RESOLVED=\"b\" (sandboxed)\n");
 }
