@@ -49,6 +49,7 @@ using openads::abi::lock_retry_policy;
 #include "mgmt/mg_stats.h"
 #include "session/connection.h"
 #include "session/handle_registry.h"
+#include "util/log.h"
 #if defined(OPENADS_WITH_SQLITE)
 #include "sql_backend/sqlite_connection.h"
 #include "sql_backend/sqlite_index.h"
@@ -5144,6 +5145,12 @@ void set_connection_legacy_paths(ADSHANDLE hConnect, bool on) {
     }
 }
 
+void set_connection_remote_server(ADSHANDLE hConnect, bool on) {
+    if (openads::session::Connection* c = lookup_connection(hConnect)) {
+        c->set_remote_server(on);
+    }
+}
+
 void register_builtin_backends() {
 #if defined(OPENADS_WITH_SQLITE)
     register_backend_table_ops(openads::session::HandleKind::SqliteTable,
@@ -6868,6 +6875,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
         // migrated from SAP with Table_Type=ADT) failed to open remotely
         // with AE_TABLE_CORRUPTED (5103), even though the identical bare
         // name opens fine locally.
+        openads::util::write_remote_open_audit(name);
         auto otr = rc->open_table(name,
             static_cast<std::uint16_t>(map_open_mode(usMode)));
         if (!otr) return fail(otr.error());

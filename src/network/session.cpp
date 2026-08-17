@@ -34,6 +34,7 @@
 namespace openads::abi {
 void set_connection_show_deleted(ADSHANDLE hConnect, bool visible);
 void set_connection_legacy_paths(ADSHANDLE hConnect, bool on);
+void set_connection_remote_server(ADSHANDLE hConnect, bool on);
 }
 
 namespace openads::network {
@@ -429,6 +430,7 @@ bool Session::ensure_abi_conn() {
         // session's engine Connection does.
         openads::abi::set_connection_legacy_paths(abi_conn_,
                                                   srv_->legacy_paths());
+        openads::abi::set_connection_remote_server(abi_conn_, true);
         // Force canonical YYYYMMDD for all date field reads performed
         // through ABI handles on the server (pack_row, GetField, etc).
         // This makes AdsGetJulian / date FieldGet return usable values
@@ -1149,6 +1151,7 @@ DispatchResult Session::dispatch(const Frame& f) {
             // client-absolute paths the same way the Connect jail above
             // accepted the connect dir.
             sess_conn_->set_legacy_paths(srv_->legacy_paths());
+            sess_conn_->set_remote_server(true);
             session_user_ = user;
             session_password_ = pw;
             srv_->set_session_user(sid_, user, dir);

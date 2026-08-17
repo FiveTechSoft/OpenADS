@@ -12,6 +12,24 @@ Complete history of releases with categorized improvements.
 
 ---
 
+## v1.8.87 — 2026-08-17
+
+### New Features
+
+- **Resolve audit trail** — every table-path resolve is a fixed-width
+  line (`CONN6 ENTRY8 TIMESTAMP RESOLVED=... asked=... via=local|remote`).
+  Console default is only `RESOLVED`. Set `OPENADS_RESOLVE_VERBOSE=1` for
+  detail lines; `OPENADS_LOG_FILE` stores only `RESOLVED` (Pritpal Bedi).
+
+### Bug Fixes
+
+- **Remote is safe storage** — a remote-server connection no longer
+  opens a leftover host-absolute path. `--legacy-paths` remounts under
+  `--data`; otherwise the open fails with the normal RDD error
+  (Pritpal Bedi).
+
+---
+
 ## v1.8.79 — 2026-08-15
 
 ### New Features

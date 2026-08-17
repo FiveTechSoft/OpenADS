@@ -2120,9 +2120,10 @@ Three levels controlled by env:
 | Var | Effect |
 |-----|--------|
 | `OPENADS_LOG=info` | Connection open / close, table open, SQL executed (truncated) |
-| `OPENADS_LOG=debug` | Plus index seeks, locks acquired, tx boundaries |
+| `OPENADS_LOG=debug` | Plus index seeks, locks acquired, tx boundaries; resolve detail lines |
 | `OPENADS_LOG=trace` | Every L1 entry / exit with arguments and return code |
-| `OPENADS_LOG_FILE=<path>` | Redirect log; default `stderr` |
+| `OPENADS_LOG_FILE=<path>` | Append `RESOLVED=` audit lines only (path resolve trail) |
+| `OPENADS_RESOLVE_VERBOSE=1` | Also print resolve detail (`input=`, remap, FALLBACK) on the console |
 
 `tools/ace-trace` is a separate shim that intercepts every `Ads*` call and writes a structured trace; useful for diffing against original ACE behaviour.
 

@@ -149,6 +149,20 @@ public:
     bool legacy_paths() const noexcept { return legacy_paths_; }
     void set_legacy_paths(bool v) noexcept { legacy_paths_ = v; }
 
+    // Set on connections owned by openads_serverd (a remote session).
+    // Remote is safe storage: never probe a client-absolute host path
+    // (the SAP free-table OPEN exception). Legacy remount under --data
+    // still applies when --legacy-paths is on; otherwise the open fails
+    // with the normal table-not-found / file-not-found RDD error.
+    bool remote_server() const noexcept { return remote_server_; }
+    void set_remote_server(bool v) noexcept { remote_server_ = v; }
+
+    // 6-char [0-9A-Z] serial assigned at Connection::open. Shared by
+    // every audit line of this connection.
+    const std::string& connection_serial() const noexcept {
+        return conn_serial_;
+    }
+
     // Application ID set via sp_SetApplicationID / read back with
     // sp_GetApplicationID. Free-form client-supplied label; empty until set.
     const std::string& application_id() const noexcept { return app_id_; }
@@ -251,6 +265,9 @@ private:
     bool                                                       encryption_key_set_ = false;
     bool                                                       show_deleted_ = true;
     bool                                                       legacy_paths_ = false;
+    bool                                                       remote_server_ = false;
+    std::string                                                conn_serial_;
+    std::uint32_t                                              next_entry_serial_ = 1;
     // M11.7 — string compare collation (default = byte-exact).
     Collation                                                  collation_ =
         Collation::Binary;

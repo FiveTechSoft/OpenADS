@@ -1,11 +1,15 @@
 #include "doctest.h"
+#include "openads/error.h"
 #include "session/connection.h"
+#include "util/log.h"
 
 #include <array>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
+#include <string>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -265,6 +269,151 @@ TEST_CASE("Connection legacy_paths create resolves a foreign-drive path") {
         CHECK(fs::path(c.resolve_table_file(foreign, type,
                                             /*for_create=*/true))
                   .generic_string() == want);
+    }
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+namespace {
+
+struct ResolveAuditGuard {
+    std::ostringstream console;
+    std::ostringstream file;
+    ResolveAuditGuard() {
+        openads::util::reset_audit_config();
+        openads::util::set_audit_console(&console);
+        openads::util::set_audit_file(&file);
+        openads::util::set_audit_details_enabled(false);
+    }
+    ~ResolveAuditGuard() { openads::util::reset_audit_config(); }
+};
+
+bool has_audit_prefix(const std::string& line, const std::string& conn) {
+    // CONN(6) SPACE ENTRY(8) SPACE YYYY-MM-DD HH:MM:SS.mmm SPACE
+    if (line.size() < 6 + 1 + 8 + 1 + 23 + 1) return false;
+    if (line.compare(0, 6, conn) != 0) return false;
+    if (line[6] != ' ') return false;
+    for (int i = 0; i < 8; ++i) {
+        if (line[7 + i] < '0' || line[7 + i] > '9') return false;
+    }
+    // date space at 26; millisecond dot at 35 (…13.826)
+    return line[15] == ' ' && line[26] == ' ' && line[35] == '.';
+}
+
+}  // namespace
+
+TEST_CASE("resolve logs RESOLVED with connection serial, entry serial, timestamp") {
+    ResolveAuditGuard g;
+    auto dir = tmp_dir("audit_resolved");
+    write_minimal_dbf(dir / "data.dbf");
+    {
+        auto opened = Connection::open(dir.string());
+        REQUIRE(opened.has_value());
+        Connection c = std::move(opened).value();
+        REQUIRE(c.connection_serial().size() == 6);
+
+        auto type = TableType::Cdx;
+        const std::string resolved = c.resolve_table_file("data.dbf", type);
+
+        CHECK(g.console.str().find("effective=") == std::string::npos);
+        CHECK(g.file.str().find("effective=") == std::string::npos);
+
+        const std::string& out = g.console.str();
+        CHECK(out.find("RESOLVED=\"") != std::string::npos);
+        CHECK(out.find(resolved) != std::string::npos);
+        CHECK(out.find("(sandboxed)") != std::string::npos);
+        CHECK(out.find("asked=\"data.dbf\"") != std::string::npos);
+        CHECK(out.find("via=local") != std::string::npos);
+        CHECK(has_audit_prefix(out, c.connection_serial()));
+        CHECK(g.file.str() == out);
+        CHECK(g.file.str().find("RESOLVED=") != std::string::npos);
+    }
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("resolve detail lines share the entry serial and stay off the file") {
+    ResolveAuditGuard g;
+    openads::util::set_audit_details_enabled(true);
+    auto dir = tmp_dir("audit_detail");
+    write_minimal_dbf(dir / "data.dbf");
+    {
+        auto opened = Connection::open(dir.string());
+        REQUIRE(opened.has_value());
+        Connection c = std::move(opened).value();
+
+        auto type = TableType::Cdx;
+        (void)c.resolve_table_file("data.dbf", type);
+
+        CHECK(g.console.str().find("input=") != std::string::npos);
+        CHECK(g.console.str().find("RESOLVED=") != std::string::npos);
+        CHECK(g.file.str().find("effective=") == std::string::npos);
+        CHECK(g.file.str().find("RESOLVED=") != std::string::npos);
+        CHECK(g.file.str().find("asked=\"data.dbf\"") != std::string::npos);
+
+        // Same connection + entry serial on every line of this resolve.
+        const std::string prefix6 = c.connection_serial() + " 00000001 ";
+        CHECK(g.console.str().find(prefix6) != std::string::npos);
+        CHECK(g.file.str().find(prefix6) != std::string::npos);
+        CHECK(g.file.str().find("input=") == std::string::npos);
+    }
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("remote server refuses host-absolute leftover and stays in the jail") {
+    ResolveAuditGuard g;
+    auto base = tmp_dir("remote_refuse_host");
+    auto jail = base / "Temp";
+    auto shadow = base / "Creative.RAM";
+    fs::create_directories(jail);
+    fs::create_directories(shadow);
+    write_minimal_dbf(shadow / "t.dbf");
+    {
+        auto opened = Connection::open(jail.string());
+        REQUIRE(opened.has_value());
+        Connection c = std::move(opened).value();
+        c.set_remote_server(true);
+
+        const std::string host_abs =
+            fs::absolute(shadow / "t.dbf").generic_string();
+        const std::string host_can =
+            fs::weakly_canonical(shadow / "t.dbf").generic_string();
+        const std::string jail_can =
+            fs::weakly_canonical(jail).generic_string();
+
+        auto type = TableType::Cdx;
+        const std::string got =
+            fs::path(c.resolve_table_file(host_abs, type)).generic_string();
+        // Must not open the leftover host tree — remote is safe storage.
+        CHECK(got != host_can);
+        CHECK(got.rfind(jail_can, 0) == 0);
+        CHECK_FALSE(fs::exists(got));
+
+        auto th = c.open_table(host_abs, TableType::Cdx);
+        REQUIRE_FALSE(th.has_value());
+        CHECK(th.error().code != 0);
+    }
+    std::error_code ec;
+    fs::remove_all(base, ec);
+}
+
+TEST_CASE("resolve entry serial increments per call on the same connection") {
+    ResolveAuditGuard g;
+    auto dir = tmp_dir("audit_seq");
+    write_minimal_dbf(dir / "a.dbf");
+    write_minimal_dbf(dir / "b.dbf");
+    {
+        auto opened = Connection::open(dir.string());
+        REQUIRE(opened.has_value());
+        Connection c = std::move(opened).value();
+        auto type = TableType::Cdx;
+        (void)c.resolve_table_file("a.dbf", type);
+        (void)c.resolve_table_file("b.dbf", type);
+        CHECK(g.file.str().find(c.connection_serial() + " 00000001 ") !=
+              std::string::npos);
+        CHECK(g.file.str().find(c.connection_serial() + " 00000002 ") !=
+              std::string::npos);
     }
     std::error_code ec;
     fs::remove_all(dir, ec);

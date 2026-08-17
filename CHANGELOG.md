@@ -1,3 +1,35 @@
+## 1.8.87 - 2026-08-17
+
+### Added — resolve audit trail (Pritpal Bedi)
+
+Every table-path resolve is now an auditable, fixed-width log line so
+ADS vs DBF login clashes can be measured (which physical file ACE
+actually opened):
+
+```
+HYT673 00000001 2026-08-16 22:12:13.826 RESOLVED="C:/temp/creative.ram/USERS.dbf" (sandboxed) asked="C:/Creative.RAM/USERS.dbf" via=local
+```
+
+- 6-char connection serial + 8-digit per-connection entry serial +
+  millisecond timestamp, all fixed width.
+- Console default: only `RESOLVED`. Detail lines (`input=`, LEGACY
+  remap/fold, FALLBACK, OPEN mode) appear with
+  `OPENADS_RESOLVE_VERBOSE=1` or `OPENADS_LOG=debug|trace`.
+- `OPENADS_LOG_FILE=<path>` appends **only** `RESOLVED` lines.
+- `asked=` is the caller name; `via=local|remote` and
+  `(sandboxed)|(client)|(remote)` say where it landed.
+- A remote `AdsOpenTable` on the client writes
+  `RESOLVED="(remote)" asked="..." via=remote` (no local file).
+
+### Fixed — remote server never opens a leftover host path (Pritpal Bedi)
+
+Remote is safe storage. A connection owned by `openads_serverd` no
+longer probes `fs::exists()` on a client-absolute path (the SAP
+free-table OPEN exception). Leftover `C:\Creative.RAM\...` on the
+server box cannot win. `--legacy-paths` still remounts under `--data`;
+without a remount the open fails with the normal RDD table-not-found
+error.
+
 ## 1.8.83 - 2026-08-15
 
 ### Fixed — AdsUnlockTable must release ALL locks (Pritpal Bedi)

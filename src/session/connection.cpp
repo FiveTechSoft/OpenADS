@@ -10,6 +10,7 @@
 #include "platform/dll.h"
 #include "platform/fs_sandbox.h"
 #include "platform/path.h"
+#include "util/log.h"
 
 #include <cstring>
 
@@ -125,6 +126,7 @@ void align_type_with_file(const std::string& path,
 util::Result<Connection> Connection::open(const std::string& data_dir) {
     namespace fs = std::filesystem;
     Connection c;
+    c.conn_serial_ = util::make_connection_serial();
 
     // If the input ends with ".add", treat it as a Data Dictionary path
     // and use its parent as the data directory.
@@ -194,8 +196,28 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
     namespace fs = std::filesystem;
     std::string effective = relative_path;
     if (dd_.has_value()) effective = dd_->resolve(relative_path);
-    std::fprintf(stderr, "[resolve] input=\"%s\" effective=\"%s\" data_dir=\"%s\"\n",
-                 relative_path.c_str(), effective.c_str(), data_dir_.c_str());
+    if (conn_serial_.empty()) conn_serial_ = util::make_connection_serial();
+    const std::uint32_t entry = next_entry_serial_++;
+    const std::string ts = util::format_log_timestamp();
+    auto log_detail = [&](const std::string& msg) {
+        util::write_audit(util::AuditKind::Detail, conn_serial_, entry, msg, ts);
+    };
+    auto log_resolved = [&](const std::string& path, const char* tag) {
+        // File stores only this line: include the caller's name so a
+        // login investigation can see which table ADS actually opened
+        // without turning on console detail.
+        std::string msg = "RESOLVED=\"";
+        msg += path;
+        msg += "\" ";
+        msg += tag;
+        msg += " asked=\"";
+        msg += relative_path;
+        msg += remote_server_ ? "\" via=remote" : "\" via=local";
+        util::write_audit(util::AuditKind::Resolved, conn_serial_, entry, msg, ts);
+    };
+    log_detail(std::string("input=\"") + relative_path +
+               "\" effective=\"" + effective +
+               "\" data_dir=\"" + data_dir_ + "\"");
     // The connection's data_dir is the directory the server owns; every
     // table name is resolved *relative to* it. Clients (Harbour rddads,
     // X# ADSRDD, …) routinely pass an absolute or drive-rooted path that
@@ -244,13 +266,30 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
             if (auto r = platform::resolve_client_path({data_dir_},
                                                        effective)) {
                 rel = fs::path(*r);
-                std::fprintf(stderr, "[resolve] LEGACY remap: \"%s\" -> \"%s\"\n",
-                             effective.c_str(), rel.string().c_str());
+                log_detail(std::string("LEGACY remap: \"") + effective +
+                           "\" -> \"" + rel.string() + "\"");
             } else {
                 rel = fs::path(platform::fold_absolute_to_relative(effective));
-                std::fprintf(stderr, "[resolve] LEGACY fold: \"%s\" -> \"%s\"\n",
-                             effective.c_str(), rel.string().c_str());
+                log_detail(std::string("LEGACY fold: \"") + effective +
+                           "\" -> \"" + rel.string() + "\"");
             }
+        } else if (remote_server_) {
+            // Remote is safe storage (Pritpal Bedi, Aug 2026): never
+            // stat or open the client's host-absolute spelling, even
+            // when that file happens to exist on the server box. Fold
+            // under --data; a miss becomes the normal table-not-found
+            // error at open_table (Harbour RDD EG_OPEN). --legacy-paths
+            // remount is the only way a Creative.RAM-style path lands
+            // in the jail (handled above).
+            log_detail(std::string("REMOTE refuse host path: \"") +
+                       effective + "\"");
+            if (for_create && path_is_inside(data_dir_, rel)) {
+                std::string resolved =
+                    platform::resolve_case_insensitive(rel.string());
+                log_resolved(resolved, "(sandboxed)");
+                return resolved;
+            }
+            rel = rel.relative_path();
         } else if (!for_create) {
             std::error_code ec;
             fs::path cand = rel;
@@ -292,8 +331,10 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
                     std::string resolved =
                         platform::resolve_case_insensitive(cand.string());
                     align_type_with_file(resolved, type);
-                    std::fprintf(stderr, "[resolve] FALLBACK client path: \"%s\" (exists=%d)\n",
-                                 resolved.c_str(), (int)fs::exists(cand, ec));
+                    log_detail(std::string("FALLBACK client path: \"") +
+                               resolved + "\" (exists=" +
+                               (fs::exists(cand, ec) ? "1" : "0") + ")");
+                    log_resolved(resolved, "(client)");
                     return resolved;
                 }
             }
@@ -327,7 +368,12 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
             const bool parent_is_drive_root = (parent == parent.root_path());
             if (path_is_inside(data_dir_, rel) ||
                 (!parent_is_drive_root && fs::is_directory(parent, ec))) {
-                return platform::resolve_case_insensitive(rel.string());
+                std::string resolved =
+                    platform::resolve_case_insensitive(rel.string());
+                log_resolved(resolved, path_is_inside(data_dir_, rel)
+                                           ? "(sandboxed)"
+                                           : "(client)");
+                return resolved;
             }
             rel = rel.relative_path();
         }
@@ -384,7 +430,7 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
     // path names a file that does not exist yet (and if it does, the
     // caller is deliberately overwriting it with a chosen format).
     if (!for_create) align_type_with_file(resolved, type);
-    std::fprintf(stderr, "[resolve] RESOLVED=\"%s\" (sandboxed)\n", resolved.c_str());
+    log_resolved(resolved, "(sandboxed)");
     return resolved;
 }
 
@@ -446,6 +492,16 @@ util::Result<Handle> Connection::open_table(const std::string& relative_path,
                                             engine::LockingMode locking) {
     namespace fs = std::filesystem;
     auto resolved = resolve_table_file(relative_path, type);
+
+    {
+        const char* ms = "shared";
+        if (mode == engine::OpenMode::Exclusive) ms = "exclusive";
+        else if (mode == engine::OpenMode::Read) ms = "read";
+        util::write_audit(
+            util::AuditKind::Detail, connection_serial(),
+            next_entry_serial_ - 1,
+            std::string("OPEN mode=") + ms + " path=\"" + resolved + "\"");
+    }
 
     auto t = engine::Table::open(resolved, type, mode, locking);
     if (!t) return t.error();
