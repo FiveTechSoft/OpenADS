@@ -531,6 +531,17 @@ inline constexpr std::uint32_t kCapPrefetchBackward = 0x00000004u;
 // the open_table fallback then fails with AE_TABLE_NOT_FOUND (5018).
 inline constexpr std::uint32_t kCapOpenTableMode = 0x00000008u;
 
+// M12.x — client thread ID pass-through. When the client sets this bit, it
+// appends a [u16 LE thread_id] to every OpenTable payload (after the mode
+// prefix, before the table name). The server reads that field and logs it
+// in the RESOLVED audit line so developers can correlate client-side
+// Harbour VM thread numbers with server-side file resolves. Old servers
+// ignore the extra bytes because the trailing bytes become part of the
+// table name and the open fails with AE_TABLE_NOT_FOUND — same as
+// kCapOpenTableMode. New clients always set this bit; the field is only
+// present when the capability is negotiated.
+inline constexpr std::uint32_t kCapClientThreadId = 0x00000010u;
+
 // RCB 07/14/2026: M12.23 — AdsCacheRecords support. Why a bare trailing field
 // and not a new opcode or a capability bit: the Skip request grew an OPTIONAL
 // trailing [u16 LE] carrying the caller's requested read-ahead depth:

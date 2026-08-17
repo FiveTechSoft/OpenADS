@@ -1032,6 +1032,9 @@ DispatchResult Session::dispatch(const Frame& f) {
                 // M12.x — client sends [u16 mode] prefix on OpenTable.
                 client_open_table_mode_ok_ =
                     (caps & openads::network::kCapOpenTableMode) != 0;
+                // M12.x — client sends [u16 thread_id] on OpenTable.
+                client_thread_id_ok_ =
+                    (caps & openads::network::kCapClientThreadId) != 0;
             }
             if (srv_->require_auth()) {
                 std::lock_guard<std::mutex> clk(srv_->creds_mu_);
@@ -1303,13 +1306,22 @@ DispatchResult Session::dispatch(const Frame& f) {
             // and std::string(nullptr, 0) is UB.
             std::string rel;
             auto open_mode = openads::engine::OpenMode::Shared;
+            std::uint16_t client_thread_id = 0;
             if (client_open_table_mode_ok_ && f.payload.size() >= 2) {
                 // M12.x extended payload: [u16 LE mode][table_name_bytes]
+                // or [u16 LE mode][u16 LE thread_id][table_name_bytes]
                 std::uint16_t mode_u16 = static_cast<std::uint16_t>(
                     static_cast<std::uint16_t>(f.payload[0]) |
                     (static_cast<std::uint16_t>(f.payload[1]) << 8));
                 open_mode = static_cast<openads::engine::OpenMode>(mode_u16);
-                rel.assign(f.payload.begin() + 2, f.payload.end());
+                std::size_t name_off = 2;
+                if (client_thread_id_ok_ && f.payload.size() >= 4) {
+                    client_thread_id = static_cast<std::uint16_t>(
+                        static_cast<std::uint16_t>(f.payload[2]) |
+                        (static_cast<std::uint16_t>(f.payload[3]) << 8));
+                    name_off = 4;
+                }
+                rel.assign(f.payload.begin() + name_off, f.payload.end());
             } else {
                 rel.assign(f.payload.begin(), f.payload.end());
             }
@@ -1328,7 +1340,9 @@ DispatchResult Session::dispatch(const Frame& f) {
             }
             auto th = sess_conn_->open_table(rel,
                 openads::engine::TableType::Cdx,
-                open_mode);
+                open_mode,
+                openads::engine::LockingMode::Compatible,
+                client_thread_id);
             if (!th) {
                 std::fprintf(stderr, "[srv] OpenTable FAILED rel='%s' code=%d msg='%s'\n",
                              rel.c_str(), th.error().code,

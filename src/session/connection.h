@@ -38,7 +38,8 @@ public:
         open_table(const std::string& relative_path,
                    engine::TableType  type,
                    engine::OpenMode   mode = engine::OpenMode::Shared,
-                   engine::LockingMode locking = engine::LockingMode::Compatible);
+                   engine::LockingMode locking = engine::LockingMode::Compatible,
+                   std::uint16_t      client_thread_id = 0);
     util::Result<Handle> adopt_table(engine::Table table,
                                      const std::string& relative_path);
 
@@ -225,7 +226,8 @@ public:
     // opens free tables by full path even on a data-dir connection).
     std::string resolve_table_file(const std::string& relative_path,
                                    engine::TableType&  type,
-                                   bool                for_create = false);
+                                   bool                for_create = false,
+                                   std::uint16_t       client_thread_id = 0);
 
 private:
     util::Result<void> recover_orphan_tx_();
