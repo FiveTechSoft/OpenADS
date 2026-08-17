@@ -30,6 +30,9 @@ HYT673 00000001 2026-08-16 22:12:13.826 RESOLVED="C:/temp/creative.ram/CAC00001\
 - Detail (`input=`, LEGACY remap/fold, FALLBACK, `OPEN mode=`) is
   optional: `OPENADS_RESOLVE_VERBOSE=1` or `OPENADS_LOG=debug|trace`.
 - File (`OPENADS_LOG_FILE=<path>`): **only** `RESOLVED` lines.
+- **One line per file** on a connection. Opening the table and then its
+  `.z01` bag used to log each path twice (`AdsOpenTable` +
+  `find_open_table` / index resolve). The second call is silent.
 
 How to read a failed ADS+DBF login:
 

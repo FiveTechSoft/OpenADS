@@ -10,6 +10,7 @@
 #include <mutex>
 #include <ostream>
 #include <string>
+#include <unordered_set>
 
 namespace openads::util {
 
@@ -53,6 +54,16 @@ std::mutex g_audit_mu;
 std::atomic<std::uint32_t> g_next_conn{0};
 std::atomic<bool> g_seeded{false};
 std::uint32_t g_conn_seed = 0;
+std::unordered_set<std::string> g_remote_asked;
+
+std::string norm_audit_path(std::string_view p) {
+    std::string s{p};
+    for (char& ch : s) {
+        if (ch == '\\') ch = '/';
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    return s;
+}
 
 void ensure_seed() {
     bool expected = false;
@@ -182,6 +193,7 @@ void reset_audit_config() {
     g_file = nullptr;
     g_file_sink_set = false;
     g_details = Details::Auto;
+    g_remote_asked.clear();
 }
 
 void write_audit(AuditKind       kind,
@@ -202,6 +214,11 @@ void write_audit(AuditKind       kind,
 void write_remote_open_audit(std::string_view asked_name) {
     static std::string id = make_connection_serial();
     static std::atomic<std::uint32_t> n{1};
+    std::string key = norm_audit_path(asked_name);
+    {
+        std::lock_guard<std::mutex> lk(g_audit_mu);
+        if (!g_remote_asked.insert(std::move(key)).second) return;
+    }
     std::string msg = "RESOLVED=\"(remote)\" asked=\"";
     msg.append(asked_name.data(), asked_name.size());
     msg += "\" via=remote";

@@ -18,6 +18,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -268,6 +269,11 @@ private:
     bool                                                       remote_server_ = false;
     std::string                                                conn_serial_;
     std::uint32_t                                              next_entry_serial_ = 1;
+    // Normalized RESOLVED paths already emitted on this connection.
+    // open_table + find_open_table + index-bag resolve the same file
+    // more than once; the audit trail keeps one line per file.
+    std::unordered_set<std::string>                            logged_resolves_;
+    std::unordered_set<std::string>                            logged_opens_;
     // M11.7 — string compare collation (default = byte-exact).
     Collation                                                  collation_ =
         Collation::Binary;

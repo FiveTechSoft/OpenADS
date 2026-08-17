@@ -418,3 +418,37 @@ TEST_CASE("resolve entry serial increments per call on the same connection") {
     std::error_code ec;
     fs::remove_all(dir, ec);
 }
+
+TEST_CASE("resolve logs a given file only once per connection") {
+    ResolveAuditGuard g;
+    openads::util::set_audit_details_enabled(true);
+    auto dir = tmp_dir("audit_once");
+    write_minimal_dbf(dir / "sy900877.dbf");
+    {
+        auto opened = Connection::open(dir.string());
+        REQUIRE(opened.has_value());
+        Connection c = std::move(opened).value();
+        auto type = TableType::Cdx;
+        (void)c.resolve_table_file("sy900877.dbf", type);
+        type = TableType::Cdx;
+        (void)c.resolve_table_file("sy900877.dbf", type);
+
+        const std::string& file = g.file.str();
+        std::size_t n = 0;
+        for (std::size_t p = 0;
+             (p = file.find("RESOLVED=", p)) != std::string::npos;
+             p += 9) {
+            ++n;
+        }
+        CHECK(n == 1);
+        std::size_t inputs = 0;
+        for (std::size_t p = 0;
+             (p = g.console.str().find("input=", p)) != std::string::npos;
+             p += 6) {
+            ++inputs;
+        }
+        CHECK(inputs == 1);
+    }
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}

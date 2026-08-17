@@ -197,15 +197,27 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
     std::string effective = relative_path;
     if (dd_.has_value()) effective = dd_->resolve(relative_path);
     if (conn_serial_.empty()) conn_serial_ = util::make_connection_serial();
-    const std::uint32_t entry = next_entry_serial_++;
     const std::string ts = util::format_log_timestamp();
+    std::vector<std::string> pending_details;
     auto log_detail = [&](const std::string& msg) {
-        util::write_audit(util::AuditKind::Detail, conn_serial_, entry, msg, ts);
+        pending_details.push_back(msg);
     };
     auto log_resolved = [&](const std::string& path, const char* tag) {
-        // File stores only this line: include the caller's name so a
-        // login investigation can see which table ADS actually opened
-        // without turning on console detail.
+        // One RESOLVED line per physical file per connection. AdsOpenTable,
+        // find_open_table and index-bag resolve all call through here for
+        // the same .dbf / .z01 (Pritpal Bedi, Aug 2026).
+        std::string key = path;
+        for (char& ch : key) {
+            if (ch == '\\') ch = '/';
+            ch = static_cast<char>(
+                std::tolower(static_cast<unsigned char>(ch)));
+        }
+        if (!logged_resolves_.insert(std::move(key)).second) return;
+        const std::uint32_t entry = next_entry_serial_++;
+        for (const auto& d : pending_details) {
+            util::write_audit(util::AuditKind::Detail, conn_serial_,
+                              entry, d, ts);
+        }
         std::string msg = "RESOLVED=\"";
         msg += path;
         msg += "\" ";
@@ -494,13 +506,21 @@ util::Result<Handle> Connection::open_table(const std::string& relative_path,
     auto resolved = resolve_table_file(relative_path, type);
 
     {
-        const char* ms = "shared";
-        if (mode == engine::OpenMode::Exclusive) ms = "exclusive";
-        else if (mode == engine::OpenMode::Read) ms = "read";
-        util::write_audit(
-            util::AuditKind::Detail, connection_serial(),
-            next_entry_serial_ - 1,
-            std::string("OPEN mode=") + ms + " path=\"" + resolved + "\"");
+        std::string okey = resolved;
+        for (char& ch : okey) {
+            if (ch == '\\') ch = '/';
+            ch = static_cast<char>(
+                std::tolower(static_cast<unsigned char>(ch)));
+        }
+        if (logged_opens_.insert(std::move(okey)).second) {
+            const char* ms = "shared";
+            if (mode == engine::OpenMode::Exclusive) ms = "exclusive";
+            else if (mode == engine::OpenMode::Read) ms = "read";
+            util::write_audit(
+                util::AuditKind::Detail, connection_serial(),
+                next_entry_serial_ > 1 ? next_entry_serial_ - 1 : 1,
+                std::string("OPEN mode=") + ms + " path=\"" + resolved + "\"");
+        }
     }
 
     auto t = engine::Table::open(resolved, type, mode, locking);

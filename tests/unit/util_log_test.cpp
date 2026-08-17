@@ -146,6 +146,20 @@ TEST_CASE("write_audit Detail is omitted from console by default") {
     CHECK(g.file.str().find("RESOLVED=") != std::string::npos);
 }
 
+TEST_CASE("write_remote_open_audit logs each asked name only once") {
+    AuditGuard g;
+    openads::util::write_remote_open_audit("c:\\creative.ram\\cac00001\\sy900877.dbf");
+    openads::util::write_remote_open_audit("C:/Creative.RAM/CAC00001/sy900877.dbf");
+    std::size_t n = 0;
+    const std::string& file = g.file.str();
+    for (std::size_t p = 0;
+         (p = file.find("RESOLVED=", p)) != std::string::npos;
+         p += 9) {
+        ++n;
+    }
+    CHECK(n == 1);
+}
+
 TEST_CASE("write_remote_open_audit is a RESOLVED line in the file") {
     AuditGuard g;
     openads::util::write_remote_open_audit("C:/Creative.RAM/USERS.dbf");
