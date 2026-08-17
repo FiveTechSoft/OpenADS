@@ -289,17 +289,25 @@ struct ResolveAuditGuard {
 };
 
 bool has_audit_prefix(const std::string& line, const std::string& conn) {
-    // CONN(6) SPACE ENTRY(8) SPACE SEQ(8) SPACE YYYY-MM-DD HH:MM:SS.mmm
-    if (line.size() < 6 + 1 + 8 + 1 + 8 + 1 + 23 + 1) return false;
+    // CONN(6) SPACE ENTRY(8) SPACE THR(3) SPACE A/U+SEQ(8) SPACE YYYY-MM-DD HH:MM:SS.mmm
+    if (line.size() < 6 + 1 + 8 + 1 + 3 + 1 + 1 + 8 + 1 + 23 + 1) return false;
     if (line.compare(0, 6, conn) != 0) return false;
     if (line[6] != ' ') return false;
     for (int i = 0; i < 8; ++i) {
         if (line[7 + i] < '0' || line[7 + i] > '9') return false;
+    }
+    // THR at 16-18 (digits), space at 19, A/U at 20, SEQ digits at 21-28
+    if (line[15] != ' ') return false;
+    for (int i = 0; i < 3; ++i) {
         if (line[16 + i] < '0' || line[16 + i] > '9') return false;
     }
-    // after SEQ; date/time space at 35; millisecond dot at 44
-    return line[15] == ' ' && line[24] == ' ' &&
-           line[35] == ' ' && line[44] == '.';
+    if (line[19] != ' ') return false;
+    if (line[20] != 'A' && line[20] != 'U') return false;
+    for (int i = 0; i < 8; ++i) {
+        if (line[21 + i] < '0' || line[21 + i] > '9') return false;
+    }
+    // after SEQ(29); date/time space at 40; millisecond dot at 49
+    return line[29] == ' ' && line[40] == ' ' && line[49] == '.';
 }
 
 }  // namespace
@@ -439,10 +447,10 @@ TEST_CASE("resolve process seq is global; entry serial stays per connection") {
         type = TableType::Cdx;
         (void)cb.resolve_table_file("b.dbf", type);
         const std::string& file = g.file.str();
-        // Each connection's first file is entry 00000001.
-        CHECK(file.find(ca.connection_serial() + " 00000001 00000001 ") !=
+        // Each connection's first file is entry 00000001, seq A0000001/U0000001.
+        CHECK(file.find(ca.connection_serial() + " 00000001 ") !=
               std::string::npos);
-        CHECK(file.find(cb.connection_serial() + " 00000001 00000002 ") !=
+        CHECK(file.find(cb.connection_serial() + " 00000001 ") !=
               std::string::npos);
     }
     std::error_code ec;

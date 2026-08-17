@@ -5,12 +5,16 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <fstream>
 #include <mutex>
 #include <ostream>
 #include <string>
 #include <unordered_set>
+#include <vector>
 
 namespace openads::util {
 
@@ -109,6 +113,73 @@ void write_file_line(const std::string& line) {
     std::fclose(f);
 }
 
+// Parse "YYYY-MM-DD HH:MM:SS" from an audit line (positions 30-52 in the
+// new format) and return seconds since epoch, or -1 on failure.
+std::int64_t parse_audit_timestamp(std::string_view line) {
+    // New format: CONN(6) ENTRY(8) THR(3) A/U SEQ(8) TIMESTAMP
+    // Timestamp starts at position 30: "YYYY-MM-DD HH:MM:SS.mmm"
+    if (line.size() < 52) return -1;
+    if (line[34] != '-' || line[37] != '-' || line[40] != ' ' ||
+        line[43] != ':' || line[46] != ':') {
+        return -1;
+    }
+    // Manual parse — avoids <ctime> locale headaches.
+    auto ch = [&](int pos) -> int {
+        return static_cast<int>(static_cast<unsigned char>(line[pos])) - '0';
+    };
+    int year  = ch(30)*1000 + ch(31)*100 + ch(32)*10 + ch(33);
+    int month = ch(35)*10 + ch(36);
+    int day   = ch(38)*10 + ch(39);
+    int hour  = ch(41)*10 + ch(42);
+    int min   = ch(44)*10 + ch(45);
+    int sec   = ch(47)*10 + ch(48);
+    if (year < 2000 || year > 2099 || month < 1 || month > 12 ||
+        day < 1 || day > 31 || hour > 23 || min > 59 || sec > 59) {
+        return -1;
+    }
+    // Days from 1970-01-01 (Civil → Julian day algorithm).
+    int m = month, y = year;
+    if (m <= 2) { m += 12; --y; }
+    std::int64_t jdn = static_cast<std::int64_t>(day) +
+        (153 * (m - 3) + 2) / 5 + 365 * y + y / 4 - y / 100 + y / 400 +
+        1721119;
+    std::int64_t epoch_days = jdn - 2440588;  // 1970-01-01
+    return epoch_days * 86400 + hour * 3600 + min * 60 + sec;
+}
+
+// Prune RESOLVED lines older than `retention_days` from the log file.
+// Called once at startup. Rewrites the file in-place, keeping only
+// recent lines plus any non-RESOLVED lines (headers, future formats).
+void prune_log_file(const char* path, int retention_days) {
+    if (path == nullptr || path[0] == '\0' || retention_days <= 0) return;
+    std::ifstream in(path);
+    if (!in.is_open()) return;
+    std::vector<std::string> kept;
+    kept.reserve(4096);
+    std::string line;
+    const std::int64_t cutoff =
+        platform::utc_unix_micros() / 1000000 -
+        static_cast<std::int64_t>(retention_days) * 86400;
+    while (std::getline(in, line)) {
+        if (line.empty()) continue;
+        // Always keep non-RESOLVED lines (future-proofing).
+        if (line.size() < 30 || line.compare(30, 9, "RESOLVED=") != 0) {
+            kept.push_back(std::move(line));
+            continue;
+        }
+        std::int64_t ts = parse_audit_timestamp(line);
+        if (ts < 0 || ts >= cutoff) {
+            kept.push_back(std::move(line));
+        }
+    }
+    in.close();
+    std::ofstream out(path, std::ios::trunc);
+    if (!out.is_open()) return;
+    for (const auto& l : kept) {
+        out << l << '\n';
+    }
+}
+
 } // namespace
 
 void Log::write(LogLevel level, std::string_view message) noexcept {
@@ -156,6 +227,8 @@ std::string format_log_timestamp() {
 
 std::string format_log_prefix(std::string_view conn_serial,
                               std::uint32_t    entry_serial,
+                              std::uint64_t    thread_id,
+                              bool             aliased,
                               std::uint32_t    seq,
                               std::string_view timestamp) {
     std::string ts{timestamp};
@@ -167,8 +240,15 @@ std::string format_log_prefix(std::string_view conn_serial,
         conn.assign(6 - conn_serial.size(), '0');
         conn.append(conn_serial);
     }
+    // 3-digit right-aligned thread id (mod 1000 → 0-999)
+    char thr[4];
+    std::snprintf(thr, sizeof(thr), "%03u",
+                  static_cast<unsigned>(thread_id % 1000));
+    char prefix[2];
+    prefix[0] = aliased ? 'A' : 'U';
+    prefix[1] = '\0';
     return conn + ' ' + format_entry_serial(entry_serial) + ' ' +
-           format_entry_serial(seq) + ' ' + ts;
+           thr + ' ' + prefix + format_entry_serial(seq) + ' ' + ts;
 }
 
 std::uint32_t next_audit_seq() {
@@ -216,13 +296,16 @@ void reset_audit_config() {
 void write_audit(AuditKind       kind,
                  std::string_view conn_serial,
                  std::uint32_t    entry_serial,
+                 std::uint64_t    thread_id,
+                 bool             aliased,
                  std::uint32_t    seq,
                  std::string_view message,
                  std::string_view timestamp) {
     if (kind == AuditKind::Detail && !audit_details_enabled()) return;
     if (seq == 0) seq = next_audit_seq();
     std::string line =
-        format_log_prefix(conn_serial, entry_serial, seq, timestamp);
+        format_log_prefix(conn_serial, entry_serial, thread_id, aliased,
+                          seq, timestamp);
     line.push_back(' ');
     line.append(message.data(), message.size());
     line.push_back('\n');
@@ -231,7 +314,8 @@ void write_audit(AuditKind       kind,
     if (kind == AuditKind::Resolved) write_file_line(line);
 }
 
-void write_remote_open_audit(std::string_view asked_name) {
+void write_remote_open_audit(std::string_view asked_name,
+                             std::uint64_t    thread_id) {
     static std::string id = make_connection_serial();
     static std::atomic<std::uint32_t> n{1};
     std::string key = norm_audit_path(asked_name);
@@ -243,7 +327,17 @@ void write_remote_open_audit(std::string_view asked_name) {
     msg.append(asked_name.data(), asked_name.size());
     msg += "\" via=remote";
     write_audit(AuditKind::Resolved, id, n.fetch_add(1),
-                next_audit_seq(), msg);
+                thread_id, false, next_audit_seq(), msg);
+}
+
+void prune_log_if_configured() {
+    const char* path = std::getenv("OPENADS_LOG_FILE");
+    if (path == nullptr || path[0] == '\0') return;
+    const char* days_str = std::getenv("OPENADS_LOG_RETENTION_DAYS");
+    if (days_str == nullptr || days_str[0] == '\0') return;
+    int days = std::atoi(days_str);
+    if (days <= 0) return;
+    prune_log_file(path, days);
 }
 
 } // namespace openads::util
