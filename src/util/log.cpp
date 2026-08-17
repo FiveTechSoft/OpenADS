@@ -80,6 +80,15 @@ void write_console_line(const std::string& line) {
         g_console->flush();
         return;
     }
+    // No explicit sink: the DLL is embedded in someone else's process
+    // (php, Apache, Harbour apps, the parity harness). SAP's ace64.dll
+    // never writes to the host's streams, so the stderr echo is opt-in —
+    // OPENADS_LOG / OPENADS_RESOLVE_VERBOSE, or set_audit_console().
+    // OPENADS_LOG_FILE keeps working regardless via write_file_line.
+    if (!env_truthy(std::getenv("OPENADS_RESOLVE_VERBOSE")) &&
+        std::getenv("OPENADS_LOG") == nullptr) {
+        return;
+    }
     std::fputs(line.c_str(), stderr);
     std::fflush(stderr);
 }

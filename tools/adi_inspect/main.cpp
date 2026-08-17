@@ -25,7 +25,7 @@ constexpr std::uint16_t LVL_TAGDIR = 3;
 using Page = std::array<std::uint8_t, PAGE_SIZE>;
 
 std::uint16_t u16_le(const std::uint8_t* p) {
-    return static_cast<std::uint16_t>(p[0]) | (static_cast<std::uint16_t>(p[1]) << 8);
+    return static_cast<std::uint16_t>(p[0] | (p[1] << 8));
 }
 
 std::uint32_t u32_le(const std::uint8_t* p) {
@@ -52,7 +52,7 @@ struct TagInfo {
 
 std::string read_field_name_from_page(FILE* f, std::uint32_t page_no) {
     Page pg;
-    std::fseek(f, static_cast<long>(page_no) * PAGE_SIZE, SEEK_SET);
+    std::fseek(f, static_cast<long>(page_no * PAGE_SIZE), SEEK_SET);
     if (std::fread(pg.data(), 1, PAGE_SIZE, f) != PAGE_SIZE) return "";
     
     // Field marker page: field numbers encoded as 1-byte each, terminated by 0
@@ -132,7 +132,7 @@ void inspect_adi(const fs::path& path) {
 
         // Read per-tag header page for unique flag and v2 metadata
         Page hdr_pg;
-        std::fseek(f, static_cast<long>(xx) * PAGE_SIZE, SEEK_SET);
+        std::fseek(f, static_cast<long>(xx * PAGE_SIZE), SEEK_SET);
         if (std::fread(hdr_pg.data(), 1, PAGE_SIZE, f) == PAGE_SIZE) {
             tag.unique = (hdr_pg[14] & 0x01u) != 0;
             
