@@ -40,7 +40,7 @@ LogLevel log_level_from_string(std::string_view s) noexcept;
 // The file never stores Detail — only RESOLVED.
 // ---------------------------------------------------------------------------
 
-enum class AuditKind { Resolved, Detail };
+enum class AuditKind { Connected, Resolved, Detail };
 
 std::string format_connection_serial(std::uint32_t n);
 std::string format_entry_serial(std::uint32_t n);
@@ -65,6 +65,9 @@ void write_audit(AuditKind       kind,
 // was resolved. Still written as a RESOLVED line so OPENADS_LOG_FILE
 // shows the asked name (login investigations).
 void write_remote_open_audit(std::string_view asked_name);
+
+// New connection established. Always goes to console + file.
+void write_connected_audit(std::string_view data_dir, bool remote);
 
 // Test hooks. nullptr console = stderr; nullptr file = OPENADS_LOG_FILE
 // if that env var is set. reset_audit_config() restores both.

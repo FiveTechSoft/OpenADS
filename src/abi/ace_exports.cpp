@@ -6142,6 +6142,7 @@ UNSIGNED32 ENTRYPOINT AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 usServerType
             // Harbour rddads stores the last AdsConnect handle for
             // AdsCreateTable / AdsBeginTransaction(0) etc.
             rddads_default_connection() = to_ads_handle(h);
+            openads::util::write_connected_audit(tdir, true);
             return ok();
 #else
             return fail(openads::AE_FUNCTION_NOT_AVAILABLE,
@@ -6175,6 +6176,7 @@ UNSIGNED32 ENTRYPOINT AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 usServerType
             // Harbour rddads stores the last AdsConnect handle for
             // AdsCreateTable / AdsBeginTransaction(0) etc.
             rddads_default_connection() = to_ads_handle(h);
+            openads::util::write_connected_audit(dir, true);
             return ok();
         }
     }
@@ -6490,6 +6492,7 @@ UNSIGNED32 ENTRYPOINT AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 usServerType
             "Run: import_dd <source.add> <dest.add>  "
             "to convert it to OpenADS format, then connect to the converted file.");
     }
+    openads::util::write_connected_audit(path, false);
     return ok();
 }
 

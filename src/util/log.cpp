@@ -228,7 +228,7 @@ void write_audit(AuditKind       kind,
     line.push_back('\n');
     std::lock_guard<std::mutex> lk(g_audit_mu);
     write_console_line(line);
-    if (kind == AuditKind::Resolved) write_file_line(line);
+    if (kind != AuditKind::Detail) write_file_line(line);
 }
 
 void write_remote_open_audit(std::string_view asked_name) {
@@ -243,6 +243,16 @@ void write_remote_open_audit(std::string_view asked_name) {
     msg.append(asked_name.data(), asked_name.size());
     msg += "\" VIA=REMOTE";
     write_audit(AuditKind::Resolved, id, n.fetch_add(1),
+                next_audit_seq(), msg);
+}
+
+void write_connected_audit(std::string_view data_dir, bool remote) {
+    static std::string id = make_connection_serial();
+    static std::atomic<std::uint32_t> n{1};
+    std::string msg = "CONNECTED=\"";
+    msg.append(data_dir.data(), data_dir.size());
+    msg += remote ? "\" VIA=REMOTE" : "\" VIA=LOCAL";
+    write_audit(AuditKind::Connected, id, n.fetch_add(1),
                 next_audit_seq(), msg);
 }
 
