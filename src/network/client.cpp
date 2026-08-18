@@ -1,7 +1,6 @@
 #include "network/client.h"
 
 #include "engine/table.h"
-#include "platform/thread.h"
 
 #include <cstring>
 
@@ -247,7 +246,7 @@ void connect_pack_payload(std::vector<std::uint8_t>& payload,
     // a distinct bit precisely because a server must NOT send a backward block
     // to a client that only understands forward ones (see kCapPrefetchBackward).
     std::uint32_t caps = kCapPrefetchConsume | kCapPrefetchBackward
-                       | kCapOpenTableMode | kCapClientThreadId;
+                       | kCapOpenTableMode;
     for (int i = 0; i < 4; ++i)
         payload.push_back(static_cast<std::uint8_t>((caps >> (8 * i)) & 0xFFu));
 }
@@ -349,16 +348,10 @@ util::Result<RemoteConnection::OpenTableResult>
 RemoteConnection::open_table(const std::string& rel, std::uint16_t mode) {
     Frame req;
     req.opcode = Opcode::OpenTable;
-    // Extended payload: [u16 mode][u16 thread_id][table_name_bytes]
+    // Extended payload: [u16 mode][table_name_bytes]
     // Old servers ignore the prefix and read the full payload as the table
-    // name; new servers strip the leading bytes when capabilities are set.
+    // name; new servers strip the 2-byte prefix when mode is non-zero.
     write_u16_le(mode, req.payload);
-    // M12.x — client thread ID for audit correlation (kCapClientThreadId).
-    // The OS thread ID at the point of the call corresponds 1:1 with the
-    // Harbour VM thread that invoked AdsOpenTable, so the server can log
-    // it for developers to trace client-side concurrency.
-    write_u16_le(static_cast<std::uint16_t>(
-        openads::platform::current_thread_id() & 0xFFFFu), req.payload);
     req.payload.insert(req.payload.end(), rel.begin(), rel.end());
     auto rep = request(req);
     if (!rep) return rep.error();

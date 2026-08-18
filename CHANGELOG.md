@@ -16,18 +16,6 @@ conn   entry    thr A/U+seq
   the OS thread hash). Identifies which server thread handled the
   request; useful for diagnosing concurrent-access issues.
 
-### Added — client thread ID on the wire (Pritpal Bedi)
-
-New capability bit `kCapClientThreadId` (0x10). When negotiated, the
-client appends a `[u16 LE thread_id]` to every OpenTable frame. The
-server reads it and appends `clt=XXXX` to the RESOLVED line so
-developers can correlate client-side Harbour VM threads with
-server-side file resolves:
-
-```
-RESOLVED="C:/..." (sandboxed) asked="t.dbf" via=local clt=01A3
-```
-
 ### Added — log retention (Pritpal Bedi)
 
 `OPENADS_LOG_RETENTION_DAYS=N` prunes RESOLVED lines older than N days

@@ -193,8 +193,7 @@ util::Result<Connection> Connection::open(const std::string& data_dir) {
 // on which physical file a name maps to.
 std::string Connection::resolve_table_file(const std::string& relative_path,
                                            engine::TableType&  type,
-                                           bool                for_create,
-                                           std::uint16_t       client_thread_id) {
+                                           bool                for_create) {
     namespace fs = std::filesystem;
     std::string effective = relative_path;
     const bool aliased = dd_.has_value();
@@ -232,12 +231,6 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
         msg += " asked=\"";
         msg += relative_path;
         msg += remote_server_ ? "\" via=remote" : "\" via=local";
-        if (client_thread_id != 0) {
-            char ctbuf[8];
-            std::snprintf(ctbuf, sizeof(ctbuf), " clt=%04X",
-                          static_cast<unsigned>(client_thread_id));
-            msg += ctbuf;
-        }
         util::write_audit(util::AuditKind::Resolved, conn_serial_, entry,
                           tid, resolved_aliased, seq, msg, ts);
     };
@@ -515,11 +508,9 @@ engine::Table* Connection::find_open_table(const std::string& relative_path,
 util::Result<Handle> Connection::open_table(const std::string& relative_path,
                                             engine::TableType  type,
                                             engine::OpenMode   mode,
-                                            engine::LockingMode locking,
-                                            std::uint16_t      client_thread_id) {
+                                            engine::LockingMode locking) {
     namespace fs = std::filesystem;
-    auto resolved = resolve_table_file(relative_path, type, false,
-                                       client_thread_id);
+    auto resolved = resolve_table_file(relative_path, type);
 
     {
         std::string okey = resolved;

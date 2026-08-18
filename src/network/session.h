@@ -107,8 +107,6 @@ private:
     bool          client_prefetch_back_ok_ = false;
     // M12.x — client sends [u16 mode] prefix on OpenTable payloads.
     bool          client_open_table_mode_ok_ = false;
-    // M12.x — client sends [u16 thread_id] on OpenTable payloads.
-    bool          client_thread_id_ok_ = false;
     // M12.32 — last ShowDeleted state received; abi_conn_ is created
     // lazily, so ensure_abi_conn must re-apply it or the ABI connection
     // starts with the default (show) and ordered walks leak deleted rows.
