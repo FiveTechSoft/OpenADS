@@ -316,16 +316,18 @@ TEST_CASE("resolve logs RESOLVED with connection, entry, seq, timestamp") {
 
         auto type = TableType::Cdx;
         const std::string resolved = c.resolve_table_file("data.dbf", type);
+        std::string norm_resolved = resolved;
+        for (char& ch : norm_resolved) { if (ch == '\\') ch = '/'; }
 
         CHECK(g.console.str().find("effective=") == std::string::npos);
         CHECK(g.file.str().find("effective=") == std::string::npos);
 
         const std::string& out = g.console.str();
         CHECK(out.find("RESOLVED=\"") != std::string::npos);
-        CHECK(out.find(resolved) != std::string::npos);
-        CHECK(out.find("(sandboxed)") != std::string::npos);
-        CHECK(out.find("asked=\"data.dbf\"") != std::string::npos);
-        CHECK(out.find("via=local") != std::string::npos);
+        CHECK(out.find(norm_resolved) != std::string::npos);
+        CHECK(out.find("JAILED") != std::string::npos);
+        CHECK(out.find("ASKED=\"data.dbf\"") != std::string::npos);
+        CHECK(out.find("VIA=LOCAL") != std::string::npos);
         CHECK(has_audit_prefix(out, c.connection_serial()));
         CHECK(g.file.str() == out);
         CHECK(g.file.str().find("RESOLVED=") != std::string::npos);
@@ -351,7 +353,7 @@ TEST_CASE("resolve detail lines share the entry serial and stay off the file") {
         CHECK(g.console.str().find("RESOLVED=") != std::string::npos);
         CHECK(g.file.str().find("effective=") == std::string::npos);
         CHECK(g.file.str().find("RESOLVED=") != std::string::npos);
-        CHECK(g.file.str().find("asked=\"data.dbf\"") != std::string::npos);
+        CHECK(g.file.str().find("ASKED=\"data.dbf\"") != std::string::npos);
 
         // Same connection + entry serial on every line of this resolve.
         const std::string prefix6 = c.connection_serial() + " 00000001 ";

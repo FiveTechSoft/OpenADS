@@ -220,13 +220,15 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
             util::write_audit(util::AuditKind::Detail, conn_serial_,
                               entry, seq, d, ts);
         }
+        std::string norm_path = path;
+        for (char& ch : norm_path) { if (ch == '\\') ch = '/'; }
         std::string msg = "RESOLVED=\"";
-        msg += path;
+        msg += norm_path;
         msg += "\" ";
         msg += tag;
-        msg += " asked=\"";
+        msg += " ASKED=\"";
         msg += relative_path;
-        msg += remote_server_ ? "\" via=remote" : "\" via=local";
+        msg += remote_server_ ? "\" VIA=REMOTE" : "\" VIA=LOCAL";
         util::write_audit(util::AuditKind::Resolved, conn_serial_, entry, seq,
                           msg, ts);
     };
@@ -301,7 +303,7 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
             if (for_create && path_is_inside(data_dir_, rel)) {
                 std::string resolved =
                     platform::resolve_case_insensitive(rel.string());
-                log_resolved(resolved, "(sandboxed)");
+                log_resolved(resolved, "JAILED");
                 return resolved;
             }
             rel = rel.relative_path();
@@ -386,7 +388,7 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
                 std::string resolved =
                     platform::resolve_case_insensitive(rel.string());
                 log_resolved(resolved, path_is_inside(data_dir_, rel)
-                                           ? "(sandboxed)"
+                                           ? "JAILED"
                                            : "(client)");
                 return resolved;
             }
@@ -445,7 +447,7 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
     // path names a file that does not exist yet (and if it does, the
     // caller is deliberately overwriting it with a chosen format).
     if (!for_create) align_type_with_file(resolved, type);
-    log_resolved(resolved, "(sandboxed)");
+    log_resolved(resolved, "JAILED");
     return resolved;
 }
 

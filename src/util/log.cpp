@@ -239,9 +239,9 @@ void write_remote_open_audit(std::string_view asked_name) {
         std::lock_guard<std::mutex> lk(g_audit_mu);
         if (!g_remote_asked.insert(std::move(key)).second) return;
     }
-    std::string msg = "RESOLVED=\"(remote)\" asked=\"";
+    std::string msg = "RESOLVED=\"(remote)\" ASKED=\"";
     msg.append(asked_name.data(), asked_name.size());
-    msg += "\" via=remote";
+    msg += "\" VIA=REMOTE";
     write_audit(AuditKind::Resolved, id, n.fetch_add(1),
                 next_audit_seq(), msg);
 }

@@ -48,7 +48,7 @@ TEST_CASE("Log parses level from environment-style string") {
 
 // ---------------------------------------------------------------------------
 // Audit prefix: CONN(6) ENTRY(8) SEQ(8) TIMESTAMP
-// HYT673 00000001 00000014 2026-08-16 22:12:13.826 RESOLVED="..." (sandboxed)
+// HYT673 00000001 00000014 2026-08-16 22:12:13.826 RESOLVED="..." JAILED
 // ---------------------------------------------------------------------------
 
 using openads::util::AuditKind;
@@ -128,12 +128,12 @@ TEST_CASE("write_audit RESOLVED goes to console and file") {
     AuditGuard g;
     openads::util::write_audit(
         AuditKind::Resolved, "HYT673", 1, 14,
-        "RESOLVED=\"C:/temp/t.dbf\" (sandboxed)",
+        "RESOLVED=\"C:/temp/t.dbf\" JAILED",
         "2026-08-16 22:12:13.826");
 
     const std::string want =
         "HYT673 00000001 00000014 2026-08-16 22:12:13.826 "
-        "RESOLVED=\"C:/temp/t.dbf\" (sandboxed)\n";
+        "RESOLVED=\"C:/temp/t.dbf\" JAILED\n";
     CHECK(g.console.str() == want);
     CHECK(g.file.str() == want);
 }
@@ -146,7 +146,7 @@ TEST_CASE("write_audit Detail is omitted from console by default") {
         "2026-08-16 22:12:13.826");
     openads::util::write_audit(
         AuditKind::Resolved, "HYT673", 1, 1,
-        "RESOLVED=\"t.dbf\" (sandboxed)",
+        "RESOLVED=\"t.dbf\" JAILED",
         "2026-08-16 22:12:13.826");
 
     CHECK(g.console.str().find("input=") == std::string::npos);
@@ -173,9 +173,9 @@ TEST_CASE("write_remote_open_audit is a RESOLVED line in the file") {
     AuditGuard g;
     openads::util::write_remote_open_audit("C:/Creative.RAM/USERS.dbf");
     CHECK(g.console.str().find("RESOLVED=\"(remote)\"") != std::string::npos);
-    CHECK(g.console.str().find("asked=\"C:/Creative.RAM/USERS.dbf\"") !=
+    CHECK(g.console.str().find("ASKED=\"C:/Creative.RAM/USERS.dbf\"") !=
           std::string::npos);
-    CHECK(g.console.str().find("via=remote") != std::string::npos);
+    CHECK(g.console.str().find("VIA=REMOTE") != std::string::npos);
     CHECK(g.file.str() == g.console.str());
 }
 
@@ -192,7 +192,7 @@ TEST_CASE("write_audit Detail appears on console when enabled, never in file") {
         "2026-08-16 22:12:13.826");
     openads::util::write_audit(
         AuditKind::Resolved, "HYT673", 1, 1,
-        "RESOLVED=\"b\" (sandboxed)",
+        "RESOLVED=\"b\" JAILED",
         "2026-08-16 22:12:13.826");
 
     CHECK(g.console.str().find("input=") != std::string::npos);
@@ -202,5 +202,5 @@ TEST_CASE("write_audit Detail appears on console when enabled, never in file") {
     CHECK(g.file.str().find("LEGACY remap") == std::string::npos);
     CHECK(g.file.str() ==
           "HYT673 00000001 00000001 2026-08-16 22:12:13.826 "
-          "RESOLVED=\"b\" (sandboxed)\n");
+          "RESOLVED=\"b\" JAILED\n");
 }

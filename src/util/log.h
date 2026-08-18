@@ -27,7 +27,7 @@ LogLevel log_level_from_string(std::string_view s) noexcept;
 
 // ---------------------------------------------------------------------------
 // Audit lines:  CONN(6) ENTRY(8) SEQ(8) TIMESTAMP  message
-// HYT673 00000001 00000014 2026-08-16 22:12:13.826 RESOLVED="..." (sandboxed)
+// HYT673 00000001 00000014 2026-08-16 22:12:13.826 RESOLVED="..." JAILED
 //
 // ENTRY is per connection (restarts at 1 on each AdsConnect).
 // SEQ is process-wide and never restarts — one increment per RESOLVED
