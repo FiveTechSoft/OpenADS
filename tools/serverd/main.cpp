@@ -15,7 +15,6 @@
 #include "mgmt/error_log.h"
 #include "network/server.h"
 #include "platform/dll.h"
-#include "util/log.h"
 #include "openads_version.h"  // OPENADS_VERSION_STR (CMake-generated)
 #include "platform/path.h"
 #include "tools/serverd/config_ini.h"
@@ -465,8 +464,6 @@ VOID WINAPI svc_main(DWORD /*argc*/, LPSTR* /*argv*/) {
         SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN;
     SetServiceStatus(g_svc_handle, &g_svc_status);
 
-    openads::util::prune_log_if_configured();
-
     int rc = run_server(args, /*console=*/false);
 
     g_svc_status.dwCurrentState  = SERVICE_STOPPED;
@@ -639,8 +636,6 @@ int main(int argc, char** argv) {
 
     std::signal(SIGINT,  on_signal);
     std::signal(SIGTERM, on_signal);
-
-    openads::util::prune_log_if_configured();
 
     return run_server(args, /*console=*/true);
 }

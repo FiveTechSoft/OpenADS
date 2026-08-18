@@ -1,28 +1,3 @@
-## 1.8.90 - 2026-08-17
-
-### Added — A/U aliased/unaliased prefix and thread ID (Pritpal Bedi)
-
-RESOLVED lines now carry five id columns:
-
-```
-TGZZDM 00000001 001 A0000007 2026-08-16 20:39:46.910 RESOLVED="C:/..."
-^^^^^^^ ^^^^^^^^ ^^^ ^^^^^^^^
-conn   entry    thr A/U+seq
-```
-
-- **A** prefix = aliased resolve (table opened via Data Dictionary alias).
-- **U** prefix = unaliased resolve (bare file path, no DD translation).
-- **THR** — 3-digit right-aligned server thread id (lower 10 bits of
-  the OS thread hash). Identifies which server thread handled the
-  request; useful for diagnosing concurrent-access issues.
-
-### Added — log retention (Pritpal Bedi)
-
-`OPENADS_LOG_RETENTION_DAYS=N` prunes RESOLVED lines older than N days
-from `OPENADS_LOG_FILE` on server startup. The file is rewritten
-in-place — no deletion or rotation. Lines without a parseable timestamp
-(or non-RESOLVED lines) are always kept.
-
 ## 1.8.89 - 2026-08-17
 
 ### Added — process-wide audit sequence (Pritpal Bedi)

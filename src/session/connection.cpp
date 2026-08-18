@@ -10,7 +10,6 @@
 #include "platform/dll.h"
 #include "platform/fs_sandbox.h"
 #include "platform/path.h"
-#include "platform/thread.h"
 #include "util/log.h"
 
 #include <cstring>
@@ -196,17 +195,14 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
                                            bool                for_create) {
     namespace fs = std::filesystem;
     std::string effective = relative_path;
-    const bool aliased = dd_.has_value();
-    if (aliased) effective = dd_->resolve(relative_path);
+    if (dd_.has_value()) effective = dd_->resolve(relative_path);
     if (conn_serial_.empty()) conn_serial_ = util::make_connection_serial();
     const std::string ts = util::format_log_timestamp();
-    const std::uint64_t tid = platform::current_thread_id();
     std::vector<std::string> pending_details;
     auto log_detail = [&](const std::string& msg) {
         pending_details.push_back(msg);
     };
-    auto log_resolved = [&](const std::string& path, const char* tag,
-                            bool resolved_aliased) {
+    auto log_resolved = [&](const std::string& path, const char* tag) {
         // One RESOLVED line per physical file per connection. AdsOpenTable,
         // find_open_table and index-bag resolve all call through here for
         // the same .dbf / .z01 (Pritpal Bedi, Aug 2026).
@@ -222,7 +218,7 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
         last_audit_seq_ = seq;
         for (const auto& d : pending_details) {
             util::write_audit(util::AuditKind::Detail, conn_serial_,
-                              entry, tid, resolved_aliased, seq, d, ts);
+                              entry, seq, d, ts);
         }
         std::string msg = "RESOLVED=\"";
         msg += path;
@@ -231,8 +227,8 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
         msg += " asked=\"";
         msg += relative_path;
         msg += remote_server_ ? "\" via=remote" : "\" via=local";
-        util::write_audit(util::AuditKind::Resolved, conn_serial_, entry,
-                          tid, resolved_aliased, seq, msg, ts);
+        util::write_audit(util::AuditKind::Resolved, conn_serial_, entry, seq,
+                          msg, ts);
     };
     log_detail(std::string("input=\"") + relative_path +
                "\" effective=\"" + effective +
@@ -305,7 +301,7 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
             if (for_create && path_is_inside(data_dir_, rel)) {
                 std::string resolved =
                     platform::resolve_case_insensitive(rel.string());
-                log_resolved(resolved, "(sandboxed)", aliased);
+                log_resolved(resolved, "(sandboxed)");
                 return resolved;
             }
             rel = rel.relative_path();
@@ -353,7 +349,7 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
                     log_detail(std::string("FALLBACK client path: \"") +
                                resolved + "\" (exists=" +
                                (fs::exists(cand, ec) ? "1" : "0") + ")");
-                    log_resolved(resolved, "(client)", aliased);
+                    log_resolved(resolved, "(client)");
                     return resolved;
                 }
             }
@@ -391,7 +387,7 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
                     platform::resolve_case_insensitive(rel.string());
                 log_resolved(resolved, path_is_inside(data_dir_, rel)
                                            ? "(sandboxed)"
-                                           : "(client)", aliased);
+                                           : "(client)");
                 return resolved;
             }
             rel = rel.relative_path();
@@ -449,7 +445,7 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
     // path names a file that does not exist yet (and if it does, the
     // caller is deliberately overwriting it with a chosen format).
     if (!for_create) align_type_with_file(resolved, type);
-    log_resolved(resolved, "(sandboxed)", aliased);
+    log_resolved(resolved, "(sandboxed)");
     return resolved;
 }
 
@@ -526,7 +522,6 @@ util::Result<Handle> Connection::open_table(const std::string& relative_path,
             util::write_audit(
                 util::AuditKind::Detail, connection_serial(),
                 next_entry_serial_ > 1 ? next_entry_serial_ - 1 : 1,
-                platform::current_thread_id(), dd_.has_value(),
                 last_audit_seq_ != 0 ? last_audit_seq_ : 1,
                 std::string("OPEN mode=") + ms + " path=\"" + resolved + "\"");
         }

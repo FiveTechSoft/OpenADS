@@ -97,7 +97,6 @@ using openads::abi::lock_retry_policy;
 #include "engine/script/parser.h"
 #include "platform/path.h"
 #include "platform/proc.h"
-#include "platform/thread.h"
 #include "platform/time.h"
 #include "sql/parser.h"
 
@@ -6876,8 +6875,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
         // migrated from SAP with Table_Type=ADT) failed to open remotely
         // with AE_TABLE_CORRUPTED (5103), even though the identical bare
         // name opens fine locally.
-        openads::util::write_remote_open_audit(
-            name, openads::platform::current_thread_id());
+        openads::util::write_remote_open_audit(name);
         auto otr = rc->open_table(name,
             static_cast<std::uint16_t>(map_open_mode(usMode)));
         if (!otr) return fail(otr.error());
