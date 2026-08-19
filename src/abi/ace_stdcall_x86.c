@@ -5936,3 +5936,63 @@ __declspec(dllexport) UNSIGNED32 __stdcall AdsDDGetUserGroupProperty(UNSIGNED8* 
     arc_log_rc("AdsDDGetUserGroupProperty", rc, 5, (uintptr_t)a0, (uintptr_t)a1, (uintptr_t)a2, (uintptr_t)a3, (uintptr_t)a4);
     return rc;
 }
+
+/* ---- AdsMutexCreate ---- */
+#define AdsMutexCreate oadsimpl_AdsMutexCreate
+extern UNSIGNED32 AdsMutexCreate(ADSHANDLE hConnect, UNSIGNED8* pucName);
+#undef AdsMutexCreate
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsMutexCreate=_AdsMutexCreate")
+#pragma comment(linker, "/export:AdsMutexCreate=_AdsMutexCreate")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsMutexCreate(ADSHANDLE a0, UNSIGNED8* a1) {
+    UNSIGNED32 rc = oadsimpl_AdsMutexCreate(a0, a1);
+    arc_log_rc("AdsMutexCreate", rc, 2, (uintptr_t)a0, (uintptr_t)a1);
+    return rc;
+}
+
+/* ---- AdsMutexLock ---- */
+#define AdsMutexLock oadsimpl_AdsMutexLock
+extern UNSIGNED32 AdsMutexLock(ADSHANDLE hConnect, UNSIGNED8* pucName, UNSIGNED32 ulTimeOut);
+#undef AdsMutexLock
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsMutexLock=_AdsMutexLock")
+#pragma comment(linker, "/export:AdsMutexLock=_AdsMutexLock")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsMutexLock(ADSHANDLE a0, UNSIGNED8* a1, UNSIGNED32 a2) {
+    UNSIGNED32 rc = oadsimpl_AdsMutexLock(a0, a1, a2);
+    arc_log_rc("AdsMutexLock", rc, 3, (uintptr_t)a0, (uintptr_t)a1, (uintptr_t)a2);
+    return rc;
+}
+
+/* ---- AdsMutexTryLock ---- */
+#define AdsMutexTryLock oadsimpl_AdsMutexTryLock
+extern UNSIGNED32 AdsMutexTryLock(ADSHANDLE hConnect, UNSIGNED8* pucName, UNSIGNED16* pbLocked);
+#undef AdsMutexTryLock
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsMutexTryLock=_AdsMutexTryLock")
+#pragma comment(linker, "/export:AdsMutexTryLock=_AdsMutexTryLock")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsMutexTryLock(ADSHANDLE a0, UNSIGNED8* a1, UNSIGNED16* a2) {
+    UNSIGNED32 rc = oadsimpl_AdsMutexTryLock(a0, a1, a2);
+    arc_log_rc("AdsMutexTryLock", rc, 3, (uintptr_t)a0, (uintptr_t)a1, (uintptr_t)a2);
+    return rc;
+}
+
+/* ---- AdsMutexUnlock ---- */
+#define AdsMutexUnlock oadsimpl_AdsMutexUnlock
+extern UNSIGNED32 AdsMutexUnlock(ADSHANDLE hConnect, UNSIGNED8* pucName);
+#undef AdsMutexUnlock
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsMutexUnlock=_AdsMutexUnlock")
+#pragma comment(linker, "/export:AdsMutexUnlock=_AdsMutexUnlock")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsMutexUnlock(ADSHANDLE a0, UNSIGNED8* a1) {
+    UNSIGNED32 rc = oadsimpl_AdsMutexUnlock(a0, a1);
+    arc_log_rc("AdsMutexUnlock", rc, 2, (uintptr_t)a0, (uintptr_t)a1);
+    return rc;
+}
+
+/* ---- AdsMutexDestroy ---- */
+#define AdsMutexDestroy oadsimpl_AdsMutexDestroy
+extern UNSIGNED32 AdsMutexDestroy(ADSHANDLE hConnect, UNSIGNED8* pucName);
+#undef AdsMutexDestroy
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsMutexDestroy=_AdsMutexDestroy")
+#pragma comment(linker, "/export:AdsMutexDestroy=_AdsMutexDestroy")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsMutexDestroy(ADSHANDLE a0, UNSIGNED8* a1) {
+    UNSIGNED32 rc = oadsimpl_AdsMutexDestroy(a0, a1);
+    arc_log_rc("AdsMutexDestroy", rc, 2, (uintptr_t)a0, (uintptr_t)a1);
+    return rc;
+}

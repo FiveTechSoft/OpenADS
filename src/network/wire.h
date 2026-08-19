@@ -446,6 +446,23 @@ enum class Opcode : std::uint8_t {
     FSeek              = 0xFC,
     FSeekAck           = 0xFD,
 
+    // M12.32 — Distributed mutex service (sub-opcode multiplexed).
+    // Request Mutex:  [u8 sub_op][u16 nameLen][name][optional fields]
+    // Reply Mutex:    [u8 sub_op][u8 ok][optional fields]
+    //
+    // Sub-ops:
+    //   0x01 Create:  [u8=0x01][u16 nameLen][name]
+    //                 Ack: [u8=0x01][u8 ok]
+    //   0x02 Lock:    [u8=0x02][u16 nameLen][name][u32 timeout_ms]
+    //                 Ack: [u8=0x02][u8 ok]
+    //   0x03 TryLock: [u8=0x03][u16 nameLen][name]
+    //                 Ack: [u8=0x03][u8 ok]
+    //   0x04 Unlock:  [u8=0x04][u16 nameLen][name]
+    //                 Ack: [u8=0x04][u8 ok]
+    //   0x05 Destroy: [u8=0x05][u16 nameLen][name]
+    //                 Ack: [u8=0x05][u8 ok]
+    Mutex              = 0xFE,
+
     Error              = 0xFF,
 };
 
@@ -489,6 +506,15 @@ namespace FetchWhereFlags {
 // Inbound cap — symmetric with encode_frame's outbound check; prevents
 // multi-gigabyte resize on a malicious 4-byte length prefix.
 inline constexpr std::uint32_t kMaxFramePayload = 16u * 1024u * 1024u;
+
+// M12.32 — Mutex sub-opcodes (payload[0] of Opcode::Mutex frames).
+enum class MutexOp : std::uint8_t {
+    Create  = 0x01,
+    Lock    = 0x02,
+    TryLock = 0x03,
+    Unlock  = 0x04,
+    Destroy = 0x05,
+};
 
 // Upper bound on field count in a single wire row — guards against
 // malicious/corrupt servers or clients allocating unbounded vectors.

@@ -12,6 +12,7 @@
 #include "mgmt/mg_collector.h"
 #include "mgmt/mg_stats.h"
 #include "network/mg_wire.h"
+#include "network/mutex_manager.h"
 #include "platform/proc.h"
 #include "openads/ace.h"
 #include "openads/error.h"
@@ -4418,6 +4419,60 @@ DispatchResult Session::dispatch(const Frame& f) {
                 nullptr, granteeBuf.data(), permissions);
             if (rc != 0) { reply = err("DDGrantPermission", rc); break; }
             reply.opcode = Opcode::DDGrantPermissionAck;
+            break;
+        }
+        case Opcode::Mutex: {
+            if (f.payload.empty()) {
+                reply = err("Mutex: empty payload"); break;
+            }
+            std::uint8_t sub_op = f.payload[0];
+            std::size_t pos = 1;
+            std::string name;
+            if (!read_lstr16(f.payload, pos, name)) {
+                reply = err("Mutex: short payload"); break;
+            }
+            // Session identifier: use connection serial as owner
+            std::string owner = conn_serial();
+            auto& mm = srv_->mutex_manager();
+            switch (static_cast<MutexOp>(sub_op)) {
+                case MutexOp::Create: {
+                    bool ok = mm.create(name);
+                    reply.opcode = Opcode::Mutex;
+                    reply.payload = { sub_op, static_cast<std::uint8_t>(ok ? 1 : 0) };
+                    break;
+                }
+                case MutexOp::Lock: {
+                    std::uint32_t timeout_ms = 0;
+                    if (pos + 4 <= f.payload.size()) {
+                        timeout_ms = read_u32_le(f.payload.data() + pos);
+                    }
+                    bool ok = mm.lock(name, timeout_ms, owner);
+                    reply.opcode = Opcode::Mutex;
+                    reply.payload = { sub_op, static_cast<std::uint8_t>(ok ? 1 : 0) };
+                    break;
+                }
+                case MutexOp::TryLock: {
+                    bool ok = mm.try_lock(name, owner);
+                    reply.opcode = Opcode::Mutex;
+                    reply.payload = { sub_op, static_cast<std::uint8_t>(ok ? 1 : 0) };
+                    break;
+                }
+                case MutexOp::Unlock: {
+                    bool ok = mm.unlock(name, owner);
+                    reply.opcode = Opcode::Mutex;
+                    reply.payload = { sub_op, static_cast<std::uint8_t>(ok ? 1 : 0) };
+                    break;
+                }
+                case MutexOp::Destroy: {
+                    bool ok = mm.destroy(name, owner);
+                    reply.opcode = Opcode::Mutex;
+                    reply.payload = { sub_op, static_cast<std::uint8_t>(ok ? 1 : 0) };
+                    break;
+                }
+                default:
+                    reply = err("Mutex: unknown sub-opcode");
+                    break;
+            }
             break;
         }
         default: {

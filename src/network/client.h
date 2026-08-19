@@ -381,6 +381,14 @@ public:
                   const std::string&          for_expr,
                   const std::vector<AggSpec>& specs);
 
+    // M12.32 — distributed mutex service (server-wide named mutexes).
+    util::Result<void> mutex_create(const std::string& name);
+    util::Result<void> mutex_lock(const std::string& name,
+                                  std::uint32_t timeout_ms = 0);
+    util::Result<bool> mutex_try_lock(const std::string& name);
+    util::Result<void> mutex_unlock(const std::string& name);
+    util::Result<void> mutex_destroy(const std::string& name);
+
 private:
     util::Result<Frame> request(const Frame& f);
 

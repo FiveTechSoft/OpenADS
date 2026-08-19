@@ -43,6 +43,9 @@ public:
     DispatchResult dispatch(const Frame& f);
     std::uint64_t  id() const noexcept { return sid_; }
 
+    // Session serial for mutex owner identification (M12.32).
+    std::string conn_serial() const { return std::to_string(sid_); }
+
     // Read one frame off this connection, dispatch it, write any reply,
     // and fold in the per-frame telemetry. Returns false when the
     // connection should be torn down (peer closed, write failed, or the

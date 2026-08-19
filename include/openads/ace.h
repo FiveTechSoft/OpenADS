@@ -2200,6 +2200,23 @@ UNSIGNED32 ENTRYPOINT AdsAggregateValue (ADSHANDLE   hRes,
 UNSIGNED32 ENTRYPOINT AdsAggregateClose (ADSHANDLE hRes);
 
 /* ------------------------------------------------------------------ */
+/*  M12.32: distributed mutex service (server-wide named mutexes)      */
+/*  Only work over a remote connection (ADS_REMOTE_SERVER).           */
+/* ------------------------------------------------------------------ */
+UNSIGNED32 ENTRYPOINT AdsMutexCreate  (ADSHANDLE  hConnect,
+                                        UNSIGNED8* pucName);
+UNSIGNED32 ENTRYPOINT AdsMutexLock    (ADSHANDLE  hConnect,
+                                        UNSIGNED8* pucName,
+                                        UNSIGNED32 ulTimeOut);
+UNSIGNED32 ENTRYPOINT AdsMutexTryLock (ADSHANDLE  hConnect,
+                                        UNSIGNED8* pucName,
+                                        UNSIGNED16* pbLocked);
+UNSIGNED32 ENTRYPOINT AdsMutexUnlock  (ADSHANDLE  hConnect,
+                                        UNSIGNED8* pucName);
+UNSIGNED32 ENTRYPOINT AdsMutexDestroy (ADSHANDLE  hConnect,
+                                        UNSIGNED8* pucName);
+
+/* ------------------------------------------------------------------ */
 /*  oads_*() legacy C API — thin forwarding wrappers                   */
 /* ------------------------------------------------------------------ */
 

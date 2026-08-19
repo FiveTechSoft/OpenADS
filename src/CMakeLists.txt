@@ -80,6 +80,7 @@ add_library(openads_core STATIC
     network/worker_pool.cpp
     network/client.cpp
     network/remote_index_nav.cpp
+    network/mutex_manager.cpp
     mgmt/mg_collector.cpp
     mgmt/error_log.cpp
     network/mg_wire.cpp

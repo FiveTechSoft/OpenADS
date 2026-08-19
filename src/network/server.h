@@ -1,6 +1,7 @@
 #pragma once
 
 #include "mgmt/mg_snapshot.h"
+#include "network/mutex_manager.h"
 #include "network/socket.h"
 #include "network/transport.h"
 #include "network/wire.h"
@@ -127,6 +128,9 @@ public:
         return rejected_sessions_.load();
     }
 
+    // M12.32 — distributed mutex manager (server-wide named mutexes).
+    MutexManager& mutex_manager() noexcept { return mutex_mgr_; }
+
     // studio.web.0.4 — observable session info exposed for the
     // Studio "Sessions" tab. Snapshot is taken under a mutex so
     // concurrent reads from the HTTP console are safe.
@@ -223,6 +227,9 @@ private:
     // M12.34 — persistent server identity for replication loop prevention.
     std::string                                   server_id_;
     std::string                                   server_id_path();
+
+    // M12.32 — distributed mutex manager.
+    MutexManager                                   mutex_mgr_;
 
     // M12.9 — credential map (user -> password). Protected by creds_mu_
     // because add_credential() may run while sessions authenticate.

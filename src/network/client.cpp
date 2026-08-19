@@ -2303,4 +2303,86 @@ RemoteConnection::seek(std::uint32_t index_id,
     return o;
 }
 
+// M12.32 — distributed mutex service.
+
+util::Result<void> RemoteConnection::mutex_create(const std::string& name) {
+    Frame req;
+    req.opcode = Opcode::Mutex;
+    req.payload.push_back(static_cast<std::uint8_t>(MutexOp::Create));
+    write_lstr16(name, req.payload);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::Mutex ||
+        rep.value().payload.size() < 2 ||
+        rep.value().payload[0] != static_cast<std::uint8_t>(MutexOp::Create))
+        return util::Error{5000, 0, "MutexCreate: server error", ""};
+    if (!rep.value().payload[1])
+        return util::Error{5000, 0, "MutexCreate: failed (exists?)", name};
+    return util::Result<void>{};
+}
+
+util::Result<void> RemoteConnection::mutex_lock(const std::string& name,
+                                                std::uint32_t timeout_ms) {
+    Frame req;
+    req.opcode = Opcode::Mutex;
+    req.payload.push_back(static_cast<std::uint8_t>(MutexOp::Lock));
+    write_lstr16(name, req.payload);
+    write_u32_le(timeout_ms, req.payload);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::Mutex ||
+        rep.value().payload.size() < 2 ||
+        rep.value().payload[0] != static_cast<std::uint8_t>(MutexOp::Lock))
+        return util::Error{5000, 0, "MutexLock: server error", ""};
+    if (!rep.value().payload[1])
+        return util::Error{5000, 0, "MutexLock: timeout or not found", name};
+    return util::Result<void>{};
+}
+
+util::Result<bool> RemoteConnection::mutex_try_lock(const std::string& name) {
+    Frame req;
+    req.opcode = Opcode::Mutex;
+    req.payload.push_back(static_cast<std::uint8_t>(MutexOp::TryLock));
+    write_lstr16(name, req.payload);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::Mutex ||
+        rep.value().payload.size() < 2 ||
+        rep.value().payload[0] != static_cast<std::uint8_t>(MutexOp::TryLock))
+        return util::Error{5000, 0, "MutexTryLock: server error", ""};
+    return rep.value().payload[1] != 0;
+}
+
+util::Result<void> RemoteConnection::mutex_unlock(const std::string& name) {
+    Frame req;
+    req.opcode = Opcode::Mutex;
+    req.payload.push_back(static_cast<std::uint8_t>(MutexOp::Unlock));
+    write_lstr16(name, req.payload);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::Mutex ||
+        rep.value().payload.size() < 2 ||
+        rep.value().payload[0] != static_cast<std::uint8_t>(MutexOp::Unlock))
+        return util::Error{5000, 0, "MutexUnlock: server error", ""};
+    if (!rep.value().payload[1])
+        return util::Error{5000, 0, "MutexUnlock: not owner or not found", name};
+    return util::Result<void>{};
+}
+
+util::Result<void> RemoteConnection::mutex_destroy(const std::string& name) {
+    Frame req;
+    req.opcode = Opcode::Mutex;
+    req.payload.push_back(static_cast<std::uint8_t>(MutexOp::Destroy));
+    write_lstr16(name, req.payload);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::Mutex ||
+        rep.value().payload.size() < 2 ||
+        rep.value().payload[0] != static_cast<std::uint8_t>(MutexOp::Destroy))
+        return util::Error{5000, 0, "MutexDestroy: server error", ""};
+    if (!rep.value().payload[1])
+        return util::Error{5000, 0, "MutexDestroy: not owner or not found", name};
+    return util::Result<void>{};
+}
+
 } // namespace openads::network

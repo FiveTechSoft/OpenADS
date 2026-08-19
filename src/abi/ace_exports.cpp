@@ -38836,6 +38836,83 @@ UNSIGNED32 ENTRYPOINT AdsWaitForObject() {
 UNSIGNED32 ENTRYPOINT AdsWriteMiniDump() {
     arc2_trace("AdsWriteMiniDump"); return ok(); }
 
+// M12.32 — Distributed mutex service (server-wide named mutexes).
+// These functions only work over a remote connection (ADS_REMOTE_SERVER).
+// For local connections they return AE_FUNCTION_NOT_AVAILABLE.
+
+UNSIGNED32 ENTRYPOINT AdsMutexCreate(ADSHANDLE hConnect,
+                                     UNSIGNED8* pucName) {
+    arc2_trace("AdsMutexCreate");
+    auto& s = state();
+    std::lock_guard<std::recursive_mutex> lk(s.mu);
+    auto* rc = get_remote_connection(hConnect);
+    if (!rc) return fail(openads::AE_FUNCTION_NOT_AVAILABLE, "mutex requires remote connection");
+    std::string name = pucName ? reinterpret_cast<const char*>(pucName) : "";
+    if (name.empty()) return fail(openads::AE_INVALID_CONNECTION_HANDLE, "mutex name is empty");
+    auto r = rc->mutex_create(name);
+    if (!r) return fail(r.error());
+    return ok();
+}
+
+UNSIGNED32 ENTRYPOINT AdsMutexLock(ADSHANDLE hConnect,
+                                   UNSIGNED8* pucName,
+                                   UNSIGNED32 ulTimeOut) {
+    arc2_trace("AdsMutexLock");
+    auto& s = state();
+    std::lock_guard<std::recursive_mutex> lk(s.mu);
+    auto* rc = get_remote_connection(hConnect);
+    if (!rc) return fail(openads::AE_FUNCTION_NOT_AVAILABLE, "mutex requires remote connection");
+    std::string name = pucName ? reinterpret_cast<const char*>(pucName) : "";
+    if (name.empty()) return fail(openads::AE_INVALID_CONNECTION_HANDLE, "mutex name is empty");
+    auto r = rc->mutex_lock(name, ulTimeOut);
+    if (!r) return fail(r.error());
+    return ok();
+}
+
+UNSIGNED32 ENTRYPOINT AdsMutexTryLock(ADSHANDLE hConnect,
+                                      UNSIGNED8* pucName,
+                                      UNSIGNED16* pbLocked) {
+    arc2_trace("AdsMutexTryLock");
+    auto& s = state();
+    std::lock_guard<std::recursive_mutex> lk(s.mu);
+    auto* rc = get_remote_connection(hConnect);
+    if (!rc) return fail(openads::AE_FUNCTION_NOT_AVAILABLE, "mutex requires remote connection");
+    std::string name = pucName ? reinterpret_cast<const char*>(pucName) : "";
+    if (name.empty()) return fail(openads::AE_INVALID_CONNECTION_HANDLE, "mutex name is empty");
+    auto r = rc->mutex_try_lock(name);
+    if (!r) return fail(r.error());
+    if (pbLocked) *pbLocked = r.value() ? 1 : 0;
+    return ok();
+}
+
+UNSIGNED32 ENTRYPOINT AdsMutexUnlock(ADSHANDLE hConnect,
+                                     UNSIGNED8* pucName) {
+    arc2_trace("AdsMutexUnlock");
+    auto& s = state();
+    std::lock_guard<std::recursive_mutex> lk(s.mu);
+    auto* rc = get_remote_connection(hConnect);
+    if (!rc) return fail(openads::AE_FUNCTION_NOT_AVAILABLE, "mutex requires remote connection");
+    std::string name = pucName ? reinterpret_cast<const char*>(pucName) : "";
+    if (name.empty()) return fail(openads::AE_INVALID_CONNECTION_HANDLE, "mutex name is empty");
+    auto r = rc->mutex_unlock(name);
+    if (!r) return fail(r.error());
+    return ok();
+}
+
+UNSIGNED32 ENTRYPOINT AdsMutexDestroy(ADSHANDLE hConnect,
+                                      UNSIGNED8* pucName) {
+    arc2_trace("AdsMutexDestroy");
+    auto& s = state();
+    std::lock_guard<std::recursive_mutex> lk(s.mu);
+    auto* rc = get_remote_connection(hConnect);
+    if (!rc) return fail(openads::AE_FUNCTION_NOT_AVAILABLE, "mutex requires remote connection");
+    std::string name = pucName ? reinterpret_cast<const char*>(pucName) : "";
+    if (name.empty()) return fail(openads::AE_INVALID_CONNECTION_HANDLE, "mutex name is empty");
+    auto r = rc->mutex_destroy(name);
+    if (!r) return fail(r.error());
+    return ok();
+}
+
 } // extern "C" -- ARC32 ACE API gap block
 
 } // extern "C++"
