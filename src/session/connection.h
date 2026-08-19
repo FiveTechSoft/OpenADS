@@ -158,6 +158,14 @@ public:
     bool remote_server() const noexcept { return remote_server_; }
     void set_remote_server(bool v) noexcept { remote_server_ = v; }
 
+    // Share the RESOLVED-audit dedup set with another connection. The
+    // network Session links its lazy ABI twin (ensure_abi_conn) to the
+    // engine connection so one client open logs a single RESOLVED line
+    // per physical file instead of two (twin re-open for index/SQL).
+    void share_logged_resolves_from(const Connection& src) {
+        logged_resolves_ = src.logged_resolves_;
+    }
+
     // 6-char [0-9A-Z] serial assigned at Connection::open. Shared by
     // every audit line of this connection.
     const std::string& connection_serial() const noexcept {
@@ -273,7 +281,10 @@ private:
     // Normalized RESOLVED paths already emitted on this connection.
     // open_table + find_open_table + index-bag resolve the same file
     // more than once; the audit trail keeps one line per file.
-    std::unordered_set<std::string>                            logged_resolves_;
+    // Shared pointer so the server's per-session ABI "twin" connection
+    // can dedup against the same set (one client open = one line).
+    std::shared_ptr<std::unordered_set<std::string>>           logged_resolves_ =
+        std::make_shared<std::unordered_set<std::string>>();
     std::unordered_set<std::string>                            logged_opens_;
     // M11.7 — string compare collation (default = byte-exact).
     Collation                                                  collation_ =

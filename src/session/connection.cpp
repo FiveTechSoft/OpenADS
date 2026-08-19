@@ -205,14 +205,16 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
     auto log_resolved = [&](const std::string& path, const char* tag) {
         // One RESOLVED line per physical file per connection. AdsOpenTable,
         // find_open_table and index-bag resolve all call through here for
-        // the same .dbf / .z01 (Pritpal Bedi, Aug 2026).
+        // the same .dbf / .z01 (Pritpal Bedi, Aug 2026). The network
+        // Session's ABI twin shares this set (share_logged_resolves_from)
+        // so the twin's index/SQL re-open does not log the file again.
         std::string key = path;
         for (char& ch : key) {
             if (ch == '\\') ch = '/';
             ch = static_cast<char>(
                 std::tolower(static_cast<unsigned char>(ch)));
         }
-        if (!logged_resolves_.insert(std::move(key)).second) return;
+        if (!logged_resolves_->insert(std::move(key)).second) return;
         const std::uint32_t entry = next_entry_serial_++;
         const std::uint32_t seq   = util::next_audit_seq();
         last_audit_seq_ = seq;

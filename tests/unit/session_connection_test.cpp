@@ -349,7 +349,9 @@ TEST_CASE("resolve detail lines share the entry serial and stay off the file") {
         auto type = TableType::Cdx;
         (void)c.resolve_table_file("data.dbf", type);
 
-        CHECK(g.console.str().find("input=") != std::string::npos);
+        // f14fc02 suppressed the verbose input=/LEGACY/OPEN detail
+        // lines (only RESOLVED is emitted now), even with details on.
+        CHECK(g.console.str().find("input=") == std::string::npos);
         CHECK(g.console.str().find("RESOLVED=") != std::string::npos);
         CHECK(g.file.str().find("effective=") == std::string::npos);
         CHECK(g.file.str().find("RESOLVED=") != std::string::npos);
@@ -480,6 +482,42 @@ TEST_CASE("resolve logs a given file only once per connection") {
             ++inputs;
         }
         CHECK(inputs == 0);
+    }
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("shared resolve log dedups across twin connections") {
+    ResolveAuditGuard g;
+    auto dir = tmp_dir("audit_twin");
+    write_minimal_dbf(dir / "lmjshd10.dbf");
+    {
+        auto oa = Connection::open(dir.string());
+        auto ob = Connection::open(dir.string());
+        REQUIRE(oa.has_value());
+        REQUIRE(ob.has_value());
+        Connection engine_conn = std::move(oa).value();
+        Connection twin = std::move(ob).value();
+        // The server's lazy ABI twin shares the engine connection's
+        // dedup set (Session::ensure_abi_conn), so the twin's re-open
+        // of the same file for index/SQL work logs nothing.
+        twin.share_logged_resolves_from(engine_conn);
+        auto type = TableType::Cdx;
+        (void)engine_conn.resolve_table_file("lmjshd10.dbf", type);
+        type = TableType::Cdx;
+        (void)twin.resolve_table_file("lmjshd10.dbf", type);
+
+        const std::string& file = g.file.str();
+        std::size_t n = 0;
+        for (std::size_t p = 0;
+             (p = file.find("RESOLVED=", p)) != std::string::npos;
+             p += 9) {
+            ++n;
+        }
+        CHECK(n == 1);
+        // The surviving line belongs to the engine connection.
+        CHECK(file.find(engine_conn.connection_serial() + " 00000001 ") !=
+              std::string::npos);
     }
     std::error_code ec;
     fs::remove_all(dir, ec);

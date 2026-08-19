@@ -5151,6 +5151,17 @@ void set_connection_remote_server(ADSHANDLE hConnect, bool on) {
     }
 }
 
+// Server: link the per-session ABI twin's RESOLVED-audit dedup set to
+// the engine connection's, so a single client open logs one RESOLVED
+// line per physical file even though the twin re-opens the table for
+// index/SQL work (Pritpal Bedi, Aug 2026: .dbf logged twice per open).
+void share_connection_resolve_log(ADSHANDLE                  hConnect,
+                                  openads::session::Connection* src) {
+    if (openads::session::Connection* c = lookup_connection(hConnect)) {
+        if (src) c->share_logged_resolves_from(*src);
+    }
+}
+
 void register_builtin_backends() {
 #if defined(OPENADS_WITH_SQLITE)
     register_backend_table_ops(openads::session::HandleKind::SqliteTable,

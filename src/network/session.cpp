@@ -36,6 +36,8 @@ namespace openads::abi {
 void set_connection_show_deleted(ADSHANDLE hConnect, bool visible);
 void set_connection_legacy_paths(ADSHANDLE hConnect, bool on);
 void set_connection_remote_server(ADSHANDLE hConnect, bool on);
+void share_connection_resolve_log(ADSHANDLE                  hConnect,
+                                  openads::session::Connection* src);
 }
 
 namespace openads::network {
@@ -432,6 +434,11 @@ bool Session::ensure_abi_conn() {
         openads::abi::set_connection_legacy_paths(abi_conn_,
                                                   srv_->legacy_paths());
         openads::abi::set_connection_remote_server(abi_conn_, true);
+        // One client session = one RESOLVED audit line per file: the
+        // twin re-opens tables for index/SQL work, so dedup against the
+        // engine connection's set, not its own (Pritpal Bedi, Aug 2026).
+        openads::abi::share_connection_resolve_log(abi_conn_,
+                                                   sess_conn_.get());
         // Force canonical YYYYMMDD for all date field reads performed
         // through ABI handles on the server (pack_row, GetField, etc).
         // This makes AdsGetJulian / date FieldGet return usable values
