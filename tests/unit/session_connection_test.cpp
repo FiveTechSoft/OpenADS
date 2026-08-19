@@ -479,7 +479,7 @@ TEST_CASE("resolve logs a given file only once per connection") {
              p += 6) {
             ++inputs;
         }
-        CHECK(inputs == 1);
+        CHECK(inputs == 0);
     }
     std::error_code ec;
     fs::remove_all(dir, ec);

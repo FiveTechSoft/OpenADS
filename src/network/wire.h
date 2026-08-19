@@ -138,6 +138,13 @@ enum class Opcode : std::uint8_t {
     GotoRecordAck      = 0x59,
     FlushTable         = 0x5A,
     FlushTableAck      = 0x5B,
+    // M12.35 — AdsGetKeyType over the wire. Returns the key expression
+    // result type (ADS_STRING=4, ADS_DATE=3, ADS_NUMERIC=2, ADS_LOGICAL=1)
+    // for a remote index so the client encodes scope/seek values correctly.
+    // Request:  [u32 index_id]
+    // Reply:    [u16 key_type LE]
+    GetKeyType         = 0x5C,
+    GetKeyTypeAck      = 0x5D,
     // M12.8 — remote index ops (CREATE INDEX is already covered by
     // M12.7's ExecuteSQL `CREATE INDEX` DDL path; Reindex isn't in
     // SQL grammar so it needs a dedicated opcode).

@@ -2303,6 +2303,24 @@ RemoteConnection::seek(std::uint32_t index_id,
     return o;
 }
 
+// M12.35 — query the server for the key expression result type of a
+// remote index. Returns ADS_STRING (4), ADS_DATE (3), ADS_NUMERIC (2),
+// or ADS_LOGICAL (1) — the same values as the local AdsGetKeyType.
+
+util::Result<std::uint16_t>
+RemoteConnection::get_key_type(std::uint32_t index_id) {
+    Frame req;
+    req.opcode = Opcode::GetKeyType;
+    write_u32_le(index_id, req.payload);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::GetKeyTypeAck ||
+        rep.value().payload.size() < 2) {
+        return util::Error{5000, 0, "GetKeyType: server error", ""};
+    }
+    return read_u16_le(rep.value().payload.data());
+}
+
 // M12.32 — distributed mutex service.
 
 util::Result<void> RemoteConnection::mutex_create(const std::string& name) {

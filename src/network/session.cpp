@@ -3112,6 +3112,25 @@ DispatchResult Session::dispatch(const Frame& f) {
             reply.opcode = Opcode::SetScopeAck;
             break;
         }
+        case Opcode::GetKeyType: {
+            // M12.35 — return the key expression result type for a remote
+            // index. Payload: [u32 index_id]. Reply: [u16 key_type LE].
+            if (f.payload.size() < 4) {
+                reply = err("GetKeyType: bad payload"); break;
+            }
+            std::uint32_t iid = read_u32_le(f.payload.data());
+            auto iit = index_h_.find(iid);
+            if (iit == index_h_.end()) {
+                reply = err("GetKeyType: bad index id"); break;
+            }
+            UNSIGNED16 kt = 0;
+            UNSIGNED32 rrc = AdsGetKeyType(iit->second, &kt);
+            if (rrc != 0) { reply = err("GetKeyType", rrc); break; }
+            reply.opcode = Opcode::GetKeyTypeAck;
+            reply.payload.push_back(static_cast<std::uint8_t>(kt & 0xFF));
+            reply.payload.push_back(static_cast<std::uint8_t>((kt >> 8) & 0xFF));
+            break;
+        }
         case Opcode::ShowDeleted: {
             if (f.payload.size() < 1) {
                 reply = err("ShowDeleted: bad payload"); break;

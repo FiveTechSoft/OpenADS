@@ -335,3 +335,135 @@ TEST_CASE("remote scope over the wire: character key + key count + walk"
     AdsCloseTable(hT);
     AdsDisconnect(hConn);
 }
+
+// M12.35 — remote AdsGetKeyType + date scope/seek over the wire.
+// Creates a CDX table with a DATE field, seeds 5 rows, starts an
+// in-process server, connects remotely, and verifies:
+//   1. AdsGetKeyType returns ADS_DATE (not ADS_STRING) for remote index
+//   2. AdsSetScope with ADS_DOUBLEKEY julian doubles works over remote
+//   3. AdsSeek with ADS_DOUBLEKEY julian double works over remote
+
+#include "network/server.h"
+
+namespace {
+
+ADSHANDLE remote_connect_keytype(const fs::path& dir, std::uint16_t port) {
+    std::string uri = "tcp://127.0.0.1:" + std::to_string(port) + "/" +
+                      dir.generic_string();
+    std::vector<UNSIGNED8> buf(uri.begin(), uri.end());
+    buf.push_back(0);
+    ADSHANDLE hConn = 0;
+    REQUIRE(AdsConnect60(buf.data(), ADS_REMOTE_SERVER,
+                         nullptr, nullptr, 0, &hConn) == 0);
+    return hConn;
+}
+
+} // namespace
+
+TEST_CASE("M12.35 remote AdsGetKeyType returns ADS_DATE for DATE index") {
+    using openads::network::Server;
+    auto dir = fs::temp_directory_path() / "openads_remote_keytype_date";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+
+    // Seed: local connection creates the table + index + data.
+    UNSIGNED8 lsrv[256];
+    std::memcpy(lsrv, dir.string().c_str(), dir.string().size() + 1);
+    ADSHANDLE hConn = 0;
+    REQUIRE(AdsConnect60(lsrv, ADS_LOCAL_SERVER,
+                         nullptr, nullptr, 0, &hConn) == 0);
+
+    UNSIGNED8 def[]   = "FDATE,D,8,0";
+    UNSIGNED8 tname[] = "rdate";
+    ADSHANDLE hT = 0;
+    REQUIRE(AdsCreateTable(hConn, tname, nullptr, ADS_CDX,
+                           0, 0, 0, 0, def, &hT) == 0);
+
+    UNSIGNED8 bag[]  = "rdate.cdx";
+    UNSIGNED8 tag[]  = "TG_DT";
+    UNSIGNED8 expr[] = "FDATE";
+    ADSHANDLE hI = 0;
+    REQUIRE(AdsCreateIndex61(hT, bag, tag, expr,
+                             nullptr, nullptr, 0, 0, &hI) == 0);
+
+    // 5 records: 2026-07-01 .. 2026-07-05
+    UNSIGNED8 fld[] = "FDATE";
+    for (int d = 1; d <= 5; ++d) {
+        REQUIRE(AdsAppendRecord(hT) == 0);
+        REQUIRE(AdsSetJulian(hT, fld,
+                             static_cast<SIGNED32>(jdn(2026, 7, d))) == 0);
+    }
+    REQUIRE(AdsWriteRecord(hT) == 0);
+    REQUIRE(AdsCloseTable(hT) == 0);
+    REQUIRE(AdsDisconnect(hConn) == 0);
+
+    // Start in-process server + connect remotely.
+    Server server;
+    REQUIRE(server.start("127.0.0.1", 0).has_value());
+    const std::uint16_t port = server.port();
+
+    ADSHANDLE hRC = remote_connect_keytype(dir, port);
+    ADSHANDLE hRT = 0;
+    REQUIRE(AdsOpenTable(hRC, tname, nullptr, ADS_CDX,
+                         0, 0, 0, 0, &hRT) == 0);
+
+    ADSHANDLE hOrd = 0;
+    UNSIGNED8 want_tag[] = "TG_DT";
+    REQUIRE(AdsGetIndexHandle(hRT, want_tag, &hOrd) == 0);
+    REQUIRE(hOrd != 0);
+
+    SUBCASE("AdsGetKeyType returns ADS_DATE for remote DATE index") {
+        UNSIGNED16 kt = 0xFFFF;
+        REQUIRE(AdsGetKeyType(hOrd, &kt) == 0);
+        INFO("remote date key type = " << kt << " want " << ADS_DATE);
+        CHECK(kt == ADS_DATE);
+    }
+
+    SUBCASE("AdsSetScope with ADS_DOUBLEKEY scopes remote date index") {
+        UNSIGNED32 cnt = 0;
+        REQUIRE(AdsGetKeyCount(hOrd, 0, &cnt) == 0);
+        CHECK(cnt == 5u);
+
+        double top = static_cast<double>(jdn(2026, 7, 2));
+        double bot = static_cast<double>(jdn(2026, 7, 4));
+        REQUIRE(AdsSetScope(hOrd, ADS_TOP,
+                            reinterpret_cast<UNSIGNED8*>(&top),
+                            sizeof(double), ADS_DOUBLEKEY) == 0);
+        REQUIRE(AdsSetScope(hOrd, ADS_BOTTOM,
+                            reinterpret_cast<UNSIGNED8*>(&bot),
+                            sizeof(double), ADS_DOUBLEKEY) == 0);
+
+        cnt = 0;
+        REQUIRE(AdsGetKeyCount(hOrd, 0, &cnt) == 0);
+        INFO("remote date scope [0702,0704] key count = " << cnt);
+        CHECK(cnt == 3u);
+
+        // Walk: first in-scope should be 2026-07-02.
+        REQUIRE(AdsGotoTop(hOrd) == 0);
+        SIGNED32 got = 0;
+        REQUIRE(AdsGetJulian(hRT, fld, &got) == 0);
+        CHECK(got == static_cast<SIGNED32>(jdn(2026, 7, 2)));
+
+        REQUIRE(AdsClearScope(hOrd, ADS_TOP) == 0);
+        REQUIRE(AdsClearScope(hOrd, ADS_BOTTOM) == 0);
+        cnt = 0;
+        REQUIRE(AdsGetKeyCount(hOrd, 0, &cnt) == 0);
+        CHECK(cnt == 5u);
+    }
+
+    SUBCASE("AdsSeek with ADS_DOUBLEKEY finds record over remote") {
+        double seek_jd = static_cast<double>(jdn(2026, 7, 3));
+        UNSIGNED16 found = 0;
+        REQUIRE(AdsSeek(hOrd, reinterpret_cast<UNSIGNED8*>(&seek_jd),
+                        sizeof(double), ADS_DOUBLEKEY,
+                        ADS_HARDSEEK, &found) == 0);
+        CHECK(found == 1);
+        SIGNED32 got = 0;
+        REQUIRE(AdsGetJulian(hRT, fld, &got) == 0);
+        CHECK(got == static_cast<SIGNED32>(jdn(2026, 7, 3)));
+    }
+
+    AdsCloseTable(hRT);
+    AdsDisconnect(hRC);
+}

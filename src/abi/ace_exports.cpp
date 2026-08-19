@@ -34564,6 +34564,12 @@ UNSIGNED32 ENTRYPOINT AdsGetKeyType(ADSHANDLE hIndex, UNSIGNED16* p) {
     // like a logical key, so scopes were sent as a 1-byte "T"/"F"
     // instead of the real key value.
     *p = ADS_STRING;
+    // M12.35 — remote index path: query the server for the real key type.
+    if (auto* ri = get_remote_index(hIndex)) {
+        auto r = ri->conn->get_key_type(ri->id);
+        if (r) *p = r.value();
+        return ok();
+    }
     auto* idx = iindex_for_handle(hIndex);
     if (idx == nullptr) return ok();
     // Bare-field key: answer from the schema. Date and logical keys are

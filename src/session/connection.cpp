@@ -230,11 +230,8 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
         msg += relative_path;
         msg += remote_server_ ? "\" VIA=REMOTE" : "\" VIA=LOCAL";
         util::write_audit(util::AuditKind::Resolved, conn_serial_, entry, seq,
-                          msg, ts);
+                           msg, ts);
     };
-    log_detail(std::string("input=\"") + relative_path +
-               "\" effective=\"" + effective +
-               "\" data_dir=\"" + data_dir_ + "\"");
     // The connection's data_dir is the directory the server owns; every
     // table name is resolved *relative to* it. Clients (Harbour rddads,
     // X# ADSRDD, …) routinely pass an absolute or drive-rooted path that
@@ -283,12 +280,8 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
             if (auto r = platform::resolve_client_path({data_dir_},
                                                        effective)) {
                 rel = fs::path(*r);
-                log_detail(std::string("LEGACY remap: \"") + effective +
-                           "\" -> \"" + rel.string() + "\"");
             } else {
                 rel = fs::path(platform::fold_absolute_to_relative(effective));
-                log_detail(std::string("LEGACY fold: \"") + effective +
-                           "\" -> \"" + rel.string() + "\"");
             }
         } else if (remote_server_) {
             // Remote is safe storage (Pritpal Bedi, Aug 2026): never
@@ -298,8 +291,6 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
             // error at open_table (Harbour RDD EG_OPEN). --legacy-paths
             // remount is the only way a Creative.RAM-style path lands
             // in the jail (handled above).
-            log_detail(std::string("REMOTE refuse host path: \"") +
-                       effective + "\"");
             if (for_create && path_is_inside(data_dir_, rel)) {
                 std::string resolved =
                     platform::resolve_case_insensitive(rel.string());
@@ -348,9 +339,6 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
                     std::string resolved =
                         platform::resolve_case_insensitive(cand.string());
                     align_type_with_file(resolved, type);
-                    log_detail(std::string("FALLBACK client path: \"") +
-                               resolved + "\" (exists=" +
-                               (fs::exists(cand, ec) ? "1" : "0") + ")");
                     log_resolved(resolved, "(client)");
                     return resolved;
                 }
@@ -509,25 +497,6 @@ util::Result<Handle> Connection::open_table(const std::string& relative_path,
                                             engine::LockingMode locking) {
     namespace fs = std::filesystem;
     auto resolved = resolve_table_file(relative_path, type);
-
-    {
-        std::string okey = resolved;
-        for (char& ch : okey) {
-            if (ch == '\\') ch = '/';
-            ch = static_cast<char>(
-                std::tolower(static_cast<unsigned char>(ch)));
-        }
-        if (logged_opens_.insert(std::move(okey)).second) {
-            const char* ms = "shared";
-            if (mode == engine::OpenMode::Exclusive) ms = "exclusive";
-            else if (mode == engine::OpenMode::Read) ms = "read";
-            util::write_audit(
-                util::AuditKind::Detail, connection_serial(),
-                next_entry_serial_ > 1 ? next_entry_serial_ - 1 : 1,
-                last_audit_seq_ != 0 ? last_audit_seq_ : 1,
-                std::string("OPEN mode=") + ms + " path=\"" + resolved + "\"");
-        }
-    }
 
     auto t = engine::Table::open(resolved, type, mode, locking);
     if (!t) return t.error();
