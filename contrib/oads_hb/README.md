@@ -2,7 +2,9 @@
 
 Provides `OADS_FCREATE()`, `OADS_FOPEN()`, `OADS_FCLOSE()`,
 `OADS_FWRITE()`, `OADS_FREAD()`, and `OADS_FSEEK()` as callable
-Harbour functions.
+Harbour functions, plus the server-side distributed mutex functions
+`OADS_MUTEXCREATE()`, `OADS_MUTEXLOCK()`, `OADS_MUTEXTRYLOCK()`,
+`OADS_MUTEXUNLOCK()` and `OADS_MUTEXDESTROY()`.
 
 These are thin wrappers over the `oads_*()` exports from the OpenADS
 DLL. The `oads_*()` functions are themselves ABI aliases for the
@@ -64,6 +66,36 @@ RETURN
 | `OADS_FRead( hFile, nLen )` | file handle, length | cData |
 | `OADS_FRead( hFile, @cBuf, nLen )` | with @ buffer | nBytesRead |
 | `OADS_FSeek( hFile, nOffset, nOrigin )` | offset, origin (0=SET,1=CUR,2=END) | nPosition |
+
+## Server-side mutexes (remote connections only)
+
+Server-wide named mutexes, shared by all sessions of a server.
+They require a remote connection (`tcp://` / `tls://`); on a local
+connection they return `.F.`. `hConn` is optional: when omitted the
+default connection set with `OADS_SetConnection()` is used.
+
+| PRG function | Parameters | Returns |
+|---|---|---|
+| `OAds_MutexCreate( [ hConn ], cName )` | mutex name | lOk |
+| `OAds_MutexLock( [ hConn ], cName, nTimeoutMs )` | 0 = wait forever | lOk |
+| `OAds_MutexTryLock( [ hConn ], cName )` | non-blocking | lLocked |
+| `OAds_MutexUnlock( [ hConn ], cName )` | owner only | lOk |
+| `OAds_MutexDestroy( [ hConn ], cName )` | mutex name | lOk |
+
+```harbour
+hConn := AdsConnect( "tcp://192.168.18.184:6262//Users/anto/OpenADS/data" )
+OAds_SetConnection( hConn )
+
+OAds_MutexCreate( "invoice_seq" )
+IF OAds_MutexLock( "invoice_seq", 5000 )   // wait up to 5 s
+   // ... critical section, e.g. allocate next invoice number ...
+   OAds_MutexUnlock( "invoice_seq" )
+ENDIF
+OAds_MutexDestroy( "invoice_seq" )
+```
+
+Mutexes are released automatically when the owning session
+disconnects.
 
 ## Build
 

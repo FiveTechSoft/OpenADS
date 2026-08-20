@@ -5,6 +5,7 @@ parent: Home (EN)
 nav_order: 5
 permalink: /en/api-reference/
 has_children: true
+last_updated: 2026-08-19 18:35:00
 ---
 
 # OpenADS API Reference — v1.8.18
@@ -58,7 +59,8 @@ ACE error code on failure) unless noted otherwise.
 | 23 | [Deferred Flush](#23-deferred-flush) | 2 |
 | 24 | [Relation (Stubs)](#24-relation-stubs) | 3 |
 | 25 | [Legacy / Lookup](#25-legacy--lookup) | 6 |
-| | [Summary](#summary) | **357** |
+| 26 | [Distributed Mutex](#26-distributed-mutex-server-side-remote-only) | 5 |
+| | [Summary](#summary) | **362** |
 
 ---
 
@@ -680,6 +682,37 @@ effect in OpenADS:
 
 ---
 
+## 26. Distributed Mutex (server-side, remote only)
+
+Server-wide named mutexes shared by all sessions of one server
+(M12.32). They **only work over a remote connection**
+(`ADS_REMOTE_SERVER`); on a local connection they return
+`AE_FUNCTION_NOT_AVAILABLE`. Mutexes owned by a session are released
+automatically when it disconnects.
+
+| Function | Status | Description |
+|----------|--------|-------------|
+| `AdsMutexCreate` | ✅ | Create a named mutex |
+| `AdsMutexLock` | ✅ | Blocking lock (`ulTimeOut` ms, 0 = forever) |
+| `AdsMutexTryLock` | ✅ | Non-blocking lock, sets `*pbLocked` |
+| `AdsMutexUnlock` | ✅ | Unlock (owner session only) |
+| `AdsMutexDestroy` | ✅ | Destroy a named mutex |
+
+**From Harbour** (without RDDADS) use the `OAds_Mutex*` wrappers in
+[`contrib/oads_hb`](https://github.com/FiveTechSoft/OpenADS/tree/master/contrib/oads_hb)
+— `hConn` is optional when a default connection is set with
+`OAds_SetConnection()`:
+
+```harbour
+OAds_MutexCreate( [ hConn ], cName )              -> lOk
+OAds_MutexLock( [ hConn ], cName, nTimeoutMs )    -> lOk
+OAds_MutexTryLock( [ hConn ], cName )             -> lLocked
+OAds_MutexUnlock( [ hConn ], cName )              -> lOk
+OAds_MutexDestroy( [ hConn ], cName )             -> lOk
+```
+
+---
+
 ## Summary
 
 | Category | Total | ✅ | ⚠️ | 🔴 |
@@ -709,7 +742,8 @@ effect in OpenADS:
 | Deferred Flush | 2 | 2 | 0 | 0 |
 | Relation | 3 | 0 | 2 | 1 |
 | Legacy / Lookup | 6 | 4 | 0 | 2 |
-| **TOTAL** | **357** | **~250** | **~56** | **~12** |
+| Distributed Mutex | 5 | 5 | 0 | 0 |
+| **TOTAL** | **362** | **~255** | **~56** | **~12** |
 
 The genuinely unimplemented functions (`AE_FUNCTION_NOT_AVAILABLE`)
 are: `AdsSetRelation`, `AdsFindConnection`, `AdsFindConnection25`,

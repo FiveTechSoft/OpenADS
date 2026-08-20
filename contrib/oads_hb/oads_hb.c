@@ -1,4 +1,4 @@
-﻿/*
+/*
  * oads_hb.c -- Harbour HB_FUNC wrappers for the oads_*() C API.
  *
  * Drop this file into your hbmk2 project to get OADS_FOPEN(),
@@ -6,7 +6,10 @@
  * OADS_FSEEK(), OADS_CHECKEXISTENCE(), OADS_DELETEFILE(),
  * OADS_RENAMEFILE(), OADS_GETFILESIZE(), OADS_GETFILEDATE(),
  * OADS_GETFILETIME(), OADS_DIRMAKE(), OADS_DIRREMOVE(),
- * OADS_DIREXIST(), OADS_DIRECTORY() callable from Harbour PRG code.
+ * OADS_DIREXIST(), OADS_DIRECTORY(), OADS_FEXIST(), and the
+ * server-side distributed mutex functions OADS_MUTEXCREATE(),
+ * OADS_MUTEXLOCK(), OADS_MUTEXTRYLOCK(), OADS_MUTEXUNLOCK(),
+ * OADS_MUTEXDESTROY() callable from Harbour PRG code.
  *
  * The actual C implementations live in adsfunc.c (or inside the
  * OpenADS DLL).  This file only contains the Harbour<->C glue.
@@ -515,4 +518,145 @@ HB_FUNC( OADS_FEXIST )
     if( szName )
         oads_CheckExistence( hConn, ( UNSIGNED8 * ) szName, &usExists );
     hb_retl( usExists != 0 );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Distributed mutex service (server-wide named mutexes).            */
+/*  Remote connections only (ADS_REMOTE_SERVER).                      */
+/* ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------ */
+/*  OAds_MutexCreate( hConn, cName ) -> lOk                            */
+/*  OAds_MutexCreate( cName )          -> lOk (default conn)           */
+/* ------------------------------------------------------------------ */
+HB_FUNC( OADS_MUTEXCREATE )
+{
+    ADSHANDLE  hConn;
+    const char *szName;
+    UNSIGNED32 ulRc    = 1;
+
+    if( hb_pcount() >= 2 )
+    {
+        hConn  = ( ADSHANDLE ) hb_parnint( 1 );
+        szName = hb_parc( 2 );
+    }
+    else
+    {
+        AdsGetDefaultConnection( &hConn );
+        szName = hb_parc( 1 );
+    }
+
+    if( szName )
+        ulRc = AdsMutexCreate( hConn, ( UNSIGNED8 * ) szName );
+    hb_retl( ulRc == 0 );
+}
+
+/* ------------------------------------------------------------------ */
+/*  OAds_MutexLock( hConn, cName, nTimeoutMs ) -> lOk                  */
+/*  OAds_MutexLock( cName, nTimeoutMs )          -> lOk (default conn) */
+/*  nTimeoutMs: milliseconds to wait, 0 = wait forever                */
+/* ------------------------------------------------------------------ */
+HB_FUNC( OADS_MUTEXLOCK )
+{
+    ADSHANDLE  hConn;
+    const char *szName;
+    UNSIGNED32 ulTimeOut;
+    UNSIGNED32 ulRc      = 1;
+
+    if( hb_pcount() >= 3 )
+    {
+        hConn     = ( ADSHANDLE ) hb_parnint( 1 );
+        szName    = hb_parc( 2 );
+        ulTimeOut = ( UNSIGNED32 ) hb_parnint( 3 );
+    }
+    else
+    {
+        AdsGetDefaultConnection( &hConn );
+        szName    = hb_parc( 1 );
+        ulTimeOut = ( UNSIGNED32 ) hb_parnint( 2 );
+    }
+
+    if( szName )
+        ulRc = AdsMutexLock( hConn, ( UNSIGNED8 * ) szName, ulTimeOut );
+    hb_retl( ulRc == 0 );
+}
+
+/* ------------------------------------------------------------------ */
+/*  OAds_MutexTryLock( hConn, cName ) -> lLocked                       */
+/*  OAds_MutexTryLock( cName )          -> lLocked (default conn)      */
+/*  Non-blocking: returns .T. only if acquired immediately            */
+/* ------------------------------------------------------------------ */
+HB_FUNC( OADS_MUTEXTRYLOCK )
+{
+    ADSHANDLE  hConn;
+    const char *szName;
+    UNSIGNED16 usLocked = 0;
+
+    if( hb_pcount() >= 2 )
+    {
+        hConn  = ( ADSHANDLE ) hb_parnint( 1 );
+        szName = hb_parc( 2 );
+    }
+    else
+    {
+        AdsGetDefaultConnection( &hConn );
+        szName = hb_parc( 1 );
+    }
+
+    if( szName )
+        AdsMutexTryLock( hConn, ( UNSIGNED8 * ) szName, &usLocked );
+    hb_retl( usLocked != 0 );
+}
+
+/* ------------------------------------------------------------------ */
+/*  OAds_MutexUnlock( hConn, cName ) -> lOk                            */
+/*  OAds_MutexUnlock( cName )          -> lOk (default conn)           */
+/*  Only the owning session can unlock                                 */
+/* ------------------------------------------------------------------ */
+HB_FUNC( OADS_MUTEXUNLOCK )
+{
+    ADSHANDLE  hConn;
+    const char *szName;
+    UNSIGNED32 ulRc    = 1;
+
+    if( hb_pcount() >= 2 )
+    {
+        hConn  = ( ADSHANDLE ) hb_parnint( 1 );
+        szName = hb_parc( 2 );
+    }
+    else
+    {
+        AdsGetDefaultConnection( &hConn );
+        szName = hb_parc( 1 );
+    }
+
+    if( szName )
+        ulRc = AdsMutexUnlock( hConn, ( UNSIGNED8 * ) szName );
+    hb_retl( ulRc == 0 );
+}
+
+/* ------------------------------------------------------------------ */
+/*  OAds_MutexDestroy( hConn, cName ) -> lOk                           */
+/*  OAds_MutexDestroy( cName )          -> lOk (default conn)          */
+/* ------------------------------------------------------------------ */
+HB_FUNC( OADS_MUTEXDESTROY )
+{
+    ADSHANDLE  hConn;
+    const char *szName;
+    UNSIGNED32 ulRc    = 1;
+
+    if( hb_pcount() >= 2 )
+    {
+        hConn  = ( ADSHANDLE ) hb_parnint( 1 );
+        szName = hb_parc( 2 );
+    }
+    else
+    {
+        AdsGetDefaultConnection( &hConn );
+        szName = hb_parc( 1 );
+    }
+
+    if( szName )
+        ulRc = AdsMutexDestroy( hConn, ( UNSIGNED8 * ) szName );
+    hb_retl( ulRc == 0 );
 }
