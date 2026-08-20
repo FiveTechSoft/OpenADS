@@ -199,9 +199,6 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
     if (conn_serial_.empty()) conn_serial_ = util::make_connection_serial();
     const std::string ts = util::format_log_timestamp();
     std::vector<std::string> pending_details;
-    auto log_detail = [&](const std::string& msg) {
-        pending_details.push_back(msg);
-    };
     auto log_resolved = [&](const std::string& path, const char* tag) {
         // One RESOLVED line per physical file per connection. AdsOpenTable,
         // find_open_table and index-bag resolve all call through here for
