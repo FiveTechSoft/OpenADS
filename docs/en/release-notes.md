@@ -12,6 +12,28 @@ Complete history of releases with categorized improvements.
 
 ---
 
+## v1.8.93 — 2026-08-19
+
+### New Features
+
+- **`OAds_Mutex*` Harbour wrappers** — the server-side distributed
+  mutex service (v1.8.92, remote connections only) is now callable
+  from Harbour PRG code without RDDADS via `contrib/oads_hb/oads_hb.c`:
+  `OAds_MutexCreate( [hConn], cName )`,
+  `OAds_MutexLock( [hConn], cName, nTimeoutMs )`,
+  `OAds_MutexTryLock( [hConn], cName )`,
+  `OAds_MutexUnlock( [hConn], cName )`,
+  `OAds_MutexDestroy( [hConn], cName )`. Omitting `hConn` uses the
+  default connection set with `OAds_SetConnection()` (Pritpal Bedi).
+
+### Documentation
+
+- **API reference** — new section 26 "Distributed Mutex (server-side,
+  remote only)" with the Harbour signatures; `last_updated` timestamp
+  added to the front matter.
+
+---
+
 ## v1.8.89 — 2026-08-17
 
 ### New Features

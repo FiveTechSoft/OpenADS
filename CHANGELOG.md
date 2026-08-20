@@ -1,3 +1,31 @@
+## 1.8.93 - 2026-08-19
+
+### Added — `OAds_Mutex*` Harbour wrappers (Pritpal Bedi)
+
+The distributed mutex service (`AdsMutexCreate/Lock/TryLock/Unlock/
+Destroy`, remote-only, shipped in v1.8.92) is now callable from
+Harbour PRG code without RDDADS via new wrappers in
+`contrib/oads_hb/oads_hb.c`:
+
+```harbour
+OAds_MutexCreate( [ hConn ], cName )              -> lOk
+OAds_MutexLock( [ hConn ], cName, nTimeoutMs )    -> lOk   // 0 = wait forever
+OAds_MutexTryLock( [ hConn ], cName )             -> lLocked
+OAds_MutexUnlock( [ hConn ], cName )              -> lOk   // owner only
+OAds_MutexDestroy( [ hConn ], cName )             -> lOk
+```
+
+Same optional-`hConn` pattern as the `OAds_F*` file wrappers: omit it
+to use the default connection set with `OAds_SetConnection()`.
+Mutexes are server-wide (shared by all sessions) and are released
+automatically when the owning session disconnects.
+
+### Docs
+
+- `docs/en/api-reference/index.md`: new section 26 (Distributed
+  Mutex), `last_updated` front matter, totals 357 -> 362.
+- `contrib/oads_hb/README.md`: mutex signature table + example.
+
 ## 1.8.89 - 2026-08-17
 
 ### Added — process-wide audit sequence (Pritpal Bedi)
