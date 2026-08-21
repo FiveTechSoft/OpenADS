@@ -1,4 +1,15 @@
-## 1.8.97 - unreleased
+## 1.8.98 - unreleased
+
+### Fixed — `openads_serverd` ignores `remote_only_access` from its ini
+
+The client guard fired inside the daemon too (it reads the same
+`openads.ini` via exe-dir lookup): the session ABI twin's legitimate
+local opens were logged as LOCALACCESS noise in log mode — and deny
+mode (`= 1`) would have broken them with AE_ACCESS_DENIED. The daemon
+now force-disables the guard at startup unless the
+`OPENADS_REMOTE_ONLY_ACCESS` env var was set explicitly.
+
+## 1.8.97 - 2026-08-21
 
 ### Fixed — `openads.ini` client keys: dash style + exe-dir lookup (Pritpal Bedi)
 

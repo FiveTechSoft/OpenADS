@@ -167,6 +167,13 @@ or `log_file` / `OPENADS_LOG_FILE`) and allowed to proceed, so you get
 the full inventory of offending paths in one run. Switch to `1` once
 they are fixed.
 
+This is a **client** guard: put the ini next to the app exe / client
+DLL, not (only) on the server. `openads_serverd` ignores
+`remote_only_access` from its own ini — its in-process engine opens
+tables locally for every wire request, which is legitimate (since
+v1.8.98 the daemon force-disables the guard unless the env var is set
+explicitly).
+
 Other clients: the PHP extension mirrors the old `php_advantage` API
 (`bindings/php_ext/`), and a portable FFI binding is in `bindings/php/`.
 

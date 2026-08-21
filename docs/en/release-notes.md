@@ -12,6 +12,18 @@ Complete history of releases with categorized improvements.
 
 ---
 
+## v1.8.98 — 2026-08-21
+
+### Bug Fixes
+
+- **`openads_serverd` ignores `remote_only_access` from its own ini**
+  (Pritpal Bedi) — the client guard fired inside the daemon too: the
+  session ABI twin's legitimate local opens were logged as LOCALACCESS
+  noise, and deny mode would have broken them. The daemon now
+  force-disables the guard unless the env var is set explicitly.
+
+---
+
 ## v1.8.97 — 2026-08-21
 
 ### Bug Fixes

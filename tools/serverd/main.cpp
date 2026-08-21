@@ -567,6 +567,20 @@ int uninstall_service() {
 } // namespace
 
 int main(int argc, char** argv) {
+    // The remote_only_access guard (v1.8.94+) targets CLIENT apps loading
+    // the ACE DLL. This daemon's in-process engine (the session ABI twin)
+    // legitimately opens tables locally for every wire request, so an
+    // openads.ini next to the server exe must never arm the guard here --
+    // deny mode would make the twin's opens fail with AE_ACCESS_DENIED.
+    // Env wins over ini, so force-disable unless the operator set the env
+    // var explicitly before launching.
+    if (std::getenv("OPENADS_REMOTE_ONLY_ACCESS") == nullptr) {
+#if defined(_WIN32)
+        _putenv_s("OPENADS_REMOTE_ONLY_ACCESS", "0");
+#else
+        setenv("OPENADS_REMOTE_ONLY_ACCESS", "0", 0);
+#endif
+    }
     // Top-level switches that short-circuit the normal serve loop.
     if (argc > 1) {
         std::string a1 = argv[1];
