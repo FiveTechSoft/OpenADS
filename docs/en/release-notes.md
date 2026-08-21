@@ -12,6 +12,21 @@ Complete history of releases with categorized improvements.
 
 ---
 
+## v1.8.94 — 2026-08-20
+
+### New Features
+
+- **`OPENADS_REMOTE_ONLY_ACCESS=1` client guard** (Pritpal Bedi) —
+  remote-only deployments can now forbid legacy local-path access
+  through ACE. With the env var set on the client process, a local
+  `AdsOpenTable` / `AdsCreateTable` fails with `AE_ACCESS_DENIED`
+  (rddads raises a Harbour runtime error) instead of silently
+  reading/writing a `.dbf` next to the app. Remote and SQL-backend
+  connections are unaffected, as is local I/O through another RDD.
+  See [Migrating from ADS](migrating-from-ads/).
+
+---
+
 ## v1.8.93 — 2026-08-19
 
 ### New Features

@@ -1,3 +1,20 @@
+## 1.8.94 - unreleased
+
+### Added — `OPENADS_REMOTE_ONLY_ACCESS=1` client guard (Pritpal Bedi)
+
+Remote-only deployments can now forbid legacy local-path access through
+ACE entirely. With the env var set on the client process, a local
+`AdsOpenTable` / `AdsCreateTable` (in-process `ADS_LOCAL_SERVER`
+connection) fails with `AE_ACCESS_DENIED` — rddads raises a Harbour
+runtime error — instead of silently reading/writing a `.dbf` next to
+the app while the rest of the data lives on the server. Remote and
+SQL-backend connections are unaffected, as is local I/O done through
+another RDD (DBFCDX never goes through this DLL).
+
+Diagnoses the class of bug where a `USE "C:\legacy\path.dbf"` opens
+locally by mistake: the append "works" but the data never reaches the
+shared table.
+
 ## 1.8.93 - 2026-08-19
 
 ### Added — `OAds_Mutex*` Harbour wrappers (Pritpal Bedi)

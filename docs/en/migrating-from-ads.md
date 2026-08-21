@@ -127,6 +127,27 @@ it is not the same as the tx journal. Details:
 Default is **off** (strict SAP-compatible resolution). This works for Windows
 clients against Windows, Linux, or macOS servers.
 
+### Client-side guard: `OPENADS_REMOTE_ONLY_ACCESS`
+
+The mirror image of `legacy_paths`, on the **client**. In a remote-only
+deployment a table opened by local path through `ace64.dll`/`ace32.dll`
+means the app bypassed the server — usually a misconfiguration that
+silently reads/writes a file next to the app instead of the shared data.
+Set this on the client process to turn that silent drift into an error:
+
+```text
+set OPENADS_REMOTE_ONLY_ACCESS=1
+```
+
+With it on, any `AdsOpenTable` / `AdsCreateTable` that would hit the
+**local** filesystem (in-process `ADS_LOCAL_SERVER` connection) fails
+with `AE_ACCESS_DENIED` — rddads surfaces it as a Harbour runtime
+error, so the offending `USE` is caught immediately instead of writing
+a stray local `.dbf`. Remote (`tcp://`/`tls://`) and SQL-backend
+(`sqlite://`, `postgresql://`, …) connections are unaffected, and so is
+any local I/O done through another RDD (e.g. DBFCDX), which never goes
+through this DLL.
+
 Other clients: the PHP extension mirrors the old `php_advantage` API
 (`bindings/php_ext/`), and a portable FFI binding is in `bindings/php/`.
 

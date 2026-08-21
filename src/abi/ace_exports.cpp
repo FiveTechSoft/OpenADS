@@ -6829,6 +6829,21 @@ UNSIGNED32 ENTRYPOINT AdsDisconnect(ADSHANDLE hConnect) {
     return ok();
 }
 
+// OPENADS_REMOTE_ONLY_ACCESS=1 -- legacy local paths must never be
+// accessed through this DLL: any table open/create that would hit the
+// local filesystem (in-process Connection, i.e. NOT a tcp:// remote
+// connection or an explicit sql backend URI) fails with
+// AE_ACCESS_DENIED so the RDD raises a runtime error instead of
+// silently reading/writing a local file next to the app. Legitimate
+// local I/O in these deployments goes through a different RDD
+// (DBFCDX), which this DLL never sees. Read per call (no static
+// cache) so tests and long-lived hosts can toggle it. (Pritpal Bedi.)
+static bool remote_only_access() noexcept {
+    const char* e = std::getenv("OPENADS_REMOTE_ONLY_ACCESS");
+    if (e == nullptr || *e == 0) return false;
+    return !(e[0] == '0' && e[1] == 0);
+}
+
 UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
                         UNSIGNED8* pucName,
                         UNSIGNED8* /*pucAlias*/,
@@ -7275,6 +7290,12 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
             return fail(openads::AE_INVALID_CONNECTION_HANDLE,
                         "unknown connection");
         }
+    }
+    // Remote-only deployments: a LOCAL open here means the app bypassed
+    // the server with a legacy local path -- fail loud, never touch disk.
+    if (remote_only_access()) {
+        return fail(openads::AE_ACCESS_DENIED,
+                    "local table open blocked by OPENADS_REMOTE_ONLY_ACCESS");
     }
     auto name = openads::abi::to_internal(pucName, 0);
     // View alias expansion: if the requested name matches a DD view, execute
@@ -7998,6 +8019,12 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
         if (c == nullptr) {
             return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
         }
+    }
+    // Same guard as AdsOpenTable: never CREATE a local file in a
+    // remote-only deployment (OPENADS_REMOTE_ONLY_ACCESS=1).
+    if (remote_only_access()) {
+        return fail(openads::AE_ACCESS_DENIED,
+                    "local table create blocked by OPENADS_REMOTE_ONLY_ACCESS");
     }
 
     namespace fs = std::filesystem;
