@@ -11,7 +11,9 @@ namespace openads::util {
 //   2. key `ini_key` (e.g. "remote_only_access") in openads.ini
 // The environment wins. openads.ini is located via, in order:
 //   $OPENADS_INI (full path to the file), <dll dir>/openads.ini,
-//   ./openads.ini (host process cwd).
+//   <app exe dir>/openads.ini, ./openads.ini (host process cwd).
+// Keys are case-insensitive and '-' is treated as '_' (so the serverd
+// dash style and the underscore style name the same key).
 // The file is re-read only when its path or mtime changes, so lookups
 // stay cheap on hot paths. Returns "" when the setting is not present
 // anywhere (an env var set to an empty string also yields "", matching

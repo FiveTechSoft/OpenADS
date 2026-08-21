@@ -48,7 +48,7 @@ TEST_CASE("client_setting: env wins, ini fallback, truthy, mtime reload") {
     write_ini(ini,
         "# comment\n"
         "[server]\n"
-        "remote_only_access = 1\n"
+        "remote-only-access = 1\n"   // dash style, like serverd keys
         "Log_File = C:/logs/ace.log\n"
         "tls_insecure = off\n");
 

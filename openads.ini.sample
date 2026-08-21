@@ -85,8 +85,10 @@ data = .
 # data = C:\app2
 
 # --- Client-side keys (read by ace64.dll/ace32.dll, not the daemon) ---
-# A copy of this file next to the DLL (or in the app working directory,
-# or pointed to by the OPENADS_INI env var) configures the client side.
+# A copy of this file next to the DLL, next to the application .exe, or
+# in the app working directory (or pointed to by the OPENADS_INI env var)
+# configures the client side. Keys are case-insensitive and dashes are
+# equivalent to underscores (remote-only-access = remote_only_access).
 # The matching OPENADS_* environment variable always wins over the key
 # here, so either mechanism works per machine.
 #

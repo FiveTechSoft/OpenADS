@@ -12,6 +12,20 @@ Complete history of releases with categorized improvements.
 
 ---
 
+## v1.8.97 — 2026-08-21
+
+### Bug Fixes
+
+- **`openads.ini` client keys: dash style + exe-dir lookup**
+  (Pritpal Bedi) — keys in the serverd dash style
+  (`remote-only-access`, like `http-port` / `legacy-paths`) were not
+  recognized, and an `openads.ini` next to the application .exe was
+  not found. Keys are now normalized (`-` = `_`, case-insensitive)
+  and the search order is `$OPENADS_INI` → DLL dir → app exe dir →
+  cwd.
+
+---
+
 ## v1.8.96 — 2026-08-21
 
 ### New Features

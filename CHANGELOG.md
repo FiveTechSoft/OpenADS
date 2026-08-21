@@ -1,4 +1,15 @@
-## 1.8.96 - unreleased
+## 1.8.97 - unreleased
+
+### Fixed — `openads.ini` client keys: dash style + exe-dir lookup (Pritpal Bedi)
+
+Client keys written in the serverd dash style (`remote-only-access`,
+like `http-port` / `legacy-paths`) were not recognized, and an
+`openads.ini` placed next to the application .exe was not found (only
+the DLL directory and cwd were searched). Keys are now normalized
+(`-` = `_`, case-insensitive) and the search order is: `$OPENADS_INI`,
+DLL directory, app exe directory, cwd.
+
+## 1.8.96 - 2026-08-21
 
 ### Added — `remote_only_access = log` audit mode (Pritpal Bedi)
 
