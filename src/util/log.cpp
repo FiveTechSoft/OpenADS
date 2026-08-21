@@ -1,6 +1,7 @@
 #include "util/log.h"
 
 #include "platform/time.h"
+#include "util/client_config.h"
 
 #include <algorithm>
 #include <atomic>
@@ -34,13 +35,6 @@ std::string lower(std::string_view s) {
                        return static_cast<char>(std::tolower(c));
                    });
     return out;
-}
-
-bool env_truthy(const char* v) {
-    if (v == nullptr || v[0] == '\0') return false;
-    if (v[0] == '0' && v[1] == '\0') return false;
-    std::string s = lower(v);
-    return s != "0" && s != "false" && s != "off" && s != "no";
 }
 
 constexpr char kB36[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -83,10 +77,12 @@ void write_console_line(const std::string& line) {
     // No explicit sink: the DLL is embedded in someone else's process
     // (php, Apache, Harbour apps, the parity harness). SAP's ace64.dll
     // never writes to the host's streams, so the stderr echo is opt-in —
-    // OPENADS_LOG / OPENADS_RESOLVE_VERBOSE, or set_audit_console().
+    // OPENADS_LOG / OPENADS_RESOLVE_VERBOSE (env or openads.ini keys
+    // `log` / `resolve_verbose`), or set_audit_console().
     // OPENADS_LOG_FILE keeps working regardless via write_file_line.
-    if (!env_truthy(std::getenv("OPENADS_RESOLVE_VERBOSE")) &&
-        std::getenv("OPENADS_LOG") == nullptr) {
+    if (!client_setting_truthy("OPENADS_RESOLVE_VERBOSE",
+                               "resolve_verbose") &&
+        client_setting("OPENADS_LOG", "log").empty()) {
         return;
     }
     std::fputs(line.c_str(), stderr);
@@ -100,9 +96,9 @@ void write_file_line(const std::string& line) {
         return;
     }
     if (g_file_sink_set) return;  // tests explicitly disabled the file
-    const char* path = std::getenv("OPENADS_LOG_FILE");
-    if (path == nullptr || path[0] == '\0') return;
-    std::FILE* f = std::fopen(path, "a");
+    const std::string path = client_setting("OPENADS_LOG_FILE", "log_file");
+    if (path.empty()) return;
+    std::FILE* f = std::fopen(path.c_str(), "a");
     if (f == nullptr) return;
     std::fputs(line.c_str(), f);
     std::fflush(f);
@@ -184,13 +180,10 @@ std::string make_connection_serial() {
 bool audit_details_enabled() {
     if (g_details == Details::On)  return true;
     if (g_details == Details::Off) return false;
-    if (env_truthy(std::getenv("OPENADS_RESOLVE_VERBOSE"))) return true;
-    const char* lvl = std::getenv("OPENADS_LOG");
-    if (lvl != nullptr) {
-        const std::string n = lower(lvl);
-        if (n == "debug" || n == "trace") return true;
-    }
-    return false;
+    if (client_setting_truthy("OPENADS_RESOLVE_VERBOSE",
+                              "resolve_verbose")) return true;
+    const std::string n = lower(client_setting("OPENADS_LOG", "log"));
+    return n == "debug" || n == "trace";
 }
 
 void set_audit_console(std::ostream* sink) { g_console = sink; }

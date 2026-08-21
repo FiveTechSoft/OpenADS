@@ -50,6 +50,7 @@ using openads::abi::lock_retry_policy;
 #include "session/connection.h"
 #include "session/handle_registry.h"
 #include "util/log.h"
+#include "util/client_config.h"
 #if defined(OPENADS_WITH_SQLITE)
 #include "sql_backend/sqlite_connection.h"
 #include "sql_backend/sqlite_index.h"
@@ -1188,7 +1189,8 @@ bool remote_table_has_index(const openads::network::RemoteTable* rt) {
 }
 
 static void cli_trace(const char* fmt, ...) {
-    static const bool on = std::getenv("OPENADS_WIRE_TRACE") != nullptr;
+    static const bool on = openads::util::client_setting_truthy(
+        "OPENADS_WIRE_TRACE", "wire_trace");
     if (!on) return;
     FILE* hf = std::fopen("C:/tmp/cli_trace.log", "a");
     if (hf == nullptr) return;
@@ -6048,7 +6050,8 @@ extern "C" {
 /* ARC32 bring-up trace (temporary): one line per key ABI call. */
 #include <cstdarg>
 static bool arc2_on() {
-    static const bool on = std::getenv("OPENADS_ARC_TRACE") != nullptr;
+    static const bool on = openads::util::client_setting_truthy(
+        "OPENADS_ARC_TRACE", "arc_trace");
     return on;
 }
 static void arc2_stamp(FILE* f) {
@@ -6128,11 +6131,10 @@ UNSIGNED32 ENTRYPOINT AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 usServerType
                                        : std::string();
             openads::network::TlsConfig cfg;
             // Verify peer certificates by default. Set OPENADS_TLS_INSECURE=1
-            // for dev/self-signed endpoints until AdsSetTlsCa ships.
-            if (const char* env = std::getenv("OPENADS_TLS_INSECURE")) {
-                cfg.insecure_skip_verify =
-                    (env[0] == '1' || env[0] == 'y' || env[0] == 'Y');
-            }
+            // (or tls_insecure = 1 in openads.ini) for dev/self-signed
+            // endpoints until AdsSetTlsCa ships.
+            cfg.insecure_skip_verify = openads::util::client_setting_truthy(
+                "OPENADS_TLS_INSECURE", "tls_insecure");
             cfg.sni_hostname         = thost;
             auto tt = openads::network::connect_tls(thost, tport, cfg);
             if (!tt) return fail(tt.error());
@@ -6836,12 +6838,12 @@ UNSIGNED32 ENTRYPOINT AdsDisconnect(ADSHANDLE hConnect) {
 // AE_ACCESS_DENIED so the RDD raises a runtime error instead of
 // silently reading/writing a local file next to the app. Legitimate
 // local I/O in these deployments goes through a different RDD
-// (DBFCDX), which this DLL never sees. Read per call (no static
-// cache) so tests and long-lived hosts can toggle it. (Pritpal Bedi.)
-static bool remote_only_access() noexcept {
-    const char* e = std::getenv("OPENADS_REMOTE_ONLY_ACCESS");
-    if (e == nullptr || *e == 0) return false;
-    return !(e[0] == '0' && e[1] == 0);
+// (DBFCDX), which this DLL never sees. Env var or openads.ini key
+// `remote_only_access = 1`; env wins. Read per call (no static cache)
+// so tests and long-lived hosts can toggle it. (Pritpal Bedi.)
+static bool remote_only_access() {
+    return openads::util::client_setting_truthy(
+        "OPENADS_REMOTE_ONLY_ACCESS", "remote_only_access");
 }
 
 UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
@@ -10372,12 +10374,10 @@ SIGNED32 to_julian(int y, int m, int d) {
 // explicit override.
 std::atomic<int> g_adi_v2_override{-1};
 
-bool adi_v2_enabled() noexcept {
+bool adi_v2_enabled() {
     const int ov = g_adi_v2_override.load(std::memory_order_relaxed);
     if (ov >= 0) return ov != 0;
-    const char* e = std::getenv("OPENADS_ADI_V2");
-    if (e == nullptr || *e == 0) return false;
-    return !(e[0] == '0' && e[1] == 0);
+    return openads::util::client_setting_truthy("OPENADS_ADI_V2", "adi_v2");
 }
 
 // Counting the live entries of an index costs one deleted_at() per entry, and
@@ -13020,10 +13020,11 @@ namespace {
 // key + 32-bit recno), so compound / computed / FOR tags work over ADT the
 // same way they do over DBF. The file is then CDX-format even though it is
 // named .adi -- only enable when those .ADI files are NOT interchanged with
-// real Advantage. Gate: env OPENADS_ADT_CDX_INDEX=1.
+// real Advantage. Gate: env OPENADS_ADT_CDX_INDEX=1 (or
+// adt_cdx_index = 1 in openads.ini).
 bool adt_cdx_index_enabled() {
-    const char* e = std::getenv("OPENADS_ADT_CDX_INDEX");
-    return e != nullptr && e[0] == '1';
+    return openads::util::client_setting_truthy(
+        "OPENADS_ADT_CDX_INDEX", "adt_cdx_index");
 }
 
 // A .adi bag written by the CdxIndex reroute carries the Harbour CDX structure
@@ -24400,7 +24401,7 @@ struct TriggerBridge final : openads::script::SqlBridge {
     openads::util::Result<std::unique_ptr<openads::script::SqlCursor>>
     exec(const std::string& sql) override {
         static const bool trig_trace =
-            std::getenv("OPENADS_TRACE") != nullptr;
+            openads::util::client_setting_truthy("OPENADS_TRACE", "trace");
         if (trig_trace)
             std::fprintf(stderr, "[trig-exec] %.120s\n", sql.c_str());
         // 1. INSERT INTO __error â€¦ VALUES (code, 'msg') -- the classic ADS
@@ -25975,7 +25976,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 auto imgs = sess::active_images(c);
                 {
                     static const bool into_trace =
-                        std::getenv("OPENADS_TRACE") != nullptr;
+                        openads::util::client_setting_truthy(
+                            "OPENADS_TRACE", "trace");
                     if (into_trace)
                         std::fprintf(stderr,
                             "[into] tmp=%s all_images=%d new=%p old=%p "

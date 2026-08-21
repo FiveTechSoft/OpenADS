@@ -1,4 +1,16 @@
-## 1.8.94 - unreleased
+## 1.8.95 - unreleased
+
+### Added — client settings in `openads.ini` (Pritpal Bedi)
+
+Every `OPENADS_*` client setting now also reads from `openads.ini`
+(env var wins): `remote_only_access`, `resolve_verbose`, `log`,
+`log_file`, `trace`, `wire_trace`, `arc_trace`, `tls_insecure`,
+`adi_v2`, `adt_cdx_index`. The client DLL looks for the file next to
+itself, then in the app working directory; `OPENADS_INI` points at an
+explicit path. The file is re-read when it changes, so edits apply
+without restarting the app. See `openads.ini.sample`.
+
+## 1.8.94 - 2026-08-20
 
 ### Added — `OPENADS_REMOTE_ONLY_ACCESS=1` client guard (Pritpal Bedi)
 

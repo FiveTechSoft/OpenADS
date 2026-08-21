@@ -12,6 +12,21 @@ Complete history of releases with categorized improvements.
 
 ---
 
+## v1.8.95 — 2026-08-20
+
+### New Features
+
+- **Client settings in `openads.ini`** (Pritpal Bedi) — every
+  `OPENADS_*` client setting now also reads from `openads.ini` (env
+  var wins): `remote_only_access`, `resolve_verbose`, `log`,
+  `log_file`, `trace`, `wire_trace`, `arc_trace`, `tls_insecure`,
+  `adi_v2`, `adt_cdx_index`. The client DLL looks for the file next
+  to itself, then in the app working directory; `OPENADS_INI` points
+  at an explicit path. The file is re-read when it changes. See
+  `openads.ini.sample`.
+
+---
+
 ## v1.8.94 — 2026-08-20
 
 ### New Features

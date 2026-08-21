@@ -83,3 +83,26 @@ data = .
 #
 # [port:6264]
 # data = C:\app2
+
+# --- Client-side keys (read by ace64.dll/ace32.dll, not the daemon) ---
+# A copy of this file next to the DLL (or in the app working directory,
+# or pointed to by the OPENADS_INI env var) configures the client side.
+# The matching OPENADS_* environment variable always wins over the key
+# here, so either mechanism works per machine.
+#
+# remote_only_access = 1  -- forbid local AdsOpenTable/AdsCreateTable
+#   (legacy local paths): they fail with AE_ACCESS_DENIED (Harbour RTE)
+#   instead of silently touching a file next to the app. Env:
+#   OPENADS_REMOTE_ONLY_ACCESS=1.
+# resolve_verbose = 1     -- audit detail lines (env OPENADS_RESOLVE_VERBOSE)
+# log = debug             -- audit console level (env OPENADS_LOG)
+# log_file = path         -- audit log file (env OPENADS_LOG_FILE)
+# trace = 1               -- SQL trigger trace (env OPENADS_TRACE)
+# wire_trace = 1          -- wire trace to C:/tmp/cli_trace.log
+#                           (env OPENADS_WIRE_TRACE)
+# arc_trace = 1           -- ARC32 bring-up trace (env OPENADS_ARC_TRACE)
+# tls_insecure = 1        -- skip TLS peer verification, dev only
+#                           (env OPENADS_TLS_INSECURE)
+# adi_v2 = 1              -- ADI v2 index writer (env OPENADS_ADI_V2)
+# adt_cdx_index = 1       -- route ADT .adi bags through the CDX engine
+#                           (env OPENADS_ADT_CDX_INDEX)

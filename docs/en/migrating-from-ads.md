@@ -137,7 +137,16 @@ Set this on the client process to turn that silent drift into an error:
 
 ```text
 set OPENADS_REMOTE_ONLY_ACCESS=1
+rem or, in an openads.ini next to ace64.dll/ace32.dll (or in the app
+rem working directory, or pointed to by OPENADS_INI):
+rem   remote_only_access = 1
 ```
+
+The environment variable wins over the ini key. The same dual
+env/ini mechanism covers the other client settings —
+`resolve_verbose`, `log`, `log_file`, `trace`, `wire_trace`,
+`arc_trace`, `tls_insecure`, `adi_v2`, `adt_cdx_index` (see
+`openads.ini.sample`).
 
 With it on, any `AdsOpenTable` / `AdsCreateTable` that would hit the
 **local** filesystem (in-process `ADS_LOCAL_SERVER` connection) fails
