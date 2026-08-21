@@ -157,6 +157,16 @@ a stray local `.dbf`. Remote (`tcp://`/`tls://`) and SQL-backend
 any local I/O done through another RDD (e.g. DBFCDX), which never goes
 through this DLL.
 
+**Start with log mode.** Deny mode raises the RTE *wherever* the first
+local open happens — if your app's error handler itself opens tables
+via ADSCDX, the RTE inside the handler recurses and Harbour kills the
+process ("recursive call" error). Set `remote_only_access = log`
+(or `2`) instead: every local open/create is written to the audit log
+as a `LOCALACCESS="OPEN|CREATE|OPENIDX" ASKED="..." VIA=LOCAL` line (console,
+or `log_file` / `OPENADS_LOG_FILE`) and allowed to proceed, so you get
+the full inventory of offending paths in one run. Switch to `1` once
+they are fixed.
+
 Other clients: the PHP extension mirrors the old `php_advantage` API
 (`bindings/php_ext/`), and a portable FFI binding is in `bindings/php/`.
 

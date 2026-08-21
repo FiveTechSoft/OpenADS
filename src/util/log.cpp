@@ -239,6 +239,18 @@ void write_remote_open_audit(std::string_view asked_name) {
                 next_audit_seq(), msg);
 }
 
+void write_local_access_audit(std::string_view op, std::string_view path) {
+    static std::string id = make_connection_serial();
+    static std::atomic<std::uint32_t> n{1};
+    std::string msg = "LOCALACCESS=\"";
+    msg.append(op.data(), op.size());
+    msg += "\" ASKED=\"";
+    msg.append(path.data(), path.size());
+    msg += "\" VIA=LOCAL MODE=LOG";
+    write_audit(AuditKind::Resolved, id, n.fetch_add(1),
+                next_audit_seq(), msg);
+}
+
 void write_connected_audit(std::string_view data_dir, bool remote) {
     static std::string id = make_connection_serial();
     static std::atomic<std::uint32_t> n{1};

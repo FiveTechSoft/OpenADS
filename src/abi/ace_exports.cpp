@@ -6831,19 +6831,28 @@ UNSIGNED32 ENTRYPOINT AdsDisconnect(ADSHANDLE hConnect) {
     return ok();
 }
 
-// OPENADS_REMOTE_ONLY_ACCESS=1 -- legacy local paths must never be
-// accessed through this DLL: any table open/create that would hit the
-// local filesystem (in-process Connection, i.e. NOT a tcp:// remote
-// connection or an explicit sql backend URI) fails with
-// AE_ACCESS_DENIED so the RDD raises a runtime error instead of
-// silently reading/writing a local file next to the app. Legitimate
-// local I/O in these deployments goes through a different RDD
-// (DBFCDX), which this DLL never sees. Env var or openads.ini key
-// `remote_only_access = 1`; env wins. Read per call (no static cache)
-// so tests and long-lived hosts can toggle it. (Pritpal Bedi.)
-static bool remote_only_access() {
-    return openads::util::client_setting_truthy(
+// OPENADS_REMOTE_ONLY_ACCESS -- legacy local paths must never be
+// accessed through this DLL in a remote-only deployment. Modes:
+//   1/on/true/yes  deny: local open/create fails with AE_ACCESS_DENIED
+//                  (the RDD raises a runtime error)
+//   2/log/warn     audit: a LOCALACCESS line goes to the audit
+//                  console/file and the access proceeds -- inventory
+//                  mode for finding every local open without breaking
+//                  the app. Use this first: in deny mode an app whose
+//                  error handler itself opens tables via ADSCDX dies
+//                  from Harbour error-handler recursion. (Pritpal Bedi.)
+//   unset/0/off    disabled
+// Env var or openads.ini key `remote_only_access`; env wins. Read per
+// call (no static cache) so tests and long-lived hosts can toggle it.
+static int remote_only_access_mode() {
+    std::string v = openads::util::client_setting(
         "OPENADS_REMOTE_ONLY_ACCESS", "remote_only_access");
+    for (auto& c : v)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (v == "2" || v == "log" || v == "warn") return 2;
+    if (v.empty() || v == "0" || v == "false" || v == "off" || v == "no")
+        return 0;
+    return 1;
 }
 
 UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
@@ -7294,10 +7303,16 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
         }
     }
     // Remote-only deployments: a LOCAL open here means the app bypassed
-    // the server with a legacy local path -- fail loud, never touch disk.
-    if (remote_only_access()) {
+    // the server with a legacy local path -- deny (RTE) or audit it,
+    // never touch disk silently.
+    const int roa_mode = remote_only_access_mode();
+    if (roa_mode == 1) {
         return fail(openads::AE_ACCESS_DENIED,
                     "local table open blocked by OPENADS_REMOTE_ONLY_ACCESS");
+    }
+    if (roa_mode == 2) {
+        auto nm = openads::abi::to_internal(pucName, 0);
+        openads::util::write_local_access_audit("OPEN", nm);
     }
     auto name = openads::abi::to_internal(pucName, 0);
     // View alias expansion: if the requested name matches a DD view, execute
@@ -8022,11 +8037,15 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
             return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
         }
     }
-    // Same guard as AdsOpenTable: never CREATE a local file in a
-    // remote-only deployment (OPENADS_REMOTE_ONLY_ACCESS=1).
-    if (remote_only_access()) {
+    // Same guard as AdsOpenTable: never CREATE a local file silently in
+    // a remote-only deployment (OPENADS_REMOTE_ONLY_ACCESS).
+    const int roa_mode = remote_only_access_mode();
+    if (roa_mode == 1) {
         return fail(openads::AE_ACCESS_DENIED,
                     "local table create blocked by OPENADS_REMOTE_ONLY_ACCESS");
+    }
+    if (roa_mode == 2) {
+        openads::util::write_local_access_audit("CREATE", rel);
     }
 
     namespace fs = std::filesystem;
@@ -13159,6 +13178,17 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
     Table* t = get_table(hTable);
     if (!t) {
         return fail(openads::AE_INTERNAL_ERROR, "unknown table");
+    }
+    // remote_only_access guard, index side: OrdListAdd with a legacy
+    // local .z01/.cdx path on a local-connection table lands here.
+    const int roa_mode = remote_only_access_mode();
+    if (roa_mode == 1) {
+        return fail(openads::AE_ACCESS_DENIED,
+                    "local index open blocked by OPENADS_REMOTE_ONLY_ACCESS");
+    }
+    if (roa_mode == 2) {
+        openads::util::write_local_access_audit(
+            "OPENIDX", openads::abi::to_internal(pucName, 0));
     }
     auto bag_name = normalize_index_path(
         openads::abi::to_internal(pucName, 0));

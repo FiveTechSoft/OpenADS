@@ -6,9 +6,11 @@
 #include "doctest.h"
 #include "openads/ace.h"
 #include "openads/error.h"
+#include "util/log.h"
 
 #include <cstring>
 #include <filesystem>
+#include <sstream>
 
 namespace fs = std::filesystem;
 
@@ -71,6 +73,35 @@ TEST_CASE("OPENADS_REMOTE_ONLY_ACCESS blocks local open/create, allows remote-mo
         CHECK(AdsCreateTable(hConn, name2, alias, ADS_CDX, 0, 0, 0, 64,
                              fields, &hTable) == openads::AE_ACCESS_DENIED);
         CHECK(!fs::exists(dir / "ro2.dbf"));
+    }
+
+    // Mode 2 (log): the access proceeds but is audited as LOCALACCESS.
+    {
+        EnvGuard guard("OPENADS_REMOTE_ONLY_ACCESS", "log");
+        std::ostringstream oss;
+        openads::util::set_audit_file(&oss);
+        hTable = 0;
+        CHECK(AdsOpenTable(hConn, name, alias, ADS_CDX, 0, 0, 0, 0,
+                           &hTable) == openads::AE_SUCCESS);
+        // OrdListAdd equivalent: local index open is audited too (the
+        // bag does not exist, so the open itself may fail -- the guard
+        // runs before the file is touched).
+        UNSIGNED8 idx[64] = "ro_noidx";
+        ADSHANDLE ahIdx[4] = {0};
+        UNSIGNED16 alen = 4;
+        (void)AdsOpenIndex(hTable, idx, ahIdx, &alen);
+        CHECK(AdsCloseTable(hTable) == openads::AE_SUCCESS);
+        UNSIGNED8 name3[64] = "ro3";
+        CHECK(AdsCreateTable(hConn, name3, alias, ADS_CDX, 0, 0, 0, 64,
+                             fields, &hTable) == openads::AE_SUCCESS);
+        CHECK(AdsCloseTable(hTable) == openads::AE_SUCCESS);
+        openads::util::reset_audit_config();
+        CHECK(oss.str().find("LOCALACCESS=\"OPEN\"") !=
+              std::string::npos);
+        CHECK(oss.str().find("LOCALACCESS=\"OPENIDX\"") !=
+              std::string::npos);
+        CHECK(oss.str().find("LOCALACCESS=\"CREATE\"") !=
+              std::string::npos);
     }
 
     // Guard OFF again (per-call env read): local open works.

@@ -94,6 +94,11 @@ data = .
 #   (legacy local paths): they fail with AE_ACCESS_DENIED (Harbour RTE)
 #   instead of silently touching a file next to the app. Env:
 #   OPENADS_REMOTE_ONLY_ACCESS=1.
+#   Use `remote_only_access = log` (or 2) first: every local open/create
+#   is written to the audit log as a LOCALACCESS line but allowed, so
+#   you can inventory the offenders without breaking the app (deny mode
+#   RTEs inside an error handler that opens tables kill the app by
+#   error-handler recursion).
 # resolve_verbose = 1     -- audit detail lines (env OPENADS_RESOLVE_VERBOSE)
 # log = debug             -- audit console level (env OPENADS_LOG)
 # log_file = path         -- audit log file (env OPENADS_LOG_FILE)

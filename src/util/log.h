@@ -66,6 +66,12 @@ void write_audit(AuditKind       kind,
 // shows the asked name (login investigations).
 void write_remote_open_audit(std::string_view asked_name);
 
+// Audit a local table access allowed through because
+// remote_only_access is in log mode (2/log): the offender is recorded
+// (OPENADS_LOG_FILE / console) but the open proceeds, so an app whose
+// error handler itself opens tables does not die from RTE recursion.
+void write_local_access_audit(std::string_view op, std::string_view path);
+
 // New connection established. Always goes to console + file.
 void write_connected_audit(std::string_view data_dir, bool remote);
 

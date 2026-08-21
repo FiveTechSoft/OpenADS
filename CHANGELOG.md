@@ -1,4 +1,18 @@
-## 1.8.95 - unreleased
+## 1.8.96 - unreleased
+
+### Added — `remote_only_access = log` audit mode (Pritpal Bedi)
+
+Deny mode (`remote_only_access = 1`, v1.8.94) raises the RTE wherever
+the first local open happens; an app whose error handler itself opens
+tables via ADSCDX dies from Harbour error-handler recursion
+("recursive call" error). New mode `remote_only_access = log` (or `2`)
+writes a `LOCALACCESS="OPEN|CREATE|OPENIDX" ASKED="..." VIA=LOCAL`
+line to the audit console / `log_file` and lets the access proceed, so
+the full inventory of legacy local paths is collected in one run
+before switching to deny mode. The guard now also covers
+`AdsOpenIndex` (OrdListAdd with a local `.z01`/`.cdx` path).
+
+## 1.8.95 - 2026-08-20
 
 ### Added — client settings in `openads.ini` (Pritpal Bedi)
 

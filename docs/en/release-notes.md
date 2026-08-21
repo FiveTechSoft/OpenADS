@@ -12,6 +12,21 @@ Complete history of releases with categorized improvements.
 
 ---
 
+## v1.8.96 — 2026-08-21
+
+### New Features
+
+- **`remote_only_access = log` audit mode** (Pritpal Bedi) — deny mode
+  (`1`) raises the RTE wherever the first local open happens, and an
+  app whose error handler itself opens tables via ADSCDX dies from
+  Harbour error-handler recursion ("recursive call" error). The new
+  `log` (or `2`) mode writes a `LOCALACCESS="OPEN|CREATE" ASKED="..."
+  VIA=LOCAL` line to the audit console / `log_file` and lets the
+  access proceed, so the full inventory of legacy local paths is
+  collected in one run before switching to deny mode.
+
+---
+
 ## v1.8.95 — 2026-08-20
 
 ### New Features
