@@ -1,5 +1,31 @@
 ﻿## What's New
 
+### Audit: 10-byte padded alias in RESOLVED log lines (v1.8.99)
+
+Every RESOLVED audit line now includes the table alias (filename stem)
+as a 10-byte right-padded field between the timestamp and the message.
+This makes it possible to identify which table a log entry refers to
+without cross-referencing the asked/resolved paths.
+
+**New log format:**
+```
+CONN(6) ENTRY(8) SEQ(8) TIMESTAMP ALIAS(10) RESOLVED="..." ...
+```
+
+**Example:**
+```
+NMWIF0 00000004 00000005 2026-08-21 16:17:26.012 USER_CONFG RESOLVED="C:/data/USER_CONFG.dbf" JAILED ASKED="USER_CONFG" VIA=LOCAL
+```
+
+The alias is right-padded with spaces if shorter than 10 characters,
+and truncated from the left if longer. Both server-side (`openads.ini`
+log file) and client-side (`_arc32/ace_calls.log`) table opens emit
+the alias.
+
+---
+
+## What's New
+
 ### Fix: multi-user record count staleness (v1.8.30)
 
 When multiple instances share a table via remote connection, Browse() and

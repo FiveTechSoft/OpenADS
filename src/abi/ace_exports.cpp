@@ -6915,7 +6915,8 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
         // migrated from SAP with Table_Type=ADT) failed to open remotely
         // with AE_TABLE_CORRUPTED (5103), even though the identical bare
         // name opens fine locally.
-        openads::util::write_remote_open_audit(name);
+        openads::util::write_remote_open_audit(name,
+            std::filesystem::path(name).stem().string());
         auto otr = rc->open_table(name,
             static_cast<std::uint16_t>(map_open_mode(usMode)));
         if (!otr) return fail(otr.error());

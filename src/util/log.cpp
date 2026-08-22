@@ -140,6 +140,16 @@ std::string format_entry_serial(std::uint32_t n) {
     return std::string(buf, 8);
 }
 
+std::string format_alias_field(std::string_view alias) {
+    constexpr std::size_t kAliasWidth = 10;
+    if (alias.size() >= kAliasWidth) {
+        return std::string(alias.data(), kAliasWidth);
+    }
+    std::string out(kAliasWidth - alias.size(), ' ');
+    out.append(alias);
+    return out;
+}
+
 std::string format_log_timestamp() {
     auto w = openads::platform::now_local();
     int ms = static_cast<int>(w.ms_of_day % 1000);
@@ -211,11 +221,16 @@ void write_audit(AuditKind       kind,
                  std::uint32_t    entry_serial,
                  std::uint32_t    seq,
                  std::string_view message,
-                 std::string_view timestamp) {
+                 std::string_view timestamp,
+                 std::string_view alias) {
     if (kind == AuditKind::Detail && !audit_details_enabled()) return;
     if (seq == 0) seq = next_audit_seq();
     std::string line =
         format_log_prefix(conn_serial, entry_serial, seq, timestamp);
+    if (!alias.empty()) {
+        line.push_back(' ');
+        line.append(format_alias_field(alias));
+    }
     line.push_back(' ');
     line.append(message.data(), message.size());
     line.push_back('\n');
@@ -224,7 +239,8 @@ void write_audit(AuditKind       kind,
     if (kind != AuditKind::Detail) write_file_line(line);
 }
 
-void write_remote_open_audit(std::string_view asked_name) {
+void write_remote_open_audit(std::string_view asked_name,
+                            std::string_view alias) {
     static std::string id = make_connection_serial();
     static std::atomic<std::uint32_t> n{1};
     std::string key = norm_audit_path(asked_name);
@@ -236,7 +252,7 @@ void write_remote_open_audit(std::string_view asked_name) {
     msg.append(asked_name.data(), asked_name.size());
     msg += "\" VIA=REMOTE";
     write_audit(AuditKind::Resolved, id, n.fetch_add(1),
-                next_audit_seq(), msg);
+                next_audit_seq(), msg, {}, alias);
 }
 
 void write_local_access_audit(std::string_view op, std::string_view path) {

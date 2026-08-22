@@ -44,6 +44,7 @@ enum class AuditKind { Connected, Resolved, Detail };
 
 std::string format_connection_serial(std::uint32_t n);
 std::string format_entry_serial(std::uint32_t n);
+std::string format_alias_field(std::string_view alias);
 std::string format_log_timestamp();
 std::string format_log_prefix(std::string_view conn_serial,
                               std::uint32_t    entry_serial,
@@ -59,12 +60,14 @@ void write_audit(AuditKind       kind,
                  std::uint32_t    entry_serial,
                  std::uint32_t    seq,
                  std::string_view message,
-                 std::string_view timestamp = {});
+                 std::string_view timestamp = {},
+                 std::string_view alias = {});
 
 // Client-side AdsOpenTable that went over the wire: no local file
 // was resolved. Still written as a RESOLVED line so OPENADS_LOG_FILE
 // shows the asked name (login investigations).
-void write_remote_open_audit(std::string_view asked_name);
+void write_remote_open_audit(std::string_view asked_name,
+                            std::string_view alias = {});
 
 // Audit a local table access allowed through because
 // remote_only_access is in log mode (2/log): the offender is recorded

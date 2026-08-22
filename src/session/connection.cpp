@@ -198,6 +198,7 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
     if (dd_.has_value()) effective = dd_->resolve(relative_path);
     if (conn_serial_.empty()) conn_serial_ = util::make_connection_serial();
     const std::string ts = util::format_log_timestamp();
+    const std::string log_alias = fs::path(relative_path).stem().string();
     std::vector<std::string> pending_details;
     auto log_resolved = [&](const std::string& path, const char* tag) {
         // One RESOLVED line per physical file per connection. AdsOpenTable,
@@ -217,7 +218,7 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
         last_audit_seq_ = seq;
         for (const auto& d : pending_details) {
             util::write_audit(util::AuditKind::Detail, conn_serial_,
-                              entry, seq, d, ts);
+                              entry, seq, d, ts, log_alias);
         }
         std::string norm_path = path;
         for (char& ch : norm_path) { if (ch == '\\') ch = '/'; }
@@ -229,7 +230,7 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
         msg += relative_path;
         msg += remote_server_ ? "\" VIA=REMOTE" : "\" VIA=LOCAL";
         util::write_audit(util::AuditKind::Resolved, conn_serial_, entry, seq,
-                           msg, ts);
+                           msg, ts, log_alias);
     };
     // The connection's data_dir is the directory the server owns; every
     // table name is resolved *relative to* it. Clients (Harbour rddads,
