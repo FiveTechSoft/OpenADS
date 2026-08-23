@@ -146,10 +146,10 @@ TEST_CASE("M12.3 server unknown opcode returns Error frame") {
 
     Frame req;
     // Pick a value outside every defined op so the server's
-    // default-case path is what answers. The server filesystem API
-    // (b06cf6a0) claimed 0xE0-0xFD; 0xFE is the only remaining gap
-    // below Error (0xFF).
-    req.opcode = static_cast<Opcode>(0xFE);   // truly unknown
+    // default-case path is what answers. 0xFE was claimed by the
+    // Mutex service (M12.32); 0x0F sits in a gap between FindRecordAck
+    // (0x0E) and Connect (0x10) with nothing defined.
+    req.opcode = static_cast<Opcode>(0x0F);   // truly unknown
     REQUIRE(write_frame(cs, req).has_value());
     auto reply = read_frame(cs);
     REQUIRE(reply.has_value());

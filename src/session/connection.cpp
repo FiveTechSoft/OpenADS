@@ -291,7 +291,17 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
             // error at open_table (Harbour RDD EG_OPEN). --legacy-paths
             // remount is the only way a Creative.RAM-style path lands
             // in the jail (handled above).
-            if (for_create && path_is_inside(data_dir_, rel)) {
+            //
+            // Exception: a host-absolute path that already lands INSIDE
+            // data_dir_ names a file the server owns, so honoring it
+            // verbatim is still safe storage. Server-internal callers
+            // depend on this -- AdsCreateTable reopens the file it just
+            // wrote by its resolved absolute path (the ADT temp cursors
+            // behind every remote SELECT that materialises a JOIN /
+            // UNION / aggregate result), and folding those produced a
+            // doubled data_dir_/Users/.../ path that opened nothing
+            // (surfaced as AE_PARSE_ERROR at the SQL boundary).
+            if (path_is_inside(data_dir_, rel)) {
                 std::string resolved =
                     platform::resolve_case_insensitive(rel.string());
                 log_resolved(resolved, "JAILED");

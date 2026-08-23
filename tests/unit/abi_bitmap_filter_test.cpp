@@ -663,7 +663,9 @@ TEST_CASE("AdsBmSeekWild: stub with index returns success") {
 
     // Create an index on NAME (need a valid filename)
     auto idx_path = fs::temp_directory_path() / "openads_bm_abi_wildidx.cdx";
-    fs::remove(idx_path);
+    std::error_code remove_ec;
+    fs::remove(idx_path, remove_ec);  // best-effort: AV scanners can
+                                      // hold the file briefly on CI
     std::string idx_file = idx_path.string();
     UNSIGNED8 tag[] = "NAME";
     UNSIGNED8 expr[] = "NAME";

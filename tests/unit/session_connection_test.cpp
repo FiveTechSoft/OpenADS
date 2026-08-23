@@ -23,7 +23,10 @@ fs::path tmp_dir(const char* tag) {
     std::error_code ec;
     fs::remove_all(p, ec);
     fs::create_directories(p);
-    return p;
+    // GitHub Windows runners hand %TEMP% back as an 8.3 short path
+    // (C:\Users\RUNNER~1\...); canonicalize so the string comparisons
+    // against weakly_canonical() results in these tests hold there too.
+    return fs::weakly_canonical(p);
 }
 
 void write_minimal_dbf(const fs::path& p) {

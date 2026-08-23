@@ -12671,9 +12671,10 @@ UNSIGNED32 ENTRYPOINT AdsUnlockTable(ADSHANDLE hTable) {
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
     auto r = t->unlock_table();
     if (!r) return fail(r.error());
-    // ACE semantics: AdsUnlockTable releases ALL locks — remove both the
-    // table lock AND all record locks from the management registry.
-    openads::mgmt::LockRegistry::instance().remove_all_for_table(t);
+    // SAP ACE semantics: AdsUnlockTable releases only the table lock —
+    // record locks are independent and must survive. Drop just the table
+    // lock from the management registry.
+    openads::mgmt::LockRegistry::instance().remove_table_lock(t);
     return ok();
 }
 

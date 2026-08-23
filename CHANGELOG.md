@@ -1,3 +1,48 @@
+## 1.9.1 - unreleased
+
+### Fixed — remote `SELECT COUNT(*)` / materialised cursors died with AE_PARSE_ERROR (7200)
+
+The ADT temp cursor behind every remote SELECT that materialises a
+result (aggregates, JOIN, UNION) is reopened by its resolved absolute
+path inside the data root; `resolve_table_file`'s remote-server branch
+folded that absolute path a second time (`data_dir_/Users/.../...`),
+the reopen failed, and the SQL boundary wrapped it as 7200. Absolute
+paths that already land inside `data_dir_` are now honored verbatim
+(still safe storage — out-of-jail paths still fold). Broken since the
+resolve-audit change (ca6187e); pinned by the M12.7 and Enterprise-pool
+remote SQL tests.
+
+### Fixed — Windows CI test failures from 8.3 short `%TEMP%`
+
+`session_connection_test` compared resolved paths against
+`weakly_canonical` forms, which diverge when `%TEMP%` comes back as an
+8.3 short path (GitHub runners: `C:\Users\RUNNER~1\...`). The test
+`tmp_dir()` helper now returns the canonical long form.
+
+### Fixed — stale "unknown opcode" test
+
+`M12.3 server unknown opcode returns Error frame` used 0xFE, which the
+Mutex service (M12.32) has since claimed; now probes the genuinely
+unassigned 0x0F.
+
+### Fixed — `AdsUnlockTable` no longer drops record locks
+
+The 1.8.83 change made `AdsUnlockTable` release the FLock AND every
+held RLock, on the premise that the original SAP ACE did this.  That
+premise was wrong: SAP ADS keeps table locks and record locks
+independent — `AdsUnlockTable` releases only the table lock, and
+records locked with `AdsLockRecord` stay locked until
+`AdsUnlockRecord` (recno 0 unlocks all).  OpenADS now matches:
+
+- **`Table::unlock_table()`** re-asserts the record locks that were
+  suspended at OS level while the FLock was held (instead of releasing
+  them); `release_all_record_locks_()` is gone.
+- **`AdsUnlockTable`** removes only the table-lock entry from the
+  `LockRegistry` (`remove_table_lock`), leaving record-lock entries
+  intact.  `AdsCloseTable` still clears everything.
+- Verified by `abi_lock_comprehensive_test.cpp` "Table lock and record
+  locks coexist independently".
+
 ## 1.9.0 - 2026-08-22
 
 ### Fixed — remote `AdsIsRecordLocked` / `AdsGetAllLocks` (Vouch IsLogged, Pritpal Bedi)

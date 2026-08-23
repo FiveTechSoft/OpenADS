@@ -1739,22 +1739,6 @@ void Table::reassert_record_locks_() noexcept {
     for (auto recno : lost) recno_locks_.erase(recno);
 }
 
-// ACE semantics: AdsUnlockTable releases ALL locks — FLock AND every
-// held RLock.  The original SAP ACE server did this; Harbour rddads
-// delegates all lock tracking to the server (no client-side pLocksPos
-// list) and trusts AdsUnlockTable to release everything.  Mirroring
-// this in unlock_table() so that dbUnlock() → AdsUnlockTable clears
-// record locks, matching the contract rddads expects.
-void Table::release_all_record_locks_() noexcept {
-    for (auto& [recno, h] : recno_locks_) {
-        if (h.offset() == 0) continue;   // virtual (FLock-subsumed)
-        locks_.force_unlock_record(driver_->file(), to_lock_type_(),
-                                   locking_, recno);
-        h.release();
-    }
-    recno_locks_.clear();
-}
-
 // xBase/ACE semantics: FLock subsumes the caller's OWN record locks. The
 // registrations are kept (AdsGetNumLocks keeps counting them and the
 // write guard keeps seeing them); only the OS bytes are released, and
@@ -1812,13 +1796,14 @@ util::Result<void> Table::unlock_table() {
         if (locks_.unlock_table(driver_->file(), to_lock_type_(), locking_)) {
             table_lock_->release();
             table_lock_.reset();
+            // SAP ACE semantics: the table lock and record locks are
+            // independent — AdsUnlockTable must NOT drop held RLocks.
+            // While the FLock was held every recno_locks_ entry was
+            // suspended at OS level (virtual / offset 0); re-assert the
+            // OS byte locks now that the FLock range is gone.
+            reassert_record_locks_();
         }
     }
-    // ACE semantics: AdsUnlockTable releases ALL locks — FLock AND every
-    // held RLock.  Harbour rddads trusts the server to do this (no
-    // client-side lock list).  Release record locks to match the original
-    // SAP ACE contract so dbUnlock() clears everything.
-    release_all_record_locks_();
     return {};
 }
 

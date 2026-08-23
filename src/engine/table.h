@@ -638,10 +638,6 @@ private:
     // the table lock goes away.
     void suspend_own_record_locks_() noexcept;
     void reassert_record_locks_() noexcept;
-    // ACE semantics: release ALL held record locks (FLock + RLocks).
-    // Called by unlock_table() to match the original SAP ACE contract
-    // where AdsUnlockTable releases everything.
-    void release_all_record_locks_() noexcept;
 
     std::unique_ptr<drivers::IDriver>             driver_;
     std::unique_ptr<drivers::IMemoStore>          memo_;
