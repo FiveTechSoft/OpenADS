@@ -6052,7 +6052,7 @@ extern "C" {
 static bool arc2_on() {
     static const bool on = openads::util::client_setting_truthy(
         "OPENADS_ARC_TRACE", "arc_trace");
-    return on;
+    return on && openads::util::logging_enabled();
 }
 static void arc2_stamp(FILE* f) {
     std::time_t t = std::time(nullptr);
@@ -15015,14 +15015,22 @@ UNSIGNED32 ENTRYPOINT AdsFailedTransactionRecovery(UNSIGNED8* pucServer) {
 UNSIGNED32 ENTRYPOINT AdsGetAllLocks(ADSHANDLE hTable, UNSIGNED32* paRecnos,
                           UNSIGNED16* pusCount) {
     arc2_trace("AdsGetAllLocks");
-    if (get_remote_table(hTable) != nullptr) {
-        // Remote record locks are server-managed. A full implementation
-        // would add a GetAllLocks wire opcode + server handler that calls
-        // AdsGetAllLocks on the server-side ABI handle and returns the
-        // list. For now return zero held locks (non-crashing) so RLockList
-        // doesn't blow up; callers that need self-lock checks can still
-        // use the write-probe + EG_UNLOCKED path once #6 is addressed.
-        if (pusCount != nullptr) *pusCount = 0;
+    if (auto* rt = get_remote_table(hTable)) {
+        // M12.36 — remote record locks are server-managed; the
+        // GetAllLocks wire opcode returns this connection's held list.
+        if (pusCount == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+        auto r = rt->conn->get_all_locks(rt->id);
+        if (!r) return fail(r.error());
+        const auto& held = r.value();
+        UNSIGNED16 cap = *pusCount;
+        UNSIGNED16 n   = static_cast<UNSIGNED16>(
+            std::min<std::size_t>(held.size(), cap));
+        if (paRecnos != nullptr && n > 0) {
+            for (UNSIGNED16 i = 0; i < n; ++i) {
+                paRecnos[i] = held[i];
+            }
+        }
+        *pusCount = static_cast<UNSIGNED16>(held.size());
         return ok();
     }
     Table* t = get_table(hTable);
@@ -35219,13 +35227,19 @@ UNSIGNED32 ENTRYPOINT AdsIsRecordInAOF(ADSHANDLE, UNSIGNED32, UNSIGNED16* p)
     arc2_trace("AdsIsRecordInAOF"); if (p) *p = 1; return openads::AE_SUCCESS; }
 // ulRecord == 0 means "the current record" (ACE convention). Reports
 // whether *this* connection holds an exclusive lock on it. Remote
-// handles aren't introspected yet -- they report 0.
+// handles go over the wire (M12.36 IsRecordLocked opcode); the server
+// translates recno 0 to the current record on its side.
 UNSIGNED32 ENTRYPOINT AdsIsRecordLocked(ADSHANDLE hTable, UNSIGNED32 ulRecord,
                              UNSIGNED16* pbLocked) {
     arc2_trace("AdsIsRecordLocked");
     if (pbLocked == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
     *pbLocked = 0;
-    if (get_remote_table(hTable) != nullptr) return ok();
+    if (auto* rt = get_remote_table(hTable)) {
+        auto r = rt->conn->is_record_locked(rt->id, ulRecord);
+        if (!r) return fail(r.error());
+        *pbLocked = r.value();
+        return ok();
+    }
     Table* t = get_table(hTable);
     if (t == nullptr) return fail(openads::AE_INTERNAL_ERROR, "no table");
     std::uint32_t rec = (ulRecord == 0) ? t->recno() : ulRecord;
@@ -35453,6 +35467,20 @@ UNSIGNED32 ENTRYPOINT AdsSetDefault(UNSIGNED8* pucPath) {
 UNSIGNED32 ENTRYPOINT AdsSetDefaultConnection(ADSHANDLE hConn) {
     arc2_trace("AdsSetDefaultConnection");
     rddads_default_connection() = hConn;
+    return openads::AE_SUCCESS;
+}
+
+// -- OAdsSetLogging -----------------------------------------------------
+// Production kill-switch for every log line the DLL can emit: the audit
+// channel (OPENADS_LOG_FILE / console RESOLVED lines) and the arc
+// bring-up traces (ace_calls.log). Paths, aliases and record counts in
+// those lines are developer diagnostics — an app going to production
+// calls OAdsSetLogging(0) once at startup so end-user machines stay
+// silent. 0 = silent, anything else = re-enable (the default).
+// Process-local: affects this client DLL instance (and the engine when
+// running in local-server mode, since it shares the process).
+UNSIGNED32 ENTRYPOINT OAdsSetLogging(UNSIGNED16 usOn) {
+    openads::util::set_logging_enabled(usOn != 0);
     return openads::AE_SUCCESS;
 }
 

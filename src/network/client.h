@@ -133,6 +133,10 @@ public:
     util::Result<std::uint32_t> get_last_table_update(std::uint32_t id);
     util::Result<void>          lock_record(std::uint32_t id, std::uint32_t recno);
     util::Result<void>          unlock_record(std::uint32_t id, std::uint32_t recno);
+    // M12.36 — does THIS connection hold a lock on recno (0 = current)?
+    util::Result<std::uint16_t> is_record_locked(std::uint32_t id, std::uint32_t recno);
+    // M12.36 — recnos this connection currently holds locks on.
+    util::Result<std::vector<std::uint32_t>> get_all_locks(std::uint32_t id);
     util::Result<void>          lock_table(std::uint32_t id);
     util::Result<void>          unlock_table(std::uint32_t id);
     util::Result<void>          pack_table(std::uint32_t id);

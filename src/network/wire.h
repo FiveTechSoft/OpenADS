@@ -156,6 +156,20 @@ enum class Opcode : std::uint8_t {
     GetLastTableUpdate    = 0x9E,
     GetLastTableUpdateAck = 0x9F,
 
+    // M12.36 — record-lock introspection over the wire. Both report the
+    // per-connection view ("locks THIS session holds"), matching the
+    // local AdsIsRecordLocked/AdsGetAllLocks semantics that walk the
+    // Table's own held-lock list. Needed by Harbour dbRecordInfo(
+    // DBRI_LOCKED) and dbRLockList() under ADSCDX (Vouch IsLogged()).
+    // Request IsRecordLocked: [u32 tid][u32 recno]  (0 = current record)
+    // Reply IsRecordLockedAck: [u16 locked LE]
+    IsRecordLocked       = 0x13,
+    IsRecordLockedAck    = 0x14,
+    // Request GetAllLocks: [u32 tid]
+    // Reply GetAllLocksAck: [u16 count][u32 recno LE]...
+    GetAllLocks          = 0x15,
+    GetAllLocksAck       = 0x16,
+
     // M9.25 — management telemetry channel.
     MgConnect          = 0xA0,
     MgConnectAck       = 0xA1,

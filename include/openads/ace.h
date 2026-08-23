@@ -1521,6 +1521,9 @@ UNSIGNED32 ENTRYPOINT AdsSetDecimals       (UNSIGNED16 usDecimals);
 UNSIGNED32 ENTRYPOINT AdsSetDefault        (UNSIGNED8* pucDir);
 UNSIGNED32 ENTRYPOINT AdsSetDefaultConnection(ADSHANDLE hConn);
 UNSIGNED32 ENTRYPOINT AdsGetDefaultConnection(ADSHANDLE* phConn);
+// OpenADS extension: process-wide logging kill-switch (audit + arc
+// traces). 0 = silent (production), non-zero = enabled (default).
+UNSIGNED32 ENTRYPOINT OAdsSetLogging(UNSIGNED16 usOn);
 UNSIGNED32 ENTRYPOINT AdsSetEpoch          (UNSIGNED16 usEpoch);
 UNSIGNED32 ENTRYPOINT AdsSetExact          (UNSIGNED16 bExact);
 UNSIGNED32 ENTRYPOINT AdsSetExact22        (ADSHANDLE hObj,

@@ -9,7 +9,8 @@
  * OADS_DIREXIST(), OADS_DIRECTORY(), OADS_FEXIST(), and the
  * server-side distributed mutex functions OADS_MUTEXCREATE(),
  * OADS_MUTEXLOCK(), OADS_MUTEXTRYLOCK(), OADS_MUTEXUNLOCK(),
- * OADS_MUTEXDESTROY() callable from Harbour PRG code.
+ * OADS_MUTEXDESTROY() callable from Harbour PRG code, plus the
+ * logging kill-switch OADS_SETLOGGING().
  *
  * The actual C implementations live in adsfunc.c (or inside the
  * OpenADS DLL).  This file only contains the Harbour<->C glue.
@@ -58,6 +59,17 @@ HB_FUNC( OADS_GETCONNECTION )
     ADSHANDLE hConn = 0;
     AdsGetDefaultConnection( &hConn );
     hb_retnint( ( HB_MAXINT ) hConn );
+}
+
+/* ------------------------------------------------------------------ */
+/*  OADS_SETLOGGING( lOn ) -> lOk                                      */
+/*  Master switch for every log the ace DLL can emit (audit channel +  */
+/*  ace_calls.log traces). Call OAds_SetLogging( .F. ) once at startup */
+/*  in production so no paths/aliases reach end-user machines.         */
+/* ------------------------------------------------------------------ */
+HB_FUNC( OADS_SETLOGGING )
+{
+    hb_retl( OAdsSetLogging( ( UNSIGNED16 ) hb_parl( 1 ) ) == 0 );
 }
 
 /* ------------------------------------------------------------------ */

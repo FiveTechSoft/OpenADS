@@ -63,6 +63,11 @@ inline std::uint32_t read_u32_le(const std::uint8_t* p) {
            (static_cast<std::uint32_t>(p[3]) << 24);
 }
 
+inline void write_u16_le(std::uint16_t v, std::vector<std::uint8_t>& out) {
+    out.push_back(static_cast<std::uint8_t>( v       & 0xFFu));
+    out.push_back(static_cast<std::uint8_t>((v >> 8) & 0xFFu));
+}
+
 inline void write_u32_le(std::uint32_t v, std::vector<std::uint8_t>& out) {
     out.push_back(static_cast<std::uint8_t>( v        & 0xFFu));
     out.push_back(static_cast<std::uint8_t>((v >>  8) & 0xFFu));
@@ -2225,6 +2230,68 @@ DispatchResult Session::dispatch(const Frame& f) {
             reply.opcode = (f.opcode == Opcode::LockRecord)
                 ? Opcode::LockRecordAck
                 : Opcode::UnlockRecordAck;
+            break;
+        }
+        // M12.36 — lock introspection. Same dual-handle routing as
+        // LockRecord above: when the parallel ABI handle exists it owns
+        // the locks (appends auto-lock there), so query it through the
+        // local ACE calls; otherwise walk the engine Table's held list.
+        case Opcode::IsRecordLocked: {
+            if (f.payload.size() < 8) { reply = err("IsRecordLocked: bad payload"); break; }
+            std::uint32_t id = read_u32_le(f.payload.data());
+            std::uint32_t rn = read_u32_le(f.payload.data() + 4);
+            auto it = tbls_.find(id);
+            if (it == tbls_.end() || !sess_conn_) {
+                reply = err("IsRecordLocked: bad table id"); break;
+            }
+            auto* tbl = sess_conn_->lookup_table(it->second);
+            if (!tbl) { reply = err("IsRecordLocked: lookup failed"); break; }
+            // ACE convention: recno 0 = the current record.
+            if (rn == 0) rn = tbl->recno();
+            std::uint16_t locked = 0;
+            if (auto hit = tbls_h_.find(id); hit != tbls_h_.end()) {
+                UNSIGNED16 b = 0;
+                if (AdsIsRecordLocked(hit->second, rn, &b) != 0) {
+                    reply = err("IsRecordLocked: failed"); break;
+                }
+                locked = b;
+            } else {
+                for (std::uint32_t held : tbl->held_record_locks()) {
+                    if (held == rn) { locked = 1; break; }
+                }
+            }
+            reply.opcode = Opcode::IsRecordLockedAck;
+            write_u16_le(locked, reply.payload);
+            break;
+        }
+        case Opcode::GetAllLocks: {
+            if (f.payload.size() < 4) { reply = err("GetAllLocks: bad payload"); break; }
+            std::uint32_t id = read_u32_le(f.payload.data());
+            auto it = tbls_.find(id);
+            if (it == tbls_.end() || !sess_conn_) {
+                reply = err("GetAllLocks: bad table id"); break;
+            }
+            std::vector<std::uint32_t> recs;
+            if (auto hit = tbls_h_.find(id); hit != tbls_h_.end()) {
+                UNSIGNED16 count = 0;
+                if (AdsGetAllLocks(hit->second, nullptr, &count) != 0) {
+                    reply = err("GetAllLocks: failed"); break;
+                }
+                recs.resize(count);
+                if (count > 0 &&
+                    AdsGetAllLocks(hit->second, recs.data(), &count) != 0) {
+                    reply = err("GetAllLocks: failed"); break;
+                }
+                recs.resize(count);
+            } else {
+                auto* tbl = sess_conn_->lookup_table(it->second);
+                if (!tbl) { reply = err("GetAllLocks: lookup failed"); break; }
+                recs = tbl->held_record_locks();
+            }
+            reply.opcode = Opcode::GetAllLocksAck;
+            write_u16_le(static_cast<std::uint16_t>(recs.size()),
+                         reply.payload);
+            for (std::uint32_t rn : recs) write_u32_le(rn, reply.payload);
             break;
         }
         case Opcode::LockTable:

@@ -204,3 +204,36 @@ TEST_CASE("write_audit Detail appears on console when enabled, never in file") {
           "HYT673 00000001 00000001 2026-08-16 22:12:13.826 "
           "RESOLVED=\"b\" JAILED\n");
 }
+
+TEST_CASE("format_alias_field right-pads to 10 chars, truncates from the right") {
+    CHECK(openads::util::format_alias_field("ABC") == "ABC       ");
+    CHECK(openads::util::format_alias_field("USER_CONFG") == "USER_CONFG");
+    CHECK(openads::util::format_alias_field("0123456789ABC") == "0123456789");
+}
+
+TEST_CASE("set_logging_enabled(false) silences every audit line") {
+    AuditGuard g;
+    openads::util::set_logging_enabled(false);
+
+    openads::util::write_audit(
+        AuditKind::Resolved, "HYT673", 1, 1, "RESOLVED=\"b\" JAILED",
+        "2026-08-16 22:12:13.826");
+    openads::util::write_audit(
+        AuditKind::Connected, "HYT673", 1, 2, "CONNECTED=\"/data\"",
+        "2026-08-16 22:12:13.826");
+    openads::util::set_audit_details_enabled(true);
+    openads::util::write_audit(
+        AuditKind::Detail, "HYT673", 1, 3, "input=\"t\"",
+        "2026-08-16 22:12:13.826");
+
+    CHECK(g.console.str().empty());
+    CHECK(g.file.str().empty());
+
+    // Re-enabling restores output.
+    openads::util::set_logging_enabled(true);
+    openads::util::write_audit(
+        AuditKind::Resolved, "HYT673", 1, 4, "RESOLVED=\"b\" JAILED",
+        "2026-08-16 22:12:13.826");
+    CHECK(g.console.str().find("RESOLVED=") != std::string::npos);
+    CHECK(g.file.str().find("RESOLVED=") != std::string::npos);
+}

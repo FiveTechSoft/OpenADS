@@ -97,6 +97,23 @@ OAds_MutexDestroy( "invoice_seq" )
 Mutexes are released automatically when the owning session
 disconnects.
 
+## Logging kill-switch (production)
+
+`OAds_SetLogging( lOn )` enables/disables every log line the ace DLL
+can emit from this process: the audit channel (`OPENADS_LOG_FILE` /
+console RESOLVED lines) and the `ace_calls.log` bring-up traces.
+Logging is ON by default (developer diagnostics); call
+`OAds_SetLogging( .F. )` once at startup before shipping so paths,
+aliases and record data never reach end-user machines.
+
+```harbour
+OAds_SetLogging( .F. )   // production: silent DLL
+```
+
+The switch is process-local — it also silences the embedded engine in
+local-server mode (same process). A remote `openads_serverd` keeps its
+own configuration on the server machine.
+
 ## Build
 
 `oads_hb.c` is compiled into **your** Harbour project (not the OpenADS

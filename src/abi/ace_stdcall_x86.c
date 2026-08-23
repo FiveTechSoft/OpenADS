@@ -14,11 +14,15 @@
 #include <stdlib.h>
 #include <stdarg.h>
 
+/* Master logging kill-switch (OAdsSetLogging) — implemented in util/log.cpp. */
+extern int oads_logging_enabled(void);
+
 static void arc_log_rc(const char* name, unsigned rc, int nargs, ...) {
     static int on = -1;
     FILE* f; int i; va_list ap;
     if (on < 0) on = getenv("OPENADS_ARC_TRACE") != NULL;
     if (!on) return;
+    if (!oads_logging_enabled()) return;   /* OAdsSetLogging(0) kill-switch */
     f = fopen("C:/OpenADS/_arc32/ace_calls.log", "a");
     if (!f) return;
     fprintf(f, "W %s rc=%u args:", name, rc);
@@ -5994,5 +5998,17 @@ extern UNSIGNED32 AdsMutexDestroy(ADSHANDLE hConnect, UNSIGNED8* pucName);
 __declspec(dllexport) UNSIGNED32 __stdcall AdsMutexDestroy(ADSHANDLE a0, UNSIGNED8* a1) {
     UNSIGNED32 rc = oadsimpl_AdsMutexDestroy(a0, a1);
     arc_log_rc("AdsMutexDestroy", rc, 2, (uintptr_t)a0, (uintptr_t)a1);
+    return rc;
+}
+
+/* ---- OAdsSetLogging ---- */
+#define OAdsSetLogging oadsimpl_OAdsSetLogging
+extern UNSIGNED32 OAdsSetLogging(UNSIGNED16 usOn);
+#undef OAdsSetLogging
+#pragma comment(linker, "/alternatename:_oadsimpl_OAdsSetLogging=_OAdsSetLogging")
+#pragma comment(linker, "/export:OAdsSetLogging=_OAdsSetLogging")
+__declspec(dllexport) UNSIGNED32 __stdcall OAdsSetLogging(UNSIGNED16 a0) {
+    UNSIGNED32 rc = oadsimpl_OAdsSetLogging(a0);
+    arc_log_rc("OAdsSetLogging", rc, 1, (uintptr_t)a0);
     return rc;
 }

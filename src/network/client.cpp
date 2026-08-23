@@ -1227,6 +1227,43 @@ util::Result<void> RemoteConnection::unlock_record(std::uint32_t id,
     return {};
 }
 
+util::Result<std::uint16_t> RemoteConnection::is_record_locked(
+        std::uint32_t id, std::uint32_t recno) {
+    Frame req; req.opcode = Opcode::IsRecordLocked;
+    write_u32_le(id, req.payload);
+    write_u32_le(recno, req.payload);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::IsRecordLockedAck ||
+        rep.value().payload.size() < 2) {
+        return util::Error{5000, 0, "IsRecordLocked: server error", ""};
+    }
+    return read_u16_le(rep.value().payload.data());
+}
+
+util::Result<std::vector<std::uint32_t>> RemoteConnection::get_all_locks(
+        std::uint32_t id) {
+    Frame req; req.opcode = Opcode::GetAllLocks;
+    write_u32_le(id, req.payload);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::GetAllLocksAck ||
+        rep.value().payload.size() < 2) {
+        return util::Error{5000, 0, "GetAllLocks: server error", ""};
+    }
+    const auto& pl = rep.value().payload;
+    std::uint16_t n = read_u16_le(pl.data());
+    if (pl.size() < 2 + static_cast<std::size_t>(n) * 4) {
+        return util::Error{5000, 0, "GetAllLocks: short payload", ""};
+    }
+    std::vector<std::uint32_t> recs;
+    recs.reserve(n);
+    for (std::uint16_t i = 0; i < n; ++i) {
+        recs.push_back(read_u32_le(pl.data() + 2 + i * 4));
+    }
+    return recs;
+}
+
 util::Result<void> RemoteConnection::lock_table(std::uint32_t id) {
     Frame req; req.opcode = Opcode::LockTable;
     write_u32_le(id, req.payload);

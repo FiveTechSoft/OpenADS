@@ -1,4 +1,40 @@
-## 1.8.98 - unreleased
+## 1.9.0 - 2026-08-22
+
+### Fixed — remote `AdsIsRecordLocked` / `AdsGetAllLocks` (Vouch IsLogged, Pritpal Bedi)
+
+For remote handles both functions silently reported "no locks":
+`dbRecordInfo( DBRI_LOCKED )` always returned .F. and `dbRLockList()`
+an empty array under ADSCDX, so Vouch's IsLogged() thread bailed out.
+New wire opcodes `IsRecordLocked` (0x13) / `GetAllLocks` (0x15, M12.36)
+forward the query to the server-side per-session lock state, with the
+same dual-handle routing as LockRecord. Semantics match the local path:
+the per-connection view ("locks THIS connection holds"); recno 0 = the
+current record, translated server-side.
+
+### Added — `OAds_SetLogging()` production kill-switch
+
+`OAds_SetLogging( .F. )` (PRG) / `OAdsSetLogging(0)` (C) silences every
+log line the ace DLL can emit: the audit channel (OPENADS_LOG_FILE /
+console RESOLVED lines) and the ace_calls.log bring-up traces (x64 and
+the x86 __stdcall shim). Process-local; ON by default. Call once at
+startup before shipping so paths, aliases and record data never reach
+end-user machines.
+
+### Fixed — RESOLVED audit alias field was left-padded
+
+`format_alias_field` left-padded the 10-char alias column (padl); it now
+right-pads (pad) as documented in the v1.8.99 log-format notes.
+
+## 1.8.99 - 2026-08-22
+
+### Added — 10-byte padded alias in RESOLVED audit lines (Pritpal Bedi)
+
+Every RESOLVED audit line includes the table alias (filename stem) as a
+10-byte field between the timestamp and the message, server-side and
+client-side, so a log entry identifies its table without
+cross-referencing the asked/resolved paths.
+
+## 1.8.98 - 2026-08-21
 
 ### Fixed — `openads_serverd` ignores `remote_only_access` from its ini
 

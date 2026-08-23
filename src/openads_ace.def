@@ -317,6 +317,7 @@ EXPORTS
     AdsSetDecimals
     AdsSetDefault
     AdsSetDefaultConnection
+    OAdsSetLogging
     AdsSetEpoch
     AdsSetExact
     AdsSetExact22

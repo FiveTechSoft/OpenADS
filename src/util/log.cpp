@@ -145,8 +145,8 @@ std::string format_alias_field(std::string_view alias) {
     if (alias.size() >= kAliasWidth) {
         return std::string(alias.data(), kAliasWidth);
     }
-    std::string out(kAliasWidth - alias.size(), ' ');
-    out.append(alias);
+    std::string out(alias.data(), alias.size());
+    out.append(kAliasWidth - alias.size(), ' ');
     return out;
 }
 
@@ -207,6 +207,13 @@ void set_audit_details_enabled(bool on) {
     g_details = on ? Details::On : Details::Off;
 }
 
+namespace {
+std::atomic<bool> g_logging_on{true};
+} // namespace
+
+void set_logging_enabled(bool on) { g_logging_on.store(on); }
+bool logging_enabled() { return g_logging_on.load(); }
+
 void reset_audit_config() {
     g_console = nullptr;
     g_file = nullptr;
@@ -223,6 +230,7 @@ void write_audit(AuditKind       kind,
                  std::string_view message,
                  std::string_view timestamp,
                  std::string_view alias) {
+    if (!logging_enabled()) return;
     if (kind == AuditKind::Detail && !audit_details_enabled()) return;
     if (seq == 0) seq = next_audit_seq();
     std::string line =
@@ -278,3 +286,12 @@ void write_connected_audit(std::string_view data_dir, bool remote) {
 }
 
 } // namespace openads::util
+
+// C-linkage accessors so the C TUs (ace_stdcall_x86.c) honor the same
+// master switch without including util/log.h.
+extern "C" int  oads_logging_enabled(void) {
+    return openads::util::logging_enabled() ? 1 : 0;
+}
+extern "C" void oads_set_logging(int on) {
+    openads::util::set_logging_enabled(on != 0);
+}
