@@ -1,4 +1,26 @@
-## 1.9.1 - unreleased
+## 1.9.1 - 2026-08-24
+
+### Fixed — `AdsOpenTable` / `AdsCreateTable` now honour the `pucAlias` parameter (Pritpal Bedi)
+
+`pucAlias` was commented out (`/*pucAlias*/`) and the alias was always
+derived from the filename stem.  Harbour `USE ... ALIAS xxx` was silently
+ignored — `Alias()` returned the table name, and RESOLVED audit lines
+showed the TABLENAME instead of the user-specified ALIAS.  Both the local
+and remote paths now use the caller's alias when non-empty; the audit log
+and `RemoteTable::alias` are updated accordingly.  `AdsCreateTable` also
+passes `pucAlias` through to `AdsOpenTable` on both the SQL-DDL and
+remote re-open paths.
+
+### Fixed — `pending_append_` never cleared after navigation-triggered commit (Pritpal Bedi)
+
+`Table::commit_dirty_record()` did not clear `pending_append_`, so after
+`APPEND BLANK` → field replace → cursor move (without an explicit
+`AdsWriteRecord`), the flag stayed set for the life of the table.  The
+next `begin_dirty_edit_()` captured `snap_was_append_ = true`, causing
+`sync_all_indexes_()` to tolerate missing-key errors on a subsequent
+UPDATE — wrong after the first commit.  `pending_append_` is now cleared
+inside `commit_dirty_record()` alongside `record_dirty_`, matching the
+behaviour of the explicit `AdsWriteRecord` / `FlushTable` paths.
 
 ### Fixed — remote `SELECT COUNT(*)` / materialised cursors died with AE_PARSE_ERROR (7200)
 
