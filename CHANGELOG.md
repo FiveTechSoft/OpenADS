@@ -1,4 +1,4 @@
-## 1.9.1 - 2026-08-24
+## 1.09.1 - 2026-08-24
 
 ### Fixed — `AdsOpenTable` / `AdsCreateTable` now honour the `pucAlias` parameter (Pritpal Bedi)
 
