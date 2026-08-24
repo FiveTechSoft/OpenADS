@@ -364,6 +364,7 @@ util::Result<void> Table::commit_dirty_record() {
     if (auto wb = writeback_record_(); !wb) return wb.error();
     auto snap = std::move(index_snap_);
     record_dirty_ = false;
+    pending_append_ = false;
     index_snap_.clear();
     return sync_all_indexes_(snap);
 }

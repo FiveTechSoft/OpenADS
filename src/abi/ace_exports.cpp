@@ -6857,7 +6857,7 @@ static int remote_only_access_mode() {
 
 UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
                         UNSIGNED8* pucName,
-                        UNSIGNED8* /*pucAlias*/,
+                        UNSIGNED8* pucAlias,
                         UNSIGNED16 usTableType,
                         UNSIGNED16 usCharType,
                         UNSIGNED16 usLockType,
@@ -6915,8 +6915,17 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
         // migrated from SAP with Table_Type=ADT) failed to open remotely
         // with AE_TABLE_CORRUPTED (5103), even though the identical bare
         // name opens fine locally.
-        openads::util::write_remote_open_audit(name,
-            std::filesystem::path(name).stem().string());
+        // Honour the caller's pucAlias (Harbour USE ... ALIAS xxx) for
+        // the log entry and the RemoteTable metadata; fall back to the
+        // filename stem when the caller omits ALIAS or passes "".
+        std::string alias;
+        if (pucAlias && pucAlias[0] != '\0') {
+            alias = openads::abi::to_internal(pucAlias, 0);
+        }
+        if (alias.empty()) {
+            alias = std::filesystem::path(name).stem().string();
+        }
+        openads::util::write_remote_open_audit(name, alias);
         auto otr = rc->open_table(name,
             static_cast<std::uint16_t>(map_open_mode(usMode)));
         if (!otr) return fail(otr.error());
@@ -6927,7 +6936,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
         rt->conn = rc;
         rt->id   = ot.id;
         rt->name = name;
-        rt->alias = std::filesystem::path(name).stem().string();
+        rt->alias = std::move(alias);
         rt->close_counted = true;
         rc->deferred_open_tables += 1;
         Handle gh = s.registry.register_object(
@@ -7360,10 +7369,17 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
     Handle gh = s.registry.register_object(HandleKind::Table, tbl);
     *phTable = to_ads_handle(gh);
 
-    // Set the table alias from the filename (without extension).
+    // Set the table alias: honour the caller's pucAlias when provided
+    // (Harbour USE ... ALIAS xxx), otherwise derive from the filename stem.
     {
         namespace fs = std::filesystem;
-        std::string alias = fs::path(name).stem().string();
+        std::string alias;
+        if (pucAlias && pucAlias[0] != '\0') {
+            alias = openads::abi::to_internal(pucAlias, 0);
+        }
+        if (alias.empty()) {
+            alias = fs::path(name).stem().string();
+        }
         tbl->set_alias(std::move(alias));
     }
 
@@ -7909,7 +7925,7 @@ AdtFieldSpec adt_spec_for(const FieldOut& f) {
 // (#130 follow-up). Don't re-comment the parameter out.
 UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
                           UNSIGNED8*    pucName,
-                          UNSIGNED8*    /*pucAlias*/,
+                          UNSIGNED8*    pucAlias,
                           UNSIGNED16    usTableType,
                           UNSIGNED16    usCharType,
                           UNSIGNED16    /*usLockType*/,
@@ -7937,7 +7953,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
     auto sql_open_created = [&](ADSHANDLE conn_h) -> UNSIGNED32 {
         std::vector<UNSIGNED8> namebuf(rel.size() + 1, 0);
         std::memcpy(namebuf.data(), rel.data(), rel.size());
-        return AdsOpenTable(conn_h, namebuf.data(), namebuf.data(),
+        return AdsOpenTable(conn_h, namebuf.data(), pucAlias,
                             ADS_CDX, usCharType, 0, 0, 1, phTable);
     };
     auto run_sql_ddl = [&](auto* conn,
@@ -8012,7 +8028,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
                 (usTableType == ADS_ADT) ? ADS_ADT
                 : (usTableType == ADS_VFP) ? ADS_VFP
                 : ADS_CDX;
-            return AdsOpenTable(rc_h, namebuf.data(), namebuf.data(),
+            return AdsOpenTable(rc_h, namebuf.data(), pucAlias,
                                 open_type, usCharType, 0, 0, 1, phTable);
         }
         // Explicit handle to a disconnected remote connection with no
