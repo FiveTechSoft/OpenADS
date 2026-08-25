@@ -18066,6 +18066,25 @@ UNSIGNED32 ENTRYPOINT AdsSeek(ADSHANDLE hIndex,
         if (ri->parent) {                            // M12.21 option C
             ri->parent->found_cached  = true;
             ri->parent->current_found = (r.value().hit != 0);
+            // FIX(seek-nav): a seek repositions the cursor ABSOLUTELY, so the
+            // client-side nav_at_bof / nav_at_eof flags inherited from the
+            // pre-seek position are stale. Left as they were, a browse walk
+            // that ended at EOF left nav_at_eof set; the next FOUND seek then
+            // made AdsAtEOF report true on a live record, rddads'
+            // hb_adsUpdateAreaFlags cleared fPositioned, and adsGetValue
+            // served blank strings for CHARACTER fields without calling ADS
+            // at all (Vouch: "SEEK succeeds but where are the field
+            // values?"). Numeric/logical/date/memo reads bypass that
+            // fPositioned guard, which is why only strings went blank.
+            // A miss with recno==0 genuinely lands at EOF (hard miss, or
+            // soft miss with no higher key); anything else is a live row.
+            if (r.value().hit != 0 || r.value().recno != 0) {
+                ri->parent->nav_at_bof = false;
+                ri->parent->nav_at_eof = false;
+            } else {
+                ri->parent->nav_at_bof = false;
+                ri->parent->nav_at_eof = true;
+            }
         }
         (void)u16KeyType;
         return ok();
@@ -18207,6 +18226,15 @@ UNSIGNED32 ENTRYPOINT AdsSeekLast(ADSHANDLE hIndex,
         if (ri->parent) {                            // M12.21 option C
             ri->parent->found_cached  = true;
             ri->parent->current_found = (r.value().hit != 0);
+            // FIX(seek-nav): same stale nav_at_bof / nav_at_eof reset as
+            // AdsSeek -- see the full note there.
+            if (r.value().hit != 0 || r.value().recno != 0) {
+                ri->parent->nav_at_bof = false;
+                ri->parent->nav_at_eof = false;
+            } else {
+                ri->parent->nav_at_bof = false;
+                ri->parent->nav_at_eof = true;
+            }
         }
         (void)u16KeyType;
         return ok();
