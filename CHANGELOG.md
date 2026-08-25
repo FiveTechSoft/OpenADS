@@ -1,3 +1,29 @@
+## 1.09.2 - 2026-08-25
+
+### Added — wire-level regression suite: REMOTE index on DBF DATE fields + SetScope
+
+Field report claimed "REMOTE will still NOT build an index on the dbf DATE
+fields. Thus, SetScope will also not work." A new test
+(`tests/unit/abi_remote_date_index_scope_test.cpp`, 3 cases, all passing)
+reproduces the exact client sequence against a live `openads_serverd` over
+TCP and proves it works on this build:
+
+- `AdsCreateIndex61` CDX tag on a bare DATE field: builds all keys, ascending
+  walk is sorted, string-key `AdsSetScope` TOP/BOTTOM scopes correctly.
+- The exact rddads sequence: `AdsGetKeyType` reports `ADS_DATE`, julian-double
+  `ADS_DOUBLEKEY` scope selects the right rows, `AdsSeek` with a DOUBLEKEY key
+  finds the record.
+- Legacy remote `AdsCreateIndex` NTX path on a DATE field: builds and scopes.
+
+### Note for reporters of date-index failures (Pritpal Bedi)
+
+Remote DATE index scope/seek depends on the `GetKeyType` wire opcode added in
+v1.9.0. **Both sides must be updated**: the client DLL (`ace64.dll` /
+`ace32.dll`) AND `openads_serverd`. Harbour's rddads switches scope-key
+encoding on `AdsGetKeyType`; if either side predates v1.9.0, `SetScope`
+silently does nothing on a date tag. If it still fails after updating both,
+please report the DLL/serverd versions plus the exact `INDEX ON` snippet.
+
 ## 1.09.1 - 2026-08-24
 
 ### Fixed — `AdsOpenTable` / `AdsCreateTable` now honour the `pucAlias` parameter (Pritpal Bedi)
