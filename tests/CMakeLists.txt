@@ -196,6 +196,7 @@ add_executable(openads_unit_tests
     unit/abi_remote_zombie_lock_test.cpp
     unit/network_skip_depth_test.cpp
     unit/abi_remote_index_nav_test.cpp
+    unit/abi_remote_date_index_scope_test.cpp
     unit/abi_remote_prodcdx_test.cpp
     unit/abi_append_autolock_test.cpp
     unit/abi_remote_only_access_test.cpp
