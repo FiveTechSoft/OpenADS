@@ -1,3 +1,42 @@
+## 1.09.3 - 2026-08-25
+
+### Fixed — remote SEEK then blank CHARACTER fields (Vouch login, Pritpal Bedi)
+
+Field report: against OpenADS remote, `SEEK` succeeds (`Found()=.T.`, correct
+`RecNo()`) but `FieldGet()` returns blank/garbage values — **only CHARACTER
+fields**, and **only on some tables**. Plain DBF/CDX with the same code worked.
+
+Root cause (client-side, `ace64.dll`, no wire change):
+
+1. When a workarea's navigation landed on the EOF phantom (browse walk, SKIP
+   past the last record), the remote client set its internal `nav_at_eof`
+   flag.
+2. `AdsSeek` / `AdsSeekLast` (remote branch) reset `row_valid` and the
+   prefetch queue but **not** the nav flags. After a later successful seek
+   onto a live record, `AdsAtEOF()` still reported `.T.`
+3. rddads' `hb_adsUpdateAreaFlags` then computed `fPositioned = .F.`, and
+   `adsGetValue` returns blanks **without calling ADS** for `HB_FT_STRING`
+   only. Numeric / date / logical / memo bypass that guard — hence "only
+   character fields".
+4. Only areas whose navigation previously hit EOF were poisoned, which is
+   why the failure looked inconsistent across tables. It is per workarea,
+   not alias confusion: current-alias-only code (`SELECT("USERS")` + plain
+   SEEK/FieldGet) is fully respected, and reads never cross tables.
+
+Fix: the remote `AdsSeek` / `AdsSeekLast` branches recompute
+`nav_at_eof` / `nav_at_bof` from the SeekAck outcome (hit or recno>0 →
+live row, clear both; miss with recno==0 → genuine EOF). No extra RTT,
+no wire protocol change, no rddads change.
+
+Verification: Harbour repro suite (type matrix C/N/F/L/D/M + high bytes,
+multi-area current-alias pattern, local + remote) passes; 217 navigation /
+seek / skip / row-trailer unit tests pass. Three unrelated remote/MT test
+failures pre-date this change (confirmed via stash).
+
+**Update the client DLL (`ace64.dll` / `ace32.dll`)**; updating
+`openads_serverd` is recommended but not required for this fix. Records
+already appended with blank values stay as-is on disk — re-enter them.
+
 ## 1.09.2 - 2026-08-25
 
 ### Added — wire-level regression suite: REMOTE index on DBF DATE fields + SetScope
