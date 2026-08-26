@@ -528,12 +528,12 @@ ADSHANDLE Session::ensure_abi_handle(std::uint32_t id) {
     // Fallback: if GotoTop left the twin in Limbo (both bof and eof true),
     // try GoBottom — some tables with deferred index updates land in
     // Limbo after GotoTop but GoBottom forces a real record positioning.
-    if (_b && _e) {
-        UNSIGNED32 gb_rc = AdsGoBottom(h);
-        AdsAtBOF(h, &_b); AdsAtEOF(h, &_e);
-        WTRACE("[wire] ensure_abi_handle id=%u Limbo fallback GoBottom gt=%u gb=%u bof=%u eof=%u\n",
-               id, (unsigned)gt_rc, (unsigned)gb_rc, (unsigned)_b, (unsigned)_e);
-    }
+        if (_b && _e) {
+            UNSIGNED32 gb_rc = AdsGotoBottom(h);
+            AdsAtBOF(h, &_b); AdsAtEOF(h, &_e);
+            WTRACE("[wire] ensure_abi_handle id=%u Limbo fallback GoBottom gt=%u gb=%u bof=%u eof=%u\n",
+                   id, (unsigned)gt_rc, (unsigned)gb_rc, (unsigned)_b, (unsigned)_e);
+        }
     WTRACE("[wire] ensure_abi_handle id=%u opened h=%llu gt_rc=%u bof=%u eof=%u\n",
            id, (unsigned long long)h, (unsigned)gt_rc, (unsigned)_b, (unsigned)_e);
     tbls_h_[id] = h;
@@ -713,7 +713,7 @@ void Session::pack_row_trailer(Frame& reply, std::uint32_t id,
         if (_b && _e) {
             AdsGotoTop(h_abi);
             AdsAtBOF(h_abi, &_b); AdsAtEOF(h_abi, &_e);
-            if (_b && _e) AdsGoBottom(h_abi);
+            if (_b && _e) AdsGotoBottom(h_abi);
             AdsAtBOF(h_abi, &_b); AdsAtEOF(h_abi, &_e);
             WTRACE("[wire] pack enter id=%u Limbo rescue bof=%u eof=%u\n",
                    id, (unsigned)_b, (unsigned)_e);
