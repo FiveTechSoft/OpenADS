@@ -75,7 +75,7 @@ $link = Join-Path (Split-Path -Parent $lib) "link.exe"
 $exports = & $link -dump -exports "$work\ace32.dll" |
     Select-String '^\s+\d+\s+[0-9A-F]+\s+[0-9A-F]+\s+(\S+)' |
     ForEach-Object { $_.Matches[0].Groups[1].Value } |
-    Where-Object { $_ -match '^_(Ads|oads_)' -or $_ -in @('_dclass','_dsign','_getch','_kbhit','_eof') }
+    Where-Object { $_ -match '^_(Ads|OAds|oads_)' -or $_ -in @('_dclass','_dsign','_getch','_kbhit','_eof') }
 @('LIBRARY ace32', 'EXPORTS') + $exports | Set-Content "$work\ace32.def" -Encoding ascii
 
 # The DLL also exports plain undecorated (AdsXxx) aliases of every entry
@@ -87,7 +87,7 @@ $exports_cdecl = & $link -dump -exports "$work\ace32.dll" |
     ForEach-Object { $_.Matches[0].Groups[1].Value } |
     # AdsXxx (rddads) plus the oads_* VFS API (contrib/oads_hb) — MinGW
     # callers reference both as cdecl _name. (oads_* reported by Pritpal Bedi.)
-    Where-Object { $_ -match '^(Ads|oads_)' }
+    Where-Object { $_ -match '^(Ads|OAds|oads_)' }
 @('LIBRARY ace32', 'EXPORTS') + $exports_cdecl | Set-Content "$work\ace32_cdecl.def" -Encoding ascii
 
 Push-Location $work
