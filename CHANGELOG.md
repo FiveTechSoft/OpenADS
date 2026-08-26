@@ -1,3 +1,20 @@
+## 1.09.5 - 2026-08-26
+
+### Fixed — mingw `OAdsSetLogging` undefined reference (Pritpal Bedi)
+
+The mingw import library generation (`dist/import-libs/gen.ps1`) filtered
+exports with `^(Ads|oads_)` — the `OAds` prefix was excluded, so
+`libace32.a` never contained `OAdsSetLogging`. MinGW ld failed with
+"undefined reference". Fix: added `OAds` to both stdcall and cdecl filter
+regexes. Import libraries regenerated.
+
+### Fixed — ABI twin Limbo rescue (additional hardening)
+
+1. `ensure_abi_handle`: if `AdsGotoTop` leaves the twin in Limbo
+   (bof=1 AND eof=1), try `AdsGotoBottom`.
+2. `pack_row_trailer`: before sending `has_row=0`, attempt to reposition
+   a Limbo twin (GotoTop then GoBottom fallback).
+
 ## 1.09.4 - 2026-08-26
 
 ### Fixed — ABI twin stuck in Limbo (bof=1 eof=1) for some tables (Pritpal Bedi)
