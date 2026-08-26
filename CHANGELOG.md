@@ -1,3 +1,30 @@
+## 1.09.4 - 2026-08-26
+
+### Fixed — ABI twin stuck in Limbo (bof=1 eof=1) for some tables (Pritpal Bedi)
+
+Field report: some Vouch modules opened correctly but showed all fields blank
+and could not navigate, while others worked fine. Server-side trace showed the
+ABI twin in the Limbo state (`bof=1 eof=1`) — `pack_row_trailer` always
+sent `has_row=0`, so `row_valid` stayed false on the client and every
+`FieldGet` returned blanks. The engine table had records and navigation
+(recno>0) succeeded, but the ABI twin never saw them.
+
+Root cause: `ensure_abi_handle` opened the table via `AdsOpenTable` but left
+the cursor at whatever initial position the open returned. For certain tables
+this was the Limbo state (both BOF and EOF true), which means "empty table"
+to the ABI engine. A subsequent `pack_row_trailer` then checked the twin's
+BOF/EOF flags, saw both set, and sent no row data.
+
+Fix: force `AdsGotoTop` on the newly opened twin immediately after
+`AdsOpenTable`. This positions the cursor on the first live row (or BOF
+phantom for a genuinely empty table), preventing the Limbo trap. Added
+`WTRACE` diagnostics for `open_name`, share mode, and open result to
+track path-resolution mismatches between the engine and ABI twin.
+
+This fix is **server-side only** (`openads_serverd`); updating the client
+DLL is not required for this specific issue (but v1.09.3's client fix for
+stale `nav_at_eof` is still recommended).
+
 ## 1.09.3 - 2026-08-25
 
 ### Fixed — remote SEEK then blank CHARACTER fields (Vouch login, Pritpal Bedi)
