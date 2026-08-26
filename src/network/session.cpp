@@ -512,10 +512,21 @@ ADSHANDLE Session::ensure_abi_handle(std::uint32_t id) {
             us_mode = ADS_SHARED; break;
     }
     ADSHANDLE h = 0;
-    if (AdsOpenTable(abi_conn_, nb.data(), nullptr,
-                     ADS_CDX, 0, 0, 0, us_mode, &h) != 0) {
+    WTRACE("[wire] ensure_abi_handle id=%u open_name='%s' mode=%u\n",
+           id, open_name.c_str(), (unsigned)us_mode);
+    UNSIGNED32 open_rrc = AdsOpenTable(abi_conn_, nb.data(), nullptr,
+                     ADS_CDX, 0, 0, 0, us_mode, &h);
+    if (open_rrc != 0) {
+        WTRACE("[wire] ensure_abi_handle id=%u AdsOpenTable FAILED rrc=%u\n",
+               id, (unsigned)open_rrc);
         return 0;
     }
+    // Position the twin so pack_row_trailer sees a live cursor (not Limbo).
+    (void)AdsGotoTop(h);
+    UNSIGNED16 _b = 9, _e = 9;
+    AdsAtBOF(h, &_b); AdsAtEOF(h, &_e);
+    WTRACE("[wire] ensure_abi_handle id=%u opened h=%llu bof=%u eof=%u\n",
+           id, (unsigned long long)h, (unsigned)_b, (unsigned)_e);
     tbls_h_[id] = h;
     return h;
 }
