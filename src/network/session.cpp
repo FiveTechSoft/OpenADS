@@ -526,14 +526,43 @@ ADSHANDLE Session::ensure_abi_handle(std::uint32_t id) {
     UNSIGNED16 _b = 9, _e = 9;
     AdsAtBOF(h, &_b); AdsAtEOF(h, &_e);
     // Fallback: if GotoTop left the twin in Limbo (both bof and eof true),
-    // try GoBottom — some tables with deferred index updates land in
-    // Limbo after GotoTop but GoBottom forces a real record positioning.
-        if (_b && _e) {
-            UNSIGNED32 gb_rc = AdsGotoBottom(h);
-            AdsAtBOF(h, &_b); AdsAtEOF(h, &_e);
-            WTRACE("[wire] ensure_abi_handle id=%u Limbo fallback GoBottom gt=%u gb=%u bof=%u eof=%u\n",
-                   id, (unsigned)gt_rc, (unsigned)gb_rc, (unsigned)_b, (unsigned)_e);
+    // the ACE CDX implementation may disagree with the engine's CDX on the
+    // same file. Close and reopen as a plain DBF (no CDX), then try to
+    // attach the index explicitly. If even that fails, we still have a
+    // working cursor in natural record order — better than Limbo.
+    if (_b && _e) {
+        WTRACE("[wire] ensure_abi_handle id=%u Limbo after CDX open, retrying without CDX\n", id);
+        AdsCloseTable(h);
+        h = 0;
+        open_rrc = AdsOpenTable(abi_conn_, nb.data(), nullptr,
+                         ADS_TABLE, 0, 0, 0, us_mode, &h);
+        if (open_rrc != 0) {
+            WTRACE("[wire] ensure_abi_handle id=%u AdsOpenTable(ADS_TABLE) FAILED rrc=%u\n",
+                   id, (unsigned)open_rrc);
+            return 0;
         }
+        // Try to attach the production index explicitly.
+        ADSHANDLE hIdx = 0;
+        UNSIGNED16 idxCount = 0;
+        // Build the CDX path from the DBF path.
+        std::string cdx_name;
+        {
+            std::filesystem::path p(open_name);
+            cdx_name = p.replace_extension(".cdx").generic_string();
+        }
+        std::vector<UNSIGNED8> cdx_nb(cdx_name.size() + 1);
+        std::memcpy(cdx_nb.data(), cdx_name.data(), cdx_name.size());
+        UNSIGNED32 idx_rc = AdsOpenIndex(h, cdx_nb.data(), &hIdx, &idxCount);
+        if (idx_rc == 0 && idxCount > 0) {
+            WTRACE("[wire] ensure_abi_handle id=%u CDX attached via ADS_TABLE fallback idx=%u\n",
+                   id, (unsigned)idxCount);
+        } else {
+            WTRACE("[wire] ensure_abi_handle id=%u no CDX (rc=%u count=%u), natural order\n",
+                   id, (unsigned)idx_rc, (unsigned)idxCount);
+        }
+        gt_rc = AdsGotoTop(h);
+        AdsAtBOF(h, &_b); AdsAtEOF(h, &_e);
+    }
     WTRACE("[wire] ensure_abi_handle id=%u opened h=%llu gt_rc=%u bof=%u eof=%u\n",
            id, (unsigned long long)h, (unsigned)gt_rc, (unsigned)_b, (unsigned)_e);
     tbls_h_[id] = h;
@@ -679,24 +708,13 @@ void Session::pack_row_trailer(Frame& reply, std::uint32_t id,
     if (auto cit = cursor_tbls_.find(id); cit != cursor_tbls_.end()) {
         h_abi = cit->second;
     } else if (ordered_tables_.count(id) != 0) {
-        // RCB 07/14/2026: THIS is the line that unlocks ordered read-ahead, and
-        // it is worth understanding why it was the blocker.
-        //
-        // A table with a controlling order must be walked through the ABI
-        // handle, because that is where the order (and any scope) lives — the
-        // engine cursor only ever moves in natural record order. This function
-        // used to resolve an ordered table to the ENGINE table, which meant the
-        // lookahead walk below produced the natural-order NEIGHBOURS instead of
-        // the next rows in the index. Wrong rows. So the Skip handler defended
-        // itself the only way it could and passed lookahead = 0 for any ordered
-        // table, with a comment saying correctness beats the round-trip save.
-        //
-        // Correct, but it disabled read-ahead precisely where it pays: rddads
-        // navigates on hOrdCurrent whenever an order is set, so "ordered
-        // browse" IS the browse. Sourcing both the current row and the block
-        // from the ABI handle makes the index walk correct, and the lookahead
-        // can simply be switched back on — no wire change, no new opcode.
         h_abi = ensure_abi_handle(id);
+        // Also resolve the engine table — we need it for fallback reads
+        // when the ABI twin is in Limbo (ACE's CDX may disagree with the
+        // engine's CDX on index state, leaving the twin at bof=eof=1).
+        if (auto eit = tbls_.find(id); eit != tbls_.end() && sess_conn_) {
+            eng_tbl = sess_conn_->lookup_table(eit->second);
+        }
     } else if (auto eit = tbls_.find(id); eit != tbls_.end() && sess_conn_) {
         eng_tbl = sess_conn_->lookup_table(eit->second);
     } else if (auto hit = tbls_h_.find(id); hit != tbls_h_.end()) {
@@ -723,6 +741,26 @@ void Session::pack_row_trailer(Frame& reply, std::uint32_t id,
     // Pack the current row.
     bool current_packed = false;
     if (eng_tbl) {
+        // If the ABI twin is in Limbo (bof=eof=1) but we have the engine
+        // table, sync the engine to the ABI twin's recno and read from engine.
+        // ACE's CDX may disagree with the engine's CDX on index state.
+        if (h_abi != 0) {
+            UNSIGNED16 _b2 = 9, _e2 = 9;
+            AdsAtBOF(h_abi, &_b2); AdsAtEOF(h_abi, &_e2);
+            if (_b2 && _e2) {
+                UNSIGNED32 rn = 0;
+                AdsGetRecordNum(h_abi, 0, &rn);
+                if (rn > 0 && eng_tbl->record_count() >= rn) {
+                    eng_tbl->goto_record(rn);
+                    WTRACE("[wire] pack enter id=%u Limbo fallback engine recno=%u\n",
+                           id, (unsigned)rn);
+                } else {
+                    // Twin recno unavailable (Limbo); use engine's current pos.
+                    WTRACE("[wire] pack enter id=%u Limbo, engine recno=%u\n",
+                           id, (unsigned)eng_tbl->recno());
+                }
+            }
+        }
         if (eng_tbl->eof() || eng_tbl->bof() || eng_tbl->recno() == 0) {
             reply.payload.push_back(0);
         } else {
