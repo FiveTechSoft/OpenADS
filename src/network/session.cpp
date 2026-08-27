@@ -1833,8 +1833,18 @@ DispatchResult Session::dispatch(const Frame& f) {
             ADSHANDLE hord_eof =
                 ordered_tables_.count(id) ? ensure_abi_handle(id) : 0;
             if (hord_eof != 0) {
-                UNSIGNED16 v = 0;
+                UNSIGNED16 v = 0, v2 = 0;
+                AdsAtBOF(hord_eof, &v2);
                 AdsAtEOF(hord_eof, &v);
+                // Limbo rescue: if both bof and eof are true, reposition
+                // the twin to break the deadlock (same logic as pack_row_trailer).
+                if (v && v2) {
+                    AdsGotoTop(hord_eof);
+                    AdsAtBOF(hord_eof, &v2); AdsAtEOF(hord_eof, &v);
+                    if (v && v2) AdsGotoBottom(hord_eof);
+                    AdsAtEOF(hord_eof, &v);
+                    WTRACE("[wire] AtEOF id=%u Limbo rescue -> %u\n", id, (unsigned)v);
+                }
                 WTRACE("[wire] AtEOF id=%u via ordered twin -> %u\n", id, (unsigned)v);
                 reply.opcode = Opcode::AtEOFAck;
                 reply.payload.push_back(v != 0 ? 1 : 0);
@@ -1978,8 +1988,18 @@ DispatchResult Session::dispatch(const Frame& f) {
             ADSHANDLE hord_bof =
                 ordered_tables_.count(id) ? ensure_abi_handle(id) : 0;
             if (hord_bof != 0) {
-                UNSIGNED16 v = 0;
+                UNSIGNED16 v = 0, v2 = 0;
                 AdsAtBOF(hord_bof, &v);
+                AdsAtEOF(hord_bof, &v2);
+                // Limbo rescue: if both bof and eof are true, reposition
+                // the twin to break the deadlock (same logic as pack_row_trailer).
+                if (v && v2) {
+                    AdsGotoTop(hord_bof);
+                    AdsAtBOF(hord_bof, &v); AdsAtEOF(hord_bof, &v2);
+                    if (v && v2) AdsGotoBottom(hord_bof);
+                    AdsAtBOF(hord_bof, &v);
+                    WTRACE("[wire] AtBOF id=%u Limbo rescue -> %u\n", id, (unsigned)v);
+                }
                 WTRACE("[wire] AtBOF id=%u via ordered twin -> %u\n", id, (unsigned)v);
                 reply.opcode = Opcode::AtBOFAck;
                 reply.payload.push_back(v != 0 ? 1 : 0);
