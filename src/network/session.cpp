@@ -512,8 +512,9 @@ ADSHANDLE Session::ensure_abi_handle(std::uint32_t id) {
             us_mode = ADS_SHARED; break;
     }
     ADSHANDLE h = 0;
-    WTRACE("[wire] ensure_abi_handle id=%u open_name='%s' mode=%u\n",
-           id, open_name.c_str(), (unsigned)us_mode);
+    WTRACE("[wire] ensure_abi_handle id=%u open_name='%s' mode=%u eng_path='%s' eng_recs=%u\n",
+           id, open_name.c_str(), (unsigned)us_mode,
+           tbl->path().c_str(), (unsigned)tbl->record_count());
     UNSIGNED32 open_rrc = AdsOpenTable(abi_conn_, nb.data(), nullptr,
                      ADS_CDX, 0, 0, 0, us_mode, &h);
     if (open_rrc != 0) {
@@ -525,13 +526,18 @@ ADSHANDLE Session::ensure_abi_handle(std::uint32_t id) {
     UNSIGNED32 gt_rc = AdsGotoTop(h);
     UNSIGNED16 _b = 9, _e = 9;
     AdsAtBOF(h, &_b); AdsAtEOF(h, &_e);
+    UNSIGNED32 twin_recs = 0;
+    AdsGetRecordCount(h, 0, &twin_recs);
+    WTRACE("[wire] ensure_abi_handle id=%u CDX open: bof=%u eof=%u twin_recs=%u\n",
+           id, (unsigned)_b, (unsigned)_e, (unsigned)twin_recs);
     // Fallback: if GotoTop left the twin in Limbo (both bof and eof true),
     // the ACE CDX implementation may disagree with the engine's CDX on the
     // same file. Close and reopen as a plain DBF (no CDX), then try to
     // attach the index explicitly. If even that fails, we still have a
     // working cursor in natural record order — better than Limbo.
     if (_b && _e) {
-        WTRACE("[wire] ensure_abi_handle id=%u Limbo after CDX open, retrying without CDX\n", id);
+        WTRACE("[wire] ensure_abi_handle id=%u Limbo after CDX open, retrying without CDX eng_recs=%u\n",
+               id, (unsigned)tbl->record_count());
         AdsCloseTable(h);
         h = 0;
         open_rrc = AdsOpenTable(abi_conn_, nb.data(), nullptr,
@@ -562,9 +568,12 @@ ADSHANDLE Session::ensure_abi_handle(std::uint32_t id) {
         }
         gt_rc = AdsGotoTop(h);
         AdsAtBOF(h, &_b); AdsAtEOF(h, &_e);
+        AdsGetRecordCount(h, 0, &twin_recs);
+        WTRACE("[wire] ensure_abi_handle id=%u TABLE fallback: bof=%u eof=%u twin_recs=%u\n",
+               id, (unsigned)_b, (unsigned)_e, (unsigned)twin_recs);
     }
-    WTRACE("[wire] ensure_abi_handle id=%u opened h=%llu gt_rc=%u bof=%u eof=%u\n",
-           id, (unsigned long long)h, (unsigned)gt_rc, (unsigned)_b, (unsigned)_e);
+    WTRACE("[wire] ensure_abi_handle id=%u opened h=%llu gt_rc=%u bof=%u eof=%u twin_recs=%u\n",
+           id, (unsigned long long)h, (unsigned)gt_rc, (unsigned)_b, (unsigned)_e, (unsigned)twin_recs);
     tbls_h_[id] = h;
     return h;
 }
