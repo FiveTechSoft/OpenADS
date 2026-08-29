@@ -13117,16 +13117,30 @@ bool same_index_path(const std::string& a, const std::string& b) {
 // whose tree was never built — or whose keys were written by a handle that
 // never reached disk — has no root page, so every GotoTop on it lands in
 // Limbo (bof=eof=1) over a NON-empty table and no navigation rescue
-// escapes. When a just-opened unconditional tag is provably empty while
-// the table has records, rebuild the bag once here instead of handing the
-// caller a ghost order. Conditional (FOR) tags are skipped: zero matching
-// rows is a legitimate state for them. Read-only tables are skipped too.
+// escapes. A PARTIALLY-maintained bag is just as broken for the app:
+// dbGoBottom lands on the last STALE key (voucher 16 of 21) instead of the
+// last record. An unconditional non-unique tag indexes every record
+// (deleted ones included), so key_count != record_count means some writes
+// bypassed the bag (SQL DML, index closed at write time, killed before
+// flush). Rebuild the bag once here instead of handing the caller a ghost
+// order. Conditional (FOR) tags are skipped: zero/fewer matching rows is
+// legitimate for them. Unique tags are skipped too: duplicates collapse,
+// so a smaller key count proves nothing. Read-only tables are skipped.
+// The partial check walks the tag once per open — threshold-gated.
 void heal_stale_bag_on_open(Table* t,
                 const std::vector<openads::drivers::IIndex*>& views) {
     if (t == nullptr || t->record_count() == 0) return;
     if (t->open_mode() == openads::engine::OpenMode::Read) return;
+    constexpr std::uint32_t kHealWalkMaxRecs = 250000;
     for (auto* v : views) {
-        if (v == nullptr || !v->condition().empty() || !v->empty()) continue;
+        if (v == nullptr || !v->condition().empty()) continue;
+        bool stale = v->empty();
+        if (!stale && !v->unique() &&
+                t->record_count() <= kHealWalkMaxRecs) {
+            const std::uint32_t kc = v->key_count();
+            if (kc != 0xFFFFFFFFu && kc != t->record_count()) stale = true;
+        }
+        if (!stale) continue;
         arc2_log("IDXHEAL stale tag '%s' on %s (recs=%u) -> reindex",
                  v->name().c_str(), t->path().c_str(),
                  (unsigned)t->record_count());
@@ -20361,7 +20375,16 @@ void dml_bind_production_index(openads::session::Connection* c,
     fs::path bag;
     bool use_cdx = false;
     if (ext == ".dbf") {
+        // Structural candidates for a DBF: <base>.cdx, else <base>.z01 —
+        // Pritpal's ERP keeps its compound bags under a custom extension
+        // (CDX format by content). SQL DML must maintain whichever exists
+        // or every INSERT leaves the bag partially stale.
         bag = tp; bag.replace_extension(".cdx"); use_cdx = true;
+        std::error_code ec1;
+        if (!fs::exists(openads::platform::resolve_case_insensitive(
+                            bag.string()), ec1)) {
+            bag = tp; bag.replace_extension(".z01");
+        }
     } else if (ext == ".adt" || ext == ".dat") {
         bag = tp; bag.replace_extension(".adi");
     } else {

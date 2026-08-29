@@ -207,3 +207,63 @@ TEST_CASE("SQL INSERT/DELETE maintain the structural CDX bag") {
     REQUIRE(AdsDisconnect(hConn) == 0);
     fs::remove_all(dir, ec);
 }
+
+// Regression: SQL DML binds <base>.cdx as the structural bag, but
+// Pritpal's ERP keeps compound bags under the custom .z01 extension — so
+// every SQL INSERT left those bags partially stale (DBF rows correct,
+// keys never written; "index pages are not being updated timely").
+// DML must bind <base>.z01 when no <base>.cdx exists.
+TEST_CASE("SQL INSERT maintains a structural .z01 bag") {
+    auto dir = fs::temp_directory_path() / "openads_dml_z01_index";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+
+    UNSIGNED8 srv[256];
+    std::memcpy(srv, dir.string().c_str(), dir.string().size() + 1);
+    ADSHANDLE hConn = 0;
+    REQUIRE(AdsConnect60(srv, ADS_LOCAL_SERVER, nullptr, nullptr, 0, &hConn) == 0);
+
+    UNSIGNED8 def[]   = "ID,N,4,0";
+    UNSIGNED8 tname[] = "vch";
+    ADSHANDLE hTable = 0;
+    REQUIRE(AdsCreateTable(hConn, tname, nullptr, ADS_CDX,
+                           0, 0, 0, 0, def, &hTable) == 0);
+
+    // Structural-by-convention bag: vch.z01 (no vch.cdx on disk).
+    auto idx_path = (dir / "vch.z01").string();
+    UNSIGNED8 idx_buf[260];
+    std::memcpy(idx_buf, idx_path.c_str(), idx_path.size() + 1);
+    UNSIGNED8 tag[64]  = "BYID";
+    UNSIGNED8 expr[64] = "ID";
+    ADSHANDLE hIndex = 0;
+    REQUIRE(AdsCreateIndex61(hTable, idx_buf, tag, expr, nullptr, nullptr,
+                             0x0008 /*ADS_COMPOUND*/, 512, &hIndex) == 0);
+    REQUIRE(AdsCloseTable(hTable) == 0);
+
+    ADSHANDLE hStmt = 0;
+    REQUIRE(AdsCreateSQLStatement(hConn, &hStmt) == 0);
+    ADSHANDLE hCur = 0;
+    UNSIGNED8 sql1[160] = "INSERT INTO vch (ID) VALUES (7)";
+    REQUIRE(AdsExecuteSQLDirect(hStmt, sql1, &hCur) == 0);
+    UNSIGNED8 sql2[160] = "INSERT INTO vch (ID) VALUES (9)";
+    REQUIRE(AdsExecuteSQLDirect(hStmt, sql2, &hCur) == 0);
+    REQUIRE(AdsCloseSQLStatement(hStmt) == 0);
+
+    // Driver-level: the .z01 must hold the two keys.
+    openads::drivers::cdx::CdxIndex idx;
+    REQUIRE(idx.open_named(idx_path,
+                           openads::drivers::IndexOpenMode::Shared, "BYID"));
+    CHECK_FALSE(idx.empty());              // RED before the .z01 binding
+    int keys = 0;
+    auto s = idx.seek_first();
+    while (s && s.value().positioned && keys < 50) {
+        ++keys;
+        s = idx.next();
+    }
+    CHECK(keys == 2);
+    (void)idx.flush();
+
+    REQUIRE(AdsDisconnect(hConn) == 0);
+    fs::remove_all(dir, ec);
+}

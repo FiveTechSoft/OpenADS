@@ -185,6 +185,74 @@ TEST_CASE("stale empty bag over non-empty table is healed on AdsOpenIndex") {
     fs::remove_all(dir, ec);
 }
 
+// Regression: a PARTIALLY-stale bag — 3 keys over 5 records (appends done
+// with the bag closed, killed before flush, or SQL DML on a custom-ext
+// bag). dbGoBottom on it lands on the last STALE key (voucher 16 of 21 in
+// the field). An unconditional non-unique tag indexes every record, so
+// key_count != record_count at open must trigger the same one-shot
+// reindex the empty-bag heal does.
+TEST_CASE("partially stale bag is healed on AdsOpenIndex") {
+    auto dir = fs::temp_directory_path() / "openads_stale_bag_partial";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+
+    UNSIGNED8 srv[256];
+    std::memcpy(srv, dir.string().c_str(), dir.string().size() + 1);
+    ADSHANDLE hConn = 0;
+    REQUIRE(AdsConnect60(srv, ADS_LOCAL_SERVER, nullptr, nullptr, 0, &hConn) == 0);
+
+    UNSIGNED8 def[]   = "ID,N,4,0";
+    UNSIGNED8 tname[] = "partme";
+    ADSHANDLE hTable = 0;
+    REQUIRE(AdsCreateTable(hConn, tname, nullptr, ADS_CDX,
+                           0, 0, 0, 0, def, &hTable) == 0);
+
+    auto idx_path = (dir / "ixp.cdx").string();
+    UNSIGNED8 idx_buf[260];
+    std::memcpy(idx_buf, idx_path.c_str(), idx_path.size() + 1);
+    UNSIGNED8 tag[64]  = "BYID";
+    UNSIGNED8 expr[64] = "ID";
+    ADSHANDLE hIndex = 0;
+    REQUIRE(AdsCreateIndex(hTable, idx_buf, tag, expr, nullptr, 0, 0,
+                           &hIndex) == 0);
+
+    // 3 records WITH the bag bound -> 3 keys.
+    UNSIGNED8 fld[] = "ID";
+    for (int i = 1; i <= 3; ++i) {
+        REQUIRE(AdsAppendRecord(hTable) == 0);
+        AdsSetDouble(hTable, fld, static_cast<double>(i));
+    }
+    REQUIRE(AdsWriteRecord(hTable) == 0);
+    REQUIRE(AdsCloseIndex(hIndex) == 0);
+
+    // 2 more records with the bag CLOSED -> stale at 3/5 keys.
+    for (int i = 4; i <= 5; ++i) {
+        REQUIRE(AdsAppendRecord(hTable) == 0);
+        AdsSetDouble(hTable, fld, static_cast<double>(i));
+    }
+    REQUIRE(AdsWriteRecord(hTable) == 0);
+
+    ADSHANDLE idx_handles[64] = {0};
+    UNSIGNED16 idx_count = 64;
+    REQUIRE(AdsOpenIndex(hTable, idx_buf, idx_handles, &idx_count) == 0);
+    REQUIRE(idx_count >= 1);
+    REQUIRE(AdsSetIndexOrderByHandle(hTable, idx_handles[0]) == 0);
+
+    // The heal must have reindexed: GoBottom lands on the real last record.
+    UNSIGNED32 kc = 0;
+    REQUIRE(AdsGetKeyCount(hTable, 0, &kc) == 0);
+    CHECK(kc == 5u);                  // RED before the partial heal (3)
+    REQUIRE(AdsGotoBottom(hTable) == 0);
+    double v = 0;
+    REQUIRE(AdsGetDouble(hTable, fld, &v) == 0);
+    CHECK(v == 5.0);                  // RED before the partial heal (3)
+
+    REQUIRE(AdsCloseTable(hTable) == 0);
+    REQUIRE(AdsDisconnect(hConn) == 0);
+    fs::remove_all(dir, ec);
+}
+
 // Counter-case for the heal: a CONDITIONAL tag (FOR) that matches zero rows
 // is legitimately empty — opening it must NOT trigger a reindex, and the
 // order stays in Limbo by design.

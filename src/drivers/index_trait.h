@@ -54,6 +54,14 @@ public:
     // table (every GotoTop on it lands in bof=eof=1 Limbo). Default false
     // means "unknown" — callers must not treat unknown as empty.
     virtual bool empty() { return false; }
+
+    // Number of on-disk keys, or UINT32_MAX when the driver cannot say
+    // cheaply. Lets an opener detect a PARTIALLY-stale bag (an
+    // unconditional non-unique tag indexes every record, deleted ones
+    // included, so key_count != record_count means some writes bypassed
+    // it). CdxIndex answers via the logical-position cache: O(1) after
+    // the first walk, O(keys) once per instance.
+    virtual std::uint32_t key_count() { return 0xFFFFFFFFu; }
     virtual bool        descending() const = 0;
     virtual bool        unique()     const = 0;
     virtual std::uint16_t key_length() const = 0;

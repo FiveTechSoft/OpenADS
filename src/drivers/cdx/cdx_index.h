@@ -118,6 +118,12 @@ public:
     // rebuild in this same process is seen.
     bool empty() override;
 
+    // Key count via the logical-position cache (one O(keys) walk the
+    // first time). See IIndex::key_count.
+    std::uint32_t key_count() override {
+        return static_cast<std::uint32_t>(ordered_recnos_cached().size());
+    }
+
     // Reset this sub-tag's B+tree to empty (drop the existing
     // root) so a CREATE-INDEX-with-existing-tag can rebuild from
     // scratch on top of an old layout. Old leaves stay on disk

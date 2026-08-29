@@ -2330,7 +2330,29 @@ DispatchResult Session::dispatch(const Frame& f) {
                 // lock is fine).
                 if (f.opcode == Opcode::UnlockRecord)
                     (void)tbl->unlock_record(rn);
-                if (rrc != 0) { reply = err("Lock: failed", rrc); break; }
+                if (rrc != 0) {
+                    // Trace the holder so a field log shows WHO is blocking
+                    // a record lock (Pritpal's GN_COUNT retry loop).
+                    if (wire_trace_on()) {
+                        for (const auto& lk : openads::mgmt::LockRegistry
+                                 ::instance().snapshot()) {
+                            if (lk.recno == rn) {
+                                WTRACE("[wire] %s id=%u recno=%u FAILED rrc=%u; held by user=%s conn=%u table=%s\n",
+                                       f.opcode == Opcode::LockRecord ? "LockRecord" : "UnlockRecord",
+                                       id, (unsigned)rn, (unsigned)rrc,
+                                       lk.user.c_str(), (unsigned)lk.conn_no,
+                                       lk.table.c_str());
+                            }
+                        }
+                        WTRACE("[wire] %s id=%u recno=%u FAILED rrc=%u (no registered holder)\n",
+                               f.opcode == Opcode::LockRecord ? "LockRecord" : "UnlockRecord",
+                               id, (unsigned)rn, (unsigned)rrc);
+                    }
+                    reply = err("Lock: failed", rrc); break;
+                }
+                WTRACE("[wire] %s id=%u recno=%u ok\n",
+                       f.opcode == Opcode::LockRecord ? "LockRecord" : "UnlockRecord",
+                       id, (unsigned)rn);
             } else if (f.opcode == Opcode::LockRecord) {
                 // Use non-blocking try + retry loop (same semantics as
                 // the ABI lock_with_retry).  Blocking lock_record_excl
