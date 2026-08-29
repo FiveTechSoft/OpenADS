@@ -1813,3 +1813,207 @@ TEST_CASE("remote INDEX ON remounts client-absolute .z01 under legacy-paths jail
     fs::remove_all(base, ec);
     srv.stop();
 }
+
+// Scratch repro: RLock on the only record of a 1-record table over the wire.
+TEST_CASE("remote lock the only record of a 1-record table") {
+    using openads::network::Server;
+    auto dir = fs::temp_directory_path() / "openads_lock_one_rec";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+
+    UNSIGNED8 srv[512];
+    const auto sp = dir.string();
+    std::memcpy(srv, sp.c_str(), sp.size() + 1);
+    ADSHANDLE hConn = 0;
+    REQUIRE(AdsConnect60(srv, ADS_LOCAL_SERVER, nullptr, nullptr, 0, &hConn) == 0);
+    UNSIGNED8 fields[] = "CNT,N,8,0";
+    UNSIGNED8 tname[]  = "gn_count.dbf";
+    ADSHANDLE hT = 0;
+    REQUIRE(AdsCreateTable(hConn, tname, nullptr, ADS_CDX,
+                           0, 0, 0, 64, fields, &hT) == 0);
+    REQUIRE(AdsAppendRecord(hT) == 0);
+    UNSIGNED8 fc[] = "CNT";
+    AdsSetLong(hT, fc, 1);
+    REQUIRE(AdsWriteRecord(hT) == 0);
+    REQUIRE(AdsCloseTable(hT) == 0);
+    REQUIRE(AdsDisconnect(hConn) == 0);
+
+    Server server;
+    REQUIRE(server.start("127.0.0.1", 0).has_value());
+    ADSHANDLE hRC = remote_connect(dir, server.port());
+    ADSHANDLE hRT = 0;
+    REQUIRE(AdsOpenTable(hRC, tname, nullptr, ADS_CDX, 0, 0, 0, 0, &hRT) == 0);
+    REQUIRE(AdsGotoTop(hRT) == 0);
+    // RLock current record (0 = current, like dbRLock()).
+    UNSIGNED32 rc = AdsLockRecord(hRT, 0);
+    CHECK(rc == 0);
+    if (rc == 0) {
+        CHECK(AdsUnlockRecord(hRT, 0) == 0);
+    }
+    // Same after a fresh open without prior navigation.
+    REQUIRE(AdsCloseTable(hRT) == 0);
+    REQUIRE(AdsOpenTable(hRC, tname, nullptr, ADS_CDX, 0, 0, 0, 0, &hRT) == 0);
+    rc = AdsLockRecord(hRT, 1);
+    CHECK(rc == 0);
+    if (rc == 0) CHECK(AdsUnlockRecord(hRT, 1) == 0);
+    REQUIRE(AdsCloseTable(hRT) == 0);
+    REQUIRE(AdsDisconnect(hRC) == 0);
+    fs::remove_all(dir, ec);
+    server.stop();
+}
+
+// Scratch repro 2: RLock after dbSeek on an ordered 1-record table.
+TEST_CASE("remote lock after seek on ordered 1-record table") {
+    using openads::network::Server;
+    auto dir = fs::temp_directory_path() / "openads_lock_seek_one";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+
+    UNSIGNED8 srv[512];
+    const auto sp = dir.string();
+    std::memcpy(srv, sp.c_str(), sp.size() + 1);
+    ADSHANDLE hConn = 0;
+    REQUIRE(AdsConnect60(srv, ADS_LOCAL_SERVER, nullptr, nullptr, 0, &hConn) == 0);
+    UNSIGNED8 fields[] = "SER,Character,4;CNT,N,8,0";
+    UNSIGNED8 tname[]  = "gn_count.dbf";
+    ADSHANDLE hT = 0;
+    REQUIRE(AdsCreateTable(hConn, tname, nullptr, ADS_CDX,
+                           0, 0, 0, 64, fields, &hT) == 0);
+    UNSIGNED8 bag[]  = "gn_count.cdx";
+    UNSIGNED8 tag[]  = "BYSER";
+    UNSIGNED8 expr[] = "SER";
+    ADSHANDLE hIdx = 0;
+    REQUIRE(AdsCreateIndex61(hT, bag, tag, expr, nullptr, nullptr, 0, 512,
+                             &hIdx) == 0);
+    REQUIRE(AdsAppendRecord(hT) == 0);
+    UNSIGNED8 fs_[] = "SER";
+    UNSIGNED8 fc[]  = "CNT";
+    REQUIRE(AdsSetString(hT, fs_, (UNSIGNED8*)"A001", 4) == 0);
+    AdsSetLong(hT, fc, 1);
+    REQUIRE(AdsWriteRecord(hT) == 0);
+    REQUIRE(AdsCloseTable(hT) == 0);
+    REQUIRE(AdsDisconnect(hConn) == 0);
+
+    Server server;
+    REQUIRE(server.start("127.0.0.1", 0).has_value());
+    ADSHANDLE hRC = remote_connect(dir, server.port());
+    ADSHANDLE hRT = 0;
+    REQUIRE(AdsOpenTable(hRC, tname, nullptr, ADS_CDX, 0, 0, 0, 0, &hRT) == 0);
+    ADSHANDLE hOrd = 0;
+    REQUIRE(AdsGetIndexHandleByOrder(hRT, 1, &hOrd) == 0);
+    REQUIRE(hOrd != 0);
+    // dbSeek for the existing key.
+    UNSIGNED16 found = 0;
+    UNSIGNED8 key[] = "A001";
+    REQUIRE(AdsSeek(hOrd, key, 4, ADS_STRINGKEY, ADS_HARDSEEK, &found) == 0);
+    CHECK(found != 0);
+    UNSIGNED32 rn = 0;
+    REQUIRE(AdsGetRecordNum(hRT, 0, &rn) == 0);
+    CHECK(rn == 1u);
+    // Now RLock current — the failing step in the field.
+    UNSIGNED32 rc = AdsLockRecord(hRT, 0);
+    INFO("AdsLockRecord rc=", rc);
+    CHECK(rc == 0);
+    if (rc == 0) CHECK(AdsUnlockRecord(hRT, 0) == 0);
+    REQUIRE(AdsCloseTable(hRT) == 0);
+    REQUIRE(AdsDisconnect(hRC) == 0);
+    fs::remove_all(dir, ec);
+    server.stop();
+}
+
+// Scratch repro 3: stale bag (0 keys over 1 record) + seek + RLock on remote.
+TEST_CASE("remote lock after seek on stale-bag 1-record table") {
+    using openads::network::Server;
+    auto dir = fs::temp_directory_path() / "openads_lock_stale_one";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+
+    UNSIGNED8 srv[512];
+    const auto sp = dir.string();
+    std::memcpy(srv, sp.c_str(), sp.size() + 1);
+    ADSHANDLE hConn = 0;
+    REQUIRE(AdsConnect60(srv, ADS_LOCAL_SERVER, nullptr, nullptr, 0, &hConn) == 0);
+    UNSIGNED8 fields[] = "SER,Character,4;CNT,N,8,0";
+    UNSIGNED8 tname[]  = "gn_count.dbf";
+    ADSHANDLE hT = 0;
+    REQUIRE(AdsCreateTable(hConn, tname, nullptr, ADS_CDX,
+                           0, 0, 0, 64, fields, &hT) == 0);
+    // Build the bag on the EMPTY table, then close it: appends bypass it.
+    UNSIGNED8 bag[]  = "gn_count.cdx";
+    UNSIGNED8 tag[]  = "BYSER";
+    UNSIGNED8 expr[] = "SER";
+    ADSHANDLE hIdx = 0;
+    REQUIRE(AdsCreateIndex61(hT, bag, tag, expr, nullptr, nullptr, 0, 512,
+                             &hIdx) == 0);
+    REQUIRE(AdsCloseIndex(hIdx) == 0);
+    // Append with the bag CLOSED -> stale bag (0 keys over 1 record).
+    REQUIRE(AdsAppendRecord(hT) == 0);
+    UNSIGNED8 fs_[] = "SER";
+    UNSIGNED8 fc[]  = "CNT";
+    REQUIRE(AdsSetString(hT, fs_, (UNSIGNED8*)"A001", 4) == 0);
+    AdsSetLong(hT, fc, 1);
+    REQUIRE(AdsWriteRecord(hT) == 0);
+    REQUIRE(AdsCloseTable(hT) == 0);
+    REQUIRE(AdsDisconnect(hConn) == 0);
+
+    Server server;
+    REQUIRE(server.start("127.0.0.1", 0).has_value());
+    ADSHANDLE hRC = remote_connect(dir, server.port());
+    ADSHANDLE hRT = 0;
+    REQUIRE(AdsOpenTable(hRC, tname, nullptr, ADS_CDX, 0, 0, 0, 0, &hRT) == 0);
+    ADSHANDLE hOrd = 0;
+    REQUIRE(AdsGetIndexHandleByOrder(hRT, 1, &hOrd) == 0);
+    REQUIRE(hOrd != 0);
+    UNSIGNED16 found = 0;
+    UNSIGNED8 key[] = "A001";
+    REQUIRE(AdsSeek(hOrd, key, 4, ADS_STRINGKEY, ADS_HARDSEEK, &found) == 0);
+    CHECK(found != 0);
+    UNSIGNED32 rn = 0;
+    REQUIRE(AdsGetRecordNum(hRT, 0, &rn) == 0);
+    CHECK(rn == 1u);
+    UNSIGNED32 rc = AdsLockRecord(hRT, 0);
+    INFO("AdsLockRecord rc=", rc);
+    CHECK(rc == 0);
+    if (rc == 0) CHECK(AdsUnlockRecord(hRT, 0) == 0);
+    REQUIRE(AdsCloseTable(hRT) == 0);
+    REQUIRE(AdsDisconnect(hRC) == 0);
+    fs::remove_all(dir, ec);
+    server.stop();
+}
+#include "doctest.h"
+#include "openads/ace.h"
+#include <cstring>
+#include <filesystem>
+namespace fs = std::filesystem;
+TEST_CASE("double RLock on same record from same handle") {
+    auto dir = fs::temp_directory_path() / "openads_lock_twice";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+    UNSIGNED8 srv[512];
+    const auto sp = dir.string();
+    std::memcpy(srv, sp.c_str(), sp.size() + 1);
+    ADSHANDLE hC = 0;
+    REQUIRE(AdsConnect60(srv, ADS_LOCAL_SERVER, nullptr, nullptr, 0, &hC) == 0);
+    UNSIGNED8 fields[] = "CNT,N,8,0";
+    UNSIGNED8 tname[] = "t.dbf";
+    ADSHANDLE hT = 0;
+    REQUIRE(AdsCreateTable(hC, tname, nullptr, ADS_CDX, 0, 0, 0, 64, fields, &hT) == 0);
+    REQUIRE(AdsAppendRecord(hT) == 0);
+    REQUIRE(AdsWriteRecord(hT) == 0);
+    // append auto-lock is held now; explicit RLock on the same recno:
+    UNSIGNED32 rc1 = AdsLockRecord(hT, 1);
+    INFO("first RLock rc=", rc1);
+    CHECK(rc1 == 0);
+    UNSIGNED32 rc2 = AdsLockRecord(hT, 1);
+    INFO("second RLock rc=", rc2);
+    CHECK(rc2 == 0);
+    CHECK(AdsUnlockRecord(hT, 1) == 0);
+    CHECK(AdsUnlockRecord(hT, 1) == 0);
+    REQUIRE(AdsCloseTable(hT) == 0);
+    REQUIRE(AdsDisconnect(hC) == 0);
+    fs::remove_all(dir, ec);
+}
