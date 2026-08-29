@@ -1,6 +1,7 @@
 #include "doctest.h"
 #include "openads/ace.h"
 #include "sql/parser.h"
+#include "drivers/cdx/cdx_index.h"
 
 #include <array>
 #include <cstdint>
@@ -132,6 +133,77 @@ TEST_CASE("M10.5 INSERT through AdsExecuteSQLDirect appends a row") {
 
     REQUIRE(AdsCloseTable(hTable) == 0);
     REQUIRE(AdsCloseSQLStatement(hStmt) == 0);
+    REQUIRE(AdsDisconnect(hConn) == 0);
+    fs::remove_all(dir, ec);
+}
+
+// Regression: SQL DML opened the table through the ENGINE connection, which
+// never bound the structural bag — every INSERT/UPDATE/DELETE left a
+// production CDX stale (0 keys), and the next opener navigated a ghost order
+// (bof=eof=1 Limbo over a non-empty table; Pritpal Bedi's .z01 work bags,
+// Aug 2026). DML must now bind <base>.cdx for the life of the statement so
+// commit_dirty_record keeps it current.
+//
+// The check below opens the bag at DRIVER level on purpose: the ABI open
+// path now also HEALS stale bags on AdsOpenIndex, which would mask a DML
+// that never wrote its keys.
+TEST_CASE("SQL INSERT/DELETE maintain the structural CDX bag") {
+    auto dir = fs::temp_directory_path() / "openads_dml_prod_index";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+
+    UNSIGNED8 srv[256];
+    std::memcpy(srv, dir.string().c_str(), dir.string().size() + 1);
+    ADSHANDLE hConn = 0;
+    REQUIRE(AdsConnect60(srv, ADS_LOCAL_SERVER, nullptr, nullptr, 0, &hConn) == 0);
+
+    UNSIGNED8 def[]   = "ID,N,4,0";
+    UNSIGNED8 tname[] = "dmlidx";
+    ADSHANDLE hTable = 0;
+    REQUIRE(AdsCreateTable(hConn, tname, nullptr, ADS_CDX,
+                           0, 0, 0, 0, def, &hTable) == 0);
+
+    // Structural bag (dmlidx.cdx == <base>.cdx) built while empty.
+    auto idx_path = (dir / "dmlidx.cdx").string();
+    UNSIGNED8 idx_buf[260];
+    std::memcpy(idx_buf, idx_path.c_str(), idx_path.size() + 1);
+    UNSIGNED8 tag[64]  = "BYID";
+    UNSIGNED8 expr[64] = "ID";
+    ADSHANDLE hIndex = 0;
+    REQUIRE(AdsCreateIndex(hTable, idx_buf, tag, expr, nullptr, 0, 0,
+                           &hIndex) == 0);
+    REQUIRE(AdsCloseTable(hTable) == 0);   // closes + flushes the bag
+
+    ADSHANDLE hStmt = 0;
+    REQUIRE(AdsCreateSQLStatement(hConn, &hStmt) == 0);
+    ADSHANDLE hCur = 0;
+    UNSIGNED8 sql1[160] = "INSERT INTO dmlidx (ID) VALUES (10)";
+    REQUIRE(AdsExecuteSQLDirect(hStmt, sql1, &hCur) == 0);
+    UNSIGNED8 sql2[160] = "INSERT INTO dmlidx (ID) VALUES (20)";
+    REQUIRE(AdsExecuteSQLDirect(hStmt, sql2, &hCur) == 0);
+    UNSIGNED8 sql3[160] = "INSERT INTO dmlidx (ID) VALUES (30)";
+    REQUIRE(AdsExecuteSQLDirect(hStmt, sql3, &hCur) == 0);
+    UNSIGNED8 sql4[160] = "DELETE FROM dmlidx WHERE ID = 20";
+    REQUIRE(AdsExecuteSQLDirect(hStmt, sql4, &hCur) == 0);
+    REQUIRE(AdsCloseSQLStatement(hStmt) == 0);
+
+    // Driver-level: the bag must hold a key per surviving row. DBFCDX keeps
+    // DELETED rows in the index (SET DELETED hides them at navigation), so
+    // the DELETE above leaves its key in place: 3 keys, one flagged deleted.
+    openads::drivers::cdx::CdxIndex idx;
+    REQUIRE(idx.open_named(idx_path,
+                           openads::drivers::IndexOpenMode::Shared, "BYID"));
+    CHECK_FALSE(idx.empty());              // RED before the fix (0 keys)
+    int keys = 0;
+    auto s = idx.seek_first();
+    while (s && s.value().positioned && keys < 50) {
+        ++keys;
+        s = idx.next();
+    }
+    CHECK(keys == 3);
+    (void)idx.flush();
+
     REQUIRE(AdsDisconnect(hConn) == 0);
     fs::remove_all(dir, ec);
 }

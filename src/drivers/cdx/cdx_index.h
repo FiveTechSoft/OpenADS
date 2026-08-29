@@ -113,6 +113,11 @@ public:
     // (sub-tag counter / root_page changed). See IIndex::refresh_from_disk.
     void refresh_from_disk() override;
 
+    // No root page == no on-disk keys (never built, or cleared). See
+    // IIndex::empty. Refreshes the cached sub-tag header first so a peer's
+    // rebuild in this same process is seen.
+    bool empty() override;
+
     // Reset this sub-tag's B+tree to empty (drop the existing
     // root) so a CREATE-INDEX-with-existing-tag can rebuild from
     // scratch on top of an old layout. Old leaves stay on disk

@@ -106,3 +106,138 @@ TEST_CASE("index walk skips stale entries left by a PACK (no ADSCDX/5000)") {
     REQUIRE(AdsDisconnect(hConn) == 0);
     fs::remove_all(dir, ec);
 }
+
+// Regression: a compound bag that was never populated (created while the
+// table was empty, records appended afterwards with the tag unbound) has no
+// root page. Opening it over a NON-empty table used to hand the caller a
+// ghost order: every GotoTop landed in Limbo (bof=eof=1) and no nav rescue
+// escaped (Pritpal Bedi's .z01 work bags over the wire, Aug 2026).
+// AdsOpenIndex must now detect the provably-empty unconditional tag and
+// reindex the bag once on open.
+TEST_CASE("stale empty bag over non-empty table is healed on AdsOpenIndex") {
+    auto dir = fs::temp_directory_path() / "openads_stale_bag_heal";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+
+    UNSIGNED8 srv[256];
+    std::memcpy(srv, dir.string().c_str(), dir.string().size() + 1);
+    ADSHANDLE hConn = 0;
+    REQUIRE(AdsConnect60(srv, ADS_LOCAL_SERVER, nullptr, nullptr, 0, &hConn) == 0);
+
+    UNSIGNED8 def[]   = "ID,N,4,0";
+    UNSIGNED8 tname[] = "healme";
+    ADSHANDLE hTable = 0;
+    REQUIRE(AdsCreateTable(hConn, tname, nullptr, ADS_CDX,
+                           0, 0, 0, 0, def, &hTable) == 0);
+
+    // Build the tag while the table is still EMPTY -> bag with no keys.
+    // Non-structural name so a later plain open never auto-binds it.
+    auto idx_path = (dir / "ix.cdx").string();
+    UNSIGNED8 idx_buf[260];
+    std::memcpy(idx_buf, idx_path.c_str(), idx_path.size() + 1);
+    UNSIGNED8 tag[64]  = "BYID";
+    UNSIGNED8 expr[64] = "ID";
+    ADSHANDLE hIndex = 0;
+    REQUIRE(AdsCreateIndex(hTable, idx_buf, tag, expr, nullptr, 0, 0,
+                           &hIndex) == 0);
+    REQUIRE(AdsCloseIndex(hIndex) == 0);
+
+    // Append with the tag unbound: the bag stays at 0 keys (stale).
+    UNSIGNED8 fld[] = "ID";
+    const double ids[5] = {10, 20, 30, 5, 15};
+    for (int i = 0; i < 5; ++i) {
+        REQUIRE(AdsAppendRecord(hTable) == 0);
+        AdsSetDouble(hTable, fld, ids[i]);
+    }
+    REQUIRE(AdsWriteRecord(hTable) == 0);
+
+    // Reopen the stale bag: the heal must reindex it on open.
+    ADSHANDLE idx_handles[64] = {0};
+    UNSIGNED16 idx_count = 64;
+    REQUIRE(AdsOpenIndex(hTable, idx_buf, idx_handles, &idx_count) == 0);
+    REQUIRE(idx_count >= 1);
+    REQUIRE(AdsSetIndexOrderByHandle(hTable, idx_handles[0]) == 0);
+
+    REQUIRE(AdsGotoTop(hTable) == 0);
+    UNSIGNED16 bof = 1, eof = 1;
+    REQUIRE(AdsAtBOF(hTable, &bof) == 0);
+    REQUIRE(AdsAtEOF(hTable, &eof) == 0);
+    CHECK(bof == 0);   // RED before the heal: bof=eof=1 (Limbo)
+    CHECK(eof == 0);
+
+    // Ascending key order: 5 10 15 20 30.
+    const double want[5] = {5, 10, 15, 20, 30};
+    int visited = 0;
+    while (eof == 0 && visited < 50) {
+        double v = 0;
+        REQUIRE(AdsGetDouble(hTable, fld, &v) == 0);
+        REQUIRE(visited < 5);
+        CHECK(v == want[visited]);
+        ++visited;
+        REQUIRE(AdsSkip(hTable, 1) == 0);
+        REQUIRE(AdsAtEOF(hTable, &eof) == 0);
+    }
+    CHECK(visited == 5);
+
+    REQUIRE(AdsCloseTable(hTable) == 0);
+    REQUIRE(AdsDisconnect(hConn) == 0);
+    fs::remove_all(dir, ec);
+}
+
+// Counter-case for the heal: a CONDITIONAL tag (FOR) that matches zero rows
+// is legitimately empty — opening it must NOT trigger a reindex, and the
+// order stays in Limbo by design.
+TEST_CASE("conditional tag with zero matching rows is not healed") {
+    auto dir = fs::temp_directory_path() / "openads_stale_bag_noheal";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+
+    UNSIGNED8 srv[256];
+    std::memcpy(srv, dir.string().c_str(), dir.string().size() + 1);
+    ADSHANDLE hConn = 0;
+    REQUIRE(AdsConnect60(srv, ADS_LOCAL_SERVER, nullptr, nullptr, 0, &hConn) == 0);
+
+    UNSIGNED8 def[]   = "ID,N,4,0";
+    UNSIGNED8 tname[] = "condme";
+    ADSHANDLE hTable = 0;
+    REQUIRE(AdsCreateTable(hConn, tname, nullptr, ADS_CDX,
+                           0, 0, 0, 0, def, &hTable) == 0);
+
+    UNSIGNED8 fld[] = "ID";
+    for (int i = 1; i <= 3; ++i) {
+        REQUIRE(AdsAppendRecord(hTable) == 0);
+        AdsSetDouble(hTable, fld, static_cast<double>(i));
+    }
+    REQUIRE(AdsWriteRecord(hTable) == 0);
+
+    // FOR matches nothing -> conditional bag with 0 keys by design.
+    auto idx_path = (dir / "ixc.cdx").string();
+    UNSIGNED8 idx_buf[260];
+    std::memcpy(idx_buf, idx_path.c_str(), idx_path.size() + 1);
+    UNSIGNED8 tag[64]  = "NONE";
+    UNSIGNED8 expr[64] = "ID";
+    UNSIGNED8 cond[64] = "ID > 999";
+    ADSHANDLE hIndex = 0;
+    REQUIRE(AdsCreateIndex(hTable, idx_buf, tag, expr, cond, 0, 0,
+                           &hIndex) == 0);
+    REQUIRE(AdsCloseIndex(hIndex) == 0);
+
+    ADSHANDLE idx_handles[64] = {0};
+    UNSIGNED16 idx_count = 64;
+    REQUIRE(AdsOpenIndex(hTable, idx_buf, idx_handles, &idx_count) == 0);
+    REQUIRE(idx_count >= 1);
+    REQUIRE(AdsSetIndexOrderByHandle(hTable, idx_handles[0]) == 0);
+
+    REQUIRE(AdsGotoTop(hTable) == 0);
+    UNSIGNED16 bof = 0, eof = 0;
+    REQUIRE(AdsAtBOF(hTable, &bof) == 0);
+    REQUIRE(AdsAtEOF(hTable, &eof) == 0);
+    CHECK(bof == 1);   // still Limbo: the heal must leave it alone
+    CHECK(eof == 1);
+
+    REQUIRE(AdsCloseTable(hTable) == 0);
+    REQUIRE(AdsDisconnect(hConn) == 0);
+    fs::remove_all(dir, ec);
+}

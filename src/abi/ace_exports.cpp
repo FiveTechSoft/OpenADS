@@ -13112,6 +13112,28 @@ bool same_index_path(const std::string& a, const std::string& b) {
     }
     return true;
 }
+
+// Stale-bag heal (Pritpal Bedi's .z01 work bags, Aug 2026): a compound tag
+// whose tree was never built — or whose keys were written by a handle that
+// never reached disk — has no root page, so every GotoTop on it lands in
+// Limbo (bof=eof=1) over a NON-empty table and no navigation rescue
+// escapes. When a just-opened unconditional tag is provably empty while
+// the table has records, rebuild the bag once here instead of handing the
+// caller a ghost order. Conditional (FOR) tags are skipped: zero matching
+// rows is a legitimate state for them. Read-only tables are skipped too.
+void heal_stale_bag_on_open(Table* t,
+                const std::vector<openads::drivers::IIndex*>& views) {
+    if (t == nullptr || t->record_count() == 0) return;
+    if (t->open_mode() == openads::engine::OpenMode::Read) return;
+    for (auto* v : views) {
+        if (v == nullptr || !v->condition().empty() || !v->empty()) continue;
+        arc2_log("IDXHEAL stale tag '%s' on %s (recs=%u) -> reindex",
+                 v->name().c_str(), t->path().c_str(),
+                 (unsigned)t->record_count());
+        (void)t->reindex();
+        return;
+    }
+}
 }  // namespace
 
 // Real-ACE 4-arg signature: opens an index FILE, registers one handle
@@ -13392,6 +13414,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
     // Pritpal Bedi's record-151 crash).
     UNSIGNED16 cap = (pu16ArrayLen != nullptr) ? *pu16ArrayLen : 0;
     UNSIGNED16 count = 0;
+    std::vector<openads::drivers::IIndex*> opened_views;
     for (const auto& name : tags) {
         std::unique_ptr<openads::drivers::IIndex> sub;
         // A rerouted bag was listed through CdxIndex above, so it must be
@@ -13418,20 +13441,22 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
         }
         ADSHANDLE h = old_handles.count(name)
             ? old_handles[name] : next_index_handle();
+        openads::drivers::IIndex* raw = sub.get();
         if (!table_has_active) {
             t->set_order(std::move(sub));
             m[h] = IndexBinding{t, name, nullptr, path};
             act[t] = h;
             table_has_active = true;
         } else {
-            openads::drivers::IIndex* raw = sub.get();
             m[h] = IndexBinding{t, name, std::move(sub), path};
             t->register_extra_index_view(raw);
         }
+        opened_views.push_back(raw);
         if (count < cap) ahIndex[count] = h;
         ++count;
     }
     if (pu16ArrayLen != nullptr) *pu16ArrayLen = count;
+    heal_stale_bag_on_open(t, opened_views);
     return ok();
 }
 
@@ -14614,7 +14639,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex(ADSHANDLE hTable, UNSIGNED8* pucFile,
         const bool bag_exists = fs2::exists(fs2::path(file));
         if (!bag_exists) {
             auto created = openads::drivers::cdx::CdxIndex::create(
-                file, tag, expr, klen, false, false);
+                file, tag, expr, klen, false, false, for_expr);
             if (!created) return fail(created.error());
             idx = std::make_unique<openads::drivers::cdx::CdxIndex>(
                 std::move(created).value());
@@ -20294,6 +20319,93 @@ openads::engine::LockingMode stmt_locking_mode(const SqlStatement& s) {
 inline void sql_dml_hold_write_lock(openads::engine::Table* tbl) {
     if (tbl == nullptr || tbl->is_table_locked()) return;
     (void)tbl->try_lock_table_excl();
+}
+
+// M-DML.IDX — production-index maintenance for SQL DML (Pritpal Bedi's
+// .z01 work bags, Aug 2026). INSERT/UPDATE/DELETE/MERGE open the table
+// through the ENGINE connection (Connection::open_table), which never
+// binds the structural bag — so every SQL write left a production CDX
+// stale, and the next handle to open it navigated a ghost order
+// (bof=eof=1 Limbo over a non-empty table). SAP maintains the structural
+// index on server-side DML. Bind <base>.cdx (<base>.adi for ADT) as parked
+// extra views for the life of the statement so commit_dirty_record keeps
+// it current. The guard flushes + frees the views at scope end; the
+// unregister is skipped when the DML already closed the table (most paths)
+// because the registry lookup then fails — touching the dead Table* would
+// be UB.
+struct DmlProductionIndexGuard {
+    openads::session::Connection* conn = nullptr;
+    openads::session::Handle      th   = 0;
+    std::vector<std::unique_ptr<openads::drivers::IIndex>> owned;
+    ~DmlProductionIndexGuard() {
+        if (owned.empty()) return;
+        if (conn != nullptr) {
+            if (auto* t = conn->lookup_table(th); t != nullptr) {
+                for (auto& v : owned) t->unregister_extra_index_view(v.get());
+            }
+        }
+        for (auto& v : owned) (void)v->flush();
+    }
+};
+
+void dml_bind_production_index(openads::session::Connection* c,
+                               openads::session::Handle th,
+                               DmlProductionIndexGuard& g) {
+    namespace fs = std::filesystem;
+    auto* tbl = c->lookup_table(th);
+    if (tbl == nullptr) return;
+    fs::path tp(tbl->path());
+    std::string ext = tp.extension().string();
+    for (auto& ch : ext)
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    fs::path bag;
+    bool use_cdx = false;
+    if (ext == ".dbf") {
+        bag = tp; bag.replace_extension(".cdx"); use_cdx = true;
+    } else if (ext == ".adt" || ext == ".dat") {
+        bag = tp; bag.replace_extension(".adi");
+    } else {
+        return;
+    }
+    std::error_code ec;
+    const std::string bag_path =
+        openads::platform::resolve_case_insensitive(bag.string());
+    if (!fs::exists(bag_path, ec)) return;
+    std::vector<std::string> tags;
+    if (use_cdx) {
+        auto r = openads::drivers::cdx::CdxIndex::list_tags(bag_path);
+        if (!r) return;
+        tags = std::move(r).value();
+    } else {
+        auto r = openads::drivers::adi::AdiIndex::list_tags(bag_path,
+                                                            tbl->path());
+        if (!r) return;
+        tags = std::move(r).value();
+    }
+    for (const auto& name : tags) {
+        std::unique_ptr<openads::drivers::IIndex> sub;
+        if (use_cdx) {
+            auto idx = std::make_unique<openads::drivers::cdx::CdxIndex>();
+            if (auto r = idx->open_named(bag_path,
+                    openads::drivers::IndexOpenMode::Shared, name); !r) {
+                continue;
+            }
+            mark_cdx_key_encoding(tbl, idx.get());
+            apply_cdx_oem_collation(tbl, idx.get());
+            sub = std::move(idx);
+        } else {
+            auto idx = std::make_unique<openads::drivers::adi::AdiIndex>();
+            if (auto r = idx->open_named(bag_path,
+                    openads::drivers::IndexOpenMode::Shared, name,
+                    tbl->path()); !r) {
+                continue;
+            }
+            sub = std::move(idx);
+        }
+        tbl->register_extra_index_view(sub.get());
+        g.owned.push_back(std::move(sub));
+    }
+    if (!g.owned.empty()) { g.conn = c; g.th = th; }
 }
 
 } // namespace
@@ -26974,6 +27086,11 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         openads::engine::Table* tbl = c->lookup_table(th.value());
         if (!tbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
         sql_dml_hold_write_lock(tbl);
+        // Keep the structural bag current on every SQL write (see
+        // DmlProductionIndexGuard above); no-op when no <base>.cdx/.adi
+        // exists for this table.
+        DmlProductionIndexGuard dml_idx_guard;
+        dml_bind_production_index(c, th.value(), dml_idx_guard);
 
         // Compile the ON tree with the same closure shape the UPDATE
         // branch below uses (helper extraction still deferred).
@@ -27290,6 +27407,11 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         openads::engine::Table* tbl = c->lookup_table(th.value());
         if (!tbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
         sql_dml_hold_write_lock(tbl);
+        // Keep the structural bag current on every SQL write (see
+        // DmlProductionIndexGuard above); no-op when no <base>.cdx/.adi
+        // exists for this table.
+        DmlProductionIndexGuard dml_idx_guard;
+        dml_bind_production_index(c, th.value(), dml_idx_guard);
         // Pre-resolve assignments so a typo surfaces before any write.
         struct Assn {
             std::uint16_t                   field_index;
@@ -27554,6 +27676,11 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         openads::engine::Table* tbl = c->lookup_table(th.value());
         if (!tbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
         sql_dml_hold_write_lock(tbl);
+        // Keep the structural bag current on every SQL write (see
+        // DmlProductionIndexGuard above); no-op when no <base>.cdx/.adi
+        // exists for this table.
+        DmlProductionIndexGuard dml_idx_guard;
+        dml_bind_production_index(c, th.value(), dml_idx_guard);
         // Reuse the WHERE filter machinery for SELECT: it's already
         // wired and the predicate semantics match exactly.
         if (del.value().where) {
@@ -27719,6 +27846,11 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         openads::engine::Table* tbl = c->lookup_table(th.value());
         if (!tbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
         sql_dml_hold_write_lock(tbl);
+        // Keep the structural bag current on every SQL write (see
+        // DmlProductionIndexGuard above); no-op when no <base>.cdx/.adi
+        // exists for this table.
+        DmlProductionIndexGuard dml_idx_guard;
+        dml_bind_production_index(c, th.value(), dml_idx_guard);
 
         // `INSERT INTO t VALUES (...)` without a column list: SAP binds
         // the values positionally in declared-column order (probed).

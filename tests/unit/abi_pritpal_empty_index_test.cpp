@@ -15,7 +15,11 @@
 // apart from engine defects:
 //   A) Empty INDEX ON → keycount 0; GoTop succeeds; FieldGet → 5068
 //      (AE_NO_CURRENT_RECORD — rddads maps that to blank, no Harbour error)
-//   B) Non-structural bag, append without AdsOpenIndex → bag stays empty
+//   B) Non-structural bag, append without AdsOpenIndex → the bag on disk
+//      is stale (0 keys over N rows); since Aug 2026 AdsOpenIndex detects
+//      that exact shape (unconditional tag, no root page, non-empty table)
+//      and reindexes once on open — the caller gets a working order
+//      instead of a ghost bof=eof=1 Limbo.
 //   C) Structural production bag auto-opens on USE and IS maintained on
 //      append (local) — so "empty bag + N rows" is NOT the local auto-open
 //      path; rebuild-after-data or order-open appends fill keys
@@ -151,10 +155,11 @@ TEST_CASE("Pritpal empty-index: INDEX ON empty table yields keycount 0 (not corr
 
 // ---------------------------------------------------------------------------
 // B) Non-structural bag: INDEX ON empty, close, append WITHOUT opening bag
-//    → keycount stays 0; DbSetIndex shows blank FieldGet (his Z01 / explicit
-//    bag path when SET INDEX was off during load).
+//    → bag on disk goes stale (0 keys over N rows). AdsOpenIndex now heals
+//    that exact shape (reindex once on open), so DbSetIndex gives a working
+//    order instead of the blank bof=eof=1 Limbo Pritpal hit over the wire.
 // ---------------------------------------------------------------------------
-TEST_CASE("Pritpal empty-index: non-structural bag stays empty if never opened during append") {
+TEST_CASE("Pritpal empty-index: stale non-structural bag is healed on open") {
     auto dir = fs::temp_directory_path() / "openads_pritpal_empty_idx_b";
     std::error_code ec;
     fs::remove_all(dir, ec);
@@ -185,29 +190,17 @@ TEST_CASE("Pritpal empty-index: non-structural bag stays empty if never opened d
     REQUIRE(AdsGotoTop(hTbl) == 0);
     CHECK(get_name(hTbl) == "Alice");
 
+    // Open the stale bag: the heal reindexes it once, on open.
     std::array<ADSHANDLE, 8> arr{};
     UNSIGNED16 n = static_cast<UNSIGNED16>(arr.size());
     REQUIRE(AdsOpenIndex(hTbl, bag, arr.data(), &n) == 0);
     REQUIRE(n >= 1u);
     hIdx = arr[0];
-    CHECK(key_count(hIdx) == 0u);
-
-    REQUIRE(AdsGotoTop(hIdx) == 0);
-    CHECK(at_bof(hTbl));
-    CHECK(at_eof(hTbl));
-    auto [rc, name] = try_get_name(hTbl);
-    CHECK(rc == AE_NO_CURRENT_RECORD);
-    CHECK(name.empty());
-
-    // Rebuild AFTER data → works (not an engine defect).
-    REQUIRE(AdsCloseTable(hTbl) == 0);
-    fs::remove(dir / "MyIdx.cdx", ec);
-    REQUIRE(AdsOpenTable(hConn, tname, tname, ADS_CDX, 1, 1, 0, 1, &hTbl) == 0);
-    hIdx = 0;
-    REQUIRE(AdsCreateIndex61(hTbl, bag, tag, expr, nullptr, nullptr,
-                             ADS_COMPOUND, 512, &hIdx) == 0);
     CHECK(key_count(hIdx) == 3u);
+
     REQUIRE(AdsGotoTop(hIdx) == 0);
+    CHECK_FALSE(at_bof(hTbl));
+    CHECK_FALSE(at_eof(hTbl));
     CHECK(get_name(hTbl) == "Alice");
 
     REQUIRE(AdsCloseTable(hTbl) == 0);

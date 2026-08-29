@@ -919,6 +919,11 @@ void CdxIndex::refresh_from_disk() {
     (void)reload_header_if_changed_();
 }
 
+bool CdxIndex::empty() {
+    refresh_from_disk();
+    return root_page_ == 0;
+}
+
 util::Result<void> CdxIndex::reload_header_if_changed_() {
     if (sub_header_offset_ == 0) return {};
     // If we hold dirty pages we own the bag; peer writers cannot have

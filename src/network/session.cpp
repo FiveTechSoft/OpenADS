@@ -1027,6 +1027,21 @@ void Session::sync_engine_cursor(std::uint32_t id) {
     UNSIGNED32 rn = 0;
     AdsGetRecordNum(h, 0, &rn);
     if (rn == 0) return;
+    // A twin in Limbo (stale/empty order) reports a phantom recno
+    // (record_count + 1). Dragging the engine cursor there poisons every
+    // later pack_row_trailer fallback ("engine recno=16" on a 15-record
+    // table). Skip the sync: the engine keeps its last known-good position.
+    // NOTE: recno == record_count+1 with eof-only is a LEGITIMATE past-end
+    // position (scope end) and must still sync — only Limbo (bof&&eof) is
+    // the poison case.
+    {
+        UNSIGNED16 lb = 0, le = 0;
+        AdsAtBOF(h, &lb); AdsAtEOF(h, &le);
+        if (lb && le) {
+            WTRACE("[wire] sync_engine_cursor id=%u twin in Limbo, skip\n", id);
+            return;
+        }
+    }
     (void)tbl->goto_record(rn);
 }
 
@@ -2479,6 +2494,17 @@ DispatchResult Session::dispatch(const Frame& f) {
                 tbl->clear_extra_index_views();
             }
             if (!rb) { reply = err("Maintenance: " + rb.error().message); break; }
+            // Engine-side pack/zap rewrites recnos (pack) or empties the file
+            // (zap); bags bound on the ABI twin now point at phantom recnos.
+            // Rebuild them so the next ordered nav doesn't walk ghosts.
+            // AdsGotoTop first: it refreshes the twin's cached record_count
+            // from disk, which the reindex scan relies on.
+            if (f.opcode == Opcode::PackTable || f.opcode == Opcode::ZapTable) {
+                if (auto hit = tbls_h_.find(id); hit != tbls_h_.end()) {
+                    (void)AdsGotoTop(hit->second);
+                    (void)AdsReindex(hit->second);
+                }
+            }
             reply.opcode = ack_op;
             break;
         }

@@ -156,9 +156,11 @@ TEST_CASE("remote Pritpal empty-index: INDEX ON empty yields keycount 0") {
 }
 
 // ---------------------------------------------------------------------------
-// B) Non-structural bag: never opened during append → stays empty
+// B) Non-structural bag: never opened during append → stale on disk; the
+//    server's AdsOpenIndex now heals it (reindex once on open), so the
+//    client gets a working order instead of the ghost bof=eof=1 Limbo.
 // ---------------------------------------------------------------------------
-TEST_CASE("remote Pritpal empty-index: non-structural bag stays empty without open") {
+TEST_CASE("remote Pritpal empty-index: stale non-structural bag is healed on open") {
     auto env = RemoteEnv::start("openads_r_pritpal_empty_b");
     auto hTbl = remote_create_empty(env.hConn, "TestIndex");
 
@@ -183,17 +185,17 @@ TEST_CASE("remote Pritpal empty-index: non-structural bag stays empty without op
     REQUIRE(AdsGotoTop(hTbl) == 0);
     CHECK(get_name(hTbl) == "Alice");
 
+    // Open the stale bag over the wire: the server-side twin reindexes it
+    // once, on open.
     std::array<ADSHANDLE, 8> arr{};
     UNSIGNED16 n = static_cast<UNSIGNED16>(arr.size());
     REQUIRE(AdsOpenIndex(hTbl, bag, arr.data(), &n) == 0);
     REQUIRE(n >= 1u);
-    CHECK(key_count(arr[0]) == 0u);
+    CHECK(key_count(arr[0]) == 3u);
     REQUIRE(AdsGotoTop(arr[0]) == 0);
-    CHECK(at_bof(hTbl));
-    CHECK(at_eof(hTbl));
-    auto [rc, name] = try_get_name(hTbl);
-    CHECK((rc == AE_NO_CURRENT_RECORD || (rc == 0 && name.empty())));
-    CHECK(name.empty());
+    CHECK_FALSE(at_bof(hTbl));
+    CHECK_FALSE(at_eof(hTbl));
+    CHECK(get_name(hTbl) == "Alice");
 
     // Rebuild after data over the wire.
     REQUIRE(AdsCloseTable(hTbl) == 0);

@@ -48,6 +48,12 @@ public:
     // Default empty; CdxIndex parses it from the on-disk sub-tag header so
     // (re)build paths can re-apply the same filter the tag was created with.
     virtual std::string condition()  const { return std::string{}; }
+
+    // True when the tag provably has no on-disk keys (CDX: no root page).
+    // Lets an opener detect a stale / never-built bag over a non-empty
+    // table (every GotoTop on it lands in bof=eof=1 Limbo). Default false
+    // means "unknown" — callers must not treat unknown as empty.
+    virtual bool empty() { return false; }
     virtual bool        descending() const = 0;
     virtual bool        unique()     const = 0;
     virtual std::uint16_t key_length() const = 0;
