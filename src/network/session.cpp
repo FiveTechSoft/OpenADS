@@ -535,7 +535,14 @@ ADSHANDLE Session::ensure_abi_handle(std::uint32_t id) {
     // same file. Close and reopen as a plain DBF (no CDX), then try to
     // attach the index explicitly. If even that fails, we still have a
     // working cursor in natural record order — better than Limbo.
-    if (_b && _e) {
+    //
+    // Skip when the table is genuinely EMPTY: Limbo is the correct state
+    // there, and reopening without the production bag only discards its
+    // binding (later twin appends then leave the bag stale). Since the
+    // AdsOpenIndex heal (v1.09.9) reindexes stale bags on open, a non-empty
+    // table should never reach this branch in Limbo anymore — it remains
+    // as a safety net for bags the heal cannot repair.
+    if (_b && _e && tbl->record_count() > 0) {
         WTRACE("[wire] ensure_abi_handle id=%u Limbo after CDX open, retrying without CDX eng_recs=%u\n",
                id, (unsigned)tbl->record_count());
         AdsCloseTable(h);
@@ -747,27 +754,38 @@ void Session::pack_row_trailer(Frame& reply, std::uint32_t id,
         }
         WTRACE("[wire] pack enter id=%u twin bof=%u eof=%u\n", id, (unsigned)_b, (unsigned)_e);
     }
+    // f2436d8 regression: for ORDERED tables it made this pack read from the
+    // engine mirror. That mirror lags the twin one op (handlers sync AFTER
+    // packing) and its lookahead walks NATURAL order, so every ordered op
+    // shipped the previous position's row and ordered read-ahead walked
+    // recno order instead of the index. The twin is the authority for an
+    // ordered table: pack from it. The engine stays the source for
+    // natural-order tables and the fallback when the twin is genuinely in
+    // Limbo (empty order/table) — the case f2436d8 meant to cover.
+    bool twin_limbo = false;
+    if (h_abi != 0) {
+        UNSIGNED16 lb = 9, le = 9;
+        AdsAtBOF(h_abi, &lb); AdsAtEOF(h_abi, &le);
+        twin_limbo = (lb != 0 && le != 0);
+    }
+    const bool use_engine = (eng_tbl != nullptr) && (h_abi == 0 || twin_limbo);
     // Pack the current row.
     bool current_packed = false;
-    if (eng_tbl) {
+    if (use_engine) {
         // If the ABI twin is in Limbo (bof=eof=1) but we have the engine
         // table, sync the engine to the ABI twin's recno and read from engine.
         // ACE's CDX may disagree with the engine's CDX on index state.
         if (h_abi != 0) {
-            UNSIGNED16 _b2 = 9, _e2 = 9;
-            AdsAtBOF(h_abi, &_b2); AdsAtEOF(h_abi, &_e2);
-            if (_b2 && _e2) {
-                UNSIGNED32 rn = 0;
-                AdsGetRecordNum(h_abi, 0, &rn);
-                if (rn > 0 && eng_tbl->record_count() >= rn) {
-                    eng_tbl->goto_record(rn);
-                    WTRACE("[wire] pack enter id=%u Limbo fallback engine recno=%u\n",
-                           id, (unsigned)rn);
-                } else {
-                    // Twin recno unavailable (Limbo); use engine's current pos.
-                    WTRACE("[wire] pack enter id=%u Limbo, engine recno=%u\n",
-                           id, (unsigned)eng_tbl->recno());
-                }
+            UNSIGNED32 rn = 0;
+            AdsGetRecordNum(h_abi, 0, &rn);
+            if (rn > 0 && eng_tbl->record_count() >= rn) {
+                eng_tbl->goto_record(rn);
+                WTRACE("[wire] pack enter id=%u Limbo fallback engine recno=%u\n",
+                       id, (unsigned)rn);
+            } else {
+                // Twin recno unavailable (Limbo); use engine's current pos.
+                WTRACE("[wire] pack enter id=%u Limbo, engine recno=%u\n",
+                       id, (unsigned)eng_tbl->recno());
             }
         }
         if (eng_tbl->eof() || eng_tbl->bof() || eng_tbl->recno() == 0) {
@@ -837,7 +855,7 @@ void Session::pack_row_trailer(Frame& reply, std::uint32_t id,
     // tables where a round-trip costs the most.
     std::size_t block_bytes = 0;
     for (std::uint16_t i = 0; i < lookahead_n; ++i) {
-        if (eng_tbl) {
+        if (use_engine) {
             auto sk = eng_tbl->skip(walk);
             if (!sk) break;
             ++cursor_advance;
@@ -868,7 +886,7 @@ void Session::pack_row_trailer(Frame& reply, std::uint32_t id,
         // back by -walk * cursor_advance.
         const SIGNED32 restore =
             -walk * static_cast<SIGNED32>(cursor_advance);
-        if (eng_tbl) {
+        if (use_engine) {
             (void)eng_tbl->skip(restore);
         } else {
             (void)AdsSkip(h_abi, restore);

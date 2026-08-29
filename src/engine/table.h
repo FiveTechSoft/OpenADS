@@ -669,6 +669,16 @@ private:
     // current row; applied once by commit_dirty_record().
     std::vector<std::pair<drivers::IIndex*, std::string>> index_snap_;
     bool                                          snap_was_append_ = false;
+    // Recno of the most recent append whose keys have NOT been synced yet.
+    // snap_was_append_ is captured per edit session and goes stale when an
+    // intermediate no-op commit (a per-field flush that touches no key)
+    // clears pending_append_ before the key-bearing commit runs: the erase
+    // of the never-inserted blank key then aborts as a bogus "corrupt
+    // tree" and the new key is never inserted (remote AppendBlank +
+    // per-field SetField+flush flow: keys after the first were lost).
+    // It survives every commit of the append session (each SetField syncs
+    // a different tag) and is cleared on navigation away from the record.
+    std::uint32_t                                 append_pending_recno_ = 0;
     bool                                          cache_enabled_  = false;
     std::uint64_t                                 live_gen_       = 0;
     bool                                          last_seek_found_ = false;

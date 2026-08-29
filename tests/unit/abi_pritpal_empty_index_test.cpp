@@ -254,6 +254,70 @@ TEST_CASE("Pritpal empty-index: local production CDX auto-open is maintained on 
     fs::remove_all(dir, ec);
 }
 
+// Scratch repro for the remote keyno failure: mirrors the exact wire op
+// sequence the server applies on the ABI twin — active order, append,
+// per-op flush — to find where the new key gets lost.
+TEST_CASE("twin repro: append+flush with active order maintains key") {
+    auto dir = fs::temp_directory_path() / "openads_twin_append_repro";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+
+    auto hConn = connect_local(dir);
+    auto hTbl = create_empty_table(hConn, "TestIndex");
+
+    UNSIGNED8 bag[]  = "TestIndex.cdx";  // production bag
+    UNSIGNED8 tag[]  = "IDX01";
+    UNSIGNED8 expr[] = "NAME";
+    ADSHANDLE hIdx = 0;
+    REQUIRE(AdsCreateIndex61(hTbl, bag, tag, expr, nullptr, nullptr,
+                             ADS_COMPOUND, 512, &hIdx) == 0);
+    // Seed 3 rows (through the bound order, like the fixture's maker).
+    append_name(hTbl, "Seed1", "A");
+    append_name(hTbl, "Seed2", "B");
+    append_name(hTbl, "Seed3", "C");
+    REQUIRE(AdsCloseIndex(hIdx) == 0);
+    REQUIRE(AdsCloseTable(hTbl) == 0);
+
+    // Reopen: production auto-open + explicit open + SetOrder (twin flow).
+    UNSIGNED8 tname[] = "TestIndex";
+    REQUIRE(AdsOpenTable(hConn, tname, tname, ADS_CDX, 1, 1, 0, 1, &hTbl) == 0);
+    std::array<ADSHANDLE, 8> arr{};
+    UNSIGNED16 n = static_cast<UNSIGNED16>(arr.size());
+    REQUIRE(AdsOpenIndex(hTbl, bag, arr.data(), &n) == 0);
+    REQUIRE(n >= 1u);
+    REQUIRE(AdsSetIndexOrderByHandle(hTbl, arr[0]) == 0);
+    CHECK(key_count(arr[0]) == 3u);
+
+    // The remote test queries keyno BEFORE the append (builds the pos
+    // cache with 3 entries) — mirror that, it is part of the failure.
+    REQUIRE(AdsGotoBottom(hTbl) == 0);
+    UNSIGNED32 kb = 0;
+    REQUIRE(AdsGetKeyNum(hTbl, 0, &kb) == 0);
+    CHECK(kb == 3u);
+
+    // Wire AppendBlank handler: append, then flush immediately.
+    REQUIRE(AdsAppendRecord(hTbl) == 0);
+    REQUIRE(AdsFlushFileBuffers(hTbl) == 0);
+    // Wire SetField handler: set each field, flush after each. NON-key
+    // field FIRST — that intermediate commit used to clear the append
+    // marker, so the key-bearing commit aborted its blank-key erase as a
+    // bogus corrupt-tree and the key was never inserted.
+    REQUIRE(AdsSetString(hTbl, (UNSIGNED8*)"CITY", (UNSIGNED8*)"X", 1) == 0);
+    REQUIRE(AdsFlushFileBuffers(hTbl) == 0);
+    REQUIRE(AdsSetString(hTbl, (UNSIGNED8*)"NAME", (UNSIGNED8*)"AAA first", 9) == 0);
+    REQUIRE(AdsFlushFileBuffers(hTbl) == 0);
+
+    CHECK(key_count(arr[0]) == 4u);
+    UNSIGNED32 kn = 0;
+    REQUIRE(AdsGetKeyNum(hTbl, 0, &kn) == 0);
+    CHECK(kn == 1u);
+    REQUIRE(AdsGotoTop(arr[0]) == 0);
+    CHECK(get_name(hTbl) == "AAA first");
+
+    REQUIRE(AdsCloseTable(hTbl) == 0);
+    REQUIRE(AdsDisconnect(hConn) == 0);
+    fs::remove_all(dir, ec);
+}
 // ---------------------------------------------------------------------------
 // D) Correct stage order: data first, then INDEX ON
 // ---------------------------------------------------------------------------

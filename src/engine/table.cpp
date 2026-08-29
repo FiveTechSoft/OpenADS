@@ -289,10 +289,20 @@ util::Result<void> Table::sync_all_indexes_(
         // On a fresh APPEND the snapshot was taken before fields were set,
         // so prev_key is the blank-key encoding (spaces/zeros) that was
         // never inserted.  5044 ("key not found") is expected here and
-        // tolerated so the insert below can proceed.
+        // tolerated so the insert below can proceed. The append marker is
+        // tracked per recno (append_pending_recno_), not only per edit
+        // session (snap_was_append_): an intermediate no-op commit — a
+        // per-field flush that changes no key — clears pending_append_
+        // before the key-bearing commit, and without the recno marker the
+        // tolerated erase became a bogus corrupt-tree abort that dropped
+        // the new key (remote AppendBlank + SetField flow, key field not
+        // written first).
+        const bool fresh_append =
+            snap_was_append_ ||
+            (append_pending_recno_ != 0 && recno_ == append_pending_recno_);
         if (!prev_key.empty()) {
             if (auto e = idx->erase(recno_, prev_key); !e) {
-                if (!snap_was_append_) return e.error();
+                if (!fresh_append) return e.error();
                 // Fresh append: tolerate missing key (blank-key snapshot).
             }
         }
@@ -598,6 +608,9 @@ util::Result<void> Table::goto_bottom() {
 
 util::Result<void> Table::goto_record(std::uint32_t recno) {
     if (auto r = commit_dirty_record(); !r) return r.error();
+    // Leaving the record ends the append key-sync window (see
+    // append_pending_recno_ in table.h).
+    append_pending_recno_ = 0;
     // Absolute reposition / AdsRefreshRecord: drop any read-ahead block
     // so the (re)read hits disk — this is how a workarea sees an edit
     // made through another handle, and how RefreshRecord re-reads.
@@ -718,6 +731,9 @@ util::Result<void> Table::skip(std::int32_t delta) {
     // Settle dirty buffer before cursor motion (GoCold). load_record_
     // also commits, but EOF/BOF exits never load.
     if (auto r = commit_dirty_record(); !r) return r.error();
+    // Leaving the record ends the append key-sync window (see
+    // append_pending_recno_ in table.h).
+    append_pending_recno_ = 0;
     // Multiuser visibility vs browse speed:
     //   - GoTop / GoBottom / GetRecordCount always re-read the header.
     //   - Per-Skip full refresh was correct but ~header-I/O per keystroke
@@ -1063,6 +1079,11 @@ util::Result<void> Table::append_record() {
     record_buf_ = std::move(rec);
     recno_      = new_recno.value();
     state_      = State::Positioned;
+    // No key is inserted at append time (a unique index must not see the
+    // blank key); the first key-bearing commit inserts it. Mark the recno
+    // so sync_all_indexes_ tolerates the never-inserted blank key on
+    // erase until that commit lands (see append_pending_recno_ in table.h).
+    append_pending_recno_ = recno_;
     // xBase / ACE semantics: a freshly-appended record in a shared table is
     // automatically locked, so immediate field sets pass the GoHot write
     // guard (which is physical-lock based — hb_dbfGoHot checks
