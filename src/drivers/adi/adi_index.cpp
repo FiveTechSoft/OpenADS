@@ -1944,58 +1944,67 @@ util::Result<void> AdiIndex::erase(std::uint32_t recno, const std::string& key) 
     if (sk.value().hit == SeekHit::AfterEnd || !sk.value().positioned)
         return util::Error{5044, 0, "ADI: key not found for erase", ""};
 
-    // Scan forward from the seek position to find the exact (key, recno) entry.
+    // Scan the leaf for the entry to remove.  A v1 dense entry IS its recno —
+    // the key is re-derived from the LIVE record bytes on every compare, and
+    // on an update the engine has already written the NEW field values before
+    // syncing indexes (Table::commit_dirty_record: writeback, then
+    // sync_all_indexes_), so the stale entry's live key no longer equals
+    // ikey.  Match by recno first: a recno appears at most once in the bag,
+    // so erec == recno identifies the entry even when its key just moved.
+    // Scan from 0 (not cur_idx_): with a decreased key the soft seek lands
+    // PAST the stale entry.  The key compare stays, but only as an early
+    // exit once entries sort past ikey.
     for (;;) {
         if (cur_pg_ == ADI_INVALID_PAGE) break;
-        for (int i = cur_idx_; i < static_cast<int>(cur_cnt_); ++i) {
+        for (int i = 0; i < static_cast<int>(cur_cnt_); ++i) {
             std::uint32_t erec = dense_entry_recno(cur_page_.data(), i, entry_size_);
-            auto ek = key_for_recno_(erec);
-            if (!ek) return ek.error();
-            int cmp = compare_keys_(ek.value(), ikey);
-            if (cmp > 0)
-                return util::Error{5044, 0, "ADI: key not found for erase", ""};
-            if (cmp == 0 && erec == recno) {
-                // Found — remove entry i.
-                std::uint8_t* base = cur_page_.data() + ADI_DENSE_ENTRY_START;
-                std::uint32_t move_n = static_cast<std::uint32_t>(cur_cnt_) - 1
-                                       - static_cast<std::uint32_t>(i);
-                if (move_n > 0)
-                    std::memmove(base + static_cast<std::uint32_t>(i) * entry_size_,
-                                 base + (static_cast<std::uint32_t>(i) + 1u) * entry_size_,
-                                 move_n * entry_size_);
-                --cur_cnt_;
-                set_u16_le(cur_page_.data() + 2, cur_cnt_);
-
-                // Adjust cursor index.
-                if (cur_idx_ >= static_cast<int>(cur_cnt_)) {
-                    cur_idx_ = static_cast<int>(cur_cnt_) - 1;
-                }
-
-                // Remember the page number before we potentially clear cur_pg_.
-                std::uint32_t write_pg = cur_pg_;
-
-                if (cur_cnt_ == 0) {
-                    // Page is now empty: bypass it in sibling links.
-                    std::uint32_t lsib = page_lsib(cur_page_.data());
-                    std::uint32_t rsib = page_rsib(cur_page_.data());
-                    if (lsib != ADI_INVALID_PAGE) {
-                        Page lp{};
-                        if (auto r = read_adi_page_(lsib, lp); !r) return r;
-                        set_u32_le(lp.data() + 8, rsib);
-                        if (auto r = write_adi_page_(lsib, lp); !r) return r;
-                    }
-                    if (rsib != ADI_INVALID_PAGE) {
-                        Page rp{};
-                        if (auto r = read_adi_page_(rsib, rp); !r) return r;
-                        set_u32_le(rp.data() + 4, lsib);
-                        if (auto r = write_adi_page_(rsib, rp); !r) return r;
-                    }
-                    cur_pg_  = ADI_INVALID_PAGE;
-                    cur_idx_ = -1;
-                }
-
-                return write_adi_page_(write_pg, cur_page_);
+            if (erec != recno) {
+                auto ek = key_for_recno_(erec);
+                if (!ek) return ek.error();
+                if (compare_keys_(ek.value(), ikey) > 0)
+                    return util::Error{5044, 0, "ADI: key not found for erase", ""};
+                continue;
             }
+            // Found — remove entry i.
+            std::uint8_t* base = cur_page_.data() + ADI_DENSE_ENTRY_START;
+            std::uint32_t move_n = static_cast<std::uint32_t>(cur_cnt_) - 1
+                                   - static_cast<std::uint32_t>(i);
+            if (move_n > 0)
+                std::memmove(base + static_cast<std::uint32_t>(i) * entry_size_,
+                             base + (static_cast<std::uint32_t>(i) + 1u) * entry_size_,
+                             move_n * entry_size_);
+            --cur_cnt_;
+            set_u16_le(cur_page_.data() + 2, cur_cnt_);
+
+            // Adjust cursor index.
+            if (cur_idx_ >= static_cast<int>(cur_cnt_)) {
+                cur_idx_ = static_cast<int>(cur_cnt_) - 1;
+            }
+
+            // Remember the page number before we potentially clear cur_pg_.
+            std::uint32_t write_pg = cur_pg_;
+
+            if (cur_cnt_ == 0) {
+                // Page is now empty: bypass it in sibling links.
+                std::uint32_t lsib = page_lsib(cur_page_.data());
+                std::uint32_t rsib = page_rsib(cur_page_.data());
+                if (lsib != ADI_INVALID_PAGE) {
+                    Page lp{};
+                    if (auto r = read_adi_page_(lsib, lp); !r) return r;
+                    set_u32_le(lp.data() + 8, rsib);
+                    if (auto r = write_adi_page_(lsib, lp); !r) return r;
+                }
+                if (rsib != ADI_INVALID_PAGE) {
+                    Page rp{};
+                    if (auto r = read_adi_page_(rsib, rp); !r) return r;
+                    set_u32_le(rp.data() + 4, lsib);
+                    if (auto r = write_adi_page_(rsib, rp); !r) return r;
+                }
+                cur_pg_  = ADI_INVALID_PAGE;
+                cur_idx_ = -1;
+            }
+
+            return write_adi_page_(write_pg, cur_page_);
         }
         // Not on this leaf: advance to right sibling.
         if (cur_rsib_ == ADI_INVALID_PAGE) break;

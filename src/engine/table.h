@@ -15,6 +15,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace openads::session { class Connection; }
@@ -606,13 +607,25 @@ private:
     // the old entry can be removed before the new one is inserted.
     util::Result<void> sync_active_index_(const std::string& prev_key);
 
+    // One bound view's pre-edit state, captured on the first dirty
+    // mutation of the current row; applied once by commit_dirty_record().
+    struct IndexSnap {
+        drivers::IIndex* idx = nullptr;
+        std::string        prev_key;
+        // Whether the record matched the view's FOR condition BEFORE the
+        // edit (true for unconditional views). Without this a record that
+        // crosses INTO a conditional tag with an unchanged key expression
+        // is never inserted (prev==new used to skip the write), and one
+        // that never matched gets a pointless tolerated erase.
+        bool               prev_included = true;
+    };
+
     // Snapshot every bound index's current key (active order + extra
     // views), and replay the snapshot after a write to update the
     // entries in lockstep. Multi-index variant of sync_active_index_.
-    std::vector<std::pair<drivers::IIndex*, std::string>>
-        snapshot_index_keys_();
+    std::vector<IndexSnap> snapshot_index_keys_();
     util::Result<void> sync_all_indexes_(
-        const std::vector<std::pair<drivers::IIndex*, std::string>>& snap);
+        const std::vector<IndexSnap>& snap);
 
     // Compute the index key bytes for the current `record_buf_` for the
     // given index. Honours the index's key encoding (text vs FoxPro 8-byte
@@ -667,7 +680,7 @@ private:
     bool                                          record_dirty_   = false;
     // Pre-edit index keys captured on the first dirty mutation of the
     // current row; applied once by commit_dirty_record().
-    std::vector<std::pair<drivers::IIndex*, std::string>> index_snap_;
+    std::vector<IndexSnap>                        index_snap_;
     bool                                          snap_was_append_ = false;
     // Recno of the most recent append whose keys have NOT been synced yet.
     // snap_was_append_ is captured per edit session and goes stale when an
@@ -679,6 +692,12 @@ private:
     // It survives every commit of the append session (each SetField syncs
     // a different tag) and is cleared on navigation away from the record.
     std::uint32_t                                 append_pending_recno_ = 0;
+    // Views already keyed during the current append session. Without this
+    // the "no key change -> skip" shortcut also skipped the FIRST insert
+    // whenever the record's key equals the blank encoding (numeric 0 ->
+    // fox(0), all-space text): the record never reached the index, bulk
+    // walks lost it and key counts ran short.
+    std::unordered_set<drivers::IIndex*>          append_keys_done_;
     bool                                          cache_enabled_  = false;
     std::uint64_t                                 live_gen_       = 0;
     bool                                          last_seek_found_ = false;

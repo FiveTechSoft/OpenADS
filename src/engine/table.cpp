@@ -255,13 +255,24 @@ std::string Table::compute_index_key_(const drivers::IIndex* idx) const {
 // this BEFORE mutating record_buf_ so the snapshot reflects the
 // pre-write key per index; after the write, sync_all_indexes_(snap)
 // erases each prior key and inserts the new one.
-std::vector<std::pair<drivers::IIndex*, std::string>>
+std::vector<Table::IndexSnap>
 Table::snapshot_index_keys_() {
-    std::vector<std::pair<drivers::IIndex*, std::string>> out;
+    std::vector<IndexSnap> out;
     auto push = [&](drivers::IIndex* idx) {
         if (idx == nullptr) return;
-        out.emplace_back(idx,
-            compute_index_key_(idx));
+        // A tag can be bound twice — as the active order and parked as an
+        // extra view (reopened bag). Syncing it twice erases+inserts the
+        // same (key, recno) pair twice per commit, duplicating entries.
+        for (const auto& s : out) {
+            if (s.idx == idx) return;
+        }
+        IndexSnap s;
+        s.idx      = idx;
+        s.prev_key = compute_index_key_(idx);
+        const std::string& cond = idx->condition();
+        s.prev_included =
+            cond.empty() || evaluate_index_expr_truthy(*this, cond);
+        out.push_back(std::move(s));
     };
     if (order_ && order_->index()) push(order_->index());
     for (auto* x : extra_index_views_) push(x);
@@ -275,20 +286,33 @@ util::Result<void> Table::sync_active_index_(const std::string& /*unused*/) {
 }
 
 util::Result<void> Table::sync_all_indexes_(
-    const std::vector<std::pair<drivers::IIndex*, std::string>>& snap) {
-    for (auto& [idx, prev_key] : snap) {
+    const std::vector<IndexSnap>& snap) {
+    for (const auto& s : snap) {
+        drivers::IIndex* idx = s.idx;
+        if (idx == nullptr) continue;
+        const std::string& prev_key = s.prev_key;
         std::string new_key = compute_index_key_(idx);
-        if (prev_key == new_key) continue;
+        // Conditional (FOR) tags index only records whose condition
+        // currently evaluates true — write-time maintenance included:
+        // appends and edits must move the record in and out of the tag as
+        // it crosses the boundary. Previously every written record got a
+        // key, so a conditional tag degenerated into a full index; and a
+        // record crossing INTO the condition with an unchanged key was
+        // swallowed by the prev==new shortcut and never inserted at all.
+        const std::string& cond = idx->condition();
+        const bool include =
+            cond.empty() || evaluate_index_expr_truthy(*this, cond);
         // Erase prior (recno, prev_key).
         //
-        // On a genuine UPDATE the old entry MUST exist — a missing key
-        // means the B-tree is corrupt (stale separators, duplicate keys)
-        // and we propagate the error so the caller can abort before
-        // inserting the new key on top of a stale entry.
+        // On a genuine UPDATE of an indexed record the old entry MUST
+        // exist — a missing key means the B-tree is corrupt (stale
+        // separators, duplicate keys) and we propagate the error so the
+        // caller can abort before inserting the new key on top of a stale
+        // entry.
         //
         // On a fresh APPEND the snapshot was taken before fields were set,
         // so prev_key is the blank-key encoding (spaces/zeros) that was
-        // never inserted.  5044 ("key not found") is expected here and
+        // never inserted.  5044 ("key not found") is expected there and
         // tolerated so the insert below can proceed. The append marker is
         // tracked per recno (append_pending_recno_), not only per edit
         // session (snap_was_append_): an intermediate no-op commit — a
@@ -300,9 +324,37 @@ util::Result<void> Table::sync_all_indexes_(
         const bool fresh_append =
             snap_was_append_ ||
             (append_pending_recno_ != 0 && recno_ == append_pending_recno_);
-        if (!prev_key.empty()) {
+        const bool tolerate_missing_erase = fresh_append;
+
+        if (!include) {
+            // Does not match the FOR (or no longer does): erase only when
+            // the record WAS indexed before this edit.
+            if (s.prev_included && !prev_key.empty()) {
+                if (auto e = idx->erase(recno_, prev_key); !e) {
+                    if (!tolerate_missing_erase) return e.error();
+                }
+            }
+            continue;
+        }
+
+        // Blank-key trap: an appended record whose key equals the blank
+        // encoding (numeric 0 -> fox(0), all-space text) compared equal to
+        // the snapshot and its insert was skipped entirely — the record
+        // never reached the index (bulk walks lost it, key counts ran
+        // short). Track the views already keyed this append session and
+        // never skip the first insert of a fresh append. A record that did
+        // not match the FOR before the edit is in the same state: not
+        // indexed, so an unchanged key still needs the insert. Unique
+        // views are excluded: a blank key must not collide in a unique bag.
+        const bool key_not_inserted_yet =
+            fresh_append && !idx->unique() &&
+            append_keys_done_.count(idx) == 0;
+        const bool need_insert = !s.prev_included || key_not_inserted_yet;
+        if (prev_key == new_key && !need_insert) continue;
+
+        if (!prev_key.empty() && prev_key != new_key && s.prev_included) {
             if (auto e = idx->erase(recno_, prev_key); !e) {
-                if (!fresh_append) return e.error();
+                if (!tolerate_missing_erase) return e.error();
                 // Fresh append: tolerate missing key (blank-key snapshot).
             }
         }
@@ -324,6 +376,7 @@ util::Result<void> Table::sync_all_indexes_(
         if (auto e = idx->insert(recno_, new_key); !e) {
             return e.error();
         }
+        if (fresh_append) append_keys_done_.insert(idx);
     }
     return {};
 }
@@ -401,17 +454,31 @@ util::Result<void> Table::writeback_record_() {
 // The top bound needs no such care mathematically (any extension of a prefix is
 // >= the prefix), but it is written symmetrically so the two read alike and a
 // future edit cannot break one without the other.
+// TOP is the traversal-side START bound: an ascending walk keeps keys >= top;
+// a descending one keeps keys <= top (it steps DOWN from the top bound).
 bool Table::key_in_top_scope_(const std::string& key) const {
     if (!order_ || !order_->scope().top.has_value()) return true;
     const std::string& top = *order_->scope().top;
+    if (order_->descending_traverse()) {
+        if (key.size() > top.size())
+            return key.compare(0, top.size(), top) <= 0;
+        return key <= top;
+    }
     if (key.size() > top.size())
         return key.compare(0, top.size(), top) >= 0;
     return key >= top;
 }
 
+// BOTTOM is the traversal-side END bound: ascending keeps keys <= bottom;
+// descending keeps keys >= bottom.
 bool Table::key_in_bottom_scope_(const std::string& key) const {
     if (!order_ || !order_->scope().bottom.has_value()) return true;
     const std::string& bottom = *order_->scope().bottom;
+    if (order_->descending_traverse()) {
+        if (key.size() > bottom.size())
+            return key.compare(0, bottom.size(), bottom) >= 0;
+        return key >= bottom;
+    }
     if (key.size() > bottom.size())
         return key.compare(0, bottom.size(), bottom) <= 0;
     return key <= bottom;
@@ -455,7 +522,22 @@ util::Result<void> Table::goto_top() {
         auto* idx = order_->index();
         util::Result<drivers::SeekOutcome> r = drivers::SeekOutcome{};
         if (order_->descending_traverse()) {
-            r = idx->seek_last();
+            if (order_->scope().top.has_value()) {
+                // Descending traversal starts at the highest key allowed
+                // by the top bound; a soft seek may land ABOVE it, so step
+                // back (prev) until the key is inside the scope. Landing
+                // unconditionally on seek_last() put the cursor past the
+                // top bound and the walk read as empty (Pritpal Bedi's
+                // descending scope case).
+                r = idx->seek_key(*order_->scope().top, /*soft=*/true);
+                while (r && r.value().positioned &&
+                       !key_in_top_scope_(idx->current_key())) {
+                    r = idx->prev();
+                    if (!r) break;
+                }
+            } else {
+                r = idx->seek_last();
+            }
         } else if (order_->scope().top.has_value()) {
             r = idx->seek_key(*order_->scope().top, true);
         } else {
@@ -465,7 +547,13 @@ util::Result<void> Table::goto_top() {
         if (!r.value().positioned) {
             state_ = State::Limbo; recno_ = 0; return {};
         }
-        if (!key_in_bottom_scope_(idx->current_key())) {
+        // Out-of-scope landing: for an ascending walk the overflow shows
+        // past the BOTTOM bound; for a descending one it shows past the
+        // TOP (the walk then steps DOWN towards the bottom bound).
+        const bool out_of_scope = order_->descending_traverse()
+            ? !key_in_top_scope_(idx->current_key())
+            : !key_in_bottom_scope_(idx->current_key());
+        if (out_of_scope) {
             state_ = State::Eof; recno_ = 0; return {};
         }
         // SET DELETE ON: skip deleted rows in the walk direction.
@@ -611,6 +699,7 @@ util::Result<void> Table::goto_record(std::uint32_t recno) {
     // Leaving the record ends the append key-sync window (see
     // append_pending_recno_ in table.h).
     append_pending_recno_ = 0;
+    append_keys_done_.clear();
     // Absolute reposition / AdsRefreshRecord: drop any read-ahead block
     // so the (re)read hits disk — this is how a workarea sees an edit
     // made through another handle, and how RefreshRecord re-reads.
@@ -734,6 +823,7 @@ util::Result<void> Table::skip(std::int32_t delta) {
     // Leaving the record ends the append key-sync window (see
     // append_pending_recno_ in table.h).
     append_pending_recno_ = 0;
+    append_keys_done_.clear();
     // Multiuser visibility vs browse speed:
     //   - GoTop / GoBottom / GetRecordCount always re-read the header.
     //   - Per-Skip full refresh was correct but ~header-I/O per keystroke
@@ -1084,6 +1174,7 @@ util::Result<void> Table::append_record() {
     // so sync_all_indexes_ tolerates the never-inserted blank key on
     // erase until that commit lands (see append_pending_recno_ in table.h).
     append_pending_recno_ = recno_;
+    append_keys_done_.clear();
     // xBase / ACE semantics: a freshly-appended record in a shared table is
     // automatically locked, so immediate field sets pass the GoHot write
     // guard (which is physical-lock based — hb_dbfGoHot checks
@@ -1097,6 +1188,47 @@ util::Result<void> Table::append_record() {
     pending_append_ = true;
     if (tx_ && tx_->active()) {
         tx_->note_append(tid_, recno_);
+    }
+    // Key the new record immediately in every bound view that accepts it:
+    // an append that is never field-edited used to stay invisible to the
+    // index (bulk walks lost the record, key counts ran short). Unique
+    // views defer to the first real-key commit — two blank keys must not
+    // collide in a unique bag. Conditional views only when the blank
+    // record already matches their FOR. ADT tables are excluded: the
+    // commit-time sync keys ADT appends correctly through the tolerated
+    // missing-erase path, and the ADI v1 erase/insert path has its own
+    // duplication quirks (pre-existing) that an early blank-key insert
+    // would leave behind as stranded entries.
+    {
+        const bool is_adt =
+            dynamic_cast<drivers::adt::AdtDriver*>(driver_.get()) != nullptr;
+        std::vector<drivers::IIndex*> views;
+        auto push_view = [&views](drivers::IIndex* idx) {
+            if (idx == nullptr) return;
+            // Same dedup as snapshot_index_keys_: a tag bound both as the
+            // active order and as a parked extra view must not be keyed
+            // twice per append.
+            for (auto* o : views) {
+                if (o == idx) return;
+            }
+            views.push_back(idx);
+        };
+        if (!is_adt) {
+            if (order_ && order_->index()) push_view(order_->index());
+            for (auto* x : extra_index_views_) push_view(x);
+        }
+        for (auto* idx : views) {
+            if (idx->unique()) continue;
+            const std::string& cond = idx->condition();
+            if (!cond.empty() &&
+                !evaluate_index_expr_truthy(*this, cond)) {
+                continue;
+            }
+            if (auto e = idx->insert(recno_, compute_index_key_(idx)); !e) {
+                return e.error();
+            }
+            append_keys_done_.insert(idx);
+        }
     }
     return {};
 }
@@ -1599,8 +1731,12 @@ util::Result<void> Table::reindex() {
         for (auto& [rec, key] : entries) {
             (void)idx->erase(rec, key);
         }
-        std::vector<std::pair<drivers::IIndex*, std::string>> snap{
-            {idx, std::string{}}};
+        // Entries were already erased above; sync only re-inserts.
+        IndexSnap rebuild_snap;
+        rebuild_snap.idx           = idx;
+        rebuild_snap.prev_key      = {};
+        rebuild_snap.prev_included = true;
+        const std::vector<IndexSnap> snap{rebuild_snap};
         const std::string for_expr = idx->condition();
         for (std::uint32_t r = 1; r <= rec_count; ++r) {
             auto raw = driver_->read_record_raw(r);
