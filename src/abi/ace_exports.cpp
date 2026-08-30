@@ -6075,7 +6075,7 @@ static bool arc2_on() {
 static void arc2_stamp(FILE* f) {
     std::time_t t = std::time(nullptr);
     struct tm tmv;
-#if defined(_MSC_VER)
+#if defined(_WIN32)
     localtime_s(&tmv, &t);
 #else
     localtime_r(&t, &tmv);

@@ -87,6 +87,35 @@ jobs:
         run: ctest --test-dir build/${{ matrix.preset }}
                    --output-on-failure -C Release
 
+      # Static ACE library for Harbour + MinGW (libopenace32.a /
+      # libopenace64.a): linking it into an hbmk2 -comp=mingw[64] app
+      # embeds the whole ACE client+engine in the .exe — no ace32.dll /
+      # ace64.dll to deploy. Built with MSYS2's matching MinGW toolchain
+      # (the MSVC legs above can't produce a GNU archive). Lean config:
+      # no HTTP console, no TLS, no tests. (Requested by Pritpal Bedi.)
+      - name: Set up MinGW for the static ACE library
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: ${{ matrix.arch == 'x64' && 'MINGW64' || 'MINGW32' }}
+          update: true
+          install: >-
+            ${{ matrix.arch == 'x64' && 'mingw-w64-x86_64-toolchain' || 'mingw-w64-i686-toolchain' }}
+
+      - name: Build static ACE library (MinGW)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          cmake -S . -B build/mingw-${{ matrix.arch }} -G "MinGW Makefiles" \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DOPENADS_BUILD_TESTS=OFF \
+                -DOPENADS_WITH_HTTP=OFF \
+                -DOPENADS_WITH_TLS=OFF \
+                -DOPENADS_WARNINGS_AS_ERRORS=OFF
+          cmake --build build/mingw-${{ matrix.arch }} \
+                --target openads_ace_static -j"$(nproc)"
+          ls -la build/mingw-${{ matrix.arch }}/src/libopenace*.a
+
       - name: Stage release files (POSIX)
         if: always() && runner.os != 'Windows'
         shell: bash
@@ -152,6 +181,14 @@ jobs:
           # runners have no Borland toolchain (see dist/import-libs/gen.ps1).
           New-Item -ItemType Directory "$stage/lib" | Out-Null
           Copy-Item -Recurse "dist/import-libs/${{ matrix.arch }}/*" "$stage/lib/"
+          # Static ACE library (MinGW): link into an hbmk2 -comp=mingw[64]
+          # app and no ace<bits>.dll is needed at all. Built in the
+          # "Build static ACE library (MinGW)" step above.
+          $staticLib = "build/mingw-${{ matrix.arch }}/src/libopenace$bits.a"
+          if (-not (Test-Path $staticLib)) {
+              throw "Static ACE library missing: $staticLib"
+          }
+          Copy-Item $staticLib "$stage/libopenace$bits.a"
           # Server + bench CLIs
           Copy-Item "$build/tools/serverd/Release/openads_serverd.exe" "$stage/"
           Copy-Item "$build/tools/bench/Release/openads_bench.exe"     "$stage/"

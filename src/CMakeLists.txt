@@ -386,3 +386,71 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 8)
 else()
     set_target_properties(openads_ace PROPERTIES OUTPUT_NAME "openace32")
 endif()
+
+# ----------------------------------------------------------------------
+# Static ACE library for Harbour + MinGW — libopenace32.a / libopenace64.a.
+# An hbmk2 -comp=mingw[64] app (rddads / oads_hb) that links this archive
+# gets the whole ACE client+engine inside its .exe: no ace32.dll /
+# ace64.dll to deploy. cdecl-only on purpose — the __stdcall wrappers
+# (ace_stdcall_x86.c) and the MSVC legacy-CRT shims (legacy_crt_shims.cpp)
+# in the DLL exist for MSVC x86 callers, not for GNU ld.
+#
+# The final archive is a merge of this target, openads_core and the
+# vendored static deps (sqlite3, mbedtls when enabled), so Harbour links
+# exactly one .a plus the system libs ws2_32 / psapi.
+# (Requested by Pritpal Bedi — simplifies Vouch deployment.)
+# ----------------------------------------------------------------------
+if(WIN32 AND MINGW AND OPENADS_BUILD_ACE_STATIC)
+    add_library(openads_ace_static STATIC
+        abi/studio_embed.cpp
+    )
+    target_include_directories(openads_ace_static
+        PUBLIC  ${CMAKE_SOURCE_DIR}/include
+                ${CMAKE_SOURCE_DIR}/include/openads
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(openads_ace_static PUBLIC openads_core)
+    if(OPENADS_WITH_HTTP)
+        target_sources(openads_ace_static PRIVATE
+            ${CMAKE_SOURCE_DIR}/tools/serverd/http_server.cpp)
+        target_compile_definitions(openads_ace_static PRIVATE OPENADS_WITH_HTTP=1)
+        target_include_directories(openads_ace_static PRIVATE ${CMAKE_SOURCE_DIR})
+        target_link_libraries(openads_ace_static PRIVATE
+            httplib::httplib
+            nlohmann_json::nlohmann_json)
+    endif()
+    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+        set(_ace_static_name "openace64")
+    else()
+        set(_ace_static_name "openace32")
+    endif()
+    set_target_properties(openads_ace_static PROPERTIES OUTPUT_NAME "${_ace_static_name}")
+
+    # GNU ar MRI script: create a temp archive, addlib this target plus
+    # openads_core and the vendored deps, save, then atomically rename
+    # over libopenace<bits>.a (cmake/merge_ar.cmake — add_custom_command
+    # has no shell, so the `ar -M < script` redirect goes through
+    # execute_process(INPUT_FILE)). MRI paths must be space-free.
+    set(_ace_static_out "${CMAKE_CURRENT_BINARY_DIR}/lib${_ace_static_name}.a")
+    set(_ace_static_mri "${CMAKE_CURRENT_BINARY_DIR}/merge_ace_static.mri")
+    set(_mri "create ${_ace_static_out}.tmp\naddlib ${_ace_static_out}\naddlib $<TARGET_FILE:openads_core>\n")
+    if(TARGET openads_sqlite3)
+        string(APPEND _mri "addlib $<TARGET_FILE:openads_sqlite3>\n")
+    endif()
+    if(TARGET mbedcrypto)
+        string(APPEND _mri "addlib $<TARGET_FILE:mbedcrypto>\naddlib $<TARGET_FILE:mbedx509>\naddlib $<TARGET_FILE:mbedtls>\n")
+    endif()
+    string(APPEND _mri "save\nend\n")
+    file(GENERATE OUTPUT "${_ace_static_mri}" CONTENT "${_mri}")
+    add_custom_command(TARGET openads_ace_static POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E rm -f "${_ace_static_out}.tmp"
+        COMMAND ${CMAKE_COMMAND}
+            "-DAR=${CMAKE_AR}"
+            "-DMRI=${_ace_static_mri}"
+            "-DOUT_TMP=${_ace_static_out}.tmp"
+            "-DOUT_FINAL=${_ace_static_out}"
+            -P "${CMAKE_SOURCE_DIR}/cmake/merge_ar.cmake"
+        COMMENT "Merging openads_core into lib${_ace_static_name}.a"
+        VERBATIM)
+
+    install(FILES "${_ace_static_out}" DESTINATION lib)
+endif()

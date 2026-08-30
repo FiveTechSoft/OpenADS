@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 project(OpenADS
-    VERSION 1.09.14
+    VERSION 1.09.15
     LANGUAGES C CXX
     DESCRIPTION "Open-source ADS-compatible engine"
 )
@@ -112,6 +112,12 @@ option(OPENADS_WITH_FIREBIRD "Enable the native Firebird-backed table driver (li
 # Bridges harbour hbnetio virtual file system and RPC capabilities
 # with OpenADS network transport layer.
 option(OPENADS_WITH_HBNETIO_BRIDGE "Build the hbnetio VFS/RPC bridge for OpenADS" OFF)
+
+# Static ACE library (libopenace32.a / libopenace64.a) for Harbour +
+# MinGW: an hbmk2 -comp=mingw[64] app links the whole ACE client+engine
+# into its .exe, so no ace32.dll / ace64.dll has to be deployed.
+# MinGW-on-Windows only (the MSVC static-lib story is a separate one).
+option(OPENADS_BUILD_ACE_STATIC "Build the static ACE library for Harbour/MinGW" ON)
 
 # Pull in mbedtls FIRST so our strict /WX -Werror flags don't bleed
 # into the upstream sources (C4200 zero-sized arrays etc). Each
