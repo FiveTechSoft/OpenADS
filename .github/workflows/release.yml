@@ -100,7 +100,7 @@ jobs:
           msystem: ${{ matrix.arch == 'x64' && 'MINGW64' || 'MINGW32' }}
           update: true
           install: >-
-            ${{ matrix.arch == 'x64' && 'mingw-w64-x86_64-toolchain' || 'mingw-w64-i686-toolchain' }}
+            ${{ matrix.arch == 'x64' && 'mingw-w64-x86_64-toolchain mingw-w64-x86_64-cmake' || 'mingw-w64-i686-toolchain mingw-w64-i686-cmake' }}
 
       - name: Build static ACE library (MinGW)
         if: runner.os == 'Windows'
