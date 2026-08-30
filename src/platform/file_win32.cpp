@@ -69,6 +69,11 @@ util::Result<File> File::open(const std::string& path, OpenMode mode) {
             access = GENERIC_READ | GENERIC_WRITE;
             disp   = OPEN_EXISTING;
             break;
+        case OpenMode::CreateExclusive:
+            access = GENERIC_READ | GENERIC_WRITE;
+            share  = 0;
+            disp   = CREATE_ALWAYS;
+            break;
     }
     HANDLE h = ::CreateFileA(path.c_str(), access, share, nullptr, disp,
                              FILE_ATTRIBUTE_NORMAL, nullptr);

@@ -80,7 +80,22 @@ acquire_with_retry_(platform::File&      f,
 util::Result<void>
 CdxDriver::open(const std::string& path, DriverOpenMode mode) {
     mode_ = mode;
+    // A concurrent AdsCreateTable holds the freshly-created file with an
+    // exclusive (share=0) handle for the few ms it writes the header;
+    // CreateFile then fails with ERROR_SHARING_VIOLATION (sub_code 32).
+    // Retry past that window instead of failing the open — the app-level
+    // dance "if (!exists) create; open" would otherwise surface a
+    // transient error exactly when the race it guards against happens.
     auto fres = platform::File::open(path, map_mode(mode));
+    for (int attempt = 0;
+         !fres && fres.error().sub_code == 32 /* ERROR_SHARING_VIOLATION */
+             && attempt < 200;
+         ++attempt) {
+        const auto us = 50 + (attempt * 25);
+        std::this_thread::sleep_for(std::chrono::microseconds(
+            us > 5000 ? 5000 : us));
+        fres = platform::File::open(path, map_mode(mode));
+    }
     if (!fres) return fres.error();
     file_ = std::move(fres).value();
 

@@ -16,6 +16,7 @@
 #undef AE_COLUMN_NOT_FOUND
 #undef AE_TABLE_NOT_FOUND
 #undef AE_TABLE_CORRUPTED
+#undef AE_FILE_IN_USE
 #undef AE_INVALID_CONNECTION_HANDLE
 #undef AE_PARSE_ERROR
 #undef AE_INVALID_SQL_TOKEN
@@ -54,6 +55,13 @@ enum : std::uint32_t {
     AE_COLUMN_NOT_FOUND         = 5063,
     AE_TABLE_NOT_FOUND          = 5066,
     AE_TABLE_CORRUPTED          = 5103,
+    // 7040: AdsCreateTable over a table another connection holds OPEN.
+    // Not in SAP ace.h as a macro (7xxx codes are server-generated); the
+    // number was verified against SAP ADS 10.10 ace32.dll on 2026-08-30
+    // (create-while-open probe: second create returns 7040 and the open
+    // connection's data survives). Creating over an existing-but-CLOSED
+    // table succeeds and overwrites it, also SAP behaviour.
+    AE_FILE_IN_USE              = 7040,
     AE_INVALID_CONNECTION_HANDLE = 4097,
     AE_PARSE_ERROR              = 7200,
     AE_INVALID_SQL_TOKEN        = 7201,

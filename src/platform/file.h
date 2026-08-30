@@ -12,7 +12,14 @@ enum class OpenMode {
     ReadOnly,
     ReadWrite,
     CreateRW,    // create or truncate, read + write
-    OpenExisting // read + write, fail if missing
+    OpenExisting,// read + write, fail if missing
+    // Create or truncate with NO sharing: the open fails (sharing
+    // violation on Win32, flock EWOULDBLOCK on POSIX) while any other
+    // handle holds the file. Used by table-create so a create over a
+    // file that is open elsewhere fails instead of truncating it
+    // underneath the openers, and no reader can observe a partially
+    // written header.
+    CreateExclusive
 };
 
 class File {

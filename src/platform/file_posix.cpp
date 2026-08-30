@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstring>
 #include <fcntl.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -66,9 +67,31 @@ util::Result<File> File::open(const std::string& path, OpenMode mode) {
         case OpenMode::ReadWrite:    flags = O_RDWR;   break;
         case OpenMode::CreateRW:     flags = O_RDWR | O_CREAT | O_TRUNC; break;
         case OpenMode::OpenExisting: flags = O_RDWR;   break;
+        case OpenMode::CreateExclusive:
+            // No O_TRUNC here: the file is only truncated AFTER the
+            // flock succeeds, so a create over a file another process
+            // holds open fails without destroying its contents.
+            flags = O_RDWR | O_CREAT;
+            break;
     }
     int fd = ::open(path.c_str(), flags, 0644);
     if (fd < 0) return os_error("open");
+    if (mode == OpenMode::CreateExclusive) {
+        // Advisory exclusive lock for the whole open lifetime (released
+        // on close). POSIX has no share modes; cooperating OpenADS
+        // creators serialise on this so a create over a file another
+        // process holds open fails instead of truncating underneath it.
+        if (::flock(fd, LOCK_EX | LOCK_NB) != 0) {
+            util::Error e = os_error("flock");
+            ::close(fd);
+            return e;
+        }
+        if (::ftruncate(fd, 0) != 0) {
+            util::Error e = os_error("ftruncate");
+            ::close(fd);
+            return e;
+        }
+    }
     return File{native_from_fd(fd)};
 }
 

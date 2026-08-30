@@ -2293,6 +2293,12 @@ CdxIndex::create(const std::string& path,
     if (!fres) return fres.error();
     platform::File file = std::move(fres).value();
 
+    // CreateRW truncates: serialise against add_tag / delete_tag / insert
+    // writers (same byte Harbour locks for its index write batches) so a
+    // racing create can never tear a bag another writer is mutating.
+    auto wl = acquire_cdx_os_lock_(file, platform::LockKind::Exclusive);
+    if (!wl) return wl.error();
+
     // 1) File / structure-tag header at offset 0 (1024B).
     //    Its root_page points to the structure tag's leaf at CDX_STRUCT_ROOT_OFFSET.
     //    The structure tag itself uses key_size = 10 (tag-name length).

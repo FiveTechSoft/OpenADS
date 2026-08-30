@@ -34,6 +34,7 @@ using openads::abi::lock_retry_policy;
 #include "engine/record_crc.h"
 #include "engine/table.h"
 #include "engine/server_fs.h"
+#include "platform/file.h"
 #include "platform/fs_sandbox.h"
 
 #include "network/client.h"
@@ -172,6 +173,26 @@ ProcessState& state() {
     return s;
 }
 
+// Serialise the file-creating entry points (AdsCreateTable local paths,
+// AdsCreateIndex61 native branch) PER TARGET PATH. All serverd sessions
+// run in one process, so this closes the TOCTOU window where N racing
+// creators each saw "file missing" and all truncated the same new
+// DBF/CDX (field report: N=200 remote processes corrupting one table).
+// Leaf lock: never take state().mu or any other lock while holding it.
+std::mutex& create_path_mu_for(std::string key) {
+    // Path case varies by caller on case-insensitive filesystems.
+    for (auto& c : key)
+        c = static_cast<char>(
+            std::tolower(static_cast<unsigned char>(c)));
+    static std::mutex g_mu;
+    static std::unordered_map<std::string, std::unique_ptr<std::mutex>>
+        g_map;
+    std::lock_guard<std::mutex> lk(g_mu);
+    auto& slot = g_map[key];  // never erased: create targets are few
+    if (!slot) slot = std::make_unique<std::mutex>();
+    return *slot;
+}
+
 UNSIGNED32 ok() {
     openads::abi::clear_last_error();
     return openads::AE_SUCCESS;
@@ -184,6 +205,41 @@ UNSIGNED32 fail(const openads::util::Error& e) {
 
 UNSIGNED32 fail(int code, const char* msg) {
     return fail(openads::util::Error{code, 0, msg ? msg : "", ""});
+}
+
+// Write a brand-new table file atomically w.r.t. other readers/writers:
+// CreateExclusive denies every other open for the duration, so a
+// concurrent AdsOpenTable can never read a partially-written header
+// (5103 storm) and a create over a file another connection holds OPEN
+// fails with AE_FILE_IN_USE (7040) instead of truncating the live table
+// underneath its appenders. Overwriting a CLOSED existing file succeeds,
+// matching SAP ADS. Returns 7040 when the create failed because the file
+// exists (open elsewhere or lost the create race), 5000 otherwise.
+UNSIGNED32 write_new_table_file(const std::string& full,
+                                const std::vector<std::uint8_t>& bytes,
+                                const char* op) {
+    namespace fs = std::filesystem;
+    auto fres = openads::platform::File::open(
+        full, openads::platform::OpenMode::CreateExclusive);
+    if (!fres) {
+        std::error_code ec;
+        if (fs::exists(full, ec)) {
+            return fail(openads::util::Error{
+                static_cast<std::int32_t>(openads::AE_FILE_IN_USE), 0,
+                std::string(op) + ": file is in use", ""});
+        }
+        return fail(openads::util::Error{
+            static_cast<std::int32_t>(openads::AE_INTERNAL_ERROR), 0,
+            std::string(op) + ": " + fres.error().message, ""});
+    }
+    auto file = std::move(fres).value();
+    auto wrote = file.write_at(0, bytes.data(), bytes.size());
+    if (!wrote || wrote.value() != bytes.size()) {
+        return fail(openads::util::Error{
+            static_cast<std::int32_t>(openads::AE_INTERNAL_ERROR), 0,
+            std::string(op) + ": write failed", ""});
+    }
+    return openads::AE_SUCCESS;   // close (releases exclusivity) via RAII
 }
 
 // â”€â”€ Tier-1 auto-commit hook â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -8202,18 +8258,22 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
             fld_off = static_cast<std::uint16_t>(fld_off + sp.adt_length);
         }
 
-        // Write the .adt file
-        { std::error_code ec; fs::remove(full, ec); }
+        // Write the .adt file under the per-path create lock with an
+        // exclusive (share=0) handle: a concurrent opener can never see a
+        // partial header, and a create over an OPEN table fails 7040
+        // instead of truncating it (SAP semantics, verified 2026-08-30).
+        std::vector<std::uint8_t> adt_file;
+        adt_file.reserve(adt_hdr.size() + fds.size());
+        adt_file.insert(adt_file.end(), adt_hdr.begin(), adt_hdr.end());
+        adt_file.insert(adt_file.end(), fds.begin(), fds.end());
         {
-            std::ofstream out(full, std::ios::binary);
-            if (!out) return fail(openads::AE_INTERNAL_ERROR,
-                                  "AdsCreateTable: ADT open for write failed");
-            out.write(reinterpret_cast<const char*>(adt_hdr.data()),
-                      static_cast<std::streamsize>(adt_hdr.size()));
-            out.write(reinterpret_cast<const char*>(fds.data()),
-                      static_cast<std::streamsize>(fds.size()));
-            if (!out) return fail(openads::AE_INTERNAL_ERROR,
-                                  "AdsCreateTable: ADT write failed");
+            std::lock_guard<std::mutex> clk(
+                create_path_mu_for(full.string()));
+            if (const UNSIGNED32 wrc = write_new_table_file(
+                    full.string(), adt_file, "AdsCreateTable: ADT");
+                wrc != openads::AE_SUCCESS) {
+                return wrc;
+            }
         }
 
         // Create a companion .adm for MEMO/BINARY/IMAGE fields
@@ -8293,17 +8353,14 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
         file.push_back(0x1A);
 
         {
-            std::error_code ec;
-            fs::remove(full, ec);
-        }
-        {
-            std::ofstream out(full, std::ios::binary);
-            if (!out) return fail(openads::AE_INTERNAL_ERROR,
-                                  "AdsCreateTable: VFP open for write failed");
-            out.write(reinterpret_cast<const char*>(file.data()),
-                      static_cast<std::streamsize>(file.size()));
-            if (!out) return fail(openads::AE_INTERNAL_ERROR,
-                                  "AdsCreateTable: VFP write failed");
+            // See the ADT branch: per-path lock + exclusive create.
+            std::lock_guard<std::mutex> clk(
+                create_path_mu_for(full.string()));
+            if (const UNSIGNED32 wrc = write_new_table_file(
+                    full.string(), file, "AdsCreateTable: VFP");
+                wrc != openads::AE_SUCCESS) {
+                return wrc;
+            }
         }
 
         if (has_memo) {
@@ -8372,19 +8429,22 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
     file.push_back(0x00);
     file.push_back(0x1A);
 
-    // Atomic-ish write: just truncate-create.
+    // Atomic create: per-path lock + exclusive (share=0) handle for the
+    // whole write. The old fs::remove + ofstream truncate-create let a
+    // racing creator truncate the DBF underneath open appenders
+    // (permanent corruption: header count reset while peers kept writing
+    // records at stale offsets) and let a concurrent AdsOpenTable read a
+    // partially-written header (5103 "DBF header truncated" storms).
+    // SAP semantics (verified against SAP ADS 10.10 ace32.dll): create
+    // over a CLOSED existing table overwrites; create over an OPEN one
+    // fails 7040 (AE_FILE_IN_USE) leaving the data intact.
     {
-        std::error_code ec;
-        fs::remove(full, ec);
-    }
-    {
-        std::ofstream out(full, std::ios::binary);
-        if (!out) return fail(openads::AE_INTERNAL_ERROR,
-                              "AdsCreateTable: open for write failed");
-        out.write(reinterpret_cast<const char*>(file.data()),
-                  static_cast<std::streamsize>(file.size()));
-        if (!out) return fail(openads::AE_INTERNAL_ERROR,
-                              "AdsCreateTable: write failed");
+        std::lock_guard<std::mutex> clk(create_path_mu_for(full.string()));
+        if (const UNSIGNED32 wrc = write_new_table_file(
+                full.string(), file, "AdsCreateTable");
+            wrc != openads::AE_SUCCESS) {
+            return wrc;
+        }
     }
 
     // If the field list declares any memo (M) field, stage an empty
@@ -14184,6 +14244,15 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
 
     std::unique_ptr<openads::drivers::IIndex> idx_owner;
     bool exists = false;
+    // Serialise the create-or-attach decision per bag path: two sessions
+    // racing INDEX ON ... TAG x TO <same new bag> both saw !exists and
+    // both ran CdxIndex::create (CREATE_ALWAYS), each truncating the bag
+    // the other had just written -- torn struct-tag leaf, dangling
+    // sub-tag pages (field stress: key count 0 on a 1200-row table).
+    // Under the lock the loser re-checks and takes the add_tag /
+    // overwrite path instead. Released before the build loop below.
+    std::unique_lock<std::mutex> bag_create_lk(
+        create_path_mu_for(p.string()));
     {
         std::error_code ec;
         exists = (is_cdx || is_adi) && fs::exists(p, ec);
@@ -14378,6 +14447,9 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
         }
         idx_owner = std::move(ntx_owner);
     }
+    // Create/attach decision is made; the bulk build below only reads the
+    // table and writes through the (write-locked) index instance.
+    bag_create_lk.unlock();
     // Mark a numeric CDX index FoxNumeric so every key-build path (this
     // create loop, the engine's sync_all_indexes_, seek) emits the 8-byte
     // binary key a native reader expects.
@@ -14670,6 +14742,10 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex(ADSHANDLE hTable, UNSIGNED8* pucFile,
     std::unique_ptr<openads::drivers::IIndex> idx;
     if (path_ends_with_ci(file, ".cdx")) {
         namespace fs2 = std::filesystem;
+        // Same per-path serialization as AdsCreateIndex61: the
+        // create-vs-add decision must be atomic per bag.
+        std::unique_lock<std::mutex> bag_create_lk(
+            create_path_mu_for(file));
         const bool bag_exists = fs2::exists(fs2::path(file));
         if (!bag_exists) {
             auto created = openads::drivers::cdx::CdxIndex::create(
