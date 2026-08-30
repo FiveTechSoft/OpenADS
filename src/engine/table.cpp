@@ -1954,14 +1954,23 @@ util::Result<void> Table::unlock_table() {
         if (locks_.unlock_table(driver_->file(), to_lock_type_(), locking_)) {
             table_lock_->release();
             table_lock_.reset();
-            // SAP ACE semantics: the table lock and record locks are
-            // independent — AdsUnlockTable must NOT drop held RLocks.
-            // While the FLock was held every recno_locks_ entry was
-            // suspended at OS level (virtual / offset 0); re-assert the
-            // OS byte locks now that the FLock range is gone.
-            reassert_record_locks_();
         }
     }
+    // SAP ACE semantics (verified against ace32/ace64, commit 1fb224b):
+    // AdsUnlockTable releases EVERY lock on the table — the file lock AND
+    // all record locks. Harbour's rddads maps dbUnlock() straight here
+    // with no client-side lock tracking, so leaving RLocks behind leaks
+    // them: the next dbRLock() on the same record blocks forever
+    // (Pritpal Bedi: "dbUnlock() in threads fail somehow", Aug 2026).
+    // The bb86a40 experiment (RLocks survive UnlockTable) was reverted.
+    for (auto& [recno, lh] : recno_locks_) {
+        if (lh.offset() != 0) {   // real OS byte lock (not FLock-virtual)
+            locks_.unlock_record(driver_->file(), to_lock_type_(),
+                                 locking_, recno);
+        }
+        lh.release();
+    }
+    recno_locks_.clear();
     return {};
 }
 

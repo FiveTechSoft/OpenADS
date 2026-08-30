@@ -113,6 +113,7 @@ add_executable(openads_unit_tests
     unit/abi_index_intensive_test.cpp
     unit/abi_index_intensive2_test.cpp
     unit/adi_erase_insert_repro_test.cpp
+    unit/abi_lock_unlock_full_test.cpp
     unit/abi_ntx_pack_reindex_test.cpp
     unit/abi_ntx_pack_reindex_multipage_test.cpp
     unit/abi_ntx_multipage_dup_test.cpp

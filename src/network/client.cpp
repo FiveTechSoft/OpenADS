@@ -1,8 +1,12 @@
 #include "network/client.h"
 
+#include "abi/lock_retry_policy.h"
 #include "engine/table.h"
+#include "openads/error.h"
 
+#include <chrono>
 #include <cstring>
+#include <thread>
 
 namespace openads::network {
 
@@ -1203,15 +1207,36 @@ RemoteConnection::get_last_table_update(std::uint32_t id) {
 
 util::Result<void> RemoteConnection::lock_record(std::uint32_t id,
                                                   std::uint32_t recno) {
-    Frame req; req.opcode = Opcode::LockRecord;
-    write_u32_le(id, req.payload);
-    write_u32_le(recno, req.payload);
-    auto rep = request(req);
-    if (!rep) return rep.error();
-    if (rep.value().opcode != Opcode::LockRecordAck) {
-        return util::Error{5000, 0, "LockRecord: server error", ""};
+    // The server answers a contended lock immediately (fail-fast). The
+    // retry lives HERE: one wire request per attempt, so the connection
+    // mutex is free between attempts and a peer thread's unlock/lock ops
+    // interleave instead of starving behind ours (Pritpal Bedi:
+    // "dbUnlock() in threads fail somehow").
+    const auto policy = openads::abi::lock_retry_policy();
+    for (std::uint16_t i = 0; ; ++i) {
+        Frame req; req.opcode = Opcode::LockRecord;
+        write_u32_le(id, req.payload);
+        write_u32_le(recno, req.payload);
+        auto rep = request(req);
+        if (rep && rep.value().opcode == Opcode::LockRecordAck) return {};
+        // Only contention (AE_LOCKED) is retryable — the server fail-fast
+        // answers it via an Error frame, which request() maps to a failed
+        // Result. Anything else is a real error; return it at once.
+        const bool contended =
+            !rep && rep.error().code ==
+                        static_cast<std::int32_t>(openads::AE_LOCKED);
+        if (!contended) {
+            if (rep) {
+                return util::Error{5000, 0, "LockRecord: server error", ""};
+            }
+            return rep.error();
+        }
+        if (i >= policy.retry_count) return rep.error();
+        if (policy.cycle_ms > 0) {
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(policy.cycle_ms));
+        }
     }
-    return {};
 }
 
 util::Result<void> RemoteConnection::unlock_record(std::uint32_t id,
@@ -1265,14 +1290,28 @@ util::Result<std::vector<std::uint32_t>> RemoteConnection::get_all_locks(
 }
 
 util::Result<void> RemoteConnection::lock_table(std::uint32_t id) {
-    Frame req; req.opcode = Opcode::LockTable;
-    write_u32_le(id, req.payload);
-    auto rep = request(req);
-    if (!rep) return rep.error();
-    if (rep.value().opcode != Opcode::LockTableAck) {
-        return util::Error{5000, 0, "LockTable: server error", ""};
+    // Same client-side retry as lock_record (see there).
+    const auto policy = openads::abi::lock_retry_policy();
+    for (std::uint16_t i = 0; ; ++i) {
+        Frame req; req.opcode = Opcode::LockTable;
+        write_u32_le(id, req.payload);
+        auto rep = request(req);
+        if (rep && rep.value().opcode == Opcode::LockTableAck) return {};
+        const bool contended =
+            !rep && rep.error().code ==
+                        static_cast<std::int32_t>(openads::AE_LOCKED);
+        if (!contended) {
+            if (rep) {
+                return util::Error{5000, 0, "LockTable: server error", ""};
+            }
+            return rep.error();
+        }
+        if (i >= policy.retry_count) return rep.error();
+        if (policy.cycle_ms > 0) {
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(policy.cycle_ms));
+        }
     }
-    return {};
 }
 
 util::Result<void> RemoteConnection::unlock_table(std::uint32_t id) {

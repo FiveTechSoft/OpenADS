@@ -702,7 +702,10 @@ TEST_CASE("Table lock and record locks coexist independently") {
     REQUIRE(AdsIsTableLocked(hTbl, &tbl_locked) == 0);
     CHECK(tbl_locked == 1);
 
-    // Unlock table — record locks remain.
+    // Unlock table — SAP ACE releases the table lock AND all record locks
+    // (verified against ace32/ace64; Harbour rddads maps dbUnlock() here
+    // with no client-side lock tracking). The 1.8.83-era assertion that
+    // RLocks survive was wrong.
     REQUIRE(AdsUnlockTable(hTbl) == 0);
     tbl_locked = 9;
     REQUIRE(AdsIsTableLocked(hTbl, &tbl_locked) == 0);
@@ -710,14 +713,7 @@ TEST_CASE("Table lock and record locks coexist independently") {
 
     cnt = 99;
     REQUIRE(AdsGetNumLocks(hTbl, &cnt) == 0);
-    CHECK(cnt == 2);  // 2 records still locked
-
-    // Unlock records.
-    REQUIRE(AdsUnlockRecord(hTbl, 1) == 0);
-    REQUIRE(AdsUnlockRecord(hTbl, 3) == 0);
-    cnt = 99;
-    REQUIRE(AdsGetNumLocks(hTbl, &cnt) == 0);
-    CHECK(cnt == 0);
+    CHECK(cnt == 0);  // record locks released too (SAP ACE semantics)
 
     REQUIRE(AdsCloseTable(hTbl) == 0);
     REQUIRE(AdsDisconnect(hConn) == 0);

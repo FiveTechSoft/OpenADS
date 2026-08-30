@@ -38,6 +38,10 @@ void set_connection_legacy_paths(ADSHANDLE hConnect, bool on);
 void set_connection_remote_server(ADSHANDLE hConnect, bool on);
 void share_connection_resolve_log(ADSHANDLE                  hConnect,
                                   openads::session::Connection* src);
+// Single-attempt record lock (see ace_exports.cpp): the wire server must
+// fail a contended lock FAST — AdsLockRecord's retry loop would block the
+// session thread ~1s, starving the peer op that releases the lock.
+UNSIGNED32 try_lock_record_once(ADSHANDLE hTable, UNSIGNED32 ulRecord);
 }
 
 namespace openads::network {
@@ -2323,7 +2327,7 @@ DispatchResult Session::dispatch(const Frame& f) {
             // whenever it exists.
             if (auto hit = tbls_h_.find(id); hit != tbls_h_.end()) {
                 UNSIGNED32 rrc = (f.opcode == Opcode::LockRecord)
-                    ? AdsLockRecord(hit->second, rn)
+                    ? openads::abi::try_lock_record_once(hit->second, rn)
                     : AdsUnlockRecord(hit->second, rn);
                 // Also release any stale engine-side lock taken before
                 // the ABI handle existed (best-effort; not holding the
@@ -2354,30 +2358,27 @@ DispatchResult Session::dispatch(const Frame& f) {
                        f.opcode == Opcode::LockRecord ? "LockRecord" : "UnlockRecord",
                        id, (unsigned)rn);
             } else if (f.opcode == Opcode::LockRecord) {
-                // Use non-blocking try + retry loop (same semantics as
-                // the ABI lock_with_retry).  Blocking lock_record_excl
-                // would freeze the entire server until the OS grants the
-                // lock — unacceptable for concurrent clients.
-                auto policy = openads::abi::lock_retry_policy();
-                bool got = false;
-                for (std::uint16_t i = 0; ; ++i) {
-                    auto r = tbl->try_lock_record_excl(rn);
-                    if (r) { got = true; break; }
-                    if (i >= policy.retry_count) break;
-                    if (policy.cycle_ms > 0) {
-                        std::this_thread::sleep_for(
-                            std::chrono::milliseconds(policy.cycle_ms));
-                    }
-                }
-                if (!got) {
+                // Fail FAST on contention — a single attempt. Retrying
+                // here blocked the session thread for the whole lock
+                // budget (~1s), starving the peer op that releases the
+                // record; the client retries instead, one wire request
+                // per attempt, keeping the connection free between them.
+                auto r = tbl->try_lock_record_excl(rn);
+                if (!r) {
+                    WTRACE("[wire] LockRecord id=%u recno=%u FAILED (engine)\n",
+                           id, (unsigned)rn);
                     reply = err("LockRecord: failed",
                         openads::AE_LOCKED);
                     break;
                 }
+                WTRACE("[wire] LockRecord id=%u recno=%u ok (engine)\n",
+                       id, (unsigned)rn);
             } else {
                 auto r = tbl->unlock_record(rn);
                 if (!r) { reply = err("UnlockRecord: failed",
                     static_cast<UNSIGNED32>(r.error().code)); break; }
+                WTRACE("[wire] UnlockRecord id=%u recno=%u ok (engine)\n",
+                       id, (unsigned)rn);
             }
             reply.opcode = (f.opcode == Opcode::LockRecord)
                 ? Opcode::LockRecordAck
@@ -2460,18 +2461,11 @@ DispatchResult Session::dispatch(const Frame& f) {
                 session_user_.empty() ? "(anonymous)" : session_user_,
                 srv_->conn_no_for_session(sid_));
             if (f.opcode == Opcode::LockTable) {
-                auto policy = openads::abi::lock_retry_policy();
-                bool got = false;
-                for (std::uint16_t i = 0; ; ++i) {
-                    auto r = tbl->try_lock_table_excl();
-                    if (r) { got = true; break; }
-                    if (i >= policy.retry_count) break;
-                    if (policy.cycle_ms > 0) {
-                        std::this_thread::sleep_for(
-                            std::chrono::milliseconds(policy.cycle_ms));
-                    }
-                }
-                if (!got) {
+                // Fail fast — a single attempt (see LockRecord above: the
+                // client owns the retry loop so the connection stays free
+                // between attempts).
+                auto r = tbl->try_lock_table_excl();
+                if (!r) {
                     reply = err("LockTable: failed",
                         openads::AE_LOCKED);
                     break;
@@ -2480,6 +2474,7 @@ DispatchResult Session::dispatch(const Frame& f) {
                 // M12.16 dual-handle: route through the ABI shadow handle
                 // when it exists (same as LockRecord/UnlockRecord) so the
                 // ABI-side Table's LockMgr releases its own locks.
+                WTRACE("[wire] UnlockTable id=%u\n", id);
                 if (auto hit = tbls_h_.find(id); hit != tbls_h_.end()) {
                     UNSIGNED32 rrc = AdsUnlockTable(hit->second);
                     // Also release engine-side locks (best-effort cleanup).

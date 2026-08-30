@@ -5153,6 +5153,24 @@ void set_connection_remote_server(ADSHANDLE hConnect, bool on) {
     }
 }
 
+// Single-attempt record lock for the wire server. AdsLockRecord retries
+// via the process-global policy (lock_with_retry), and doing that inside
+// a session handler blocks the connection for ~1s under contention —
+// starving the peer op that would release the record (client threads on
+// a shared connection; Pritpal Bedi: "dbUnlock() in threads fail
+// somehow"). The client retries instead, one wire request per attempt.
+UNSIGNED32 try_lock_record_once(ADSHANDLE hTable, UNSIGNED32 ulRecord) {
+    Table* t = get_table(hTable);
+    if (!t) return openads::AE_INTERNAL_ERROR;
+    // ulRecord == 0 → the current record (ACE convention; see
+    // AdsLockRecord for the FILE_BASE byte-range rationale).
+    std::uint32_t rec = (ulRecord == 0) ? t->recno() : ulRecord;
+    auto r = t->try_lock_record_excl(rec);
+    if (!r) return static_cast<UNSIGNED32>(r.error().code);
+    openads::mgmt::LockRegistry::instance().add_record_lock(t, t->path(), rec);
+    return 0;
+}
+
 // Server: link the per-session ABI twin's RESOLVED-audit dedup set to
 // the engine connection's, so a single client open logs one RESOLVED
 // line per physical file even though the twin re-opens the table for
@@ -12687,10 +12705,12 @@ UNSIGNED32 ENTRYPOINT AdsUnlockTable(ADSHANDLE hTable) {
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
     auto r = t->unlock_table();
     if (!r) return fail(r.error());
-    // SAP ACE semantics: AdsUnlockTable releases only the table lock —
-    // record locks are independent and must survive. Drop just the table
-    // lock from the management registry.
-    openads::mgmt::LockRegistry::instance().remove_table_lock(t);
+    // SAP ACE semantics (verified against ace32/ace64, commit 1fb224b):
+    // AdsUnlockTable releases ALL locks — table AND record. Harbour rddads
+    // trusts this (dbUnlock() has no client-side lock list; a leaked RLock
+    // blocks the next dbRLock forever). Drop every lock of the table from
+    // the management registry too.
+    openads::mgmt::LockRegistry::instance().remove_all_for_table(t);
     return ok();
 }
 
@@ -34955,7 +34975,14 @@ UNSIGNED32 ENTRYPOINT AdsGetNumLocks(ADSHANDLE hTable, UNSIGNED16* p) {
     arc2_trace("AdsGetNumLocks");
     if (p == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
     *p = 0;
-    if (get_remote_table(hTable) != nullptr) { return ok(); }
+    // Remote: route through the wire GetAllLocks op and count (was a stub
+    // returning 0 — lock introspection on remote tables reported nothing).
+    if (auto* rt = get_remote_table(hTable)) {
+        auto r = rt->conn->get_all_locks(rt->id);
+        if (!r) return fail(r.error());
+        *p = static_cast<UNSIGNED16>(r.value().size());
+        return ok();
+    }
     Table* t = get_table(hTable);
     if (t == nullptr) return fail(openads::AE_INTERNAL_ERROR, "no table");
     *p = t->lock_count();
