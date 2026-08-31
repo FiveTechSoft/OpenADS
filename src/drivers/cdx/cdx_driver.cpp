@@ -99,6 +99,27 @@ CdxDriver::open(const std::string& path, DriverOpenMode mode) {
     if (!fres) return fres.error();
     file_ = std::move(fres).value();
 
+    // POSIX counterpart of the share=0 create window above: hold a
+    // flock(LOCK_SH) for the whole lifetime of this open. A concurrent
+    // AdsCreateTable takes flock(LOCK_EX|LOCK_NB) (OpenMode::
+    // CreateExclusive), so it now fails with EWOULDBLOCK — surfaced as
+    // 7040 — instead of ftruncate()ing the live table underneath us;
+    // and while a create holds its EX lock for the ms-long header write,
+    // our LOCK_SH simply contends, so retry past it (matching the Win32
+    // sharing-violation retry) rather than erroring the open. No-op on
+    // Win32. SH locks of concurrent openers do not conflict.
+    for (int attempt = 0;; ++attempt) {
+        auto sl = file_.try_lock_shared();
+        if (sl) break;
+        if (attempt >= 200) {
+            file_ = platform::File{};
+            return sl.error();
+        }
+        const auto us = 50 + (attempt * 25);
+        std::this_thread::sleep_for(std::chrono::microseconds(
+            us > 5000 ? 5000 : us));
+    }
+
     // Coordinate the header read with concurrent appenders. An append
     // holds an EXCLUSIVE byte-lock on the header lock position while it
     // bumps the record count. Take a SHARED lock on the same byte

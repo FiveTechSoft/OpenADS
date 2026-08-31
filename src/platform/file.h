@@ -41,6 +41,14 @@ public:
     util::Result<void> sync();
     util::Result<void> truncate(std::uint64_t size);
 
+    // POSIX only: flock(LOCK_SH | LOCK_NB), held until close. Table
+    // drivers take this for the lifetime of an open so that a concurrent
+    // exclusive create (OpenMode::CreateExclusive, flock LOCK_EX) fails
+    // with EWOULDBLOCK instead of truncating the file underneath the
+    // openers. On Win32 this is a no-op: share=0 on the creating handle
+    // already provides the exclusion.
+    util::Result<void> try_lock_shared();
+
     // Native handle access for the lock + mmap layers below.
     void*    native_handle() const noexcept { return native_; }
     bool     is_open()       const noexcept { return native_ != nullptr; }

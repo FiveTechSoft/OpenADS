@@ -93,6 +93,24 @@ AdtDriver::open(const std::string& path, DriverOpenMode mode) {
     if (!fres) return fres.error();
     file_ = std::move(fres).value();
 
+    // POSIX counterpart of the share=0 create window: hold an
+    // flock(LOCK_SH) for the lifetime of this open, so a concurrent
+    // AdsCreateTable (OpenMode::CreateExclusive, flock LOCK_EX|NB)
+    // fails instead of ftruncate()ing the live table underneath us.
+    // While a create holds its EX lock for the header write, this SH
+    // lock contends and retries past the ms-long window. No-op on
+    // Win32 (share=0 already provides the exclusion).
+    for (int attempt = 0;; ++attempt) {
+        auto sl = file_.try_lock_shared();
+        if (sl) break;
+        if (attempt >= 200) {
+            file_ = platform::File{};
+            return sl.error();
+        }
+        std::this_thread::sleep_for(
+            std::chrono::microseconds(50 + (attempt * 25)));
+    }
+
     // Coordinate the header read with concurrent appenders (who hold 0..399
     // exclusive). Shared lock + retry so open does not fail with
     // ERROR_LOCK_VIOLATION while another connection appends.

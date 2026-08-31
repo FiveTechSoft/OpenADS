@@ -27,6 +27,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -36,6 +37,10 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#ifndef _WIN32
+#include <sys/resource.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -195,6 +200,25 @@ TEST_CASE("remote create/index/append storm keeps DBF+CDX intact [slow]" *
         int v = std::atoi(env);
         if (v >= 4 && v <= 400) workers = v;
     }
+
+#ifndef _WIN32
+    // Each worker costs the test process several fds (client socket +
+    // server session socket + DBF + one fd per CDX tag + txlog), so 120
+    // workers blow past the common 1024 RLIMIT_NOFILE soft cap (observed
+    // on Ubuntu CI as EMFILE "Too many open files" from OpenIndex). Raise
+    // the soft cap up to the hard cap so the storm measures locking, not
+    // fd exhaustion.
+    {
+        struct rlimit rl{};
+        if (::getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur < 8192) {
+            rl.rlim_cur = (rl.rlim_max == RLIM_INFINITY)
+                              ? 8192
+                              : std::min<rlim_t>(rl.rlim_max,
+                                                 static_cast<rlim_t>(8192));
+            ::setrlimit(RLIMIT_NOFILE, &rl);
+        }
+    }
+#endif
 
     auto data = fs::temp_directory_path() / "openads_stress_create_data";
     std::error_code ec;

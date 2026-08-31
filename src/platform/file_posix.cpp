@@ -137,6 +137,15 @@ util::Result<void> File::truncate(std::uint64_t size) {
     return {};
 }
 
+util::Result<void> File::try_lock_shared() {
+    int fd = fd_from_native(native_);
+    // flock locks are per open-file-description, so two fds from separate
+    // open() calls in the SAME process still contend — exactly the Win32
+    // share=0 semantics the create path relies on. LOCK_NB: callers retry.
+    if (::flock(fd, LOCK_SH | LOCK_NB) != 0) return os_error("flock");
+    return {};
+}
+
 } // namespace openads::platform
 
 #endif // !_WIN32

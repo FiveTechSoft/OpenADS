@@ -1,3 +1,31 @@
+## 1.09.17 - 2026-08-31
+
+### Fixed — Linux: create-while-open truncated live tables; racing creates returned 5103 (v1.09.16 follow-up)
+
+The 1.09.16 `CreateExclusive` fix was asymmetric. The *creator* side took the
+POSIX `flock(LOCK_EX|NB)` correctly, but no *opener* ever participated in that
+flock, so the protocol had only one speaker on Linux:
+
+1. `AdsCreateTable` over a table another connection held OPEN truncated it
+   instead of failing 7040 — the opener's fd held no shared flock, so the
+   creator's `flock(LOCK_EX|NB)` succeeded and `ftruncate(0)` destroyed the
+   live data (Windows unaffected: share=0 fails the open before truncation).
+2. In the 16-thread create race, 6 of 16 threads got 5103 "DBF header
+   truncated" — each open landed inside another creator's
+   `ftruncate → write_at` window and read a partial header.
+
+Fix, mirroring the Win32 share=0 semantics on POSIX:
+
+- `platform::File::try_lock_shared()` (new): `flock(LOCK_SH|LOCK_NB)` held
+  until close on POSIX; no-op on Win32.
+- `CdxDriver::open` (DBF/CDX/NTX tables) takes the shared flock for the
+  open's lifetime, retrying past a create's ms-long exclusive window.
+- `AdtDriver::open`: same treatment (latent identical bug, ADT on Linux).
+
+Verified: Linux suite 1500/1500 (572,822 assertions) on Ubuntu, Windows
+1518/1518 (573,248) — the two failing Linux test cases from 1.09.16 now pass
+on both. Remote create storm (120–200 connections) clean.
+
 ## 1.09.5 - 2026-08-26
 
 ### Fixed — mingw `OAdsSetLogging` undefined reference (Pritpal Bedi)

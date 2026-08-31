@@ -134,6 +134,12 @@ util::Result<void> File::truncate(std::uint64_t size) {
     return {};
 }
 
+util::Result<void> File::try_lock_shared() {
+    // No-op on Win32: the creating handle's share=0 already excludes
+    // every other open for the duration of a create.
+    return {};
+}
+
 } // namespace openads::platform
 
 #endif // _WIN32
