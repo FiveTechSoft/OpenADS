@@ -1,82 +1,150 @@
-# openads.ini — settings for the OpenADS server daemon.
+# openads.ini — every setting of the OpenADS server daemon (openads_serverd),
+# with its default value and an explanation.
 #
 # Point the daemon at this file with:  openads_serverd --config openads.ini
-# Any command-line flag given as well overrides the matching key here, so you
-# can keep a baseline in the file and tweak one setting on the fly.
-#
 # `openads_serverd --setup` writes a file like this for you and (optionally)
-# registers it as a service. Lines are `key = value`; `#`/`;` start comments;
-# an optional `[server]` header is accepted and ignored.
+# registers it as a Windows service / systemd unit / launchd plist.
+#
+# Lines are `key = value`; `#`/`;` start comments; an optional [server]
+# header is accepted and ignored. Keys are case-insensitive; dashes are
+# equivalent to underscores (max_sessions == max-sessions == maxsessions).
+#
+# PRECEDENCE: built-in defaults < this file < command-line flags
+# (--host, --port, ... given after --config still win).
+#
+# NOTE on env vars: every OPENADS_* environment variable mentioned below
+# wins over BOTH this file and the command line (they are read directly by
+# the engine at startup).
 
 [server]
 
-# Bind address. 0.0.0.0 = all interfaces; 127.0.0.1 = local only.
+# ------------------------------------------------------------------
+# host — bind address
+# Default: 0.0.0.0
+# ------------------------------------------------------------------
+# 0.0.0.0 = all interfaces (LAN-visible); 127.0.0.1 = local machine only.
 host = 0.0.0.0
 
-# TCP wire port clients connect to. 6262 is the historical ADS default.
-# (If SAP's Advantage service is still running on this host, pick another,
-#  e.g. 6263, to avoid a bind clash.)
+# ------------------------------------------------------------------
+# port — main TCP wire port for AdsConnect60 clients
+# Default: 6262
+# ------------------------------------------------------------------
+# 6262 is the historical Advantage (ADS) default. If SAP's Advantage
+# service still runs on this host, pick another (e.g. 6263) to avoid a
+# bind clash. 0 = ephemeral (the daemon prints the chosen port).
 port = 6262
 
-# listen() backlog.
-backlog = 16
+# ------------------------------------------------------------------
+# backlog — listen() backlog for all listeners
+# Default: 256 (env OPENADS_SERVER_BACKLOG, else 256 in the engine;
+# the ini default below was 16 in older releases)
+# ------------------------------------------------------------------
+# How many connections in the middle of connecting (TCP accept queue)
+# can be pending before the OS starts refusing. Each B_BIG-style
+# instance opens and holds a connection; a storm of N instances
+# connecting at once needs a backlog big enough to absorb the burst.
+# With a large instance count, set backlog and max_sessions together.
+backlog = 256
 
-# Directory the engine serves tables from.
+# ------------------------------------------------------------------
+# max_sessions — cap on concurrent client sessions
+# Default: 500 (env OPENADS_SERVER_MAX_SESSIONS, else 500)
+# ------------------------------------------------------------------
+# Hard limit on simultaneous connections. Beyond the cap, new
+# connections are refused (counted server-side as rejected sessions).
+# 0 = unlimited (bounded only by RAM / thread limits).
+# For B_BIG with 700+ instances, raise to your instance count + headroom:
+#   max_sessions = 1000
+# Abandoned/dead connections are reaped automatically after a timeout,
+# which frees slots; long-running clients that stay connected count the
+# whole time.
+max_sessions = 500
+
+# ------------------------------------------------------------------
+# data — directory (the jail) the engine serves tables from
+# Default: . (the daemon's current working directory)
+# ------------------------------------------------------------------
+# Prefer forward slashes. Semicolon-separated for more than one root:
+#   data = C:/data;D:/more-data
+# Do NOT include the client's logical drive letter here: a client
+# connecting with tcp://host:6262/C:/Temp is served by data=C:/Temp.
+# data = .
 data = .
 
-# Allow remote oads_*/Ads* filesystem ops (File/FErase/Directory/FOpen…).
-# Default 0 = denied. WARNING: enables client read/write/delete under data=.
+# ------------------------------------------------------------------
+# EnableFileFunc — allow client filesystem operations over the wire
+# Default: 0 (disabled)
+# ------------------------------------------------------------------
+# When 1, remote oads_*/Ads* filesystem functions (FExist, FOpen,
+# FCreate, FErase, Directory...) operate under data=. This is required
+# by apps that log to files via OAds_FCreate/FWrite (B_BIG's
+# LogEvents does), but it lets clients read/write/delete files under
+# data= — enable only on trusted networks.
 # EnableFileFunc = 0
 
-# Legacy ERP path resolution (porting DBFCDX apps to remote ADS with no
-# code changes). Default 0 = strict SAP-compatible resolution.
-# When 1, every client-supplied path (tables, indexes, memos, file funcs,
-# the connect dir itself) is resolved against the data= roots
-# case-insensitively and ignoring the drive letter: a path that starts
-# with a data= root is stripped and re-joined under that root
-# ("C:/TEMP/Sub/t.dbf" with data=C:\temp serves "<data>\Sub\t.dbf"), and
-# any other absolute path loses its drive letter and is joined under the
-# root ("E:\CLIENT\F.DBF" serves "<data>\CLIENT\F.DBF"). One server
-# instance then serves every client folder, and the same app binary still
-# runs against local DBFCDX.
+# ------------------------------------------------------------------
+# legacy_paths — remount client-absolute paths onto data=
+# Default: 0 (strict SAP-compatible resolution)
+# ------------------------------------------------------------------
+# When 1, every client-supplied path (tables, indexes, memos, file
+# funcs, the connect dir itself) is resolved against the data= roots
+# case-insensitively ignoring the drive letter: "C:/TEMP/Sub/t.dbf"
+# with data=C:\temp serves "<data>\Sub\t.dbf", and "E:\CLIENT\F.DBF"
+# serves "<data>\CLIENT\F.DBF". One server then serves every client
+# folder and the same app binary still runs against local DBFCDX.
 # legacy_paths = 0
 
-# Studio web console: set a port to expose the browser admin UI / REST API.
-# Leave commented out to disable it.
+# ------------------------------------------------------------------
+# error_log_path — directory for the SAP-style error log (ads_err.dbf)
+# Default: C:\ on Windows, /var/log/advantage on Linux (falls back to a
+# writable location if not writable). CLI --error-log-path; env
+# OPENADS_ERROR_LOG_PATH.
+# ------------------------------------------------------------------
+# Logs SQL failures, remote error frames, and server start/stop.
+# Accepts the SAP alias name `error_assert_logs` too. Directory only —
+# the file name is always ads_err.dbf.
+# error_log_path = C:\OpenADS\logs
+
+# ------------------------------------------------------------------
+# error_log_max — max size of ads_err.dbf in kilobytes
+# Default: 1000
+# ------------------------------------------------------------------
+# error_log_max = 1000
+
+# ------------------------------------------------------------------
+# http_port — Studio web console (browser admin UI / REST API)
+# Default: unset (console disabled)
+# ------------------------------------------------------------------
+# Set a port to expose the console, e.g. 6263 (if 6262 is taken by the
+# wire) or 8080. Requires a build with OPENADS_WITH_HTTP=ON.
 # http_port = 6263
 
-# Studio logins (repeatable). Omit entirely to leave the console open.
+# ------------------------------------------------------------------
+# http_user — Studio console login (repeatable)
+# Default: none (console open)
+# ------------------------------------------------------------------
+# Value is user:password. Register one line per login. If no http_user
+# is given at all, the console is open without a login.
 # http_user = admin:change-me
 
-# TCP wire authentication for AdsConnect60 (repeatable). When configured,
-# every remote connection must supply a matching user/password.
-# Use tls:// in the client URI to protect credentials in transit.
+# ------------------------------------------------------------------
+# auth_user — TCP wire authentication for AdsConnect60 (repeatable)
+# Default: none (connections are not authenticated)
+# ------------------------------------------------------------------
+# When at least one auth_user is configured, every remote connection
+# must supply a matching user/password in AdsConnect60. Use tls:// in
+# client URIs to protect credentials in transit.
 # auth_user = client:change-me
 
-# Server error log (ads_err.dbf) — SAP-style operational log for SQL
-# failures, remote error frames, and server start/stop. Directory only;
-# the file name is always ads_err.dbf. Alias: error_assert_logs (SAP name).
-# CLI: --error-log-path DIR   Env: OPENADS_ERROR_LOG_PATH=DIR
-# Default: C:\ on Windows, /var/log/advantage on Linux (falls back to a
-# writable location if the default is not writable).
-# error_log_path = C:\OpenADS\logs
-# error_log_max  = 1000
-#
-# Note: the transaction journal (openads.txlog / openads.lsnmap) is NOT
-# controlled here — it always lives under each connection's data=
-# directory. If data= is a drive root (C:\), journaling may be disabled
-# on that connection (tables in subfolders still work). See docs/en/error-log.md.
-
-# --- Multi-port (optional) ---
-# Additional listeners with their own data directories.  Each [port:NNNN]
-# section creates a separate TCP listener on port NNNN that serves tables
-# from the data= folder below it.  Clients connecting to that port see
-# only its data directory — different apps can share one server process
-# while isolating their data.  (LetoDB-style multi-port.)
-#
-# The primary [server] port (default 6262) always exists and uses the
-# global data= above.  Extra ports must not collide with it or with
-# each other.
+# ------------------------------------------------------------------
+# Multi-port: extra listeners with their own data jails
+# (LetoDB-style multi-port; different apps share one daemon but see
+# isolated data directories)
+# ------------------------------------------------------------------
+# Each [port:NNNN] section creates a separate TCP listener on port
+# NNNN serving tables from the data= folder below it. Extra ports must
+# not collide with the main port or each other. Only data= is read
+# inside a port section.
 #
 # [port:6263]
 # data = C:\app1
@@ -84,14 +152,14 @@ data = .
 # [port:6264]
 # data = C:\app2
 
-# --- Client-side keys (read by ace64.dll/ace32.dll, not the daemon) ---
-# A copy of this file next to the DLL, next to the application .exe, or
-# in the app working directory (or pointed to by the OPENADS_INI env var)
-# configures the client side. Keys are case-insensitive and dashes are
-# equivalent to underscores (remote-only-access = remote_only_access).
-# The matching OPENADS_* environment variable always wins over the key
-# here, so either mechanism works per machine.
-#
+# ==================================================================
+# Client-side keys (below) are read by ace64.dll / ace32.dll, NOT by
+# the daemon. A copy of this file next to the DLL, next to the
+# application .exe, or in the app working directory (or pointed to by
+# the OPENADS_INI env var) configures the client side. The matching
+# OPENADS_* environment variable always wins over the key here.
+# ==================================================================
+
 # remote_only_access = 1  -- forbid local AdsOpenTable/AdsCreateTable
 #   (legacy local paths): they fail with AE_ACCESS_DENIED (Harbour RTE)
 #   instead of silently touching a file next to the app. Env:
@@ -113,3 +181,25 @@ data = .
 # adi_v2 = 1              -- ADI v2 index writer (env OPENADS_ADI_V2)
 # adt_cdx_index = 1       -- route ADT .adi bags through the CDX engine
 #                           (env OPENADS_ADT_CDX_INDEX)
+
+# ==================================================================
+# Environment variables the SERVER honours (no ini key; set them in
+# the environment before starting the daemon):
+#
+#   OPENADS_SERVER_MAX_SESSIONS = 500   session cap (== max_sessions)
+#   OPENADS_SERVER_BACKLOG      = 256   listen backlog (== backlog)
+#   OPENADS_SERVER_POOL         = 0     sharded-reactor pool (experimental;
+#                                       1 = multiplex connections over a
+#                                       worker pool instead of one thread
+#                                       per connection)
+#   OPENADS_SERVER_POOL_WORKERS = 0     pool worker threads (0 = auto)
+#   OPENADS_ERROR_LOG_PATH      = DIR   error log dir (== error_log_path)
+#   OPENADS_REMOTE_ONLY_ACCESS  = 0     force client-side remote-only off
+#
+# Engine/client internals with sane defaults (documented for completeness):
+#   OPENADS_LOCK_RETRY_COUNT = 50   lock-wait retries before conflict
+#   OPENADS_LOCK_RETRY_MS    = 100  lock retry cycle (ms)
+#   OPENADS_INI              = path to an explicit client ini file
+#   OPENADS_LOG / OPENADS_LOG_FILE / OPENADS_RESOLVE_VERBOSE — client audit
+#
+# ==================================================================

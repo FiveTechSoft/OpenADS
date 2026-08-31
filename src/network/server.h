@@ -119,8 +119,13 @@ public:
 
     // Enterprise: cap on concurrent session threads (0 = unlimited). Overrides
     // the env-loaded EnterpriseConfig value; call before start(). Production
-    // reads OPENADS_SERVER_MAX_SESSIONS; this exists mainly for tests.
+    // reads OPENADS_SERVER_MAX_SESSIONS / openads.ini max_sessions; this
+    // exists mainly for tests.
     void set_max_sessions(std::uint32_t n) { max_sessions_override_ = n; }
+    // listen() backlog override for the primary + extra listeners (0 = keep
+    // the env default, OPENADS_SERVER_BACKLOG / 256). Production config comes
+    // from --backlog / openads.ini backlog.
+    void set_backlog(int n) { backlog_override_ = n; }
     // Observability: live session-thread count, and the number of connections
     // refused because the cap was reached.
     std::uint32_t active_session_threads() const;
@@ -218,6 +223,7 @@ private:
     std::uint32_t                                  max_sessions_ = 0;
     std::uint32_t                                  max_sessions_override_ = 0;
     std::atomic<std::uint32_t>                     rejected_sessions_{0};
+    int                                            backlog_override_ = 0;
 
     // Data root directory: relative client paths are resolved under it.
     std::string                                   data_dir_;

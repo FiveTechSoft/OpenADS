@@ -1,3 +1,26 @@
+## 1.09.18 - 2026-08-31
+
+### Added — `max_sessions` / `backlog` configurable via CLI + openads.ini (complete server config surface)
+
+The session cap (default 500, `OPENADS_SERVER_MAX_SESSIONS` since
+v1.4.0) previously had **no** ini or CLI key — deployments needing more
+than 500 concurrent clients (e.g. the B_BIG 700-instance stress) had to
+set the env var by hand. Worse, the `backlog` ini key and `--backlog`
+CLI flag were parsed but never threaded to the listener (the banner
+printed them; `Server::start()` silently kept reading the env/256).
+
+- **`--max-sessions N`** CLI flag and **`max_sessions = N`** ini key
+  (dash/underscore aliases accepted). 0 = unlimited. Default unchanged:
+  env `OPENADS_SERVER_MAX_SESSIONS`, else 500.
+- `Server::set_backlog(n)` override wired: `--backlog`/ini `backlog`
+  now actually reach `listen()` for the primary and every extra
+  listener (previously only `OPENADS_SERVER_BACKLOG`/256 applied).
+- **`openads.ini.sample` rewritten**: every server + client key with
+  default value and explanation, precedence rules, the multi-port
+  sections, and the full server env-var surface.
+- Tests: `parse_ini max_sessions` cases; suite 1519/1519 (573,258
+  assertions), plus a 700-connection create/append storm clean 7/7.
+
 ## 1.09.17 - 2026-08-31
 
 ### Fixed — Linux: create-while-open truncated live tables; racing creates returned 5103 (v1.09.16 follow-up)

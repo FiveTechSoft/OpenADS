@@ -39,6 +39,11 @@ struct IniConfig {
     std::uint16_t port          = 0;
     bool          has_backlog   = false;
     int           backlog       = 0;
+    // Cap on concurrent client sessions (0 = unlimited). Maps to
+    // Server::set_max_sessions; default comes from the
+    // OPENADS_SERVER_MAX_SESSIONS env (500).
+    bool          has_max_sessions = false;
+    std::uint32_t max_sessions     = 0;
     bool          has_http_port = false;
     std::uint16_t http_port     = 0;
     bool          has_data      = false;
@@ -71,8 +76,8 @@ struct IniConfig {
 // Parse INI *text* (already loaded into memory). Returns true on success.
 // On failure returns false and sets `error` to a one-line, line-numbered
 // message (e.g. "line 4: unknown key 'foo'"). Recognised keys:
-//   host, port, backlog, http_port, data (alias: data_dir; may list
-//   several roots separated by ';', e.g. "C:\data;D:\more-data" — see
+//   host, port, backlog, max_sessions, http_port, data (alias: data_dir; may
+//   list several roots separated by ';', e.g. "C:\data;D:\more-data" — see
 //   Server::set_data_dir / platform::split_data_roots),
 //   http_user (value is user:password, repeatable),
 //   auth_user (value is user:password, repeatable; required by TCP clients),

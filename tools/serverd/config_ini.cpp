@@ -134,6 +134,16 @@ bool parse_ini(const std::string& text, IniConfig& out, std::string& error) {
             }
             out.backlog = static_cast<int>(n);
             out.has_backlog = true;
+        } else if (key == "max_sessions" || key == "max-sessions" ||
+                   key == "maxsessions") {
+            unsigned long n = 0;
+            if (!parse_uint(val, 0xFFFFFFFFul, n)) {
+                error = "line " + std::to_string(lineno) +
+                        ": max_sessions must be a non-negative integer";
+                return false;
+            }
+            out.max_sessions = static_cast<std::uint32_t>(n);
+            out.has_max_sessions = true;
         } else if (key == "http_port" || key == "http-port") {
             unsigned long n = 0;
             if (!parse_uint(val, 65535, n)) {

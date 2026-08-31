@@ -56,7 +56,11 @@ void usage(const char* argv0) {
         "          [--listen PORT:DIR]...\n"
         "  --host       bind address (default 0.0.0.0)\n"
         "  --port       TCP wire port (default 6262, 0 = ephemeral)\n"
-        "  --backlog    listen() backlog (default 16)\n"
+        "  --backlog    listen() backlog (default: env OPENADS_SERVER_BACKLOG,\n"
+        "               else 256; ini: backlog)\n"
+        "  --max-sessions N  cap on concurrent client sessions\n"
+        "               (default: env OPENADS_SERVER_MAX_SESSIONS, else 500;\n"
+        "               0 = unlimited; ini: max_sessions)\n"
         "  --http-port  if set, expose Studio web console on this port\n"
         "  --data       physical data root(s) on the SERVER (the jail).\n"
         "               Prefer forward slashes: --data C:/Temp\n"
@@ -103,6 +107,10 @@ struct Args {
     std::string   host        = "0.0.0.0";
     std::uint16_t port        = 6262;
     int           backlog     = 16;
+    // Cap on concurrent sessions (0 = unlimited). Defaults to 0 here so the
+    // env-loaded EnterpriseConfig default (500) applies; an explicit
+    // --max-sessions / max_sessions= ini key overrides it.
+    std::uint32_t max_sessions = 0;
     std::uint16_t http_port   = 0;
     std::string   data_dir    = ".";
     bool          enable_file_func = false;
@@ -128,6 +136,8 @@ bool parse_args(int argc, char** argv, Args& out) {
         if      (a == "--host"      && i + 1 < argc) out.host    = argv[++i];
         else if (a == "--port"      && i + 1 < argc) out.port    = static_cast<std::uint16_t>(std::atoi(argv[++i]));
         else if (a == "--backlog"   && i + 1 < argc) out.backlog = std::atoi(argv[++i]);
+        else if (a == "--max-sessions" && i + 1 < argc)
+            out.max_sessions = static_cast<std::uint32_t>(std::atoi(argv[++i]));
         else if (a == "--http-port" && i + 1 < argc) out.http_port = static_cast<std::uint16_t>(std::atoi(argv[++i]));
         else if (a == "--data"      && i + 1 < argc) out.data_dir = argv[++i];
         else if (a == "--enable-file-func") out.enable_file_func = true;
@@ -203,6 +213,7 @@ void apply_ini(const openads::serverd::IniConfig& cfg, Args& out) {
     if (cfg.has_host)      out.host      = cfg.host;
     if (cfg.has_port)      out.port      = cfg.port;
     if (cfg.has_backlog)   out.backlog   = cfg.backlog;
+    if (cfg.has_max_sessions) out.max_sessions = cfg.max_sessions;
     if (cfg.has_http_port) out.http_port = cfg.http_port;
     if (cfg.has_data)      out.data_dir  = cfg.data_dir;
     if (cfg.has_enable_file_func) out.enable_file_func = cfg.enable_file_func;
@@ -318,6 +329,11 @@ int run_server(const Args& args, bool console) {
         srv.set_data_dir(args.data_dir);
     srv.set_enable_file_func(args.enable_file_func);
     srv.set_legacy_paths(args.legacy_paths);
+    // listen() backlog override (0 = env default OPENADS_SERVER_BACKLOG/256).
+    srv.set_backlog(args.backlog);
+    // Session cap: an explicit --max-sessions / ini key wins (0 = unlimited);
+    // otherwise the env default (OPENADS_SERVER_MAX_SESSIONS, 500) applies.
+    srv.set_max_sessions(args.max_sessions);
     for (const auto& u : args.auth_users)
         srv.add_credential(u.first, u.second);
 

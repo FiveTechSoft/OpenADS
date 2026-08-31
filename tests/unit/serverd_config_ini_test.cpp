@@ -24,6 +24,7 @@ TEST_CASE("parse_ini reads every recognised key") {
         "host = 127.0.0.1\n"
         "port = 6263\n"
         "backlog = 32\n"
+        "max_sessions = 700\n"
         "http_port = 8080\n"
         "data = C:/app/data\n"
         "http_user = admin:secret\n"
@@ -34,6 +35,8 @@ TEST_CASE("parse_ini reads every recognised key") {
     CHECK(cfg.port == 6263);
     CHECK(cfg.has_backlog);
     CHECK(cfg.backlog == 32);
+    CHECK(cfg.has_max_sessions);
+    CHECK(cfg.max_sessions == 700);
     CHECK(cfg.has_http_port);
     CHECK(cfg.http_port == 8080);
     CHECK(cfg.has_data);
@@ -78,6 +81,19 @@ TEST_CASE("parse_ini accepts dash/underscore aliases") {
     auto cfg = parse_ok("http-port = 9000\ndata_dir = /var/lib/openads\n");
     CHECK(cfg.http_port == 9000);
     CHECK(cfg.data_dir == "/var/lib/openads");
+}
+
+TEST_CASE("parse_ini max_sessions accepts dash alias and zero") {
+    auto cfg = parse_ok("max-sessions = 1000\n");
+    CHECK(cfg.has_max_sessions);
+    CHECK(cfg.max_sessions == 1000);
+    auto zero = parse_ok("maxsessions = 0\n");
+    CHECK(zero.has_max_sessions);
+    CHECK(zero.max_sessions == 0);   // 0 = unlimited (valid)
+    IniConfig bad;
+    std::string err;
+    CHECK_FALSE(parse_ini("max_sessions = -5\n", cfg, err));
+    CHECK(err.find("max_sessions") != std::string::npos);
 }
 
 TEST_CASE("parse_ini EnableFileFunc") {

@@ -441,7 +441,9 @@ util::Result<void> Server::start(const std::string& host,
     ListenerOptions opts;
     opts.host = host;
     opts.port = port;
-    opts.backlog = static_cast<int>(ecfg.server_listen_backlog);
+    opts.backlog = (backlog_override_ != 0)
+                       ? backlog_override_
+                       : static_cast<int>(ecfg.server_listen_backlog);
     auto l = listen_tcp(opts);
     if (!l) return l.error();
     listener_ = l.value();
@@ -519,7 +521,9 @@ util::Result<void> Server::add_listener(const std::string& host,
     ListenerOptions opts;
     opts.host = host;
     opts.port = port;
-    opts.backlog = static_cast<int>(ecfg.server_listen_backlog);
+    opts.backlog = (backlog_override_ != 0)
+                       ? backlog_override_
+                       : static_cast<int>(ecfg.server_listen_backlog);
     auto l = listen_tcp(opts);
     if (!l) return l.error();
 
