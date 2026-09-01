@@ -69,6 +69,23 @@ Clients connect with a remote URI:
 AdsConnect60("tcp://SERVERHOST:6262/data/mydb.add", user, pass, ADS_REMOTE_SERVER, ...)
 ```
 
+### How many clients can connect?
+
+The server caps concurrent connections at **500** by default. Each client
+process/connection counts; beyond the cap new connections are refused
+silently (the client sees a failed `AdsConnect60`). To raise it, edit the
+`openads.ini` the wizard wrote and add:
+
+```ini
+max_sessions = 1000   ; 0 = unlimited
+backlog      = 256    ; TCP accept queue for connect bursts
+```
+
+then restart the daemon. Check the effective value with
+`openads_serverd --help` (the flag is `--max_sessions N`; the matching
+env var is `OPENADS_SERVER_MAX_SESSIONS`). See `openads.ini.sample` for
+every key with defaults and explanations.
+
 To run it unattended (Windows Service / Linux systemd / macOS launchd), answer
 "yes" to the wizard's auto-start question, or see `docs/en/service-deployment.md`.
 

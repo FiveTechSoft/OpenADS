@@ -134,7 +134,7 @@ jobs:
           # Server + bench CLIs
           cp "$BUILD"/tools/serverd/openads_serverd "$STAGE/"
           cp "$BUILD"/tools/bench/openads_bench   "$STAGE/"
-          cp LICENSE NOTICE README.md             "$STAGE/"
+          cp LICENSE NOTICE README.md openads.ini.sample "$STAGE/"
           tar czvf "$STAGE.tar.gz" "$STAGE"
           ls -la "$STAGE.tar.gz"
           echo "ASSET=$STAGE.tar.gz" >> "$GITHUB_ENV"
@@ -192,7 +192,8 @@ jobs:
           # Server + bench CLIs
           Copy-Item "$build/tools/serverd/Release/openads_serverd.exe" "$stage/"
           Copy-Item "$build/tools/bench/Release/openads_bench.exe"     "$stage/"
-          Copy-Item LICENSE,NOTICE,README.md                $stage/
+          Copy-Item LICENSE,NOTICE,README.md,openads.ini.sample  $stage/
+          Copy-Item QUICKSTART.md                              "$stage/" -ErrorAction SilentlyContinue
           if ("${{ matrix.arch }}" -eq "x86") {
               Copy-Item src/openads_ace_x86_stdcall.def      "$stage/"
               # Ship the 32-bit MinGW import library at the archive root too:

@@ -69,6 +69,9 @@ void write_ini(std::ostream& os, const std::string& host,
        << "host = " << host << "\n"
        << "port = " << port << "\n"
        << "backlog = " << backlog << "\n"
+       << "# Concurrent-client cap (0 = unlimited). Default 500 — raise for\n"
+       << "# multi-instance workloads (e.g. B_BIG with 700 instances):\n"
+       << "max_sessions = 1000\n"
        << "data = " << data << "\n";
     if (studio) {
         os << "http_port = " << http_port << "\n";
