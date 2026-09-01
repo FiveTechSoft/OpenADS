@@ -1,5 +1,19 @@
 # Release notes — v1.09.18 (2026-08-31)
 
+## Notation — one canonical spelling: `_` everywhere (Pritpal Bedi)
+
+Every phrase now has a single canonical form on the command line, in
+`openads.ini`, and in env variables: **underscore**.
+
+- `openads.ini`: a `-` inside a key folds to `_` (`error-log-max` ==
+  `error_log_max`), so old dash-style files keep working — but the
+  canonical form shown everywhere is underscore.
+- Command line: the same fold after `--`, so `--max_sessions` ==
+  `--max-sessions`, `--http_port` == `--http-port`,
+  `--enable_file_func` == `--enable-file-func`, etc. `--help` now
+  documents the underscore forms, matching the OPENADS_* env vars.
+- `openads.ini.sample` ships in canonical underscore notation.
+
 ## Added — server capacity config surfaced: `max_sessions` + `backlog` via CLI & openads.ini
 
 The server's session cap (default **500** concurrent connections, from
@@ -10,9 +24,9 @@ the `backlog` ini key and `--backlog` CLI flag were parsed and printed
 on the startup banner but **never actually reached `listen()`** — only
 the env/default applied. Both are now real:
 
-- **`--max-sessions N`** CLI flag and **`max_sessions = N`** ini key
-  (dash/underscore aliases accepted, `0` = unlimited). Default is
-  unchanged: `OPENADS_SERVER_MAX_SESSIONS` env, else 500.
+- **`--max_sessions N`** CLI flag and **`max_sessions = N`** ini key
+  (dash spelling accepted, `0` = unlimited). Default is unchanged:
+  `OPENADS_SERVER_MAX_SESSIONS` env, else 500.
   Connections beyond the cap are refused and counted
   (`rejected_sessions` counter, visible in the Studio Sessions panel).
 - **`Server::set_backlog(n)`** wired through: `--backlog` / ini
@@ -33,13 +47,14 @@ backlog      = 256    ; absorb the connect burst
 
 ## Verification
 
-- Full suite: **1519/1519 test cases, 573,258 assertions, 0 failures**
+- Full suite: **1520/1520 test cases, 573,277 assertions, 0 failures**
   (Windows x64, Release).
 - Remote create/index/append storm at **700 concurrent connections**
   (the B_BIG staging dance: create → 3 CDX tags → shared open → 10
   appends each, then physical DBF+CDX validation): **7/7 clean runs**.
-- New `parse_ini` cases for `max_sessions` (dash alias, `0=unlimited`,
-  rejection of garbage).
+- New `parse_ini` cases: canonical underscore keys, dash aliases fold
+  to the same field, `max_sessions` with `0=unlimited`, rejection of
+  garbage.
 
 ## Upgrade notes
 
@@ -50,6 +65,8 @@ backlog      = 256    ; absorb the connect burst
   otherwise the cap stays at 500 exactly as before.
 - `--backlog` now has a real effect; if you previously set an odd
   `backlog` value in openads.ini believing it inert, re-check it.
+- Dash-style CLI flags and ini keys still work, but prefer the
+  underscore spellings — that is what the help text and samples show.
 
 ## What to test (Pritpal)
 

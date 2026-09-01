@@ -6,8 +6,13 @@
 # registers it as a Windows service / systemd unit / launchd plist.
 #
 # Lines are `key = value`; `#`/`;` start comments; an optional [server]
-# header is accepted and ignored. Keys are case-insensitive; dashes are
-# equivalent to underscores (max_sessions == max-sessions == maxsessions).
+# header is accepted and ignored.
+#
+# NOTATION — one canonical spelling everywhere: keys are written with
+# UNDERSCORE (max_sessions, http_port, enable_file_func), matching the
+# OPENADS_* env variables and the command line (--max_sessions etc.).
+# Case is ignored; a '-' in a key is accepted as '_' for backward
+# compatibility, but '_' is the one canonical form everywhere.
 #
 # PRECEDENCE: built-in defaults < this file < command-line flags
 # (--host, --port, ... given after --config still win).
@@ -72,7 +77,7 @@ max_sessions = 500
 data = .
 
 # ------------------------------------------------------------------
-# EnableFileFunc — allow client filesystem operations over the wire
+# enable_file_func — allow client filesystem operations over the wire
 # Default: 0 (disabled)
 # ------------------------------------------------------------------
 # When 1, remote oads_*/Ads* filesystem functions (FExist, FOpen,
@@ -80,7 +85,7 @@ data = .
 # by apps that log to files via OAds_FCreate/FWrite (B_BIG's
 # LogEvents does), but it lets clients read/write/delete files under
 # data= — enable only on trusted networks.
-# EnableFileFunc = 0
+# enable_file_func = 0
 
 # ------------------------------------------------------------------
 # legacy_paths — remount client-absolute paths onto data=
@@ -97,7 +102,7 @@ data = .
 # ------------------------------------------------------------------
 # error_log_path — directory for the SAP-style error log (ads_err.dbf)
 # Default: C:\ on Windows, /var/log/advantage on Linux (falls back to a
-# writable location if not writable). CLI --error-log-path; env
+# writable location if not writable). CLI --error_log_path; env
 # OPENADS_ERROR_LOG_PATH.
 # ------------------------------------------------------------------
 # Logs SQL failures, remote error frames, and server start/stop.
@@ -158,6 +163,7 @@ data = .
 # application .exe, or in the app working directory (or pointed to by
 # the OPENADS_INI env var) configures the client side. The matching
 # OPENADS_* environment variable always wins over the key here.
+# Keys follow the same canonical underscore notation.
 # ==================================================================
 
 # remote_only_access = 1  -- forbid local AdsOpenTable/AdsCreateTable

@@ -78,21 +78,55 @@ TEST_CASE("parse_ini tolerates CRLF line endings") {
 }
 
 TEST_CASE("parse_ini accepts dash/underscore aliases") {
+    // '-' in a key folds to '_': one canonical spelling everywhere.
     auto cfg = parse_ok("http-port = 9000\ndata_dir = /var/lib/openads\n");
     CHECK(cfg.http_port == 9000);
     CHECK(cfg.data_dir == "/var/lib/openads");
+}
+
+TEST_CASE("parse_ini canonical underscore form for every phrase key") {
+    auto cfg = parse_ok(
+        "http_port = 9001\n"
+        "enable_file_func = 1\n"
+        "legacy_paths = 1\n"
+        "error_log_path = C:/logs\n"
+        "error_log_max = 500\n"
+        "http_user = a:1\n"
+        "auth_user = b:2\n"
+        "max_sessions = 777\n");
+    CHECK(cfg.http_port == 9001);
+    CHECK(cfg.enable_file_func);
+    CHECK(cfg.legacy_paths);
+    CHECK(cfg.error_log_path == "C:/logs");
+    CHECK(cfg.error_log_max_kb == 500);
+    REQUIRE(cfg.http_users.size() == 1);
+    REQUIRE(cfg.auth_users.size() == 1);
+    CHECK(cfg.has_max_sessions);
+    CHECK(cfg.max_sessions == 777);
+    // dash forms land on the same fields
+    auto dash = parse_ok(
+        "enable-file-func = 1\nlegacy-paths = 1\nerror-log-max = 42\n"
+        "http-user = u:p\nauth-user = x:y\nmax-sessions = 12\n");
+    CHECK(dash.enable_file_func);
+    CHECK(dash.legacy_paths);
+    CHECK(dash.error_log_max_kb == 42);
+    REQUIRE(dash.http_users.size() == 1);
+    REQUIRE(dash.auth_users.size() == 1);
+    CHECK(dash.max_sessions == 12);
 }
 
 TEST_CASE("parse_ini max_sessions accepts dash alias and zero") {
     auto cfg = parse_ok("max-sessions = 1000\n");
     CHECK(cfg.has_max_sessions);
     CHECK(cfg.max_sessions == 1000);
+    auto underscore = parse_ok("max_sessions = 1000\n");
+    CHECK(underscore.max_sessions == 1000);
     auto zero = parse_ok("maxsessions = 0\n");
     CHECK(zero.has_max_sessions);
     CHECK(zero.max_sessions == 0);   // 0 = unlimited (valid)
     IniConfig bad;
     std::string err;
-    CHECK_FALSE(parse_ini("max_sessions = -5\n", cfg, err));
+    CHECK_FALSE(parse_ini("max_sessions = -5\n", bad, err));
     CHECK(err.find("max_sessions") != std::string::npos);
 }
 

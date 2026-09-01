@@ -1,5 +1,21 @@
 ## 1.09.18 - 2026-08-31
 
+### Changed — uniform notation: `_` everywhere (Pritpal Bedi)
+
+One canonical spelling for every phrase on the command line, in
+`openads.ini`, and in env variables: **underscore**.
+
+- `openads.ini` keys: `-` in a key now folds to `_` after lowercasing
+  (`error-log-max` == `error_log_max`), so the dash style the daemon
+  previously documented (`http-port`, `enable-file-func`) keeps
+  working, but every doc/sample now shows the underscore form.
+- Command line: the same fold applies after the leading `--`, so
+  `--max_sessions` and `--max-sessions`, `--http_port` and
+  `--http-port`, `--enable_file_func` and `--enable-file-func`, ...
+  are all the same flag. Canonical usage/help text uses `_`.
+- `openads.ini.sample` rewritten in the canonical underscore notation
+  with a NOTATION section explaining the rule.
+
 ### Added — `max_sessions` / `backlog` configurable via CLI + openads.ini (complete server config surface)
 
 The session cap (default 500, `OPENADS_SERVER_MAX_SESSIONS` since
@@ -9,17 +25,18 @@ set the env var by hand. Worse, the `backlog` ini key and `--backlog`
 CLI flag were parsed but never threaded to the listener (the banner
 printed them; `Server::start()` silently kept reading the env/256).
 
-- **`--max-sessions N`** CLI flag and **`max_sessions = N`** ini key
-  (dash/underscore aliases accepted). 0 = unlimited. Default unchanged:
-  env `OPENADS_SERVER_MAX_SESSIONS`, else 500.
+- **`--max_sessions N`** CLI flag and **`max_sessions = N`** ini key
+  (dash spelling accepted; `0` = unlimited). Default unchanged: env
+  `OPENADS_SERVER_MAX_SESSIONS`, else 500.
 - `Server::set_backlog(n)` override wired: `--backlog`/ini `backlog`
   now actually reach `listen()` for the primary and every extra
   listener (previously only `OPENADS_SERVER_BACKLOG`/256 applied).
 - **`openads.ini.sample` rewritten**: every server + client key with
   default value and explanation, precedence rules, the multi-port
   sections, and the full server env-var surface.
-- Tests: `parse_ini max_sessions` cases; suite 1519/1519 (573,258
-  assertions), plus a 700-connection create/append storm clean 7/7.
+- Tests: `parse_ini max_sessions` + canonical-notation cases; suite
+  1520/1520 (573,277 assertions), plus a 700-connection create/append
+  storm clean 7/7.
 
 ## 1.09.17 - 2026-08-31
 

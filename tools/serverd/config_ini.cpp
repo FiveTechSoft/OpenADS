@@ -27,6 +27,17 @@ std::string to_lower(std::string s) {
     return s;
 }
 
+// Canonical key form: lowercase, '-' folded to '_' so there is exactly
+// one spelling of every phrase everywhere (openads.ini, command line,
+// env vars) — e.g. max_sessions, http_port, enable_file_func.
+std::string canon_key(std::string s) {
+    s = to_lower(std::move(s));
+    for (char& c : s) {
+        if (c == '-') c = '_';
+    }
+    return s;
+}
+
 // Parse an unsigned integer in [0, max]. Rejects empty strings, non-digit
 // characters and out-of-range values so a typo (`port = 99999`) is a clear
 // error rather than a silent wraparound.
@@ -96,7 +107,7 @@ bool parse_ini(const std::string& text, IniConfig& out, std::string& error) {
                     ": expected key = value";
             return false;
         }
-        std::string key = to_lower(trim(t.substr(0, eq)));
+        std::string key = canon_key(trim(t.substr(0, eq)));
         std::string val = trim(t.substr(eq + 1));
 
         // Inside a [port:NNNN] section — accept data= only
@@ -134,8 +145,7 @@ bool parse_ini(const std::string& text, IniConfig& out, std::string& error) {
             }
             out.backlog = static_cast<int>(n);
             out.has_backlog = true;
-        } else if (key == "max_sessions" || key == "max-sessions" ||
-                   key == "maxsessions") {
+        } else if (key == "max_sessions" || key == "maxsessions") {
             unsigned long n = 0;
             if (!parse_uint(val, 0xFFFFFFFFul, n)) {
                 error = "line " + std::to_string(lineno) +
@@ -144,7 +154,7 @@ bool parse_ini(const std::string& text, IniConfig& out, std::string& error) {
             }
             out.max_sessions = static_cast<std::uint32_t>(n);
             out.has_max_sessions = true;
-        } else if (key == "http_port" || key == "http-port") {
+        } else if (key == "http_port") {
             unsigned long n = 0;
             if (!parse_uint(val, 65535, n)) {
                 error = "line " + std::to_string(lineno) +
@@ -156,8 +166,7 @@ bool parse_ini(const std::string& text, IniConfig& out, std::string& error) {
         } else if (key == "data" || key == "data_dir" || key == "datadir") {
             out.data_dir = val;
             out.has_data = true;
-        } else if (key == "enablefilefunc" || key == "enable_file_func" ||
-                   key == "enable-file-func") {
+        } else if (key == "enablefilefunc" || key == "enable_file_func") {
             out.has_enable_file_func = true;
             std::string v = val;
             for (char& c : v) {
@@ -165,8 +174,7 @@ bool parse_ini(const std::string& text, IniConfig& out, std::string& error) {
             }
             out.enable_file_func =
                 (v == "1" || v == "true" || v == "yes" || v == "on");
-        } else if (key == "legacypaths" || key == "legacy_paths" ||
-                   key == "legacy-paths") {
+        } else if (key == "legacypaths" || key == "legacy_paths") {
             out.has_legacy_paths = true;
             std::string v = val;
             for (char& c : v) {
@@ -174,11 +182,10 @@ bool parse_ini(const std::string& text, IniConfig& out, std::string& error) {
             }
             out.legacy_paths =
                 (v == "1" || v == "true" || v == "yes" || v == "on");
-        } else if (key == "error_log_path" || key == "error-log-path" ||
-                   key == "error_assert_logs") {
+        } else if (key == "error_log_path" || key == "error_assert_logs") {
             out.error_log_path = val;
             out.has_error_log_path = true;
-        } else if (key == "error_log_max" || key == "error-log-max") {
+        } else if (key == "error_log_max") {
             unsigned long n = 0;
             if (!parse_uint(val, 0xFFFFFFFFul, n) || n == 0) {
                 error = "line " + std::to_string(lineno) +
@@ -188,7 +195,7 @@ bool parse_ini(const std::string& text, IniConfig& out, std::string& error) {
             }
             out.error_log_max_kb = static_cast<std::uint32_t>(n);
             out.has_error_log_max = true;
-        } else if (key == "http_user" || key == "http-user") {
+        } else if (key == "http_user") {
             auto colon = val.find(':');
             if (colon == std::string::npos) {
                 error = "line " + std::to_string(lineno) +
@@ -197,7 +204,7 @@ bool parse_ini(const std::string& text, IniConfig& out, std::string& error) {
             }
             out.http_users.emplace_back(val.substr(0, colon),
                                         val.substr(colon + 1));
-        } else if (key == "auth_user" || key == "auth-user") {
+        } else if (key == "auth_user") {
             auto colon = val.find(':');
             if (colon == std::string::npos || colon == 0) {
                 error = "line " + std::to_string(lineno) +

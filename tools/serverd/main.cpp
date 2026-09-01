@@ -50,18 +50,22 @@ void on_signal(int) { g_running.store(false); }
 void usage(const char* argv0) {
     std::fprintf(stderr,
         "usage: %s [--host HOST] [--port PORT] [--backlog N]\n"
-        "          [--http-port PORT] [--data DIR] [--auth-user U:P]...\n"
-        "          [--http-user U:P]... [--error-log-path DIR]\n"
-        "          [--error-log-max KB]\n"
+        "          [--http_port PORT] [--data DIR] [--auth_user U:P]...\n"
+        "          [--http_user U:P]... [--error_log_path DIR]\n"
+        "          [--error_log_max KB]\n"
         "          [--listen PORT:DIR]...\n"
+        "Notation: '_' everywhere — on the command line both spellings of\n"
+        "a phrase are accepted (--http_port == --http-port), but the\n"
+        "canonical form is with underscore, matching openads.ini keys and\n"
+        "OPENADS_* env variables.\n"
         "  --host       bind address (default 0.0.0.0)\n"
         "  --port       TCP wire port (default 6262, 0 = ephemeral)\n"
         "  --backlog    listen() backlog (default: env OPENADS_SERVER_BACKLOG,\n"
         "               else 256; ini: backlog)\n"
-        "  --max-sessions N  cap on concurrent client sessions\n"
+        "  --max_sessions N  cap on concurrent client sessions\n"
         "               (default: env OPENADS_SERVER_MAX_SESSIONS, else 500;\n"
         "               0 = unlimited; ini: max_sessions)\n"
-        "  --http-port  if set, expose Studio web console on this port\n"
+        "  --http_port  if set, expose Studio web console on this port\n"
         "  --data       physical data root(s) on the SERVER (the jail).\n"
         "               Prefer forward slashes: --data C:/Temp\n"
         "               Semicolon-separated for more than one root,\n"
@@ -71,22 +75,22 @@ void usage(const char* argv0) {
         "  --listen PORT:DIR  extra listener on PORT serving tables from DIR.\n"
         "               Repeatable: --listen 6263:C:/app1 --listen 6264:C:/app2\n"
         "               Each port gets its own data jail (LetoDB-style).\n"
-        "  --enable-file-func   allow remote oads_*/Ads* filesystem ops\n"
-        "               under --data (default OFF; see EnableFileFunc)\n"
-        "  --legacy-paths       remount client-absolute paths onto --data\n"
+        "  --enable_file_func   allow remote oads_*/Ads* filesystem ops\n"
+        "               under --data (default OFF; see enable_file_func)\n"
+        "  --legacy_paths       remount client-absolute paths onto --data\n"
         "               (case-insensitive, ignore drive letter). ERP apps\n"
         "               that USE \"C:/Creative.RAM/...\" or \"E:/...\" keep\n"
         "               their sources; files land under --data. URI stays\n"
         "               logical (tcp://host:6262/C:/). Default OFF.\n"
         "               See cookbook/docs/local-and-remote.md\n"
-        "  --error-log-path DIR  directory for ads_err.dbf (SAP-style\n"
+        "  --error_log_path DIR  directory for ads_err.dbf (SAP-style\n"
         "               error log). Env OPENADS_ERROR_LOG_PATH also works.\n"
         "               ini: error_log_path / error_assert_logs\n"
-        "  --error-log-max KB    max size of ads_err.dbf (default 1000).\n"
+        "  --error_log_max KB    max size of ads_err.dbf (default 1000).\n"
         "               ini: error_log_max. See docs/en/error-log.md\n"
-        "  --http-user  user:password — register a Studio login\n"
+        "  --http_user  user:password — register a Studio login\n"
         "               (repeatable; if none given, console is open)\n"
-        "  --auth-user  user:password — require this login for TCP\n"
+        "  --auth_user  user:password — require this login for TCP\n"
         "               AdsConnect60 connections (repeatable)\n"
         "  --config     read settings from an openads.ini file (CLI flags\n"
         "               given after it still win); see openads.ini.sample\n"
@@ -94,8 +98,8 @@ void usage(const char* argv0) {
         "               writes an openads.ini and (optionally) a service\n"
         "  --version    print version + exit\n"
 #if defined(_WIN32)
-        "  --install-service [extra-flags...]   register Windows Service\n"
-        "  --uninstall-service                  deregister Windows Service\n"
+        "  --install_service [extra-flags...]   register Windows Service\n"
+        "  --uninstall_service                  deregister Windows Service\n"
         "  --service                            (internal — used by SCM)\n"
 #endif
         ,
@@ -126,6 +130,17 @@ struct Args {
 };
 
 bool parse_args(int argc, char** argv, Args& out) {
+    // Canonical CLI spelling folds '-' to '_' after the leading "--", so
+    // --max_sessions and --max-sessions are the same flag (one phrase,
+    // one canonical form with '_', per the uniform-notation rule).
+    auto flag_eq = [](const std::string& a, const char* canon) {
+        if (a.size() < 2 || a[0] != '-' || a[1] != '-') return false;
+        std::string body = a.substr(2);
+        for (char& c : body) {
+            if (c == '-') c = '_';
+        }
+        return body == canon;
+    };
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         // Skip Windows-service-mode markers consumed by main().
@@ -133,18 +148,18 @@ bool parse_args(int argc, char** argv, Args& out) {
         // --config is resolved before parse_args() (see load_config_and_args);
         // here we just consume its value so it is not flagged as unknown.
         if (a == "--config" && i + 1 < argc) { ++i; continue; }
-        if      (a == "--host"      && i + 1 < argc) out.host    = argv[++i];
-        else if (a == "--port"      && i + 1 < argc) out.port    = static_cast<std::uint16_t>(std::atoi(argv[++i]));
-        else if (a == "--backlog"   && i + 1 < argc) out.backlog = std::atoi(argv[++i]);
-        else if (a == "--max-sessions" && i + 1 < argc)
+        if      (flag_eq(a, "host")      && i + 1 < argc) out.host    = argv[++i];
+        else if (flag_eq(a, "port")      && i + 1 < argc) out.port    = static_cast<std::uint16_t>(std::atoi(argv[++i]));
+        else if (flag_eq(a, "backlog")   && i + 1 < argc) out.backlog = std::atoi(argv[++i]);
+        else if (flag_eq(a, "max_sessions") && i + 1 < argc)
             out.max_sessions = static_cast<std::uint32_t>(std::atoi(argv[++i]));
-        else if (a == "--http-port" && i + 1 < argc) out.http_port = static_cast<std::uint16_t>(std::atoi(argv[++i]));
-        else if (a == "--data"      && i + 1 < argc) out.data_dir = argv[++i];
-        else if (a == "--enable-file-func") out.enable_file_func = true;
-        else if (a == "--disable-file-func") out.enable_file_func = false;
-        else if (a == "--legacy-paths") out.legacy_paths = true;
-        else if (a == "--disable-legacy-paths") out.legacy_paths = false;
-        else if (a == "--listen" && i + 1 < argc) {
+        else if (flag_eq(a, "http_port") && i + 1 < argc) out.http_port = static_cast<std::uint16_t>(std::atoi(argv[++i]));
+        else if (flag_eq(a, "data")      && i + 1 < argc) out.data_dir = argv[++i];
+        else if (flag_eq(a, "enable_file_func")) out.enable_file_func = true;
+        else if (flag_eq(a, "disable_file_func")) out.enable_file_func = false;
+        else if (flag_eq(a, "legacy_paths")) out.legacy_paths = true;
+        else if (flag_eq(a, "disable_legacy_paths")) out.legacy_paths = false;
+        else if (flag_eq(a, "listen") && i + 1 < argc) {
             // --listen PORT:DIR  (e.g. --listen 6263:C:/app1)
             std::string spec = argv[++i];
             auto colon = spec.find(':');
@@ -171,12 +186,12 @@ bool parse_args(int argc, char** argv, Args& out) {
             pe.data_dir = std::move(dir);
             out.extra_listeners.push_back(std::move(pe));
         }
-        else if (a == "--error-log-path" && i + 1 < argc)
+        else if (flag_eq(a, "error_log_path") && i + 1 < argc)
             out.error_log_path = argv[++i];
-        else if (a == "--error-log-max"  && i + 1 < argc)
+        else if (flag_eq(a, "error_log_max")  && i + 1 < argc)
             out.error_log_max_kb =
                 static_cast<std::uint32_t>(std::atol(argv[++i]));
-        else if (a == "--http-user" && i + 1 < argc) {
+        else if (flag_eq(a, "http_user") && i + 1 < argc) {
             std::string up = argv[++i];
             auto colon = up.find(':');
             if (colon == std::string::npos) {
@@ -187,7 +202,7 @@ bool parse_args(int argc, char** argv, Args& out) {
             out.http_users.emplace_back(up.substr(0, colon),
                                          up.substr(colon + 1));
         }
-        else if (a == "--auth-user" && i + 1 < argc) {
+        else if (flag_eq(a, "auth_user") && i + 1 < argc) {
             std::string up = argv[++i];
             auto colon = up.find(':');
             if (colon == std::string::npos || colon == 0) {
@@ -623,10 +638,10 @@ int main(int argc, char** argv) {
             return 0;
         }
 #if defined(_WIN32)
-        if (a1 == "--install-service") {
+        if (a1 == "--install-service" || a1 == "--install_service") {
             return install_service(argc, argv);
         }
-        if (a1 == "--uninstall-service") {
+        if (a1 == "--uninstall-service" || a1 == "--uninstall_service") {
             return uninstall_service();
         }
         if (a1 == "--service") {
