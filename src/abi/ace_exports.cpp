@@ -11483,7 +11483,6 @@ UNSIGNED32 ENTRYPOINT AdsWriteRecord(ADSHANDLE hTable) {
     Table* t = get_table(hTable);
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
     bool is_insert = t->pending_append();
-    t->set_pending_append(false);
     std::uint32_t event_mask = is_insert ? 1u : 2u;
 
     if (is_insert) {
@@ -11526,7 +11525,20 @@ UNSIGNED32 ENTRYPOINT AdsWriteRecord(ADSHANDLE hTable) {
 
     // Always settle the dirty record buffer (field replaces coalesce until
     // here). deferred_flush only skips OS FlushFileBuffers / index fsync.
-    if (t->deferred_flush()) {
+    // A bare append (AdsAppendRecord + WriteRecord with NO field writes)
+    // never marked the row dirty, so commit_dirty_record would skip it and
+    // the record would stay unkeyed (the blank-key test pins this). Key it
+    // here exactly once: append_record deliberately does not key eagerly
+    // (the eager per-append insert measured a ~40% remote append
+    // regression — see the NOTE in Table::append_record()).
+    if (is_insert && !t->record_dirty()) {
+        auto r = t->commit_bare_append();
+        if (!r) return fail(r.error());
+        if (!t->deferred_flush()) {
+            auto r2 = t->flush();
+            if (!r2) return fail(r2.error());
+        }
+    } else if (t->deferred_flush()) {
         auto r = t->commit_dirty_record();
         if (!r) return fail(r.error());
     } else {

@@ -1,4 +1,4 @@
-#include "engine/table.h"
+﻿#include "engine/table.h"
 
 #include "session/connection.h"
 
@@ -352,6 +352,31 @@ util::Result<void> Table::sync_all_indexes_(
         const bool need_insert = !s.prev_included || key_not_inserted_yet;
         if (prev_key == new_key && !need_insert) continue;
 
+        // key_not_inserted_yet also means there is nothing to erase: the
+        // view never saw this recno. Attempting the erase walks the tree
+        // for a guaranteed 5044 miss — on large bags that measured as the
+        // bulk of the v1.09.13 append regression. Insert directly.
+        if (key_not_inserted_yet) {
+            if (idx->unique()) {
+                auto sr = idx->seek_key(new_key, /*soft=*/false);
+                if (sr) {
+                    const auto& so = sr.value();
+                    if (so.positioned &&
+                        so.hit == openads::drivers::SeekHit::Exact &&
+                        so.recno != recno_) {
+                        return util::Error{openads::AE_UNIQUE_INDEX_VIOLATION,
+                            0, "duplicate key value in unique index '" +
+                            idx->expression() + "'", ""};
+                    }
+                }
+            }
+            if (auto e = idx->insert(recno_, new_key); !e) {
+                return e.error();
+            }
+            append_keys_done_.insert(idx);
+            continue;
+        }
+
         if (!prev_key.empty() && prev_key != new_key && s.prev_included) {
             if (auto e = idx->erase(recno_, prev_key); !e) {
                 if (!tolerate_missing_erase) return e.error();
@@ -423,12 +448,31 @@ void Table::discard_dirty_() noexcept {
 }
 
 util::Result<void> Table::commit_dirty_record() {
+    // Only genuinely dirty rows go through here. A bare append
+    // (AdsAppendRecord + WriteRecord with NO field writes) is keyed via
+    // commit_bare_append(), called from the ABI's AdsWriteRecord; keeping
+    // the two paths separate avoids a redundant writeback per appended
+    // record (the ~40% v1.09.13 append regression).
     if (!record_dirty_) return {};
     if (auto wb = writeback_record_(); !wb) return wb.error();
     auto snap = std::move(index_snap_);
     record_dirty_ = false;
     pending_append_ = false;
     index_snap_.clear();
+    return sync_all_indexes_(snap);
+}
+
+util::Result<void> Table::commit_bare_append() {
+    // Key a never-field-edited appended record (the blank-key test pins
+    // this): snapshot the current blank state and let sync_all_indexes_
+    // insert exactly one key per bound view. No writeback: append_record
+    // already wrote the row; this only makes it visible to the index.
+    if (auto r = ensure_writable_(); !r) return r.error();
+    if (!pending_append_) return {};
+    pending_append_ = false;
+    append_pending_recno_ = recno_;
+    append_keys_done_.clear();
+    auto snap = snapshot_index_keys_();
     return sync_all_indexes_(snap);
 }
 
@@ -2185,7 +2229,7 @@ bool Table::is_field_empty(std::uint16_t field_idx) {
     if (field_idx >= fields.size()) return false;
     const auto& f = fields[field_idx];
 
-    // ADT: empty ≡ NULL (AdsIsEmpty "determines if a given field is
+    // ADT: empty = NULL (AdsIsEmpty "determines if a given field is
     // empty (null)"; the sentinel IS the empty value). A VFP NULL also
     // reports empty.
     if (f.adt) return is_field_null(field_idx);

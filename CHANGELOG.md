@@ -13,22 +13,32 @@ same machine/OS state):
 | **v1.09.13 (760ad3d)** | **~660 rec/s (−39%)** |
 | with the CDX deleted | ~3010 rec/s (fast — cost is index maintenance) |
 
-Root cause: 760ad3d ("index correctness under intensive use") added an
-**eager blank-key insert** in `Table::append_record()` — every append
-immediately inserted a blank key into every bound index, which the
-write then erased before inserting the real key: 3 B-tree mutations per
-appended record instead of 1.
+Root cause: 760ad3d ("index correctness under intensive use") reworked
+the append/commit flow so that every appended record paid extra B-tree
+and physical-write work:
 
-Fix: the eager insert is removed. All of 760ad3d's correctness is kept
-by the write path — `append_pending_recno_` tolerates the never-inserted
-blank erase, and `key_not_inserted_yet` forces the first insert of a
-fresh append even when the key is unchanged (the blank-key trap the
-commit fixed). A bare, never-written append stays unkeyed until its
-first commit, matching SAP (an uncommitted append is not visible to
-reads). Verified: the ~40-case intensive index battery
+- an **eager blank-key insert** in `Table::append_record()` — the write
+  then erased it before inserting the real key: 3 B-tree mutations per
+  appended record instead of 1;
+- the append-commit flow routed a bare append through a **second,
+  redundant writeback** (the row was already on disk);
+- the fresh-append erase attempt walked the tree for a guaranteed 5044
+  miss before every first insert.
+
+Fix: `append_record()` no longer keys eagerly; the fresh-append erase is
+skipped when the view provably never saw the recno
+(`key_not_inserted_yet` → direct insert); and a bare append
+(`AdsAppendRecord` + `AdsWriteRecord` with no field writes — the
+all-space-NAME case 760ad3d fixed) is keyed exactly once at write time
+by a new `Table::commit_bare_append()` with no writeback. All of
+760ad3d's correctness is kept: `append_pending_recno_` tolerates the
+never-inserted blank erase and `key_not_inserted_yet` forces the first
+insert of a fresh append even when the key is unchanged (the blank-key
+trap). Verified: the ~40-case intensive index battery
 (`abi_index_intensive*`, blank-key, FOR, unique) passes unchanged, full
 suite 1520/1520 (573,277 assertions), and the remote append bench is
-back to ~1060 rec/s (v1.09.12 parity).
+back to ~1000 rec/s (v1.09.12 parity, measured 987–1002 vs 960–1071
+across runs).
 
 ### Changed — uniform notation: `_` everywhere (Pritpal Bedi)
 

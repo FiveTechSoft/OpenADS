@@ -291,6 +291,9 @@ public:
     // N disk+index updates for N field replaces on one row.
     bool record_dirty() const noexcept { return record_dirty_; }
     util::Result<void> commit_dirty_record();
+    // Key a bare append (AppendRecord + WriteRecord, no field writes):
+    // snapshot + sync, no writeback. Called from AdsWriteRecord.
+    util::Result<void> commit_bare_append();
 
     util::Result<void> flush();
     util::Result<void> enable_cache(std::uint16_t cache_mode);

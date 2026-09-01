@@ -23,11 +23,13 @@ int main(int argc, char** argv) {
 
     const char* host = "192.168.18.184";
     int port = 6262;
+    const char* dir = "//home/antonio/OpenADS/bench_data";
     if (argc > 2) host = argv[2];
     if (argc > 3) port = atoi(argv[3]);
+    if (argc > 4) dir = argv[4];
 
     char uri[256];
-    snprintf(uri, sizeof(uri), "tcp://%s:%d//home/antonio/OpenADS/bench_data", host, port);
+    snprintf(uri, sizeof(uri), "tcp://%s:%d%s", host, port, dir);
     fprintf(stderr, "Connecting to %s ...\n", uri);
 
     double t_total0 = now_ms();
