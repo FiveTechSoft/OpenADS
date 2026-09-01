@@ -1,5 +1,35 @@
 ## 1.09.18 - 2026-08-31
 
+### Fixed — ~40% remote append regression with an active index (v1.09.13 regression, Pritpal Bedi report)
+
+"v1.8.x appended 70,000 records in 5 minutes; now it's much slower."
+Bisected with a controlled A/B (`remote_bench`, 20k appends onto a
+20k-row table with the production CDX auto-opened, warm runs,
+same machine/OS state):
+
+| Build | append rate (remote, CDX active) |
+|---|---|
+| v1.8.77 … v1.09.12 | ~1070 rec/s |
+| **v1.09.13 (760ad3d)** | **~660 rec/s (−39%)** |
+| with the CDX deleted | ~3010 rec/s (fast — cost is index maintenance) |
+
+Root cause: 760ad3d ("index correctness under intensive use") added an
+**eager blank-key insert** in `Table::append_record()` — every append
+immediately inserted a blank key into every bound index, which the
+write then erased before inserting the real key: 3 B-tree mutations per
+appended record instead of 1.
+
+Fix: the eager insert is removed. All of 760ad3d's correctness is kept
+by the write path — `append_pending_recno_` tolerates the never-inserted
+blank erase, and `key_not_inserted_yet` forces the first insert of a
+fresh append even when the key is unchanged (the blank-key trap the
+commit fixed). A bare, never-written append stays unkeyed until its
+first commit, matching SAP (an uncommitted append is not visible to
+reads). Verified: the ~40-case intensive index battery
+(`abi_index_intensive*`, blank-key, FOR, unique) passes unchanged, full
+suite 1520/1520 (573,277 assertions), and the remote append bench is
+back to ~1060 rec/s (v1.09.12 parity).
+
 ### Changed — uniform notation: `_` everywhere (Pritpal Bedi)
 
 One canonical spelling for every phrase on the command line, in

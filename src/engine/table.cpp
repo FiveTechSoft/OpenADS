@@ -1189,47 +1189,16 @@ util::Result<void> Table::append_record() {
     if (tx_ && tx_->active()) {
         tx_->note_append(tid_, recno_);
     }
-    // Key the new record immediately in every bound view that accepts it:
-    // an append that is never field-edited used to stay invisible to the
-    // index (bulk walks lost the record, key counts ran short). Unique
-    // views defer to the first real-key commit — two blank keys must not
-    // collide in a unique bag. Conditional views only when the blank
-    // record already matches their FOR. ADT tables are excluded: the
-    // commit-time sync keys ADT appends correctly through the tolerated
-    // missing-erase path, and the ADI v1 erase/insert path has its own
-    // duplication quirks (pre-existing) that an early blank-key insert
-    // would leave behind as stranded entries.
-    {
-        const bool is_adt =
-            dynamic_cast<drivers::adt::AdtDriver*>(driver_.get()) != nullptr;
-        std::vector<drivers::IIndex*> views;
-        auto push_view = [&views](drivers::IIndex* idx) {
-            if (idx == nullptr) return;
-            // Same dedup as snapshot_index_keys_: a tag bound both as the
-            // active order and as a parked extra view must not be keyed
-            // twice per append.
-            for (auto* o : views) {
-                if (o == idx) return;
-            }
-            views.push_back(idx);
-        };
-        if (!is_adt) {
-            if (order_ && order_->index()) push_view(order_->index());
-            for (auto* x : extra_index_views_) push_view(x);
-        }
-        for (auto* idx : views) {
-            if (idx->unique()) continue;
-            const std::string& cond = idx->condition();
-            if (!cond.empty() &&
-                !evaluate_index_expr_truthy(*this, cond)) {
-                continue;
-            }
-            if (auto e = idx->insert(recno_, compute_index_key_(idx)); !e) {
-                return e.error();
-            }
-            append_keys_done_.insert(idx);
-        }
-    }
+    // NOTE: the new record is intentionally NOT keyed here. An eager
+    // blank-key insert at append time (tried in 760ad3d) costs two extra
+    // B-tree mutations per appended record (insert blank + erase blank at
+    // write) and measured a ~40% remote append slowdown with an active
+    // CDX (1081 -> 660 rec/s). Everything the eager insert protected is
+    // covered by the write path: append_pending_recno_ makes the blank
+    // erase tolerated, and key_not_inserted_yet forces the first insert
+    // of a fresh append even when the key is unchanged (blank-key trap).
+    // A bare, never-written append stays unkeyed until its first commit —
+    // matching SAP, where an uncommitted append is not visible to reads.
     return {};
 }
 

@@ -1,5 +1,22 @@
 # Release notes — v1.09.18 (2026-08-31)
 
+## Fixed — ~40% remote append regression with an active index (v1.09.13 regression)
+
+"v1.8.x appended 70,000 records in 5 minutes; now it's much slower"
+(Pritpal Bedi). Bisected to **v1.09.13 (760ad3d)**: every append eagerly
+inserted a blank key into every bound index, which the write then
+erased before inserting the real key — 3 B-tree mutations per appended
+record instead of 1. Measured −39% on remote appends with an active CDX
+(~1070 → ~660 rec/s).
+
+The eager insert is removed; all of 760ad3d's correctness is kept by
+the write path (`append_pending_recno_` tolerates the never-inserted
+blank erase; `key_not_inserted_yet` forces the first insert of a fresh
+append even when the key is unchanged). The ~40-case intensive index
+battery passes unchanged; the bench is back to ~1060 rec/s (v1.09.12
+parity). Remote appends with no active index were never affected
+(~3010 rec/s in both).
+
 ## Notation — one canonical spelling: `_` everywhere (Pritpal Bedi)
 
 Every phrase now has a single canonical form on the command line, in
@@ -52,6 +69,8 @@ backlog      = 256    ; absorb the connect burst
 - Remote create/index/append storm at **700 concurrent connections**
   (the B_BIG staging dance: create → 3 CDX tags → shared open → 10
   appends each, then physical DBF+CDX validation): **7/7 clean runs**.
+- Regression bench: remote appends with active CDX restored to ~1060
+  rec/s (v1.09.12 parity, was ~660 since v1.09.13).
 - New `parse_ini` cases: canonical underscore keys, dash aliases fold
   to the same field, `max_sessions` with `0=unlimited`, rejection of
   garbage.
