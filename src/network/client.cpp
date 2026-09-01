@@ -1213,7 +1213,15 @@ util::Result<void> RemoteConnection::lock_record(std::uint32_t id,
     // interleave instead of starving behind ours (Pritpal Bedi:
     // "dbUnlock() in threads fail somehow").
     const auto policy = openads::abi::lock_retry_policy();
-    for (std::uint16_t i = 0; ; ++i) {
+    // Budget = retry_count x cycle_ms (the plain ACE total-wait contract),
+    // but early attempts recheck after a few ms (adaptive backoff): a
+    // short contention — the common case — resolves in single-digit ms
+    // instead of one 100ms slice (700-instance B_BIG measured a full
+    // ~1.4s per contended RLock with the flat quantum).
+    const auto t0 = std::chrono::steady_clock::now();
+    const auto deadline =
+        t0 + std::chrono::milliseconds(policy.budget_ms());
+    for (std::uint32_t i = 0; ; ++i) {
         Frame req; req.opcode = Opcode::LockRecord;
         write_u32_le(id, req.payload);
         write_u32_le(recno, req.payload);
@@ -1231,11 +1239,11 @@ util::Result<void> RemoteConnection::lock_record(std::uint32_t id,
             }
             return rep.error();
         }
-        if (i >= policy.retry_count) return rep.error();
-        if (policy.cycle_ms > 0) {
-            std::this_thread::sleep_for(
-                std::chrono::milliseconds(policy.cycle_ms));
+        if (i >= policy.retry_count &&
+            std::chrono::steady_clock::now() >= deadline) {
+            return rep.error();
         }
+        openads::abi::lock_retry_sleep(i);
     }
 }
 
@@ -1290,9 +1298,13 @@ util::Result<std::vector<std::uint32_t>> RemoteConnection::get_all_locks(
 }
 
 util::Result<void> RemoteConnection::lock_table(std::uint32_t id) {
-    // Same client-side retry as lock_record (see there).
+    // Same client-side retry as lock_record (see there): budget =
+    // retry_count x cycle_ms with adaptive early backoff.
     const auto policy = openads::abi::lock_retry_policy();
-    for (std::uint16_t i = 0; ; ++i) {
+    const auto t0 = std::chrono::steady_clock::now();
+    const auto deadline =
+        t0 + std::chrono::milliseconds(policy.budget_ms());
+    for (std::uint32_t i = 0; ; ++i) {
         Frame req; req.opcode = Opcode::LockTable;
         write_u32_le(id, req.payload);
         auto rep = request(req);
@@ -1306,11 +1318,11 @@ util::Result<void> RemoteConnection::lock_table(std::uint32_t id) {
             }
             return rep.error();
         }
-        if (i >= policy.retry_count) return rep.error();
-        if (policy.cycle_ms > 0) {
-            std::this_thread::sleep_for(
-                std::chrono::milliseconds(policy.cycle_ms));
+        if (i >= policy.retry_count &&
+            std::chrono::steady_clock::now() >= deadline) {
+            return rep.error();
         }
+        openads::abi::lock_retry_sleep(i);
     }
 }
 
