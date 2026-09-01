@@ -1,3 +1,29 @@
+## 1.09.19 - 2026-09-01
+
+### Fixed — contended-lock wait slices: flat 100 ms retry → adaptive backoff (Pritpal Bedi)
+
+"ADSCDX is imposing some wait slices on threads implementation which
+has expanded the duration of operations." Confirmed: the lock-retry
+loop slept a **flat 100 ms per attempt** (the ACE default cycle —
+`retry_count` 10 × `cycle_ms` 100). Under low contention the retries
+rarely fire, but with 700 B_BIG instances × 10 threads contending on
+one table, every contended `RLock`/`FLock` paid the full slices.
+Measured with a contended-RLock probe: worst-case acquisition latency
+**1397 ms**, almost all of it sleep while the record was already free.
+
+Fix: adaptive ladder — attempts 1-6 recheck after 2/4/8/16/32/64 ms,
+later attempts keep the configured `cycle_ms` quantum, and the loop
+continues until the **total budget** (`retry_count × cycle_ms`, the
+plain SAP `AdsSetLockCycle`/`AdsSetLockRetryCount` contract) is
+exhausted. `AdsSetLockCycle`/`AdsSetLockRetryCount` still control the
+ceiling, so `AE_LOCK_FAILED` timing semantics are unchanged. Applied to
+the ABI `lock_with_retry` (local tables) and the wire client
+`lock_record`/`lock_table` (the server already fails fast).
+
+Measured: contended-RLock worst case **1397 ms → 197 ms (7×)**, p50
+unchanged. Suite 1520/1520 (573,277 assertions), including the
+multi-thread contention tests pinning the retry semantics.
+
 ## 1.09.18 - 2026-08-31
 
 ### Fixed — ~40% remote append regression with an active index (v1.09.13 regression, Pritpal Bedi report)
