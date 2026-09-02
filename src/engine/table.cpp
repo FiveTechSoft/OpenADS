@@ -1222,11 +1222,14 @@ util::Result<void> Table::append_record() {
     // xBase / ACE semantics: a freshly-appended record in a shared table is
     // automatically locked, so immediate field sets pass the GoHot write
     // guard (which is physical-lock based — hb_dbfGoHot checks
-    // hb_dbfIsLocked). The lock used to be taken only by the ABI's
-    // AdsAppendRecord; engine-level callers (SQL INSERT, server AppendBlank)
-    // need it too. Best-effort: the lock layer no-ops in read/exclusive
-    // modes, and contention on a brand-new recno cannot occur.
-    (void)try_lock_record_excl(recno_);
+    // hb_dbfIsLocked). Must WAIT (lock_record_excl), not try_lock: CDX
+    // compatible lock bytes alias across recnos, and ignoring a failed
+    // try left B_BIG N=700 with durable blank rows (REPLACE ran unlocked
+    // and stopped mid-field). Exclusive/read modes no-op inside
+    // lock_record_excl.
+    if (auto lk = lock_record_excl(recno_); !lk) {
+        return lk.error();
+    }
     // Mark the table as "pending append" so AdsWriteRecord classifies the
     // commit as an insert for RI / trigger handling.
     pending_append_ = true;
