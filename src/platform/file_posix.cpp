@@ -17,7 +17,11 @@ namespace {
 
 util::Error os_error(const char* op) {
     util::Error e;
-    e.code     = (errno == ENOENT) ? 5103 : 5000;
+    e.code     = (errno == ENOENT) ? 5103
+                 : (errno == EACCES || errno == ETXTBSY ||
+                    errno == EAGAIN || errno == EWOULDBLOCK)
+                       ? 7040
+                       : 5000;
     e.sub_code = errno;
     e.message  = op;
     e.message += ": ";

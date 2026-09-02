@@ -14,7 +14,10 @@ util::Error os_error(const char* op) {
     util::Error e;
     e.code = (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND)
                  ? 5103   // AE_TABLE_NOT_FOUND-style placeholder
-                 : 5000;  // AE_INTERNAL_ERROR placeholder
+                 : (code == ERROR_SHARING_VIOLATION ||
+                    code == ERROR_LOCK_VIOLATION)
+                       ? 7040  // AE_FILE_IN_USE (create/open vs exclusive hold)
+                       : 5000;  // AE_INTERNAL_ERROR placeholder
     e.sub_code = static_cast<std::int32_t>(code);
     char buf[256] = {};
     ::FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,

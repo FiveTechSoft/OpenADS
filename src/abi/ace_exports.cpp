@@ -13415,6 +13415,21 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
     }
     auto path = p.string();
 
+    // Same per-bag mutex AdsCreateIndex61 holds around create-or-attach.
+    // Taken BEFORE index_bindings_mu (leaf create lock first) so OpenIndex
+    // waits out a racing INDEX ON instead of reading a half-written header
+    // (5103/6106) or a sharing-violation 5000. B_BIG N=700 logged
+    // OpenIndex: TestIndex.cdx / 5103 during concurrent tag creates.
+    std::lock_guard<std::mutex> bag_lk(create_path_mu_for(path));
+    {
+        std::error_code ec;
+        if (!fs::exists(p, ec)) {
+            // Missing bag is "no file", not AE_TABLE_CORRUPTED (5103).
+            // File::open ENOENT used to bubble 5103 from list_tags and
+            // poison B_BIG's dbSetIndex during a racing INDEX ON.
+            return fail(openads::AE_NO_FILE_FOUND, path.c_str());
+        }
+    }
     std::lock_guard<std::recursive_mutex> _oi_lk(index_bindings_mu());
     auto& m   = index_bindings();
     auto& act = active_binding_for();

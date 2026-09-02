@@ -106,6 +106,7 @@ add_executable(openads_unit_tests
     unit/abi_remote_create_table_test.cpp
     unit/abi_create_concurrent_test.cpp
     unit/abi_remote_create_stress_test.cpp
+    unit/abi_openindex_create_race_test.cpp
     unit/abi_refresh_extract_test.cpp
     unit/abi_create_index61_test.cpp
     unit/abi_index_expr_validation_test.cpp
