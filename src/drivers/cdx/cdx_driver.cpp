@@ -306,7 +306,14 @@ CdxDriver::append_record_raw(const std::uint8_t* buf, std::size_t n) {
     if (n != rec_len_) {
         return util::Error{5000, 0, "record buffer length mismatch", ""};
     }
-    auto lk = acquire_with_retry_(file_, kHeaderLockOff, kHeaderLockLen);
+    // Blocking wait, not acquire_with_retry_ (10 s then fail). B_BIG
+    // N=700 has ~7000 threads in append_record_raw; the 10 s spin-timeout
+    // dropped waiters so the storm stalled ~17k/70k. The header lock is
+    // one byte past EOF and is released as soon as the count is rewritten,
+    // so a kernel wait is a fair FIFO and does not interact with Browse
+    // rec-locks (those sit at 0x40000000+hdr+(recno-1)*rlen).
+    auto lk = platform::ByteLock::acquire(
+        file_, kHeaderLockOff, kHeaderLockLen, platform::LockKind::Exclusive);
     if (!lk) return lk.error();
     if (auto rh = refresh_record_count_(); !rh) return rh.error();
     std::uint32_t new_recno = rec_count_ + 1;

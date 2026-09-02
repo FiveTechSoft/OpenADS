@@ -46,8 +46,8 @@ TEST_CASE("remote contended append auto-locks and fills every NAME") {
     std::string uri = "tcp://127.0.0.1:" + std::to_string(port) + "/" +
                       dir.generic_string();
 
-    const int workers = 32;
-    const int per = 10;
+    const int workers = 64;
+    const int per = 20;
     std::atomic<int> unlocked_append{0};
     std::atomic<int> append_fail{0};
     std::atomic<int> field_fail{0};
