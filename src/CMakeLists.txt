@@ -341,7 +341,12 @@ if(WIN32)
         file(READ "${OPENADS_ACE_DEF}" _ace_def_raw)
         string(REGEX REPLACE "(^|\n)[ \t]*;[^\n]*" "\\1" _ace_def_clean "${_ace_def_raw}")
         string(REGEX REPLACE "(^|\n)[ \t]*LIBRARY[ \t]*(\n|$)" "\\1" _ace_def_clean "${_ace_def_clean}")
+        # Collapse to a single EXPORTS header: the x86 stdcall def repeats
+        # LIBRARY/EXPORTS per section, and a second EXPORTS line reaches GNU
+        # ld as a plain (invalid) symbol name -> "syntax error" at link.
+        string(REGEX REPLACE "(^|\n)[ \t]*EXPORTS[ \t]*(\n|$)" "\n" _ace_def_clean "${_ace_def_clean}")
         string(REGEX REPLACE "^[ \t\n]+" "" _ace_def_clean "${_ace_def_clean}")
+        string(PREPEND _ace_def_clean "EXPORTS\n")
         set(_ace_def_gnu "${CMAKE_CURRENT_BINARY_DIR}/openads_ace.gnu.def")
         file(WRITE "${_ace_def_gnu}" "${_ace_def_clean}")
         target_sources(openads_ace PRIVATE "${_ace_def_gnu}")
