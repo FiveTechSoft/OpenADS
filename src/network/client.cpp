@@ -1887,7 +1887,11 @@ util::Result<void> RemoteConnection::set_order(std::uint32_t table_id,
     auto rep = request(req);
     if (!rep) return rep.error();
     if (rep.value().opcode != Opcode::SetOrderAck) {
-        return util::Error{5000, 0, "SetOrder: server error", ""};
+        std::int32_t code = 5000;
+        if (rep.value().payload.size() >= 4)
+            code = static_cast<std::int32_t>(
+                read_u32_le(rep.value().payload.data()));
+        return util::Error{code, 0, "SetOrder: server error", ""};
     }
     return {};
 }
@@ -1901,7 +1905,11 @@ RemoteConnection::set_order_by_name(std::uint32_t table_id,
     auto rep = request(req);
     if (!rep) return rep.error();
     if (rep.value().opcode != Opcode::SetOrderByNameAck) {
-        return util::Error{5000, 0, "SetOrderByName: server error", tag};
+        std::int32_t code = 5000;
+        if (rep.value().payload.size() >= 4)
+            code = static_cast<std::int32_t>(
+                read_u32_le(rep.value().payload.data()));
+        return util::Error{code, 0, "SetOrderByName: server error", tag};
     }
     return {};
 }

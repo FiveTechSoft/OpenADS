@@ -2726,8 +2726,22 @@ DispatchResult Session::dispatch(const Frame& f) {
             std::uint32_t iid = read_u32_le(f.payload.data() + 4);
             ADSHANDLE ht = ensure_abi_handle(tid);
             if (ht == 0) { reply = err("SetOrder: bad table id"); break; }
+            // iid 0 = natural order (rddads DbSetOrder(0)). A missing
+            // map entry used to err() with default 5000 and poison B_BIG.
+            if (iid == 0) {
+                UNSIGNED32 rrc = AdsSetIndexOrder(ht, nullptr);
+                if (rrc != 0) { reply = err("SetOrder", rrc); break; }
+                ordered_tables_.erase(tid);
+                sync_engine_cursor(tid);
+                reply.opcode = Opcode::SetOrderAck;
+                break;
+            }
             auto iit = index_h_.find(iid);
-            if (iit == index_h_.end()) { reply = err("SetOrder: bad index id"); break; }
+            if (iit == index_h_.end()) {
+                reply = err("SetOrder: unknown index id",
+                            openads::AE_NO_FILE_FOUND);
+                break;
+            }
             UNSIGNED32 rrc = AdsSetIndexOrderByHandle(ht, iit->second);
             if (rrc != 0) { reply = err("SetOrder", rrc); break; }
             ordered_tables_.insert(tid);
