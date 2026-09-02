@@ -106,6 +106,7 @@ struct AppendGate {
     std::mutex mu;
     std::condition_variable cv;
     int active = 0;
+    static constexpr int kMaxInFlight = 32;
 };
 
 AppendGate& append_gate_for(std::string key) {
@@ -128,18 +129,18 @@ public:
         std::unique_lock<std::mutex> lk(g_->mu);
         const auto deadline = std::chrono::steady_clock::now() +
             std::chrono::milliseconds(timeout_ms == 0 ? 1 : timeout_ms);
-        while (g_->active > 0) {
+        while (g_->active >= AppendGate::kMaxInFlight) {
             if (g_->cv.wait_until(lk, deadline) == std::cv_status::timeout)
                 return false;
         }
-        g_->active = 1;
+        ++g_->active;
         held_ = true;
         return true;
     }
     ~AppendTurn() {
         if (!held_ || g_ == nullptr) return;
         std::lock_guard<std::mutex> lk(g_->mu);
-        g_->active = 0;
+        if (g_->active > 0) --g_->active;
         g_->cv.notify_one();
     }
 private:
