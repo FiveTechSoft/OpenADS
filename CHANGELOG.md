@@ -1,3 +1,25 @@
+## 1.09.20 - unreleased
+
+### Fixed — B_BIG N=700 OpenIndex 5103 / SetOrder 5000 / unlocked append blanks (Pritpal Bedi)
+
+Unmodified `B_BIG.exe` × 700 remote instances stalled at 22 084 / 70 000
+rows: `ads_err` logged `OpenIndex: TestIndex.cdx` 5103 (header race vs
+`INDEX ON`), `SetOrder` 5000 (`iid` missing → `err()` default), and
+580 durable blank `INS` fields (append `try_lock` ignored).
+
+- `AdsOpenIndex` waits on the same per-path create mutex as
+  `AdsCreateIndex61`; missing bag is 5018 not 5103; sharing-violation
+  maps to 7040.
+- Wire `SetOrder` iid 0 is natural order (Ack); unknown iid is 5018
+  not 5000.
+- `Table::append_record` takes a blocking record lock so REPLACE cannot
+  run on an unlocked blank.
+
+C++ no-barrier remote storm (32 workers) is green. Unmodified
+`B_BIG.exe` × 700 no longer logs 5103/5000 and blank `INS` dropped
+from 580 → 20, but the Harbour WVT `Browse()` storm still stalls
+short of 70 000 (lock convoy); that remaining soak is not this patch.
+
 ## 1.09.19 - 2026-09-01
 
 ### Fixed — contended-lock wait slices: flat 100 ms retry → adaptive backoff (Pritpal Bedi)

@@ -80,7 +80,7 @@ struct WorkerResult {
 };
 
 void stress_worker(const fs::path& dir, std::uint16_t port, int id,
-                   Barrier& phase_b, WorkerResult& out) {
+                   Barrier* phase_b, WorkerResult& out) {
     auto fail = [&](const char* what, UNSIGNED32 rc) {
         char buf[160];
         std::snprintf(buf, sizeof(buf), "w%d %s rc=%u", id, what, rc);
@@ -88,7 +88,11 @@ void stress_worker(const fs::path& dir, std::uint16_t port, int id,
     };
 
     ADSHANDLE hConn = stress_connect(dir, port);
-    if (hConn == 0) { fail("connect", 0xFFFFFFFFu); phase_b.wait(); return; }
+    if (hConn == 0) {
+        fail("connect", 0xFFFFFFFFu);
+        if (phase_b) phase_b->wait();
+        return;
+    }
 
     // Stagger starts so creates overlap opens/indexing/appends of peers.
     std::this_thread::sleep_for(std::chrono::milliseconds(id % 8));
@@ -146,13 +150,16 @@ void stress_worker(const fs::path& dir, std::uint16_t port, int id,
         }
     }
 
-    // All workers past the create/index phase before anyone appends, so
-    // the expected record count is exact (a SAP-legal overwrite of a
-    // closed table cannot wipe already-appended rows).
-    phase_b.wait();
-    if (!out.errors.empty()) {
-        AdsDisconnect(hConn);
-        return;
+    // Optional barrier: the original storm waits so a SAP-legal overwrite
+    // of a closed table cannot wipe already-appended rows. B_BIG has no
+    // barrier — OpenIndex overlaps INDEX ON — so the no-barrier sibling
+    // passes nullptr.
+    if (phase_b) {
+        phase_b->wait();
+        if (!out.errors.empty()) {
+            AdsDisconnect(hConn);
+            return;
+        }
     }
 
     // -- step 3: shared open + append 10 --------------------------------
@@ -164,6 +171,13 @@ void stress_worker(const fs::path& dir, std::uint16_t port, int id,
         ADSHANDLE ah[8] = {0};
         UNSIGNED16 nidx = 8;   // capacity in, count out
         rc = AdsOpenIndex(hT, cdx, ah, &nidx);
+        if (rc != 0 && (rc == 7040u || rc == 5018u || rc == 5059u)) {
+            for (int t = 0; t < 20 && rc != 0; ++t) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                nidx = 8;
+                rc = AdsOpenIndex(hT, cdx, ah, &nidx);
+            }
+        }
         if (rc != 0) fail("OpenIndex", rc);
     }
     UNSIGNED8 fName[] = "NAME";
@@ -236,7 +250,7 @@ TEST_CASE("remote create/index/append storm keeps DBF+CDX intact [slow]" *
         pool.reserve(workers);
         for (int i = 0; i < workers; ++i) {
             pool.emplace_back(stress_worker, data, srv.port(), i,
-                              std::ref(phase_b), std::ref(results[i]));
+                              &phase_b, std::ref(results[i]));
         }
         for (auto& t : pool) t.join();
     }
@@ -335,6 +349,67 @@ TEST_CASE("remote create/index/append storm keeps DBF+CDX intact [slow]" *
     }
     REQUIRE(AdsCloseTable(hT) == 0);
     REQUIRE(AdsDisconnect(hConn) == 0);
+
+    srv.stop();
+    fs::remove_all(data, ec);
+}
+
+TEST_CASE("remote create/index/append storm no-barrier overlaps INDEX ON [slow]" *
+          doctest::timeout(240)) {
+    using openads::network::Server;
+
+    int workers = 32;
+    if (const char* env = std::getenv("OPENADS_STRESS_WORKERS")) {
+        int v = std::atoi(env);
+        if (v >= 4 && v <= 400) workers = v;
+    }
+
+    auto data = fs::temp_directory_path() / "openads_stress_nobarrier_data";
+    std::error_code ec;
+    fs::remove_all(data, ec);
+    fs::create_directories(data);
+
+    Server srv;
+    srv.set_enable_file_func(true);
+    REQUIRE(srv.start("127.0.0.1", 0).has_value());
+
+    std::vector<WorkerResult> results(workers);
+    {
+        std::vector<std::thread> pool;
+        pool.reserve(workers);
+        for (int i = 0; i < workers; ++i) {
+            pool.emplace_back(stress_worker, data, srv.port(), i,
+                              nullptr, std::ref(results[i]));
+        }
+        for (auto& t : pool) t.join();
+    }
+
+    int total_appended = 0;
+    std::string first_errors;
+    for (const auto& r : results) {
+        total_appended += r.appended;
+        for (const auto& e : r.errors) {
+            if (first_errors.size() < 900) first_errors += e + "; ";
+        }
+    }
+    INFO("worker errors: ", first_errors);
+    REQUIRE(first_errors.empty());
+    REQUIRE(total_appended == workers * 10);
+
+    const auto dbf_path = data / "StressIdx.dbf";
+    REQUIRE(fs::exists(dbf_path));
+    REQUIRE(fs::exists(data / "StressIdx.cdx"));
+
+    std::ifstream in(dbf_path, std::ios::binary);
+    REQUIRE(in.good());
+    std::uint8_t hdr[32] = {0};
+    in.read(reinterpret_cast<char*>(hdr), sizeof(hdr));
+    REQUIRE(in.gcount() == 32);
+    const std::uint32_t hdr_count =
+        (std::uint32_t)hdr[4] | ((std::uint32_t)hdr[5] << 8) |
+        ((std::uint32_t)hdr[6] << 16) | ((std::uint32_t)hdr[7] << 24);
+    CHECK(hdr_count == (std::uint32_t)(workers * 10));
+    in.close();
 
     srv.stop();
     fs::remove_all(data, ec);
