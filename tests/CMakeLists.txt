@@ -109,6 +109,7 @@ add_executable(openads_unit_tests
     unit/abi_openindex_create_race_test.cpp
     unit/abi_setorder_natural_remote_test.cpp
     unit/abi_append_lock_contention_test.cpp
+    unit/abi_append_queue_timeout_test.cpp
     unit/abi_refresh_extract_test.cpp
     unit/abi_create_index61_test.cpp
     unit/abi_index_expr_validation_test.cpp

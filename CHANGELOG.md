@@ -20,6 +20,17 @@ C++ no-barrier remote storm (32 workers) is green. Unmodified
 from 580 → 20, but the Harbour WVT `Browse()` storm still stalls
 short of 70 000 (lock convoy); that remaining soak is not this patch.
 
+### Fixed — append queue with ACE lock-budget timeout (Pritpal Bedi)
+
+`Table::append_record` took a blocking `LockFileEx` on the new recno.
+A peer `FLock` / WVT `Browse()` covers the VFP record-lock range, so
+700 B_BIG instances sat in the kernel forever (stall at 8 725 recs).
+
+Now: per-path FIFO gate (one in-flight append per table) that waits at
+most the ACE lock budget (`retry_count × cycle_ms`, default 1 s), then
+`try_lock` with the same adaptive backoff. Timeout → `AE_LOCKED` (5012)
+and `rollback_appends` so no durable blank row.
+
 ## 1.09.19 - 2026-09-01
 
 ### Fixed — contended-lock wait slices: flat 100 ms retry → adaptive backoff (Pritpal Bedi)
