@@ -17,12 +17,8 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
-#include <condition_variable>
 #include <cstdio>
 #include <cstring>
-#include <memory>
-#include <mutex>
-#include <unordered_map>
 #include <utility>
 
 #include <atomic>
@@ -94,61 +90,6 @@ void write_adt_blob_ref(std::uint8_t* dst, std::uint32_t block_no,
 }
 
 } // namespace
-
-namespace {
-
-// Per-path FIFO append gate. Serverd sessions share a process, so this
-// serialises AdsAppendRecord on one table and bounds the wait with the
-// ACE lock budget. Infinite LockFileEx (the previous lock_record_excl)
-// sat forever under FLock/Browse covering the VFP rec-lock range —
-// B_BIG N=700 stalled at 8k recs with 700 threads blocked in the kernel.
-struct AppendGate {
-    std::mutex mu;
-    std::condition_variable cv;
-    int active = 0;
-    static constexpr int kMaxInFlight = 32;
-};
-
-AppendGate& append_gate_for(std::string key) {
-    for (char& c : key)
-        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    static std::mutex g_mu;
-    static std::unordered_map<std::string, std::unique_ptr<AppendGate>> g_map;
-    std::lock_guard<std::mutex> lk(g_mu);
-    auto& slot = g_map[key];
-    if (!slot) slot = std::make_unique<AppendGate>();
-    return *slot;
-}
-
-class AppendTurn {
-public:
-    explicit AppendTurn(AppendGate& g) : g_(&g) {}
-    AppendTurn(const AppendTurn&) = delete;
-    AppendTurn& operator=(const AppendTurn&) = delete;
-    bool wait(std::uint32_t timeout_ms) {
-        std::unique_lock<std::mutex> lk(g_->mu);
-        const auto deadline = std::chrono::steady_clock::now() +
-            std::chrono::milliseconds(timeout_ms == 0 ? 1 : timeout_ms);
-        while (g_->active >= AppendGate::kMaxInFlight) {
-            if (g_->cv.wait_until(lk, deadline) == std::cv_status::timeout)
-                return false;
-        }
-        ++g_->active;
-        held_ = true;
-        return true;
-    }
-    ~AppendTurn() {
-        if (!held_ || g_ == nullptr) return;
-        std::lock_guard<std::mutex> lk(g_->mu);
-        if (g_->active > 0) --g_->active;
-        g_->cv.notify_one();
-    }
-private:
-    AppendGate* g_ = nullptr;
-    bool held_ = false;
-};
-
-}  // namespace
 
 util::Result<Table> Table::open(const std::string& path,
                                 TableType type,
@@ -1211,11 +1152,6 @@ util::Result<void> Table::append_record() {
     bump_live_gen();
     if (mode_ == OpenMode::Read) {
         return util::Error{5000, 0, "table opened read-only", ""};
-    }
-    const auto budget_ms = openads::abi::lock_retry_policy().budget_ms();
-    AppendTurn turn(append_gate_for(path_));
-    if (!turn.wait(budget_ms == 0 ? 1 : budget_ms)) {
-        return util::Error{5012, 0, "append queue timeout", path_};
     }
     // GoCold the previous row before starting a new append.
     if (auto r = commit_dirty_record(); !r) return r.error();

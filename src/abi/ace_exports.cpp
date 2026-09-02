@@ -13420,13 +13420,18 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
     // waits out a racing INDEX ON instead of reading a half-written header
     // (5103/6106) or a sharing-violation 5000. B_BIG N=700 logged
     // OpenIndex: TestIndex.cdx / 5103 during concurrent tag creates.
-    std::lock_guard<std::mutex> bag_lk(create_path_mu_for(path));
+    std::unique_lock<std::mutex> bag_lk(create_path_mu_for(path));
     {
         std::error_code ec;
+        // B_BIG dbSetIndex does not retry. If INDEX ON is a few ms behind,
+        // spin (releasing the mutex so the creator can run) instead of
+        // returning 5018 and skipping HeyAddRecords entirely.
+        for (int spin = 0; !fs::exists(p, ec) && spin < 40; ++spin) {
+            bag_lk.unlock();
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            bag_lk.lock();
+        }
         if (!fs::exists(p, ec)) {
-            // Missing bag is "no file", not AE_TABLE_CORRUPTED (5103).
-            // File::open ENOENT used to bubble 5103 from list_tags and
-            // poison B_BIG's dbSetIndex during a racing INDEX ON.
             return fail(openads::AE_NO_FILE_FOUND, path.c_str());
         }
     }

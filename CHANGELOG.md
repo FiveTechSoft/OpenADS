@@ -26,10 +26,11 @@ short of 70 000 (lock convoy); that remaining soak is not this patch.
 A peer `FLock` / WVT `Browse()` covers the VFP record-lock range, so
 700 B_BIG instances sat in the kernel forever (stall at 8 725 recs).
 
-Now: per-path FIFO gate (up to 32 in-flight appends per table) that
-waits at most the ACE lock budget (`retry_count × cycle_ms`, default
-1 s), then `try_lock` with the same adaptive backoff. Timeout →
-`AE_LOCKED` (5012) and `rollback_appends` so no durable blank row.
+Now: per-path FIFO gate dropped (it starved B_BIG worker threads
+until `Browse()` ran — ~20 rec/s). Append uses `try_lock` + ACE
+budget only; timeout → `AE_LOCKED` (5012) and `rollback_appends`.
+`AdsOpenIndex` spins up to 200 ms for a bag that `INDEX ON` is about
+to create, so `dbSetIndex` does not skip `HeyAddRecords`.
 
 ## 1.09.19 - 2026-09-01
 
