@@ -1,4 +1,38 @@
-## 1.09.20 - unreleased
+## 1.09.20 - 2026-09-02
+
+### Fixed — stale wire index id survives silent index overwrite (Pritpal Bedi)
+
+Second `B_BIG.exe` × 700 storm (after the v1.09.20-rc1 fixes above)
+stalled at 16 998 / 70 000 rows and logged 200 `SetOrder` 5000s
+("index not bound to table"). Closed the wire trace and found the
+mechanism end to end:
+
+- rddads `adsGoTop` passes `pArea->hOrdCurrent` when non-zero, so
+  ordered navigation re-activates the index over the wire (`SetOrder`
+  op 140) on every GotoTop;
+- the server-side `AdsCreateIndex61` **silent overwrite** (re-INDEX on
+  an existing tag) erased the old ABI binding and minted a **fresh**
+  index handle — the session's `index_h_` kept pointing at the erased
+  one, so the next `SetOrder(iid)` failed with 5000;
+- `AdsOpenIndex` already kept old tag→handle mappings on reopen (RCB
+  01/08/2026) for exactly this reason — the create path did not.
+
+Two-layer fix:
+
+- `AdsCreateIndex61` silent-overwrite now **reuses** the dropped
+  binding's handle instead of minting a fresh one (same contract as
+  the reopen refresh);
+- the wire session remembers each index id's **tag name**
+  (`index_tag_`, populated by OpenIndex/CreateIndex/CDX-fallback,
+  purged on CloseIndex/CloseTable) and the `SetOrder` handler
+  **self-heals** a stale handle: re-resolves the tag's current
+  binding with `AdsGetIndexHandle` and retries once before failing.
+
+The session-level heal covers every staleness source (silent
+overwrite, `AdsCloseAllIndexes` purge, twin replacement), not just
+the create path.
+
+## 1.09.20-rc1 - unreleased
 
 ### Fixed — B_BIG N=700 OpenIndex 5103 / SetOrder 5000 / unlocked append blanks (Pritpal Bedi)
 

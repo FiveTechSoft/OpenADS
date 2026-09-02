@@ -89,6 +89,14 @@ private:
     std::unordered_map<std::uint32_t, ADSHANDLE>                index_h_;
     // M12.16 — reverse map index_id -> table_id.
     std::unordered_map<std::uint32_t, std::uint32_t>            index_table_;
+    // Wire index_id -> tag name. Lets the SetOrder handler re-resolve a
+    // stale id: server-side AdsCreateIndex61's silent overwrite and
+    // AdsCloseAllIndexes' non-structural purge erase ABI bindings and mint
+    // fresh handles, but the session's index_h_ keeps the dead one -- the
+    // next ordered nav then fails with 5000 "index not bound to table"
+    // (B_BIG storm 700). With the tag cached, the handler looks up the
+    // binding's CURRENT handle (AdsGetIndexHandle) and retries.
+    std::unordered_map<std::uint32_t, std::string>              index_tag_;
     // Table ids with an active controlling order. Index ops set the order
     // on the ABI handle (tbls_h_), not the engine table, so when one is
     // active GotoTop / GotoBottom / Skip must navigate the ABI handle and

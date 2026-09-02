@@ -14682,6 +14682,13 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
     // silent overwrite (clear_data already wiped the on-disk
     // B+tree) so the stale binding must vanish too -- otherwise
     // ordinal lookups iterate over both the old and new bindings.
+    // RCB 09/02/2026 (B_BIG storm 700): remember the dropped handle and
+    // REUSE it for the new binding -- mirroring AdsOpenIndex's reopen
+    // refresh (which keeps old tag->handle mappings for exactly this
+    // reason). Minting a fresh handle left remote sessions' index_h_
+    // pointing at the erased one; their next SetOrder failed with
+    // 5000 "index not bound to table" and poisoned every ordered nav.
+    ADSHANDLE reuse_h = 0;
     for (auto it = m.begin(); it != m.end(); ) {
         if (it->second.table == t && it->second.tag_name == tag) {
             // If the stale entry was the active one, take the
@@ -14694,12 +14701,13 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
                 t->unregister_extra_index_view(
                     it->second.parked.get());
             }
+            reuse_h = it->first;
             it = m.erase(it);
         } else {
             ++it;
         }
     }
-    ADSHANDLE h = next_index_handle();
+    ADSHANDLE h = reuse_h != 0 ? reuse_h : next_index_handle();
     // Each new CREATE INDEX makes itself the active order
     // (Clipper / Harbour convention). Park the previous active
     // (if any) so it stays openable + survives ORDSETFOCUS(N).

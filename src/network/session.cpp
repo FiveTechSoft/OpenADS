@@ -358,6 +358,7 @@ void Session::cleanup() {
     }
     index_h_.clear();
     index_table_.clear();
+    index_tag_.clear();
     ordered_tables_.clear();
     abi_schema_.clear();
     prefetch_depth_.clear();
@@ -571,8 +572,19 @@ ADSHANDLE Session::ensure_abi_handle(std::uint32_t id) {
         std::memcpy(cdx_nb.data(), cdx_name.data(), cdx_name.size());
         UNSIGNED32 idx_rc = AdsOpenIndex(h, cdx_nb.data(), &hIdx, &idxCount);
         if (idx_rc == 0 && idxCount > 0) {
-            WTRACE("[wire] ensure_abi_handle id=%u CDX attached via ADS_TABLE fallback idx=%u\n",
-                   id, (unsigned)idxCount);
+            // Register the attached tag under a wire id so ordered nav can
+            // reach it (mirrors the OpenIndex handler's bookkeeping).
+            std::uint32_t iid = next_id_++;
+            index_h_[iid]     = hIdx;
+            index_table_[iid] = id;
+            UNSIGNED8 tbuf[256] = {0};
+            UNSIGNED16 tlen = static_cast<UNSIGNED16>(sizeof(tbuf) - 1);
+            if (AdsGetIndexName(hIdx, tbuf, &tlen) == 0) {
+                index_tag_[iid] = std::string(
+                    reinterpret_cast<char*>(tbuf), tlen);
+            }
+            WTRACE("[wire] ensure_abi_handle id=%u CDX attached via ADS_TABLE fallback idx=%u iid=%u\n",
+                   id, (unsigned)idxCount, (unsigned)iid);
         } else {
             WTRACE("[wire] ensure_abi_handle id=%u no CDX (rc=%u count=%u), natural order\n",
                    id, (unsigned)idx_rc, (unsigned)idxCount);
@@ -1565,6 +1577,7 @@ DispatchResult Session::dispatch(const Frame& f) {
             for (auto iit = index_table_.begin(); iit != index_table_.end(); ) {
                 if (iit->second == id) {
                     index_h_.erase(iit->first);
+                    index_tag_.erase(iit->first);
                     iit = index_table_.erase(iit);
                 } else {
                     ++iit;
@@ -2657,6 +2670,7 @@ DispatchResult Session::dispatch(const Frame& f) {
                     tag.assign(reinterpret_cast<char*>(tbuf), tlen);
                     while (!tag.empty() && tag.back() == ' ') tag.pop_back();
                 }
+                index_tag_[iid] = tag;
                 auto tn = static_cast<std::uint16_t>(tag.size());
                 reply.payload.push_back(static_cast<std::uint8_t>( tn       & 0xFFu));
                 reply.payload.push_back(static_cast<std::uint8_t>((tn >> 8) & 0xFFu));
@@ -2717,6 +2731,7 @@ DispatchResult Session::dispatch(const Frame& f) {
                 index_h_.erase(iit);
             }
             index_table_.erase(iid);
+            index_tag_.erase(iid);
             reply.opcode = Opcode::CloseIndexAck;
             break;
         }
@@ -2743,6 +2758,28 @@ DispatchResult Session::dispatch(const Frame& f) {
                 break;
             }
             UNSIGNED32 rrc = AdsSetIndexOrderByHandle(ht, iit->second);
+            if (rrc != 0) {
+                // Self-heal (B_BIG storm 700): a server-side silent-overwrite
+                // CREATE INDEX or AdsCloseAllIndexes re-creates the ABI binding
+                // under a fresh handle while index_h_[iid] still holds the dead
+                // one -> 5000 "index not bound to table". Re-resolve the tag's
+                // CURRENT binding and retry once; on success refresh index_h_.
+                std::string tag;
+                if (auto tit = index_tag_.find(iid); tit != index_tag_.end())
+                    tag = tit->second;
+                if (!tag.empty()) {
+                    std::vector<UNSIGNED8> tb(tag.size() + 1);
+                    std::memcpy(tb.data(), tag.data(), tag.size());
+                    ADSHANDLE h_fresh = 0;
+                    if (AdsGetIndexHandle(ht, tb.data(), &h_fresh) == 0 &&
+                        h_fresh != 0 && h_fresh != iit->second) {
+                        WTRACE("[wire] SetOrder iid=%u stale handle, healed via tag '%s'\n",
+                               iid, tag.c_str());
+                        rrc = AdsSetIndexOrderByHandle(ht, h_fresh);
+                        if (rrc == 0) iit->second = h_fresh;
+                    }
+                }
+            }
             if (rrc != 0) { reply = err("SetOrder", rrc); break; }
             ordered_tables_.insert(tid);
             sync_engine_cursor(tid);
@@ -2887,6 +2924,7 @@ DispatchResult Session::dispatch(const Frame& f) {
             std::uint32_t iid = next_id_++;
             index_h_[iid]     = hidx;
             index_table_[iid] = tid;
+            index_tag_[iid]   = tag;
             reply.opcode = Opcode::CreateIndexAck;
             write_u32_le(iid, reply.payload);
             break;
