@@ -1,3 +1,49 @@
+## 1.09.21 - 2026-09-03
+
+### Fixed — 700-client storm clean end-to-end: convoy + wire frame desync (Pritpal Bedi)
+
+`B_BIG.exe` × 700 storm: three different failure modes across runs —
+runs 28/29 left blank rows (AppendBlank acked, REPLACEs lost) and
+instances dying silently; run 30 fell at 54 167 / 70 000 with 187
+partial instances and ~370 cascading `SetField/AppendBlank/GotoTop:
+server error` + 13 `recv() failed`. Server `ads_err` was EMPTY during
+the kill window (08:34–08:35) — the server never returned Error
+frames; all damage was client-side. OPDUMP per-opcode telemetry
+(new, `OPENADS_OPDUMP=1`) showed the physical cause:
+
+- **CDX write-lock convoy.** The process-wide per-path CDX write lock
+  (one entry for TestIndex.cdx shared by all 700 sessions) queued
+  appends for up to **52.7 s** per op (server batch deadline: 60 s).
+- **Client `SO_RCVTIMEO` was 30 s** — BELOW the server deadline. When
+  an op exceeded 30 s the client's `recv()` expired, the late reply
+  stayed in the socket buffer, and the next request on the shared
+  connection consumed that **stale frame**: opcode mismatch →
+  cascading "server error" → instance death. Blank rows = AppendBlank
+  acked but SetField lost to desync.
+
+Two fixes + convoy mitigation:
+
+- wire client `SO_RCVTIMEO` 30 s → **180 s** (clears the 60 s server
+  deadline with margin);
+- `RemoteConnection::request()` **poisons the transport** on any
+  send/recv failure (closes it): frame desync becomes impossible,
+  later requests fail fast with `AE_NO_CONNECTION` (5036) instead of
+  consuming a stale reply;
+- CDX write-lock **waiter handoff** (OS byte lock parked for the next
+  waiter, capped at 64 handoffs so external peers still get turns)
+  and per-append `AdsFlushFileBuffers` dropped — durability is now
+  delivered at `DbCommit`→`FlushTable` (removes a ~9× CDX page-write
+  multiplication under the storm);
+- in-process DBF append gate (one kernel waiter-IRP instead of 700)
+  and `handle_registry` reader paths moved to `shared_mutex`.
+
+Evidence: run 31 + run 32 consecutive **PASS** — 70 000/700 exact,
+0 missing, 0 blank, 0 RTERROR, CDX integrity walk clean.
+
+New telemetry: `OPENADS_OPDUMP=1` makes serverd sample per-opcode
+latency (count/avg/max) every 10 s into the error log (OPDUMP/OPI
+records) — the tool that pinned run 30's convoy.
+
 ## 1.09.20 - 2026-09-02
 
 ### Fixed — stale wire index id survives silent index overwrite (Pritpal Bedi)
