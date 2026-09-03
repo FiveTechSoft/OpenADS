@@ -778,6 +778,28 @@ CdxIndex::open_named(const std::string& path,
     auto fres = platform::File::open(path, map_mode(mode));
     if (!fres) return fres.error();
     file_ = std::move(fres).value();
+
+    // POSIX counterpart of the create window: a concurrent
+    // AdsCreateTable holds flock(LOCK_EX|LOCK_NB) (OpenMode::
+    // CreateExclusive) while truncating + writing the header. Without
+    // a shared lock here the open succeeds, reads a 0-byte file and
+    // surfaces "CDX header truncated" (6106) instead of the Win32
+    // sharing violation (7040). Hold LOCK_SH for the lifetime of the
+    // open, retrying past a create's ms-long EX window (mirror of
+    // CdxDriver::open; no-op on Win32 — SH locks of concurrent
+    // openers do not conflict).
+    for (int attempt = 0;; ++attempt) {
+        auto sl = file_.try_lock_shared();
+        if (sl) break;
+        if (attempt >= 200) {
+            file_ = platform::File{};
+            return sl.error();
+        }
+        const auto us = 50 + (attempt * 25);
+        std::this_thread::sleep_for(std::chrono::microseconds(
+            us > 5000 ? 5000 : us));
+    }
+
     auto sz = file_.size();
     if (!sz) return sz.error();
     file_size_ = sz.value();

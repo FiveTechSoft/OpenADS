@@ -42,6 +42,11 @@ void share_connection_resolve_log(ADSHANDLE                  hConnect,
 // fail a contended lock FAST — AdsLockRecord's retry loop would block the
 // session thread ~1s, starving the peer op that releases the lock.
 UNSIGNED32 try_lock_record_once(ADSHANDLE hTable, UNSIGNED32 ulRecord);
+// Raw (unformatted) date/timestamp field reads for the wire: the server
+// packs "YYYYMMDD"/"YYYYMMDDhhmmss" into row payloads regardless of the
+// process-wide date format; clients format for display themselves.
+void field_read_raw_begin();
+void field_read_raw_end();
 }
 
 namespace openads::network {
@@ -473,12 +478,7 @@ bool Session::ensure_abi_conn() {
         // twin re-opens tables for index/SQL work, so dedup against the
         // engine connection's set, not its own (Pritpal Bedi, Aug 2026).
         openads::abi::share_connection_resolve_log(abi_conn_,
-                                                   sess_conn_.get());
-        // Force canonical YYYYMMDD for all date field reads performed
-        // through ABI handles on the server (pack_row, GetField, etc).
-        // This makes AdsGetJulian / date FieldGet return usable values
-        // over remote and matches the engine's internal 8-digit strings.
-        (void)AdsSetDateFormat((UNSIGNED8*)"YYYYMMDD");
+                                                    sess_conn_.get());
         // M12.32 — a ShowDeleted opcode may have arrived before this
         // lazy connection existed; new connections default to "show".
         if (!show_deleted_) {
@@ -757,8 +757,14 @@ bool Session::pack_one_row_abi(std::vector<std::uint8_t>& dst,
             vcap = mlen + 1;
         }
         vbuf.assign(vcap, 0);
-        if (AdsGetField(h_abi, const_cast<UNSIGNED8*>(fd.name.data()),
-                        vbuf.data(), &vcap, 0) != 0) {
+        // Date/Timestamp cells ride the wire RAW ("YYYYMMDD" /
+        // "YYYYMMDDhhmmss") — the client formats for display; SAP parity
+        // (AdsGetField formatted) stays on the client-side ABI surface.
+        openads::abi::field_read_raw_begin();
+        UNSIGNED32 grc = AdsGetField(h_abi, const_cast<UNSIGNED8*>(fd.name.data()),
+                                     vbuf.data(), &vcap, 0);
+        openads::abi::field_read_raw_end();
+        if (grc != 0) {
             vcap = 0;
         }
         write_u32_p(vcap);

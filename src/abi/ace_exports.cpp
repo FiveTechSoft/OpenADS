@@ -5227,6 +5227,15 @@ UNSIGNED32 try_lock_record_once(ADSHANDLE hTable, UNSIGNED32 ulRecord) {
     return 0;
 }
 
+// RAII-style toggle for the raw field-read flag (g_field_read_raw, anon
+// namespace below). The wire session's row packer uses this so date /
+// timestamp cells travel as raw storage text ("YYYYMMDD") independent of
+// the process-wide date display format — the client does its own display
+// formatting, and server-side AdsGetDateFormat must keep returning the
+// connection's format (not the old "YYYYMMDD" polluter, removed 2026-09).
+void field_read_raw_begin() { g_field_read_raw = true; }
+void field_read_raw_end()   { g_field_read_raw = false; }
+
 // Server: link the per-session ABI twin's RESOLVED-audit dedup set to
 // the engine connection's, so a single client open logs one RESOLVED
 // line per physical file even though the twin re-opens the table for
@@ -37720,12 +37729,22 @@ UNSIGNED32 ENTRYPOINT AdsGetDate(ADSHANDLE hObj, UNSIGNED8* pId, UNSIGNED8* pucB
     // rddads passes hOrdCurrent (a RemoteIndex handle) for Date fields.
     // AdsGetField only checks get_remote_table(); resolve index -> parent.
     ADSHANDLE real_hObj = hObj;
+    bool is_remote = (get_remote_index(hObj) != nullptr);
     if (auto* ri = get_remote_index(hObj)) {
+        is_remote = true;
         if (ri->parent) real_hObj = to_ads_handle(handle_for_remote_table(ri->parent));
     }
+    is_remote = is_remote || (get_remote_table(real_hObj) != nullptr);
+    // rddads date FieldGet expects the RAW "YYYYMMDD" storage text (it
+    // decodes it to a Julian day itself); formatting it per the display
+    // format would feed "01/15/2024" into that decode. Suppress the
+    // display formatting for remote reads here — the local/AdsGetField
+    // surface keeps SAP formatting.
+    if (is_remote) openads::abi::field_read_raw_begin();
     UNSIGNED32 rc = AdsGetField(real_hObj,
                                 as_field(resolve_field_id(real_hObj, pId, nm, sizeof(nm))),
                                 pucBuf, &cap, 0);
+    if (is_remote) openads::abi::field_read_raw_end();
     if (pusLen) *pusLen = static_cast<UNSIGNED16>(cap);
     return rc;
 }

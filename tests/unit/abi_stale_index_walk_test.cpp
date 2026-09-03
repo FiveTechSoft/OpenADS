@@ -187,10 +187,11 @@ TEST_CASE("stale empty bag over non-empty table is healed on AdsOpenIndex") {
 
 // Regression: a PARTIALLY-stale bag — 3 keys over 5 records (appends done
 // with the bag closed, killed before flush, or SQL DML on a custom-ext
-// bag). dbGoBottom on it lands on the last STALE key (voucher 16 of 21 in
-// the field). An unconditional non-unique tag indexes every record, so
-// key_count != record_count at open must trigger the same one-shot
-// reindex the empty-bag heal does.
+// bag). Since 60841ec the one-shot open heal triggers ONLY on an empty bag
+// (root_page == 0): a key_count != record_count trigger caused a
+// reindex convoy with 700 concurrent openers under the storm-700 load.
+// A partially stale bag must therefore stay as-is: the stale key entries
+// remain visible to the walk until the app reindexes explicitly.
 TEST_CASE("partially stale bag is healed on AdsOpenIndex") {
     auto dir = fs::temp_directory_path() / "openads_stale_bag_partial";
     std::error_code ec;
@@ -239,14 +240,17 @@ TEST_CASE("partially stale bag is healed on AdsOpenIndex") {
     REQUIRE(idx_count >= 1);
     REQUIRE(AdsSetIndexOrderByHandle(hTable, idx_handles[0]) == 0);
 
-    // The heal must have reindexed: GoBottom lands on the real last record.
+    // No heal on a partially stale bag (by design since 60841ec): the
+    // 3 bound-era keys are all the walk sees; GoBottom lands on the last
+    // stale key (ID 3). Records 4-5 are invisible to the order until the
+    // app reindexes.
     UNSIGNED32 kc = 0;
     REQUIRE(AdsGetKeyCount(hTable, 0, &kc) == 0);
-    CHECK(kc == 5u);                  // RED before the partial heal (3)
+    CHECK(kc == 3u);
     REQUIRE(AdsGotoBottom(hTable) == 0);
     double v = 0;
     REQUIRE(AdsGetDouble(hTable, fld, &v) == 0);
-    CHECK(v == 5.0);                  // RED before the partial heal (3)
+    CHECK(v == 3.0);
 
     REQUIRE(AdsCloseTable(hTable) == 0);
     REQUIRE(AdsDisconnect(hConn) == 0);
