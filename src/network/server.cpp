@@ -687,7 +687,24 @@ void Server::accept_loop() {
                 session_threads_.emplace(tid,
                     std::thread([this, s, tid, dd = std::move(dd),
                                  listener_port]() mutable {
-                        this->session_loop(s, std::move(dd), listener_port);
+                        // One session must never take the server down: an
+                        // uncaught exception here (e.g. std::bad_alloc once
+                        // the address space is exhausted) would escape into
+                        // std::terminate and abort() the whole process.
+                        try {
+                            this->session_loop(s, std::move(dd), listener_port);
+                        } catch (const std::exception& e) {
+                            openads::mgmt::ErrorLog::instance().log(
+                                0, "SERVER", 0,
+                                std::string("session ") +
+                                std::to_string(tid) +
+                                " ended by exception: " + e.what());
+                        } catch (...) {
+                            openads::mgmt::ErrorLog::instance().log(
+                                0, "SERVER", 0,
+                                "session " + std::to_string(tid) +
+                                " ended by unknown exception");
+                        }
                         std::lock_guard<std::mutex> lk2(sessions_mu_);
                         finished_threads_.push_back(tid);
                     }));

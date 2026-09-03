@@ -152,7 +152,15 @@ void WorkerPool::worker_loop(Worker& w) {
         std::vector<std::size_t> dead;
         for (std::size_t j = 0; j < w.sessions.size(); ++j) {
             if ((items[j + 1].events & (kRead | kErr)) == 0) continue;
-            if (!w.sessions[j]->handle_readable()) dead.push_back(j);
+            // One poisoned session must not escape into std::terminate and
+            // take the reactor worker (and every session it multiplexes) down.
+            try {
+                if (!w.sessions[j]->handle_readable()) dead.push_back(j);
+            } catch (const std::exception&) {
+                dead.push_back(j);
+            } catch (...) {
+                dead.push_back(j);
+            }
         }
 
         // 5. Tear down dead connections (reverse order keeps indices valid).

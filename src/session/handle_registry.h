@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <shared_mutex>
 #include <mutex>
 #include <unordered_map>
 
@@ -59,7 +60,13 @@ public:
 
     template <class T>
     T* lookup(Handle h, HandleKind kind) const {
-        std::lock_guard<std::mutex> lk(mu_);
+        // Storm fix — reads dominate (every ABI call resolves its handle
+        // here, ~15k lookups/s under the 700-session B_BIG storm). A plain
+        // mutex serialised them all behind one critical section (measured:
+        // the OpenIndex metadata loop, 9 lookups/call, averaged 15.9 ms —
+        // pure mutex queueing). shared_mutex lets concurrent lookups
+        // overlap; register/release keep the exclusive lane.
+        std::shared_lock<std::shared_mutex> lk(mu_);
         auto it = slots_.find(h);
         if (it == slots_.end()) return nullptr;
         if (it->second.kind != kind) return nullptr;
@@ -68,14 +75,14 @@ public:
 
     template <class F>
     void for_each_handle(F&& f) const {
-        std::lock_guard<std::mutex> lk(mu_);
+        std::shared_lock<std::shared_mutex> lk(mu_);
         for (auto& [h, slot] : slots_) {
             f(h, slot.kind, slot.ptr);
         }
     }
 
     HandleKind kind_of(Handle h) const {
-        std::lock_guard<std::mutex> lk(mu_);
+        std::shared_lock<std::shared_mutex> lk(mu_);
         auto it = slots_.find(h);
         return it == slots_.end() ? HandleKind::None : it->second.kind;
     }
@@ -83,7 +90,7 @@ public:
     // Reverse lookup: find the handle registered for a live object pointer.
     Handle find_handle(HandleKind kind, const void* ptr) const {
         if (ptr == nullptr) return 0;
-        std::lock_guard<std::mutex> lk(mu_);
+        std::shared_lock<std::shared_mutex> lk(mu_);
         for (auto& [h, slot] : slots_) {
             if (slot.kind == kind && slot.ptr == ptr) return h;
         }
@@ -93,7 +100,7 @@ public:
 private:
     struct Slot { HandleKind kind = HandleKind::None; void* ptr = nullptr; };
 
-    mutable std::mutex                  mu_;
+    mutable std::shared_mutex           mu_;
     std::unordered_map<Handle, Slot>    slots_;
     Handle                              next_ = 1;
 };

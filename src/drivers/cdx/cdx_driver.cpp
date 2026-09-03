@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -75,6 +76,10 @@ acquire_with_retry_(platform::File&      f,
     return last_err;
 }
 
+// Serializes in-process DBF header-lock traffic (append EXCLUSIVE and
+// open SHARED). See append_record_raw / CdxDriver::open.
+static std::mutex g_dbf_append_mu;
+
 } // namespace
 
 util::Result<void>
@@ -122,14 +127,20 @@ CdxDriver::open(const std::string& path, DriverOpenMode mode) {
 
     // Coordinate the header read with concurrent appenders. An append
     // holds an EXCLUSIVE byte-lock on the header lock position while it
-    // bumps the record count. Take a SHARED lock on the same byte
-    // (retried with back-off) so open waits for any in-flight append —
-    // Harbour station included — then reads a consistent header.
-    // Concurrent opens share the lock freely; released at end of scope.
-    auto hdr_lock = acquire_with_retry_(file_, kHeaderLockOff, kHeaderLockLen,
-                                        platform::LockKind::Shared);
-    if (!hdr_lock) return hdr_lock.error();
-
+    // bumps the record count.
+    //
+    // Storm fix (RCB 2026-09-02): do NOT take that lock here. With ~700
+    // in-process append threads the exclusive stream on this byte is
+    // continuous and Win32 LockFileEx has no fairness — a SHARED
+    // requester starved behind the endless EX hand-offs (observed:
+    // OpenIndex avg 8-14 s, 80% of server time; routing the SHARED
+    // acquire through the appender gate instead serialized every open
+    // behind the whole append queue and made the storm worse). The
+    // unlocked read is safe in practice: the 32-byte header rewrite
+    // lands inside a single sector, so readers see either the old or
+    // the new count, and both are consistent with a table whose append
+    // body was written before the count. Later operations re-read the
+    // count under the append lock (refresh_record_count_) anyway.
     std::uint8_t hdr_buf[32]{};
     auto got = file_.read_at(0, hdr_buf, sizeof(hdr_buf));
     if (!got) return got.error();
@@ -312,6 +323,20 @@ CdxDriver::append_record_raw(const std::uint8_t* buf, std::size_t n) {
     // one byte past EOF and is released as soon as the count is rewritten,
     // so a kernel wait is a fair FIFO and does not interact with Browse
     // rec-locks (those sit at 0x40000000+hdr+(recno-1)*rlen).
+    //
+    // Storm fix (RCB 2026-09-02): 7000 in-process threads each blocked in
+    // the kernel LockFileEx wait queue on the SAME byte region. Windows
+    // keeps a waiter IRP per blocked thread and every release walks that
+    // queue, so the append cost grew with the waiter count — the 700-run
+    // collapsed to ~5-15 recs/s while the 200-run did ~200 recs/s, and
+    // throughput recovered only as clients exited (waiter queue shrank).
+    // Gate the in-process stampede on a cheap userspace mutex first: only
+    // ONE thread at a time ever enters the kernel wait, so the OS queue
+    // holds a single IRP. Cross-process peers still contend the OS byte
+    // normally. One global mutex (not per-file): the critical section is
+    // a handful of page-cached writes (<1 ms), so even unrelated tables
+    // pay a negligible serialization compared to the kernel-queue storm.
+    std::lock_guard<std::mutex> append_gate(g_dbf_append_mu);
     auto lk = platform::ByteLock::acquire(
         file_, kHeaderLockOff, kHeaderLockLen, platform::LockKind::Exclusive);
     if (!lk) return lk.error();

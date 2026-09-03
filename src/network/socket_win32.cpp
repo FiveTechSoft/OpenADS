@@ -168,8 +168,18 @@ util::Result<Socket> connect_tcp(const std::string& host,
     disable_nagle(s);
     // M12.33 — set receive timeout so blocking recv() doesn't hang forever
     // when the remote side is slow or the connection drops silently.
+    //
+    // Storm fix (run30): 30 s sat BELOW the server-side CDX write-lock
+    // in-process batch deadline (60 s, cdx_index.cpp). Under the 700-storm
+    // an AppendBlank behind the convoy could legally take up to ~52 s, so
+    // the client's recv() expired first, the late reply stayed in the
+    // socket buffer and the next request on the shared connection read a
+    // stale frame -> opcode mismatch -> cascading "SetField/AppendBlank:
+    // server error" -> instance death. 180 s comfortably clears the 60 s
+    // server deadline; a genuinely dead connection is still detected by
+    // keepalive + the request() poisoning below.
     {
-        DWORD timeout_ms = 30000;  // 30 seconds
+        DWORD timeout_ms = 180000;  // 3 minutes
         ::setsockopt(s, SOL_SOCKET, SO_RCVTIMEO,
                      reinterpret_cast<const char*>(&timeout_ms),
                      sizeof(timeout_ms));

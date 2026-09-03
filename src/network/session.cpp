@@ -295,10 +295,35 @@ bool Session::process_frame(const Frame& f) {
     }
     srv_->set_session_executing(sid_, true);
     auto t0 = std::chrono::steady_clock::now();
-    auto res = dispatch(f);
+    DispatchResult res;
+    try {
+        res = dispatch(f);
+    } catch (const std::exception& e) {
+        // A failing handler (e.g. std::bad_alloc once the address space is
+        // exhausted) must close this session, never kill the whole server.
+        res.reply = err(std::string("internal error: ") + e.what());
+        res.close_session = true;
+    } catch (...) {
+        res.reply = err("internal error: unknown exception");
+        res.close_session = true;
+    }
     auto micros = std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now() - t0).count();
     srv_->record_session_op_time(sid_, static_cast<std::uint64_t>(micros));
+    {
+        // Storm-diag — lock-free per-opcode latency accumulation.
+        auto& st = openads::mgmt::process_mg_stats();
+        auto& t = st.op_timing[static_cast<std::uint8_t>(f.opcode)];
+        t.count.fetch_add(1, std::memory_order_relaxed);
+        t.total_us.fetch_add(static_cast<std::uint64_t>(micros),
+                             std::memory_order_relaxed);
+        auto prev = t.max_us.load(std::memory_order_relaxed);
+        while (static_cast<std::uint64_t>(micros) > prev &&
+               !t.max_us.compare_exchange_weak(
+                   prev, static_cast<std::uint64_t>(micros),
+                   std::memory_order_relaxed)) {
+        }
+    }
     srv_->set_session_executing(sid_, false);
     if (res.reply) {
         if (auto wr = write_frame(s_, *res.reply); !wr) return false;
@@ -520,19 +545,38 @@ ADSHANDLE Session::ensure_abi_handle(std::uint32_t id) {
     WTRACE("[wire] ensure_abi_handle id=%u open_name='%s' mode=%u eng_path='%s' eng_recs=%u\n",
            id, open_name.c_str(), (unsigned)us_mode,
            tbl->path().c_str(), (unsigned)tbl->record_count());
+    auto& oi_st = openads::mgmt::process_mg_stats();
+    auto oi_us = [](auto a, auto b) {
+        return static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                b - a).count());
+    };
+    auto oi_acc = [&oi_st, &oi_us](int ph, auto a, auto b) {
+        auto& t = oi_st.op_timing_oi[ph];
+        auto us = oi_us(a, b);
+        t.count.fetch_add(1, std::memory_order_relaxed);
+        t.total_us.fetch_add(us, std::memory_order_relaxed);
+        auto pv = t.max_us.load(std::memory_order_relaxed);
+        while (us > pv && !t.max_us.compare_exchange_weak(
+                  pv, us, std::memory_order_relaxed)) {}
+    };
+    auto oi_t0 = std::chrono::steady_clock::now();
     UNSIGNED32 open_rrc = AdsOpenTable(abi_conn_, nb.data(), nullptr,
                      ADS_CDX, 0, 0, 0, us_mode, &h);
+    oi_acc(0, oi_t0, std::chrono::steady_clock::now());
     if (open_rrc != 0) {
         WTRACE("[wire] ensure_abi_handle id=%u AdsOpenTable FAILED rrc=%u\n",
                id, (unsigned)open_rrc);
         return 0;
     }
     // Position the twin so pack_row_trailer sees a live cursor (not Limbo).
+    auto oi_t2 = std::chrono::steady_clock::now();
     UNSIGNED32 gt_rc = AdsGotoTop(h);
     UNSIGNED16 _b = 9, _e = 9;
     AdsAtBOF(h, &_b); AdsAtEOF(h, &_e);
     UNSIGNED32 twin_recs = 0;
     AdsGetRecordCount(h, 0, &twin_recs);
+    oi_acc(2, oi_t2, std::chrono::steady_clock::now());
     WTRACE("[wire] ensure_abi_handle id=%u CDX open: bof=%u eof=%u twin_recs=%u\n",
            id, (unsigned)_b, (unsigned)_e, (unsigned)twin_recs);
     // Fallback: if GotoTop left the twin in Limbo (both bof and eof true),
@@ -2647,17 +2691,44 @@ DispatchResult Session::dispatch(const Frame& f) {
             std::string path(reinterpret_cast<const char*>(
                                  f.payload.data() + 4),
                              f.payload.size() - 4);
+            auto& oi_st = openads::mgmt::process_mg_stats();
+            auto oi_us = [](auto a, auto b) {
+                return static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        b - a).count());
+            };
+            auto oi_t0 = std::chrono::steady_clock::now();
             ADSHANDLE ht = ensure_abi_handle(tid);
+            {
+                auto& t = oi_st.op_timing_oi[0];
+                auto us = oi_us(oi_t0, std::chrono::steady_clock::now());
+                t.count.fetch_add(1, std::memory_order_relaxed);
+                t.total_us.fetch_add(us, std::memory_order_relaxed);
+                auto pv = t.max_us.load(std::memory_order_relaxed);
+                while (us > pv && !t.max_us.compare_exchange_weak(
+                          pv, us, std::memory_order_relaxed)) {}
+            }
             if (ht == 0) { reply = err("OpenIndex: bad table id"); break; }
             std::vector<UNSIGNED8> pb(path.size() + 1);
             std::memcpy(pb.data(), path.data(), path.size());
             ADSHANDLE arr[64] = {0};
             UNSIGNED16 alen = 64;
+            auto oi_t1 = std::chrono::steady_clock::now();
             UNSIGNED32 rrc = AdsOpenIndex(ht, pb.data(), arr, &alen);
+            {
+                auto& t = oi_st.op_timing_oi[1];
+                auto us = oi_us(oi_t1, std::chrono::steady_clock::now());
+                t.count.fetch_add(1, std::memory_order_relaxed);
+                t.total_us.fetch_add(us, std::memory_order_relaxed);
+                auto pv = t.max_us.load(std::memory_order_relaxed);
+                while (us > pv && !t.max_us.compare_exchange_weak(
+                          pv, us, std::memory_order_relaxed)) {}
+            }
             if (rrc != 0) { reply = err("OpenIndex: " + path, rrc); break; }
             reply.opcode = Opcode::OpenIndexAck;
             reply.payload.push_back(static_cast<std::uint8_t>( alen       & 0xFFu));
             reply.payload.push_back(static_cast<std::uint8_t>((alen >> 8) & 0xFFu));
+            auto oi_t3 = std::chrono::steady_clock::now();
             for (std::uint16_t i = 0; i < alen; ++i) {
                 std::uint32_t iid = next_id_++;
                 index_h_[iid] = arr[i];
@@ -2719,6 +2790,15 @@ DispatchResult Session::dispatch(const Frame& f) {
                 AdsIsIndexDescending(arr[i], &desc);
                 reply.payload.push_back(uniq != 0 ? 1 : 0);
                 reply.payload.push_back(desc != 0 ? 1 : 0);
+            }
+            {
+                auto& t = oi_st.op_timing_oi[3];
+                auto us = oi_us(oi_t3, std::chrono::steady_clock::now());
+                t.count.fetch_add(1, std::memory_order_relaxed);
+                t.total_us.fetch_add(us, std::memory_order_relaxed);
+                auto pv = t.max_us.load(std::memory_order_relaxed);
+                while (us > pv && !t.max_us.compare_exchange_weak(
+                          pv, us, std::memory_order_relaxed)) {}
             }
             break;
         }
@@ -3519,9 +3599,11 @@ DispatchResult Session::dispatch(const Frame& f) {
             if (auto hit = tbls_h_.find(id); hit != tbls_h_.end()) {
                 UNSIGNED32 rrc = AdsAppendRecord(hit->second);
                 if (rrc != 0) { reply = err("AppendBlank", rrc); break; }
-                // Persist dirty index pages so a later reopen of the bag
-                // (or another station) sees the new keys.
-                (void)AdsFlushFileBuffers(hit->second);
+                // Storm fix — the client commits with DbCommit→FlushTable
+                // (which flushes this same handle); a per-append flush here
+                // multiplied CDX page writes ~9x under the 700-storm and
+                // serialised every ABI op behind the batch. Durability is
+                // still delivered at commit time.
                 sync_engine_cursor(id);
                 tbl->set_pending_append(true);
             } else {
@@ -3585,7 +3667,8 @@ DispatchResult Session::dispatch(const Frame& f) {
                     reply = err("SetField: write failed", rrc);
                     break;
                 }
-                (void)AdsFlushFileBuffers(hit->second);
+                // Storm fix — no per-field flush; the record is made
+                // durable by DbCommit→FlushTable at the end of the append.
                 sync_engine_cursor(id);
                 reply.opcode = Opcode::SetFieldAck;
                 break;

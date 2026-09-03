@@ -49,13 +49,28 @@ std::unordered_map<std::string, std::uint64_t> g_cdx_alloc_tail;
 // 8-thread duplicate-key stress). The per-entry mutex serialises only
 // registry access and the OS acquire, never held across a batch (safe
 // for worker pools where a connection's requests hop threads).
+//
+// Handoff optimization (700-session convoy): between two in-process
+// batches the OS byte lock used to be dropped and reacquired, and every
+// waiter woke and stormed OS LockFileEx with try_acquire — hundreds of
+// failing syscalls + backoff sleeps per flushed record. When in-process
+// demand is continuous we instead keep os_lock parked in the entry and
+// hand the batch straight to the next waiter (see release() /
+// ensure_write_lock_()). The OS byte lock is per-HANDLE, not per-thread,
+// so the parked lock stays valid for whichever thread adopts the batch.
+// Bounded: after kMaxCdxLockHandoffs consecutive handoffs the lock is
+// really dropped once so an external peer process (native ADS/Harbour
+// client) cannot be starved.
 struct CdxWriteLockEntry {
     std::mutex                        mu;
     std::condition_variable           cv;   // waiters wake on last release
     std::size_t                       users = 0;
     std::thread::id                   owner{};
     std::optional<platform::ByteLock> os_lock;
+    std::size_t                       waiters  = 0;
+    std::size_t                       handoffs = 0;
 };
+constexpr std::size_t kMaxCdxLockHandoffs = 64;
 std::mutex g_cdx_wl_mu;
 std::unordered_map<std::string, std::shared_ptr<CdxWriteLockEntry>>
     g_cdx_write_locks;
@@ -627,13 +642,33 @@ void CdxWriteLockJoin::release() noexcept {
         {
             std::lock_guard<std::mutex> elk(e->mu);
             if (e->users > 0 && --e->users == 0) {
-                e->os_lock.reset();   // drops the OS byte lock
                 e->owner = std::thread::id{};
+                if (e->waiters == 0 || e->handoffs >= kMaxCdxLockHandoffs) {
+                    // No in-process taker (or the handoff cap was reached):
+                    // drop the OS byte lock so an external peer process can
+                    // take its turn, and reset the handoff budget.
+                    e->os_lock.reset();
+                    e->handoffs = 0;
+                } else {
+                    // Keep os_lock parked in the entry; the next waiter
+                    // takes the batch without an OS acquire/release round
+                    // trip. Count the consecutive handoff so the cap above
+                    // periodically frees the byte for external peers.
+                    ++e->handoffs;
+                }
             }
         }
-        // Wake every waiter that was parking on another thread's batch.
-        // notify_all is cheap when no one is waiting.
-        e->cv.notify_all();
+        // Wake the batch waiters. Handoff needs exactly one (waking all
+        // ~700 storm waiters per flushed record was the write convoy:
+        // every woken thread re-locked e->mu, lost the batch to one
+        // winner and re-slept — thousands of wasted mutex round trips
+        // per record). A real release (os_lock dropped) wants everyone;
+        // notify_all is cheap when idle.
+        if (e->waiters > 0 && e->os_lock) {
+            e->cv.notify_one();
+        } else {
+            e->cv.notify_all();
+        }
     } catch (...) {
         // noexcept contract: a lock-registry hiccup must never throw
         // through a destructor.
@@ -658,18 +693,23 @@ util::Result<void> CdxIndex::ensure_write_lock_() {
     for (;;) {
         std::unique_lock<std::mutex> elk(e->mu);
         if (e->users == 0) {
-            // Free batch: take the OS byte lock while holding e->mu so
-            // two threads of this process cannot both try_acquire the
-            // same region (Windows same-process exclusive fails the
-            // second with LOCK_VIOLATION and used to burn the full
-            // 10 s retry budget). Peers in other processes still
-            // contend via the OS lock's own retry loop.
-            auto l = acquire_cdx_os_lock_(file_,
-                                          platform::LockKind::Exclusive);
-            if (!l) return l.error();
-            e->os_lock = std::move(l).value();
-            e->owner   = self;
-            e->users   = 1;
+            // Free batch. The OS byte lock is per-HANDLE (not per-thread),
+            // so a lock parked here by the previous owner's handoff is
+            // valid for us too — adopt it without an OS round trip.
+            if (!e->os_lock) {
+                // Take the OS byte lock while holding e->mu so two threads
+                // of this process cannot both try_acquire the same region
+                // (Windows same-process exclusive fails the second with
+                // LOCK_VIOLATION and used to burn the full 10 s retry
+                // budget). Peers in other processes still contend via the
+                // OS lock's own retry loop.
+                auto l = acquire_cdx_os_lock_(file_,
+                                              platform::LockKind::Exclusive);
+                if (!l) return l.error();
+                e->os_lock = std::move(l).value();
+            }
+            e->owner = self;
+            e->users = 1;
             break;
         }
         if (e->owner == self) {
@@ -682,8 +722,11 @@ util::Result<void> CdxIndex::ensure_write_lock_() {
         // only in its dirty cache while the on-disk header already
         // references them (torn read → 6106). cv wakes on release()
         // instead of a 100 µs poll (slow "thread launch" under load).
-        if (e->cv.wait_until(elk, deadline) == std::cv_status::timeout &&
-            e->users != 0 && e->owner != self) {
+        ++e->waiters;
+        bool timed_out =
+            e->cv.wait_until(elk, deadline) == std::cv_status::timeout;
+        --e->waiters;
+        if (timed_out && e->users != 0 && e->owner != self) {
             return util::Error{5012, 0,
                 "CDX write lock: in-process batch wait timed out", ""};
         }
@@ -947,33 +990,32 @@ util::Result<void> CdxIndex::reload_header_if_changed_() {
     // mid-write then, and on POSIX a same-process shared fcntl lock on
     // the region would downgrade our own exclusive lock (fcntl locks
     // merge per process). When ANOTHER thread of this process owns an
-    // in-flight batch, wait for its flush instead of reading a header
-    // that may already reference pages the owner has only in its dirty
-    // cache (torn read → 6106 under multithreaded load).
+    // in-flight batch, DO NOT wait for it: under heavy write load the
+    // batch is continuously re-acquired (700-writer storm handoffs keep
+    // users>0 for minutes), so a wait here stalled every OpenIndex /
+    // navigation up to the full 10 s budget (OPDUMP: 0x88 avg 8 s, 80%
+    // of server time). Instead keep the current in-memory state — it is
+    // a consistent snapshot taken either before the batch started or
+    // after it ended, and the next call after users drops to 0 picks up
+    // the peer's changes. Reading the header mid-batch (the torn read
+    // that caused 6106) is still impossible because we skip the read.
     const auto self = std::this_thread::get_id();
-    bool holds_batch = false;
-    for (int wait = 0; ; ++wait) {
+    {
         std::shared_ptr<CdxWriteLockEntry> e;
         {
             std::lock_guard<std::mutex> lk(g_cdx_wl_mu);
             auto it = g_cdx_write_locks.find(path_);
             if (it != g_cdx_write_locks.end()) e = it->second;
         }
-        if (!e) break;
-        {
+        if (e) {
             std::lock_guard<std::mutex> elk(e->mu);
-            if (e->users == 0) break;                    // no batch
-            if (e->owner == self) { holds_batch = true; break; }
+            if (e->users > 0 && e->owner != self) return {};   // defer
         }
-        if (wait > 100000) break;   // ~10 s: proceed unlocked (legacy)
-        std::this_thread::sleep_for(std::chrono::microseconds(100));
     }
     std::optional<platform::ByteLock> rlk;   // held across the reads below
-    if (!holds_batch) {
-        if (auto l = acquire_cdx_os_lock_(file_, platform::LockKind::Shared, 40))
-            rlk = std::move(l).value();
-        // best-effort: on sustained contention fall back to unlocked reads
-    }
+    if (auto l = acquire_cdx_os_lock_(file_, platform::LockKind::Shared, 40))
+        rlk = std::move(l).value();
+    // best-effort: on sustained contention fall back to unlocked reads
     std::array<std::uint8_t, CDX_HEADER_LEN> sub_hdr{};
     auto got = file_.read_at(sub_header_offset_, sub_hdr.data(), sub_hdr.size());
     if (!got) return got.error();

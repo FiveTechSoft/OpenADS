@@ -32,6 +32,25 @@ struct MgStats {
     std::atomic<std::uint32_t> max_indexes{0};
     std::atomic<std::uint32_t> max_locks{0};
 
+    // Storm-diag — per-opcode dispatch latency accumulation. Indexed by
+    // raw wire opcode (0-255). count/total_us are cumulative;
+    // max_us is the single worst frame seen. All relaxed atomics so
+    // the hot path pays one store each. A background thread in the
+    // daemon samples this table and dumps deltas to the log.
+    static constexpr std::size_t kOpcodeSlots = 256;
+    struct OpTiming {
+        std::atomic<std::uint64_t> count{0};
+        std::atomic<std::uint64_t> total_us{0};
+        std::atomic<std::uint64_t> max_us{0};
+    };
+    OpTiming op_timing[kOpcodeSlots];
+    // Storm-diag — OpenIndex sub-phase timing (µs): [0]=AdsOpenTable in
+    // ensure_abi_handle, [1]=AdsOpenIndex, [2]=post-open navigation
+    // (GotoTop/AtBOF/AtEOF/GetRecordCount), [3]=per-tag metadata loop.
+    OpTiming op_timing_oi[4];
+    // Gate for the background dump thread (env OPENADS_OPDUMP=1).
+    std::atomic<bool> op_dump_enabled{false};
+
     // Raise `hwm` to `cur` if `cur` is larger. Lock-free.
     static void bump_max(std::atomic<std::uint32_t>& hwm,
                          std::uint32_t cur) {

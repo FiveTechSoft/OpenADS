@@ -13,6 +13,7 @@
 // interactive use).
 
 #include "mgmt/error_log.h"
+#include "mgmt/mg_stats.h"
 #include "network/server.h"
 #include "platform/dll.h"
 #include "openads_version.h"  // OPENADS_VERSION_STR (CMake-generated)
@@ -424,9 +425,109 @@ int run_server(const Args& args, bool console) {
     }
 #endif
 
+    // Storm-diag — when OPENADS_OPDUMP=1, a low-priority background
+    // thread samples the per-opcode latency table every 10s and logs
+    // the deltas: count, avg µs and worst single frame per opcode,
+    // plus the session-thread high-water mark. Zero cost when off.
+    std::atomic<bool> opdump_stop{false};
+    std::thread opdump;
+    if (std::getenv("OPENADS_OPDUMP") != nullptr &&
+        std::strcmp(std::getenv("OPENADS_OPDUMP"), "1") == 0) {
+        openads::mgmt::process_mg_stats().op_dump_enabled.store(true);
+        opdump = std::thread([&srv, &opdump_stop]() {
+            auto& st = openads::mgmt::process_mg_stats();
+            auto& elog = openads::mgmt::ErrorLog::instance();
+            using Clock = std::chrono::steady_clock;
+            std::uint64_t prev_count[openads::mgmt::MgStats::kOpcodeSlots] = {};
+            std::uint64_t prev_total[openads::mgmt::MgStats::kOpcodeSlots] = {};
+            std::uint64_t oi_c[4] = {};
+            std::uint64_t oi_t[4] = {};
+            auto last = Clock::now();
+            while (!opdump_stop.load(std::memory_order_relaxed)) {
+                std::this_thread::sleep_for(
+                    std::chrono::seconds(10));
+                if (opdump_stop.load(std::memory_order_relaxed)) break;
+                auto now = Clock::now();
+                auto dt_ms = std::chrono::duration_cast<
+                    std::chrono::milliseconds>(now - last).count();
+                last = now;
+                struct Row { int op; std::uint64_t n; double avg; std::uint64_t mx; };
+                Row rows[openads::mgmt::MgStats::kOpcodeSlots];
+                int n = 0;
+                std::uint64_t tot_ops = 0, tot_us = 0;
+                for (int i = 0; i < int(openads::mgmt::MgStats::kOpcodeSlots); ++i) {
+                    auto c = st.op_timing[i].count.load(std::memory_order_relaxed);
+                    auto t = st.op_timing[i].total_us.load(std::memory_order_relaxed);
+                    if (c <= prev_count[i]) continue;
+                    std::uint64_t dn = c - prev_count[i];
+                    std::uint64_t dus = t >= prev_total[i] ? t - prev_total[i] : 0;
+                    prev_count[i] = c;
+                    prev_total[i] = t;
+                    tot_ops += dn;
+                    tot_us += dus;
+                    rows[n++] = {i, dn,
+                                 dn ? double(dus) / double(dn) : 0.0,
+                                 st.op_timing[i].max_us.load(
+                                     std::memory_order_relaxed)};
+                }
+                // top-5 by avg desc (insertion sort, tiny n)
+                for (int i = 1; i < n; ++i) {
+                    Row r = rows[i];
+                    int j = i - 1;
+                    while (j >= 0 && rows[j].avg < r.avg) {
+                        rows[j + 1] = rows[j];
+                        --j;
+                    }
+                    rows[j + 1] = r;
+                }
+                if (n > 0) {
+                    // OpenIndex sub-phases (ensure_abi_handle / AdsOpenIndex)
+                    std::uint64_t oi_prev_c[4] = {oi_c[0], oi_c[1], oi_c[2], oi_c[3]};
+                    std::uint64_t oi_prev_t[4] = {oi_t[0], oi_t[1], oi_t[2], oi_t[3]};
+                    std::string opi = "OPI dt=" +
+                        std::to_string(dt_ms) + "ms";
+                    for (int p = 0; p < 4; ++p) {
+                        auto c = st.op_timing_oi[p].count.load(
+                            std::memory_order_relaxed);
+                        auto t = st.op_timing_oi[p].total_us.load(
+                            std::memory_order_relaxed);
+                        oi_c[p] = c; oi_t[p] = t;
+                        auto dn = c >= oi_prev_c[p] ? c - oi_prev_c[p] : 0;
+                        auto dus = t >= oi_prev_t[p] ? t - oi_prev_t[p] : 0;
+                        opi += " ph" + std::to_string(p) + "=" +
+                            std::to_string(dn) + "x" +
+                            std::to_string(dn ? dus / dn : 0) + "us";
+                    }
+                    elog.log(0, "OPI", 0, std::move(opi));
+                    std::string line = "OPDUMP dt=" +
+                        std::to_string(dt_ms) + "ms ops=" +
+                        std::to_string(tot_ops) + " avg_us=" +
+                        std::to_string(tot_ops ?
+                            double(tot_us) / double(tot_ops) : 0.0) +
+                        " sess=" +
+                        std::to_string(srv.active_session_threads()) +
+                        " top:";
+                    for (int i = 0; i < n && i < 5; ++i) {
+                        char opb[8];
+                        std::snprintf(opb, sizeof(opb), "%02X",
+                                      unsigned(rows[i].op));
+                        line += std::string(" 0x") + opb + "=" +
+                            std::to_string(rows[i].n) + "x" +
+                            std::to_string(std::uint64_t(rows[i].avg)) +
+                            "us(max" +
+                            std::to_string(rows[i].mx) + ")";
+                    }
+                    elog.log(0, "OPDUMP", 0, std::move(line));
+                }
+            }
+        });
+    }
+
     while (g_running.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
+    opdump_stop.store(true);
+    if (opdump.joinable()) opdump.join();
     if (console) {
         std::printf("openads_serverd: shutdown signal received\n");
     }

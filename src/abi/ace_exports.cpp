@@ -12959,6 +12959,8 @@ ADSHANDLE next_index_handle() {
 }
 
 Table* table_for_index(ADSHANDLE hIndex) {
+    // Storm fix: reader must hold index_bindings_mu (binds are unlocked now).
+    std::lock_guard<std::recursive_mutex> _tf_lk(index_bindings_mu());
     auto it = index_bindings().find(hIndex);
     if (it == index_bindings().end()) return nullptr;
     // Activate this binding so the Table's order_ reflects the
@@ -13229,15 +13231,20 @@ void heal_stale_bag_on_open(Table* t,
                 const std::vector<openads::drivers::IIndex*>& views) {
     if (t == nullptr || t->record_count() == 0) return;
     if (t->open_mode() == openads::engine::OpenMode::Read) return;
-    constexpr std::uint32_t kHealWalkMaxRecs = 250000;
     for (auto* v : views) {
         if (v == nullptr || !v->condition().empty()) continue;
+        // empty() refreshes the sub-tag header and checks root_page_==0 —
+        // the never-built / never-flushed Limbo bag this heal exists for.
+        // The old key_count() != record_count() trigger walked the whole
+        // tag (O(keys)) per open AND is inherently racy: under a
+        // concurrent-writer storm keys insert at commit, so every
+        // simultaneous OpenIndex saw key_count < record_count, concluded
+        // "stale" and each launched a full t->reindex() — measured as the
+        // 700-session storm convoy (OPDUMP: 0x88 OpenIndex = 92.6% of
+        // server time, 6.8 s/call). A partially-maintained bag cannot be
+        // detected reliably under concurrency and stays the app's
+        // reindex responsibility.
         bool stale = v->empty();
-        if (!stale && !v->unique() &&
-                t->record_count() <= kHealWalkMaxRecs) {
-            const std::uint32_t kc = v->key_count();
-            if (kc != 0xFFFFFFFFu && kc != t->record_count()) stale = true;
-        }
         if (!stale) continue;
         arc2_log("IDXHEAL stale tag '%s' on %s (recs=%u) -> reindex",
                  v->name().c_str(), t->path().c_str(),
@@ -13429,39 +13436,53 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
             return fail(openads::AE_NO_FILE_FOUND, path.c_str());
         }
     }
-    std::lock_guard<std::recursive_mutex> _oi_lk(index_bindings_mu());
-    auto& m   = index_bindings();
-    auto& act = active_binding_for();
-
-    // Refresh: drop any prior bindings for this Table that came from
-    // the same file path. If the active binding was among them, also
-    // surrender Table::order_; the caller's reopen will repopulate it.
-    // RCB 01/08/2026: keep the old tagÃ¢â€ â€™handle mapping and REUSE those
-    // handles below -- remote clients (openads_serverd's wire index_h_)
-    // hold the numeric handles across a bag reopen, and erasing them
-    // made the next SetOrder fail with 5000 (stale binding).
+    // Storm fix (700-session B_BIG, OPI run22): the old code held
+    // index_bindings_mu across list_tags + every open_named + heal --
+    // 0.1-1.5 s of file I/O per call with 700 concurrent OpenIndex
+    // calls. Every metadata reader (AdsGetIndexName/Expr/Filename,
+    // AdsIsIndexUnique/Descending -> iindex_for_handle) queues behind
+    // ALL of them: measured 12.3 ms avg for a pure in-memory lookup
+    // loop (ph3 = 15.9 s of the server's time). The mutex protects the
+    // two process-global maps and nothing else; take it only around
+    // the map snapshot / erase / insert phases below.
     std::unordered_map<std::string, ADSHANDLE> old_handles;
-    bool active_dropped = false;
-    auto act_it = act.find(t);
-    ADSHANDLE active_h = act_it != act.end() ? act_it->second : 0;
-    for (auto it = m.begin(); it != m.end(); ) {
-        if (it->second.table == t && same_index_path(it->second.path, path)) {
-            old_handles[it->second.tag_name] = it->first;
-            if (it->first == active_h) {
-                active_dropped = true;
-            } else if (it->second.parked) {
-                t->unregister_extra_index_view(it->second.parked.get());
+    ADSHANDLE active_h = 0;
+    bool      had_active = false;
+    {
+        std::lock_guard<std::recursive_mutex> _oi_lk(index_bindings_mu());
+        auto& m   = index_bindings();
+        auto& act = active_binding_for();
+
+        // Refresh: drop any prior bindings for this Table that came from
+        // the same file path. If the active binding was among them, also
+        // surrender Table::order_; the caller's reopen will repopulate it.
+        // RCB 01/08/2026: keep the old tag→handle mapping and REUSE those
+        // handles below -- remote clients (openads_serverd's wire index_h_)
+        // hold the numeric handles across a bag reopen, and erasing them
+        // made the next SetOrder fail with 5000 (stale binding).
+        bool active_dropped = false;
+        auto act_it = act.find(t);
+        if (act_it != act.end()) active_h = act_it->second;
+        for (auto it = m.begin(); it != m.end(); ) {
+            if (it->second.table == t && same_index_path(it->second.path, path)) {
+                old_handles[it->second.tag_name] = it->first;
+                if (it->first == active_h) {
+                    active_dropped = true;
+                } else if (it->second.parked) {
+                    t->unregister_extra_index_view(it->second.parked.get());
+                }
+                it = m.erase(it);
+            } else {
+                ++it;
             }
-            it = m.erase(it);
-        } else {
-            ++it;
         }
+        if (active_dropped) {
+            act.erase(t);
+            t->clear_order();
+        }
+        had_active = act.find(t) != act.end();
     }
-    if (active_dropped) {
-        act.erase(t);
-        t->clear_order();
-    }
-    bool table_has_active = act.find(t) != act.end();
+    bool table_has_active = had_active;
 
     // Enumerate tags. CDX/ADI expose list_tags; NTX has only its single
     // tag, which open() reports via name().
@@ -13512,14 +13533,20 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
             mark_ntx_key_encoding(t, idx.get());
         ADSHANDLE h = old_handles.count(tag_name)
             ? old_handles[tag_name] : next_index_handle();
-        if (!table_has_active) {
-            t->set_order(std::move(idx));
-            m[h] = IndexBinding{t, tag_name, nullptr, path};
-            act[t] = h;
-        } else {
-            openads::drivers::IIndex* raw = idx.get();
-            m[h] = IndexBinding{t, tag_name, std::move(idx), path};
-            t->register_extra_index_view(raw);
+        // Map mutations only (storm fix -- see the refresh snapshot).
+        {
+            std::lock_guard<std::recursive_mutex> _oi_lk(index_bindings_mu());
+            auto& m   = index_bindings();
+            auto& act = active_binding_for();
+            if (!table_has_active) {
+                t->set_order(std::move(idx));
+                m[h] = IndexBinding{t, tag_name, nullptr, path};
+                act[t] = h;
+            } else {
+                openads::drivers::IIndex* raw = idx.get();
+                m[h] = IndexBinding{t, tag_name, std::move(idx), path};
+                t->register_extra_index_view(raw);
+            }
         }
         ahIndex[0] = h;
         if (pu16ArrayLen != nullptr) *pu16ArrayLen = 1;
@@ -13541,6 +13568,12 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
     UNSIGNED16 cap = (pu16ArrayLen != nullptr) ? *pu16ArrayLen : 0;
     UNSIGNED16 count = 0;
     std::vector<openads::drivers::IIndex*> opened_views;
+    struct PendingBind {
+        ADSHANDLE h;
+        std::string name;
+        openads::drivers::IIndex* raw;
+    };
+    std::vector<PendingBind> to_bind;
     for (const auto& name : tags) {
         std::unique_ptr<openads::drivers::IIndex> sub;
         // A rerouted bag was listed through CdxIndex above, so it must be
@@ -13567,19 +13600,31 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
         }
         ADSHANDLE h = old_handles.count(name)
             ? old_handles[name] : next_index_handle();
-        openads::drivers::IIndex* raw = sub.get();
-        if (!table_has_active) {
-            t->set_order(std::move(sub));
-            m[h] = IndexBinding{t, name, nullptr, path};
-            act[t] = h;
-            table_has_active = true;
-        } else {
-            m[h] = IndexBinding{t, name, std::move(sub), path};
-            t->register_extra_index_view(raw);
+        to_bind.push_back({h, name, sub.release()});
+    }
+    // Map mutations only -- opens above ran unlocked (storm fix, see the
+    // comment on the refresh snapshot). Table mutation (set_order /
+    // register_extra_index_view) is per-connection state, safe here too:
+    // this Table belongs to this session alone.
+    {
+        std::lock_guard<std::recursive_mutex> _oi_lk(index_bindings_mu());
+        auto& m   = index_bindings();
+        auto& act = active_binding_for();
+        for (auto& pb : to_bind) {
+            std::unique_ptr<openads::drivers::IIndex> sub(pb.raw);
+            if (!table_has_active) {
+                t->set_order(std::move(sub));
+                m[pb.h] = IndexBinding{t, pb.name, nullptr, path};
+                act[t] = pb.h;
+                table_has_active = true;
+            } else {
+                m[pb.h] = IndexBinding{t, pb.name, std::move(sub), path};
+                t->register_extra_index_view(pb.raw);
+            }
+            opened_views.push_back(pb.raw);
+            if (count < cap) ahIndex[count] = pb.h;
+            ++count;
         }
-        opened_views.push_back(raw);
-        if (count < cap) ahIndex[count] = h;
-        ++count;
     }
     if (pu16ArrayLen != nullptr) *pu16ArrayLen = count;
     heal_stale_bag_on_open(t, opened_views);
@@ -13658,6 +13703,8 @@ UNSIGNED32 ENTRYPOINT AdsCloseIndex(ADSHANDLE hIndex) {
     }
     auto& m = index_bindings();
     auto& act = active_binding_for();
+    // Storm fix: mutator must hold index_bindings_mu (binds are unlocked now).
+    std::lock_guard<std::recursive_mutex> _cl_lk(index_bindings_mu());
     auto it = m.find(hIndex);
     if (it == m.end()) return fail(openads::AE_INTERNAL_ERROR, "unknown index");
     // xBase production-index convention: a tag of the STRUCTURAL bag
@@ -13716,6 +13763,8 @@ UNSIGNED32 ENTRYPOINT AdsCloseAllIndexes(ADSHANDLE hTable) {
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
     auto& m = index_bindings();
     auto& act = active_binding_for();
+    // Storm fix: mutator must hold index_bindings_mu (binds are unlocked now).
+    std::lock_guard<std::recursive_mutex> _cal_lk(index_bindings_mu());
     // xBase production-index convention: tags of the STRUCTURAL bag
     // (named after the table) stay attached through OrdListClear --
     // DBFCDX still reports OrdCount()=1 after it (dballcmp conformance
@@ -14874,6 +14923,9 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex(ADSHANDLE hTable, UNSIGNED8* pucFile,
         stamp_production_index_flag(t, file);
     }
 
+    // Map mutations only (storm fix): the bulk build above ran unlocked;
+    // wrap the binding registration.
+    std::lock_guard<std::recursive_mutex> _ci_lk(index_bindings_mu());
     auto& m   = index_bindings();
     auto& act = active_binding_for();
     bool table_has_active = act.find(t) != act.end();
@@ -14950,6 +15002,8 @@ UNSIGNED32 ENTRYPOINT AdsAddCustomKey(ADSHANDLE hIndex) {
     arc2_trace("AdsAddCustomKey");
     auto& s = state();
     std::lock_guard<std::recursive_mutex> lk(s.mu);
+    // Storm fix: reader must hold index_bindings_mu (binds are unlocked now).
+    std::lock_guard<std::recursive_mutex> _ack_lk(index_bindings_mu());
     auto& m = index_bindings();
     auto it = m.find(hIndex);
     if (it == m.end()) {
@@ -14993,6 +15047,8 @@ UNSIGNED32 ENTRYPOINT AdsDeleteCustomKey(ADSHANDLE hIndex) {
     arc2_trace("AdsDeleteCustomKey");
     auto& s = state();
     std::lock_guard<std::recursive_mutex> lk(s.mu);
+    // Storm fix: reader must hold index_bindings_mu (binds are unlocked now).
+    std::lock_guard<std::recursive_mutex> _dck_lk(index_bindings_mu());
     auto& m = index_bindings();
     auto it = m.find(hIndex);
     if (it == m.end()) {
@@ -15389,6 +15445,8 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrder(ADSHANDLE hTable, UNSIGNED8* pucName) {
         return true;
     };
     auto& m = index_bindings();
+    // Storm fix: reader must hold index_bindings_mu (binds are unlocked now).
+    std::lock_guard<std::recursive_mutex> _so_lk(index_bindings_mu());
     for (auto& [h, b] : m) {
         if (b.table == t && upper_eq(b.tag_name, name)) {
             auto r = activate_binding(h);
@@ -15471,6 +15529,8 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrderByHandle(ADSHANDLE hTable, ADSHANDLE hInde
         return ok();
     }
     auto& m = index_bindings();
+    // Storm fix: reader must hold index_bindings_mu (binds are unlocked now).
+    std::lock_guard<std::recursive_mutex> _sob_lk(index_bindings_mu());
     auto it = m.find(hIndex);
     if (it == m.end() || it->second.table != t) {
         return fail(openads::AE_INTERNAL_ERROR,
@@ -16630,6 +16690,8 @@ UNSIGNED32 ENTRYPOINT AdsDDGetIndexProperty(ADSHANDLE hConn, UNSIGNED8* pucTable
     openads::drivers::IIndex* found_idx = nullptr;
     std::string found_path;
 
+    // Storm fix: reader must hold index_bindings_mu (binds are unlocked now).
+    std::lock_guard<std::recursive_mutex> _dd_lk(index_bindings_mu());
     for (auto& [h, b] : index_bindings()) {
         if (b.tag_name != idx_name) continue;
         // If a table name is given, check that the binding's table is that table.
@@ -17615,6 +17677,8 @@ UNSIGNED32 ENTRYPOINT AdsGetNumIndexes(ADSHANDLE hTable, UNSIGNED16* pusCount) {
         return fail(openads::AE_INTERNAL_ERROR, "");
     }
     UNSIGNED16 n = 0;
+    // Storm fix: reader must hold index_bindings_mu (binds are unlocked now).
+    std::lock_guard<std::recursive_mutex> _rn2_lk(index_bindings_mu());
     for (auto& [_, b] : index_bindings()) {
         if (b.table == t) ++n;
     }
@@ -17683,6 +17747,8 @@ UNSIGNED32 ENTRYPOINT AdsGetIndexHandle(ADSHANDLE hTable, UNSIGNED8* pucName,
     if (!t) {
         return fail(openads::AE_INTERNAL_ERROR, "");
     }
+    // Storm fix: reader must hold index_bindings_mu (binds are unlocked now).
+    std::lock_guard<std::recursive_mutex> _rh_lk(index_bindings_mu());
     for (auto& [h, b] : index_bindings()) {
         if (b.table == t && b.tag_name == name) { *phIndex = h; return ok(); }
     }
@@ -17706,6 +17772,9 @@ UNSIGNED32 ENTRYPOINT AdsGetIndexHandle(ADSHANDLE hTable, UNSIGNED8* pucName,
 // this internal helper returns a C++ UDT (std::vector) -- give it C++
 // linkage so MSVC doesn't warn C4190.
 extern "C++" std::vector<ADSHANDLE> ordered_index_handles_for(Table* t) {
+    // Caller may already hold index_bindings_mu (recursive; storm fix --
+    // this helper reads the map and can bind extra tags).
+    std::lock_guard<std::recursive_mutex> _oh_lk(index_bindings_mu());
     auto& m   = index_bindings();
     auto& act = active_binding_for();
     std::string bag_path;
@@ -17806,6 +17875,9 @@ UNSIGNED32 ENTRYPOINT AdsGetIndexExpr(ADSHANDLE hIndex, UNSIGNED8* pucBuf,
         return ok();
     }
     auto& m = index_bindings();
+    // Storm fix: readers must hold index_bindings_mu now that OpenIndex
+    // binds outside the lock (map erase concurrent with .find = UAF).
+    std::lock_guard<std::recursive_mutex> _rb_lk(index_bindings_mu());
     auto it = m.find(hIndex);
     if (it == m.end()) {
         return fail(openads::AE_INTERNAL_ERROR, "unknown index");
@@ -17831,6 +17903,8 @@ UNSIGNED32 ENTRYPOINT AdsGetIndexName(ADSHANDLE hIndex, UNSIGNED8* pucBuf,
         return ok();
     }
     auto& m = index_bindings();
+    // Storm fix: reader must hold index_bindings_mu (binds are unlocked now).
+    std::lock_guard<std::recursive_mutex> _rn_lk(index_bindings_mu());
     auto it = m.find(hIndex);
     if (it == m.end()) {
         return fail(openads::AE_INTERNAL_ERROR, "unknown index");
@@ -17843,6 +17917,8 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexDirection(ADSHANDLE hIndex, UNSIGNED16 usDir) {
     arc2_trace("AdsSetIndexDirection");
     auto& s = state();
     std::lock_guard<std::recursive_mutex> lk(s.mu);
+    // Storm fix: reader must hold index_bindings_mu (binds are unlocked now).
+    std::lock_guard<std::recursive_mutex> _sd_lk(index_bindings_mu());
     auto it = index_bindings().find(hIndex);
     if (it == index_bindings().end()) {
         return fail(openads::AE_INTERNAL_ERROR, "unknown index");
@@ -34778,6 +34854,8 @@ UNSIGNED32 ENTRYPOINT AdsGetIndexCondition(ADSHANDLE hIndex, UNSIGNED8* p,
     arc2_trace("AdsGetIndexCondition");
     if (l == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
     auto& m = index_bindings();
+    // Storm fix: reader must hold index_bindings_mu (binds are unlocked now).
+    std::lock_guard<std::recursive_mutex> _rc_lk(index_bindings_mu());
     auto it = m.find(hIndex);
     if (it == m.end()) {
         if (p && *l > 0) p[0] = 0;
@@ -34848,6 +34926,8 @@ UNSIGNED32 ENTRYPOINT AdsGetIndexFilename(ADSHANDLE hIndex, UNSIGNED16 usOption,
         return ok();
     }
     auto& m = index_bindings();
+    // Storm fix: reader must hold index_bindings_mu (binds are unlocked now).
+    std::lock_guard<std::recursive_mutex> _rf_lk(index_bindings_mu());
     auto it = m.find(hIndex);
     if (it == m.end()) {
         if (p && *l > 0) p[0] = 0;
@@ -34882,6 +34962,8 @@ UNSIGNED32 ENTRYPOINT AdsGetIndexOrderByHandle(ADSHANDLE hIndex, UNSIGNED16* p) 
         return ok();
     }
     auto& m = index_bindings();
+    // Storm fix: reader must hold index_bindings_mu (binds are unlocked now).
+    std::lock_guard<std::recursive_mutex> _ro_lk(index_bindings_mu());
     Table* t = nullptr;
     std::string tag;
     {
@@ -34893,6 +34975,9 @@ UNSIGNED32 ENTRYPOINT AdsGetIndexOrderByHandle(ADSHANDLE hIndex, UNSIGNED16* p) 
     if (t == nullptr) return ok();
     // Match by tag name (not handle identity) so the result is stable even
     // if more than one binding transiently exists for the same tag.
+    // (_ro_lk from above still held: m.find below + ordered_index_handles_for
+    // read the map -- ordered_index_handles_for itself takes the mutex, and
+    // it is recursive.)
     std::vector<ADSHANDLE> ordered = ordered_index_handles_for(t);
     for (std::size_t i = 0; i < ordered.size(); ++i) {
         auto bit = m.find(ordered[i]);
@@ -35493,10 +35578,12 @@ UNSIGNED32 ENTRYPOINT AdsIsIndexDescending(ADSHANDLE hIndex, UNSIGNED16* p) {
     // observe a dynamic reversal, and FWH xbrowse header re-sorting (which
     // toggles via OrdDescend) would stick after the first click.
     {
-        auto& s = state();
-        std::lock_guard<std::recursive_mutex> lk(s.mu);
-        auto& m  = index_bindings();
-        auto it  = m.find(hIndex);
+    auto& s = state();
+    std::lock_guard<std::recursive_mutex> lk(s.mu);
+    // Storm fix: reader must hold index_bindings_mu (binds are unlocked now).
+    std::lock_guard<std::recursive_mutex> _rd_lk(index_bindings_mu());
+    auto& m  = index_bindings();
+    auto it  = m.find(hIndex);
         // The active binding is the only one with no parked IIndex (its
         // index lives in Table::order_). Parked/inactive bindings have no
         // dynamic traverse state, so fall through to the physical flag.
@@ -37231,6 +37318,8 @@ UNSIGNED32 ENTRYPOINT AdsGetAllIndexes(ADSHANDLE hTable, ADSHANDLE* ahIndex,
     Table* t = get_table(hTable);
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
     std::vector<ADSHANDLE> found;
+    // Storm fix: reader must hold index_bindings_mu (binds are unlocked now).
+    std::lock_guard<std::recursive_mutex> _ra_lk(index_bindings_mu());
     for (auto& [h, b] : index_bindings()) {
         if (b.table == t) found.push_back(h);
     }

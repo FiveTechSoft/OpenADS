@@ -201,9 +201,26 @@ util::Result<Frame> RemoteConnection::request(const Frame& f) {
         return util::Error{5036 /* AE_NO_CONNECTION */, 0,
                            "RemoteConnection: not connected", ""};
     }
-    if (auto r = write_frame(*transport_,f); !r) return r.error();
+    if (auto r = write_frame(*transport_,f); !r) {
+        // Storm fix (run30): a failed send leaves the wire in an unknown
+        // state. Poison the connection so every later request() fails
+        // fast with AE_NO_CONNECTION instead of reading half-written or
+        // stale frames (opcode desync -> cascading "server error").
+        transport_->close();
+        return r.error();
+    }
     auto rep = read_frame(*transport_);
-    if (!rep) return rep.error();
+    if (!rep) {
+        // Storm fix (run30): a failed/timeout recv is worse than a failed
+        // send — the request may still be in flight and its reply can
+        // arrive later. If we kept the socket, the next request would
+        // consume that late reply and every subsequent opcode check on
+        // the shared connection would mismatch (run30: ~370 cascading
+        // "SetField/AppendBlank: server error" after 30 s recv timeouts).
+        // Poison instead: fail fast with 5036 like a dropped connection.
+        transport_->close();
+        return rep.error();
+    }
     // M12.10 — Error frame payload prefixed with [u32 LE ace_code].
     // Parse it back into the util::Error so callers see the real ACE
     // code (5036, 7077, 5066, ...) instead of a generic 5000.
