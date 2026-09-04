@@ -3,6 +3,11 @@
 #include "engine/oem_collation.h"
 #include "platform/lock.h"
 
+#ifndef _WIN32
+#include <fcntl.h>
+#include <sys/file.h>
+#endif
+
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
