@@ -143,6 +143,10 @@ util::Result<void> File::try_lock_shared() {
     return {};
 }
 
+void File::release_lock_shared() {
+    // No-op on Win32: try_lock_shared is also a no-op.
+}
+
 } // namespace openads::platform
 
 #endif // _WIN32

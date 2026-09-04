@@ -77,6 +77,12 @@ public:
     // Default no-op; CdxIndex overrides to clear its CurState.
     virtual void invalidate_cursor() {}
 
+    // POSIX: release the flock(LOCK_SH) held on the index file. Needed
+    // so that the ABI handle can acquire fcntl(F_WRLCK) for writes — on
+    // macOS flock and fcntl on the same file interact and a held LOCK_SH
+    // blocks an exclusive fcntl.  No-op on Win32 (flock is a no-op).
+    virtual void release_lock_shared() {}
+
     // Multiuser: re-read the on-disk bag header so peer appends / reindex
     // become visible. Default no-op; CdxIndex drops clean page-cache pages
     // when the sub-tag counter / root changes. Call before navigation.

@@ -109,6 +109,8 @@ public:
         cur_index_ = -1;
     }
 
+    void release_lock_shared() override { file_.release_lock_shared(); }
+
     // Drop clean page-cache entries when a peer has rewritten the bag
     // (sub-tag counter / root_page changed). See IIndex::refresh_from_disk.
     void refresh_from_disk() override;

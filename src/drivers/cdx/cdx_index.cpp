@@ -71,9 +71,53 @@ struct CdxWriteLockEntry {
     std::size_t                       handoffs = 0;
 };
 constexpr std::size_t kMaxCdxLockHandoffs = 64;
+} // namespace anonymous
+
 std::mutex g_cdx_wl_mu;
 std::unordered_map<std::string, std::shared_ptr<CdxWriteLockEntry>>
     g_cdx_write_locks;
+
+void clear_cdx_write_lock(const std::string& path) {
+    std::string canon;
+    try { canon = std::filesystem::absolute(path).lexically_normal().string(); } catch (...) { canon = path; }
+    {
+        std::lock_guard<std::mutex> lk(g_cdx_wl_mu);
+        auto it = g_cdx_write_locks.find(canon);
+        if (it != g_cdx_write_locks.end()) {
+            if (it->second && it->second->os_lock) {
+                it->second->os_lock->release();
+                it->second->os_lock.reset();
+            }
+            g_cdx_write_locks.erase(it);
+        }
+        auto it2 = g_cdx_write_locks.find(path);
+        if (it2 != g_cdx_write_locks.end() && it2->first != canon) {
+            if (it2->second && it2->second->os_lock) {
+                it2->second->os_lock->release();
+                it2->second->os_lock.reset();
+            }
+            g_cdx_write_locks.erase(it2);
+        }
+    }
+    // Also release any fcntl byte lock still held by this process on that file
+#ifndef _WIN32
+    auto do_unlck = [](const std::string& p){
+        if (auto f = platform::File::open(p, platform::OpenMode::ReadWrite)) {
+            struct ::flock fl{};
+            fl.l_type = F_UNLCK;
+            fl.l_whence = SEEK_SET;
+            fl.l_start = static_cast<off_t>(CDX_WRITE_LOCK_OFF);
+            fl.l_len = 1;
+            int fd = static_cast<int>(reinterpret_cast<intptr_t>(f.value().native_handle()) - 1);
+            ::fcntl(fd, F_SETLK, &fl);
+        }
+    };
+    do_unlck(path);
+    if (canon != path) do_unlck(canon);
+#endif
+}
+
+namespace {
 
 util::Result<platform::ByteLock>
 acquire_cdx_os_lock_(platform::File& f, platform::LockKind kind,
@@ -100,9 +144,15 @@ acquire_cdx_os_lock_(platform::File& f, platform::LockKind kind,
 
 std::string canonicalize_path(const std::string& path) {
     try {
-        return std::filesystem::absolute(path).lexically_normal().string();
+        // Use weakly_canonical to resolve symlinks (e.g. /tmp -> /private/tmp on macOS)
+        // so that two paths to the same file share the same registry entry.
+        return std::filesystem::weakly_canonical(path).string();
     } catch (...) {
-        return path;
+        try {
+            return std::filesystem::absolute(path).lexically_normal().string();
+        } catch (...) {
+            return path;
+        }
     }
 }
 
@@ -683,6 +733,10 @@ util::Result<void> CdxIndex::ensure_write_lock_() {
         auto& slot = g_cdx_write_locks[path_];
         if (!slot) slot = std::make_shared<CdxWriteLockEntry>();
         e = slot;
+        if (auto* f = std::fopen("/tmp/lock_diag.log", "a")) {
+            std::fprintf(f, "ensure_write_lock ENTER path=%s users=%zu has_os=%d fd=%p\n", path_.c_str(), e->users, (int)(bool)e->os_lock, file_.native_handle());
+            std::fclose(f);
+        }
     }
     const auto self = std::this_thread::get_id();
     // Harbour peers never give up (FLX_WAIT). Bound our own in-process
@@ -705,7 +759,14 @@ util::Result<void> CdxIndex::ensure_write_lock_() {
                 // OS lock's own retry loop.
                 auto l = acquire_cdx_os_lock_(file_,
                                               platform::LockKind::Exclusive);
-                if (!l) return l.error();
+                if (!l) {
+                    if (auto* f = std::fopen("/tmp/cdx_diag.log", "a")) {
+                        std::fprintf(f, "acquire_cdx_os_lock FAIL path=%s fd=%p code=%d sub=%d msg=%s\n",
+                            path_.c_str(), file_.native_handle(), l.error().code, l.error().sub_code, l.error().message.c_str());
+                        std::fclose(f);
+                    }
+                    return l.error();
+                }
                 e->os_lock = std::move(l).value();
             }
             e->owner = self;
@@ -775,6 +836,10 @@ CdxIndex::open_named(const std::string& path,
                      const std::string& tag_name) {
     mode_  = mode;
     path_  = canonicalize_path(path);
+    if (auto* f = std::fopen("/tmp/lock_diag.log", "a")) {
+        std::fprintf(f, "open_named orig=%s canon=%s fd_will_open\n", path.c_str(), path_.c_str());
+        std::fclose(f);
+    }
     auto fres = platform::File::open(path, map_mode(mode));
     if (!fres) return fres.error();
     file_ = std::move(fres).value();

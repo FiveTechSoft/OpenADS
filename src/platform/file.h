@@ -48,6 +48,7 @@ public:
     // openers. On Win32 this is a no-op: share=0 on the creating handle
     // already provides the exclusion.
     util::Result<void> try_lock_shared();
+    void release_lock_shared();
 
     // Native handle access for the lock + mmap layers below.
     void*    native_handle() const noexcept { return native_; }

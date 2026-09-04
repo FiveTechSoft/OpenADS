@@ -150,6 +150,12 @@ util::Result<void> File::try_lock_shared() {
     return {};
 }
 
+void File::release_lock_shared() {
+    if (native_ == nullptr) return;
+    int fd = fd_from_native(native_);
+    ::flock(fd, LOCK_UN);
+}
+
 } // namespace openads::platform
 
 #endif // !_WIN32

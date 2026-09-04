@@ -4,6 +4,7 @@
 
 #include <cerrno>
 #include <cstdint>
+#include <cstdio>
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -57,7 +58,10 @@ util::Result<ByteLock> do_lock(File& f, std::uint64_t offset,
     fl.l_pid    = 0;            // OFD requires l_pid=0
     // native_handle() stores (fd + 1) to avoid the nullptr/fd-0 collision.
     int fd = static_cast<int>(reinterpret_cast<intptr_t>(f.native_handle()) - 1);
-    if (::fcntl(fd, cmd, &fl) == -1) return os_error("fcntl(F_SETLK)");
+    if (::fcntl(fd, cmd, &fl) == -1) {
+        auto e = os_error("fcntl(F_SETLK)");
+        return e;
+    }
     return ByteLock{f.native_handle(), offset, length};
 }
 
