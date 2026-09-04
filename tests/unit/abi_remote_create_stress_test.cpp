@@ -212,7 +212,7 @@ TEST_CASE("remote create/index/append storm keeps DBF+CDX intact [slow]" *
     int workers = 120;
     if (const char* env = std::getenv("OPENADS_STRESS_WORKERS")) {
         int v = std::atoi(env);
-        if (v >= 4 && v <= 400) workers = v;
+        if (v >= 4 && v <= 800) workers = v;
     }
 
 #ifndef _WIN32
@@ -241,6 +241,7 @@ TEST_CASE("remote create/index/append storm keeps DBF+CDX intact [slow]" *
 
     Server srv;
     srv.set_enable_file_func(true);   // AdsCheckExistence rides the fs ops
+    srv.set_max_sessions(workers + 10);
     REQUIRE(srv.start("127.0.0.1", 0).has_value());
 
     Barrier phase_b(workers);
@@ -361,7 +362,7 @@ TEST_CASE("remote create/index/append storm no-barrier overlaps INDEX ON [slow]"
     int workers = 32;
     if (const char* env = std::getenv("OPENADS_STRESS_WORKERS")) {
         int v = std::atoi(env);
-        if (v >= 4 && v <= 400) workers = v;
+        if (v >= 4 && v <= 800) workers = v;
     }
 
     auto data = fs::temp_directory_path() / "openads_stress_nobarrier_data";
@@ -371,6 +372,7 @@ TEST_CASE("remote create/index/append storm no-barrier overlaps INDEX ON [slow]"
 
     Server srv;
     srv.set_enable_file_func(true);
+    srv.set_max_sessions(workers + 10);
     REQUIRE(srv.start("127.0.0.1", 0).has_value());
 
     std::vector<WorkerResult> results(workers);

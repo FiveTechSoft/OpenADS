@@ -38,8 +38,16 @@
   - Errors: 0
   - Miscount: 0
 
-- `abi_remote_create_stress_test`: 120 workers
-  - 9,644 assertions, 0 failures
+- `openads_remote_stress`: 1000 clients, 60s duration
+  - 2779 full scans (46.3/s)
+  - 2,779,000 rows read (46,317/s)
+  - Scan latency: p50=1281ms, p95=4748ms, p99=9334ms
+  - Peak sessions: 275
+  - Errors: 0
+  - Miscount: 0
+
+- `abi_remote_create_stress_test`: 700 workers
+  - 56,044 assertions, 0 failures
   - All DBF+CDX integrity checks passed
 
 ### Known Issues
