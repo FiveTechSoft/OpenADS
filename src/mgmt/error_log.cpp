@@ -148,6 +148,7 @@ bool dir_usable(const fs::path& dir) {
     // directory and the file are writable by this process.
     std::ofstream f(dir / kLogName, std::ios::binary | std::ios::app);
     return f.good();
+}
 
 }  // namespace (file-local DBF probes)
 
