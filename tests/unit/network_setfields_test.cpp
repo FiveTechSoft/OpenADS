@@ -64,7 +64,6 @@ void sf_set(ADSHANDLE hTable, const char* fld, const char* val) {
                          reinterpret_cast<UNSIGNED8*>(const_cast<char*>(val)),
                          len) == AE_SUCCESS);
 }
-
 std::string sf_get(ADSHANDLE hTable, const char* fld) {
     UNSIGNED8 f[32]{};
     std::memcpy(f, fld, std::strlen(fld));
@@ -76,6 +75,21 @@ std::string sf_get(ADSHANDLE hTable, const char* fld) {
     while (!s.empty() && s.back() == ' ') s.pop_back();
     while (!s.empty() && s.front() == ' ') s.erase(s.begin());
     return s;
+}
+
+// CI diagnostics: cursor snapshot so a value mismatch shows WHERE the
+// cursor is (recno 0 / EOF after flush would explain blank reads).
+std::string sf_cursor(ADSHANDLE hTable) {
+    UNSIGNED32 recno = 0, reccount = 0;
+    UNSIGNED16 eof = 0, bof = 0;
+    AdsGetRecordNum(hTable, 0, &recno);
+    AdsGetRecordCount(hTable, 0, &reccount);
+    AdsAtEOF(hTable, &eof);
+    AdsAtBOF(hTable, &bof);
+    char b[128]{};
+    std::snprintf(b, sizeof(b), "recno=%u count=%u eof=%u bof=%u",
+                  recno, reccount, eof, bof);
+    return std::string(b);
 }
 
 } // namespace
@@ -112,6 +126,7 @@ TEST_CASE("SetFields remote wire: buffered append + commit flush round-trips") {
     CHECK(sf_get(hTable, "AGE") == "42");
     // Commit flushes the batch in one frame.
     REQUIRE(AdsWriteRecord(hTable) == AE_SUCCESS);
+    CAPTURE(sf_cursor(hTable));
     CHECK(sf_get(hTable, "NM") == "delta");
     CHECK(sf_get(hTable, "AGE") == "42");
 
@@ -167,6 +182,7 @@ TEST_CASE("SetFields remote wire: skip-away flush keeps rows distinct") {
     REQUIRE(AdsGotoTop(hTable) == AE_SUCCESS);
     CHECK(sf_get(hTable, "NM") == "one");
     REQUIRE(AdsSkip(hTable, 1) == AE_SUCCESS);
+    CAPTURE(sf_cursor(hTable));
     CHECK(sf_get(hTable, "NM") == "two");
 
     REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);

@@ -11390,6 +11390,7 @@ bool fire_triggers_(Handle hConn, Connection* conn,
 UNSIGNED32 ENTRYPOINT AdsAppendRecord(ADSHANDLE hTable) {
     arc2_trace("AdsAppendRecord");
     if (auto* rt = get_remote_table(hTable)) {
+        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         remote_settle_cursor(rt);                   // M12.21 option C
         rt->row_valid        = false;               // M12.17
         rt->rec_count_cached = false;
