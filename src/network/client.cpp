@@ -316,11 +316,14 @@ RemoteConnection::connect_with_transport(std::unique_ptr<ITransport> transport,
         constexpr const char* kPrefix = "connected:";
         constexpr std::size_t kPreLen = 10;
         if (pl.size() >= kPreLen + 4 &&
-            std::equal(pl.begin(), pl.begin() + kPreLen, kPrefix)) {
-            std::size_t tail = pl.size() - kPreLen - 4;
+            std::equal(pl.begin(),
+                       pl.begin() + static_cast<std::ptrdiff_t>(kPreLen),
+                       kPrefix)) {
+            const std::size_t tail = pl.size() - kPreLen - 4;
             if (tail == data_dir.size() &&
-                std::equal(pl.begin() + kPreLen,
-                           pl.begin() + kPreLen + tail, data_dir.begin())) {
+                std::equal(pl.begin() + static_cast<std::ptrdiff_t>(kPreLen),
+                           pl.begin() + static_cast<std::ptrdiff_t>(kPreLen + tail),
+                           data_dir.begin())) {
                 const std::uint8_t* c = pl.data() + pl.size() - 4;
                 server_caps_ =
                     static_cast<std::uint32_t>(c[0]) |

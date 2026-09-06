@@ -650,17 +650,33 @@ void remote_settle_cursor(openads::network::RemoteTable* rt) {
 }
 
 // Write coalescing for RDD-only apps over WAN (Vouch/ERP — the app cannot
-// be changed to batch). Consecutive AdsSet* calls buffer (field, value)
-// locally instead of paying 1 RTT each; the buffer flushes as one
-// SetFields batch on the next visibility event (see remote_flush_pending
-// call sites). Settle-then-buffer keeps the server cursor where the
-// buffered writes belong: any cursor move flushes first.
-void remote_buffered_set(openads::network::RemoteTable* rt,
-                         const std::string& fname, const std::string& val) {
-    if (rt == nullptr) return;
+// be changed to batch). After the first set, consecutive AdsSet* calls
+// buffer (field, value) locally instead of paying 1 RTT each; the buffer
+// flushes as one SetFields batch on the next visibility event (see
+// remote_flush_pending call sites).
+//
+// The FIRST set of a run goes out immediately (probe): write-guard errors
+// (record locked by another station — alternating multi-user appends —
+// or X#'s GoHot lock-required check) surface on the writing call itself,
+// exactly as before. Only runs of 2+ consecutive sets batch, which is
+// precisely the voucher-entry shape this exists for. A failed probe
+// buffers nothing, so error timing matches the legacy loop field-for-field.
+UNSIGNED32 remote_buffered_set(openads::network::RemoteTable* rt,
+                               const std::string& fname,
+                               const std::string& val) {
+    if (rt == nullptr || rt->conn == nullptr) {
+        return fail(openads::AE_INTERNAL_ERROR, "");
+    }
     remote_settle_cursor(rt);
     rt->row_valid = false;                      // M12.17 cache invalidation
+    if (rt->pending_sets.empty()) {
+        if (auto r = rt->conn->set_field(rt->id, fname, val); !r) {
+            return fail(r.error());
+        }
+        return ok();
+    }
     rt->pending_sets.emplace_back(fname, val);
+    return ok();
 }
 
 // Overlay coalesced writes onto a cached row value (latest buffered set
@@ -10468,10 +10484,10 @@ UNSIGNED32 ENTRYPOINT AdsGetLong(ADSHANDLE hTable, UNSIGNED8* pucField, SIGNED32
             (void)rt->conn->fetch_current_row(rt);
         }
         std::string vstr;
-        if (rt->row_valid && i < rt->current_row.size()) {
+        const bool overlaid = remote_pending_overlay(rt, i, vstr);
+        if (!overlaid && rt->row_valid && i < rt->current_row.size()) {
             vstr = rt->current_row[i];
-            remote_pending_overlay(rt, i, vstr);
-        } else if (i < rt->fields.size()) {
+        } else if (!overlaid && i < rt->fields.size()) {
             auto v = rt->conn->get_field(rt->id, rt->fields[i].name);
             if (!v) return fail(v.error());
             vstr = std::move(v).value();
@@ -10520,10 +10536,10 @@ UNSIGNED32 ENTRYPOINT AdsGetDouble(ADSHANDLE hTable, UNSIGNED8* pucField, double
             (void)rt->conn->fetch_current_row(rt);
         }
         std::string vstr;
-        if (rt->row_valid && i < rt->current_row.size()) {
+        const bool overlaid = remote_pending_overlay(rt, i, vstr);
+        if (!overlaid && rt->row_valid && i < rt->current_row.size()) {
             vstr = rt->current_row[i];
-            remote_pending_overlay(rt, i, vstr);
-        } else if (i < rt->fields.size()) {
+        } else if (!overlaid && i < rt->fields.size()) {
             auto v = rt->conn->get_field(rt->id, rt->fields[i].name);
             if (!v) return fail(v.error());
             vstr = std::move(v).value();
@@ -10672,10 +10688,10 @@ UNSIGNED32 ENTRYPOINT AdsGetJulian(ADSHANDLE hTable, UNSIGNED8* pucField, SIGNED
             (void)rt->conn->fetch_current_row(rt);
         }
         std::string vstr;
-        if (rt->row_valid && i < rt->current_row.size()) {
+        const bool overlaid = remote_pending_overlay(rt, i, vstr);
+        if (!overlaid && rt->row_valid && i < rt->current_row.size()) {
             vstr = rt->current_row[i];
-            remote_pending_overlay(rt, i, vstr);
-        } else if (i < rt->fields.size()) {
+        } else if (!overlaid && i < rt->fields.size()) {
             auto v = rt->conn->get_field(rt->id, rt->fields[i].name);
             if (!v) return fail(v.error());
             vstr = std::move(v).value();
@@ -10919,17 +10935,27 @@ UNSIGNED32 ENTRYPOINT AdsGetField(ADSHANDLE hTable, UNSIGNED8* pucField,
         if (fi == std::numeric_limits<std::size_t>::max()) {
             return fail(openads::AE_COLUMN_NOT_FOUND, "");
         }
-        if (rt->row_valid) {
-            std::string val = rt->current_row[fi];
-            remote_pending_overlay(rt, fi, val);
-            if (rt->fields[fi].type == ADS_STRING)
-                val = pad_char_field(std::move(val), rt->fields[fi].length);
-            else if (!g_field_read_raw && rt->fields[fi].type == ADS_DATE)
-                val = format_date_display(val);
-            else if (!g_field_read_raw && rt->fields[fi].type == ADS_TIMESTAMP)
-                val = format_timestamp_display(val);
-            openads::abi::copy_to_caller(pucBuf, pulLen, val);
-            return ok();
+        // Buffered sets win over the cached row (fresh appends have no
+        // fetchable row yet); otherwise serve the cache, else fall
+        // through to the BOF/EOF blank template below.
+        {
+            std::string val;
+            const bool overlaid = remote_pending_overlay(rt, fi, val);
+            if (!overlaid && rt->row_valid && fi < rt->current_row.size()) {
+                val = rt->current_row[fi];
+            }
+            if (!overlaid && !rt->row_valid) {
+                // fall through to the BOF/EOF blank template below
+            } else {
+                if (rt->fields[fi].type == ADS_STRING)
+                    val = pad_char_field(std::move(val), rt->fields[fi].length);
+                else if (!g_field_read_raw && rt->fields[fi].type == ADS_DATE)
+                    val = format_date_display(val);
+                else if (!g_field_read_raw && rt->fields[fi].type == ADS_TIMESTAMP)
+                    val = format_timestamp_display(val);
+                openads::abi::copy_to_caller(pucBuf, pulLen, val);
+                return ok();
+            }
         }
         // BOF/EOF -- blank template (FWH td_blankrow, TBrowse append row).
         return ads_get_field_blank_out(
@@ -11921,8 +11947,7 @@ UNSIGNED32 ENTRYPOINT AdsSetString(ADSHANDLE hTable, UNSIGNED8* pucField,
         if (pucValue != nullptr && ulLen > 0) {
             val.assign(reinterpret_cast<const char*>(pucValue), ulLen);
         }
-        remote_buffered_set(rt, fname, val);
-        return ok();
+        return remote_buffered_set(rt, fname, val);
     }
 #if defined(OPENADS_WITH_FIREBIRD)
     if (auto* ft = get_firebird_table(hTable)) {
@@ -12038,8 +12063,7 @@ UNSIGNED32 ENTRYPOINT AdsSetLogical(ADSHANDLE hTable, UNSIGNED8* pucField,
             return fail(openads::AE_COLUMN_NOT_FOUND, "");
         }
         std::string fname = rt->fields[i].name;
-        remote_buffered_set(rt, fname, bValue ? "1" : "0");
-        return ok();
+        return remote_buffered_set(rt, fname, bValue ? "1" : "0");
     }
     Table* t = get_table(hTable);
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
@@ -12077,8 +12101,7 @@ UNSIGNED32 ENTRYPOINT AdsSetDouble(ADSHANDLE hTable, UNSIGNED8* pucField,
         std::string fname = rt->fields[i].name;
         char nbuf[64];
         std::snprintf(nbuf, sizeof(nbuf), "%.17g", dValue);
-        remote_buffered_set(rt, fname, std::string(nbuf));
-        return ok();
+        return remote_buffered_set(rt, fname, std::string(nbuf));
     }
     Table* t = get_table(hTable);
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
@@ -12422,8 +12445,7 @@ UNSIGNED32 ENTRYPOINT AdsSetStringW(ADSHANDLE hTable, UNSIGNED8* pucField,
             return fail(openads::AE_COLUMN_NOT_FOUND, "");
         }
         std::string fname = rt->fields[i].name;
-        remote_buffered_set(rt, fname, utf8);
-        return ok();
+        return remote_buffered_set(rt, fname, utf8);
     }
     Table* t = get_table(hTable);
     if (!t) {
@@ -12496,8 +12518,7 @@ UNSIGNED32 ENTRYPOINT AdsSetJulian(ADSHANDLE hTable, UNSIGNED8* pucField,
             return fail(openads::AE_COLUMN_NOT_FOUND, "");
         }
         std::string fname = rt->fields[i].name;
-        remote_buffered_set(rt, fname, val);
-        return ok();
+        return remote_buffered_set(rt, fname, val);
     }
     Table* t = get_table(hTable);
     if (!t) {
@@ -15359,8 +15380,7 @@ UNSIGNED32 ENTRYPOINT AdsSetFieldRaw(ADSHANDLE hTable, UNSIGNED8* pucField,
             return fail(openads::AE_COLUMN_NOT_FOUND, "");
         }
         std::string fname = rt->fields[i].name;
-        remote_buffered_set(rt, fname, raw);
-        return ok();
+        return remote_buffered_set(rt, fname, raw);
     }
     Table* t = get_table(hTable);
     if (!t) {
@@ -19344,8 +19364,7 @@ UNSIGNED32 ENTRYPOINT AdsFileToBinary(ADSHANDLE hTable, UNSIGNED8* pucField,
             return fail(openads::AE_COLUMN_NOT_FOUND, "");
         }
         std::string fname = rt->fields[i].name;
-        remote_buffered_set(rt, fname, payload);
-        return ok();
+        return remote_buffered_set(rt, fname, payload);
     }
     Table* t = get_table(hTable);
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "");
@@ -37789,8 +37808,7 @@ UNSIGNED32 ENTRYPOINT AdsSetNull(ADSHANDLE hObj, UNSIGNED8* pId) {
     if (auto* rt = get_remote_table(hObj)) {
         if (pId == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
         std::string fname(reinterpret_cast<const char*>(pId));
-        remote_buffered_set(rt, fname, std::string());
-        return ok();
+        return remote_buffered_set(rt, fname, std::string());
     }
     Table* t = get_table(hObj);
     if (t != nullptr) {

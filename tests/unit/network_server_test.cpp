@@ -89,7 +89,20 @@ TEST_CASE("M12.3 server Connect against a real data dir succeeds") {
     CHECK(reply.value().opcode == Opcode::ConnectAck);
     std::string s(reply.value().payload.begin(),
                   reply.value().payload.end());
-    CHECK(s == std::string("connected:") + ds);
+    // Server caps echo: "connected:<dir>" + trailing [u32 LE] word.
+    // The dir is echoed verbatim; the caps word advertises SetFields.
+    REQUIRE(s.size() >= 10u + ds.size() + 4u);
+    CHECK(s.substr(0, 10u + ds.size()) == std::string("connected:") + ds);
+    {
+        const auto& pl = reply.value().payload;
+        const std::uint8_t* c = pl.data() + pl.size() - 4;
+        std::uint32_t caps =
+            static_cast<std::uint32_t>(c[0]) |
+            (static_cast<std::uint32_t>(c[1]) <<  8) |
+            (static_cast<std::uint32_t>(c[2]) << 16) |
+            (static_cast<std::uint32_t>(c[3]) << 24);
+        CHECK((caps & openads::network::kCapSetFieldsBatch) != 0u);
+    }
 
     sock_close(cs);
     srv.stop();
