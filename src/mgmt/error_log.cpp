@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cstddef>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -147,11 +148,13 @@ bool dir_usable(const fs::path& dir) {
     // directory and the file are writable by this process.
     std::ofstream f(dir / kLogName, std::ios::binary | std::ios::app);
     return f.good();
-}
+
+}  // namespace (file-local DBF probes)
 
 // Per-thread request context (see set_log_context). Plain log() picks
 // these up so existing call sites gain SESSION/CLIENT/OP/TABLE columns
-// without signature churn.
+// without signature churn. External linkage: the server (session.cpp,
+// another TU) sets this per wire frame.
 struct LogContext {
     std::uint64_t session = 0;
     std::string   client;
@@ -170,6 +173,9 @@ void ErrorLog::set_log_context(std::uint64_t session,
     g_ctx.table   = table;
 }
 
+namespace {
+
+// File-local helpers: detail shape + fixed-width text mirror.
 // When the caller did not set OP/TABLE context, derive them from the
 // conventional "Op: rest" detail shape the server uses
 // (e.g. "OpenIndex: foo.cdx"). Only splits when the head looks like a
