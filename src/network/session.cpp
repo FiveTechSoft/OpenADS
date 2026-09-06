@@ -1546,14 +1546,15 @@ DispatchResult Session::dispatch(const Frame& f) {
                     for (auto& c : ext)
                         c = static_cast<char>(std::tolower(
                                 static_cast<unsigned char>(c)));
-                    std::string bag_leaf;
-                    if (ext == ".dbf")      bag_leaf = tp.stem().string() + ".cdx";
-                    else if (ext == ".adt") bag_leaf = tp.stem().string() + ".adi";
-                    if (!bag_leaf.empty()) {
+                    std::vector<std::string> bag_leaves;
+                    if (ext == ".dbf")      bag_leaves = {tp.stem().string() + ".cdx",
+                                                          tp.stem().string() + ".z01"};
+                    else if (ext == ".adt") bag_leaves = {tp.stem().string() + ".adi"};
+                    for (const auto& bag_leaf : bag_leaves) {
                         std::error_code ec;
                         std::filesystem::path bagp = tp.parent_path() / bag_leaf;
                         if (!std::filesystem::exists(bagp, ec)) {
-                            // Case-insensitive fallback.
+                            // Case-insensitive fallback (.CDX vs .cdx, .Z01 vs .z01).
                             std::string ci = openads::platform::
                                 resolve_case_insensitive(bagp.string());
                             if (!ci.empty())
@@ -1564,6 +1565,11 @@ DispatchResult Session::dispatch(const Frame& f) {
                             // root so subdirectory tables round-trip the
                             // correct production index (basename-only made
                             // AdsOpenIndex miss when table_dir != data root).
+                            // NOTE: Vouch/ERP apps keep the CDX-format
+                            // production bag as <base>.z01 instead of
+                            // <base>.cdx — without this the client falls
+                            // back to a speculative <base>.cdx OpenIndex
+                            // that always 5018s + writes ads_err.dbf.
                             std::string bag = bag_leaf;
                             std::filesystem::path base(sess_conn_->data_dir());
                             auto bag_rel = std::filesystem::relative(bagp, base, ec);
@@ -1578,6 +1584,7 @@ DispatchResult Session::dispatch(const Frame& f) {
                                 static_cast<std::uint8_t>((bn >> 8) & 0xFFu));
                             reply.payload.insert(reply.payload.end(),
                                                  bag.begin(), bag.end());
+                            break;
                         }
                     }
                 }

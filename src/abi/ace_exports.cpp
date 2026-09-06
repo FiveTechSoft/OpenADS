@@ -7043,38 +7043,44 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
         // for its own bookkeeping after the wire reply, which is fine.
         lk.unlock();
         {
-            std::string bag;
+            std::vector<std::string> bags;
             // Prefer the bag path the server confirmed exists.
             if (!ot.prod_bag_path.empty()) {
-                bag = ot.prod_bag_path;
+                bags = {ot.prod_bag_path};
             } else {
-                // Fallback: derive from the table name.
+                // Fallback: derive from the table name. Vouch/ERP apps
+                // keep the CDX-format production bag as <base>.z01, so
+                // try .cdx first then .z01 (old servers never send
+                // prod_bag_path; new servers already confirmed above).
                 std::filesystem::path tp(name);
                 std::string ext = tp.extension().string();
                 for (auto& c : ext)
                     c = static_cast<char>(std::tolower(
                             static_cast<unsigned char>(c)));
-                if (ext == ".dbf")      bag = tp.stem().string() + ".cdx";
-                else if (ext == ".adt") bag = tp.stem().string() + ".adi";
+                if (ext == ".dbf")      bags = {tp.stem().string() + ".cdx",
+                                                tp.stem().string() + ".z01"};
+                else if (ext == ".adt") bags = {tp.stem().string() + ".adi"};
             }
-            if (!bag.empty()) {
+            for (const auto& bag : bags) {
                 std::vector<UNSIGNED8> b(bag.size() + 1);
                 std::memcpy(b.data(), bag.data(), bag.size());
                 ADSHANDLE arr[64] = {0};
                 UNSIGNED16 alen = 64;
-                (void)AdsOpenIndex(to_ads_handle(gh), b.data(), arr, &alen);
-                // ADS semantics: auto-opening the production index leaves
-                // the controlling order natural (0) until DbSetOrder picks
-                // one. AdsOpenIndex optimistically marks the first tag
-                // active; undo that so the first nav-by-index actually
-                // sends SetOrder to the server.
-                if (auto* rtp = get_remote_table(to_ads_handle(gh))) {
-                    rtp->active_index_id = 0;
-                    // Store the confirmed production bag path so
-                    // AdsGetIndexFilename / OrdBagName works locally.
-                    if (!ot.prod_bag_path.empty())
-                        rtp->prod_bag_path = ot.prod_bag_path;
-                }
+                UNSIGNED32 orc = AdsOpenIndex(to_ads_handle(gh), b.data(), arr, &alen);
+                if (orc == 0) break; // .z01 hit after .cdx 5018, or first hit
+                if (!ot.prod_bag_path.empty()) break; // confirmed path: don't retry
+            }
+            // ADS semantics: auto-opening the production index leaves
+            // the controlling order natural (0) until DbSetOrder picks
+            // one. AdsOpenIndex optimistically marks the first tag
+            // active; undo that so the first nav-by-index actually
+            // sends SetOrder to the server.
+            if (auto* rtp = get_remote_table(to_ads_handle(gh))) {
+                rtp->active_index_id = 0;
+                // Store the confirmed production bag path so
+                // AdsGetIndexFilename / OrdBagName works locally.
+                if (!ot.prod_bag_path.empty())
+                    rtp->prod_bag_path = ot.prod_bag_path;
             }
         }
         // Implicit GoTop in REMOTE mode: after the production CDX
@@ -7496,18 +7502,20 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
     namespace fs = std::filesystem;
     fs::path tp(tbl->path());
     if (tp.extension() == ".dbf" || tp.extension() == ".DBF") {
-        fs::path cdx = tp; cdx.replace_extension(".cdx");
-        std::error_code ec;
-        std::string cdx_path =
-            openads::platform::resolve_case_insensitive(cdx.string());
-        if (fs::exists(cdx_path, ec)) {
-            std::string cdxs = cdx_path;
-            std::vector<UNSIGNED8> b(cdxs.size() + 1);
-            std::memcpy(b.data(), cdxs.data(), cdxs.size());
-            // Up to 64 tag handles is plenty for a production CDX.
-            ADSHANDLE arr[64] = {0};
-            UNSIGNED16 alen = 64;
-            (void)AdsOpenIndex(to_ads_handle(gh), b.data(), arr, &alen);
+        // Vouch/ERP: production bag may be <base>.z01 (CDX format).
+        for (const char* ext : {".cdx", ".z01"}) {
+            fs::path bag = tp; bag.replace_extension(ext);
+            std::error_code ec;
+            std::string bag_path =
+                openads::platform::resolve_case_insensitive(bag.string());
+            if (fs::exists(bag_path, ec)) {
+                std::vector<UNSIGNED8> b(bag_path.size() + 1);
+                std::memcpy(b.data(), bag_path.data(), bag_path.size());
+                // Up to 64 tag handles is plenty for a production bag.
+                ADSHANDLE arr[64] = {0};
+                UNSIGNED16 alen = 64;
+                if (AdsOpenIndex(to_ads_handle(gh), b.data(), arr, &alen) == 0) break;
+            }
         }
     }
     // ADI auto-open: same convention for ADT tables -- opening `<base>.adt`
