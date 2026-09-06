@@ -2881,6 +2881,13 @@ DispatchResult Session::dispatch(const Frame& f) {
                         b - a).count());
             };
             auto oi_t0 = std::chrono::steady_clock::now();
+            // Remember whether the twin pre-existed: ensure_abi_handle
+            // creates one as a side effect, and a FAILED open below must
+            // not leave it behind. An orphan twin hijacks every later
+            // write (AppendBlank/SetField/SetFields prefer tbls_h_) while
+            // fetch packs the engine table — same-handle read-after-write
+            // then serves stale blanks until a nav reloads from disk.
+            const bool had_twin = tbls_h_.find(tid) != tbls_h_.end();
             ADSHANDLE ht = ensure_abi_handle(tid);
             {
                 auto& t = oi_st.op_timing_oi[0];
@@ -2907,7 +2914,21 @@ DispatchResult Session::dispatch(const Frame& f) {
                 while (us > pv && !t.max_us.compare_exchange_weak(
                           pv, us, std::memory_order_relaxed)) {}
             }
-            if (rrc != 0) { reply = err("OpenIndex: " + path, rrc); break; }
+            if (rrc != 0) {
+                // Drop an orphan twin created above: it owns no tags, so
+                // keeping it would only split engine/twin state (and leak
+                // the ABI handle). A pre-existing twin stays untouched, as
+                // does a cursor_tbls_ handle (never in tbls_h_).
+                if (!had_twin) {
+                    if (auto hit = tbls_h_.find(tid);
+                        hit != tbls_h_.end() && hit->second == ht) {
+                        abi_schema_.erase(ht);
+                        (void)AdsCloseTable(ht);
+                        tbls_h_.erase(hit);
+                    }
+                }
+                reply = err("OpenIndex: " + path, rrc); break;
+            }
             reply.opcode = Opcode::OpenIndexAck;
             reply.payload.push_back(static_cast<std::uint8_t>( alen       & 0xFFu));
             reply.payload.push_back(static_cast<std::uint8_t>((alen >> 8) & 0xFFu));
