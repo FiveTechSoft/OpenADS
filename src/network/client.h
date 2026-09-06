@@ -81,6 +81,14 @@ public:
         return transport_ && transport_->valid();
     }
 
+    // Server capability word echoed in ConnectAck (see Session::dispatch).
+    // Bit kCapSetFieldsBatch => the server implements SetFields (0x5E);
+    // the write-coalescing buffer below only batches when this is set,
+    // otherwise every set goes out as a single SetField exactly as before.
+    bool server_setfields_batch() const noexcept {
+        return (server_caps_ & kCapSetFieldsBatch) != 0;
+    }
+
     // M12.16 — remote index handle subsystem.
     struct OpenIndexEntry {
         std::uint32_t id = 0;
@@ -327,6 +335,12 @@ public:
     util::Result<void>          set_field(std::uint32_t id,
                                           const std::string& field_name,
                                           const std::string& value);
+    // Write coalescing: N field writes in ONE round-trip. Payload:
+    // [u32 tid][u16 n][per field: u16 nlen][name][u32 vlen][value].
+    // Empty input is a no-op success (no frame sent).
+    util::Result<void>          set_fields_batch(
+        std::uint32_t id,
+        const std::vector<std::pair<std::string, std::string>>& fields);
     // M12.25 — raw DBF record image at the current cursor position.
     util::Result<std::vector<std::uint8_t>> get_record(std::uint32_t id);
     util::Result<std::uint32_t> get_record_crc(std::uint32_t id);
@@ -401,6 +415,8 @@ private:
 
     std::unique_ptr<ITransport> transport_;
     std::mutex                  mu_;
+    // Server caps echoed in ConnectAck (0 when the server predates caps).
+    std::uint32_t               server_caps_ = 0;
 
 public:
     // Deferred disconnect (MT shared connections). AdsDisconnect on a
@@ -438,6 +454,13 @@ struct RemoteTable {
     // not one per cell.
     std::vector<std::string> current_row;
     bool                     row_valid = false;
+    // Write coalescing (RDD voucher entry): consecutive AdsSet* calls
+    // buffer (field name, value) here instead of paying 1 RTT each; the
+    // buffer flushes as one SetFields batch on the next visibility event
+    // (read/nav/lock/unlock/commit/close — see remote_flush_pending in
+    // ace_exports.cpp). Empty = clean. Reads overlay these values onto
+    // current_row so same-handle read-after-write stays exact.
+    std::vector<std::pair<std::string, std::string>> pending_sets;
     // M12.18 — recno + deleted flag arrive together with the row
     // bytes so AdsGetRecordNum / AdsIsRecordDeleted can serve from
     // cache instead of a separate RTT each.

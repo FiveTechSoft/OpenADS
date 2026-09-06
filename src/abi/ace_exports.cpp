@@ -13290,6 +13290,49 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
     }
     if (auto* rt = get_remote_table(hTable)) {
         std::string path = openads::abi::to_internal(pucName, 0);
+        // Zero-RTT dedup (RDD-only apps, no app change possible): the
+        // production bag is already bound on this handle by the OpenTable
+        // auto-open, but rddads issues an explicit AdsOpenIndex for the
+        // same bag on every USE. A second wire open buys identical
+        // bindings for a full RTT + server reopen, so serve it from the
+        // cached tag/handle lists when the request names the production
+        // bag. Compared by stem (case-insensitive): .cdx/.z01 are
+        // equivalent production spellings. Temp bags (different stem)
+        // always go to the wire — another session may have added tags.
+        {
+            auto stem_of = [](const std::string& p) {
+                std::string b = p;
+                auto sep = b.find_last_of("/\\");
+                if (sep != std::string::npos) b = b.substr(sep + 1);
+                auto dot = b.find_last_of('.');
+                if (dot != std::string::npos) b = b.substr(0, dot);
+                for (auto& c : b)
+                    c = static_cast<char>(std::tolower(
+                            static_cast<unsigned char>(c)));
+                return b;
+            };
+            auto& s = state();
+            std::lock_guard<std::recursive_mutex> lk(s.mu);
+            if (!rt->index_by_tag.empty() && !rt->prod_bag_path.empty() &&
+                rt->index_by_tag.size() == rt->index_handles.size() &&
+                !stem_of(path).empty() &&
+                stem_of(path) == stem_of(rt->prod_bag_path)) {
+                const std::uint16_t cap =
+                    (pu16ArrayLen != nullptr) ? *pu16ArrayLen : 0;
+                std::uint16_t count = 0;
+                for (std::size_t i = 0; i < rt->index_by_tag.size(); ++i) {
+                    if (count < cap) {
+                        ahIndex[count] = to_ads_handle(static_cast<Handle>(
+                            rt->index_handles[i]));
+                    }
+                    ++count;
+                }
+                if (rt->active_index_id == 0)
+                    rt->active_index_id = rt->index_by_tag.front().second;
+                if (pu16ArrayLen != nullptr) *pu16ArrayLen = count;
+                return ok();
+            }
+        }
         auto r = rt->conn->open_index(rt->id, path);
         if (!r) return fail(r.error());
         auto& s = state();

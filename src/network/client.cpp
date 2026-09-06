@@ -4,6 +4,7 @@
 #include "engine/table.h"
 #include "openads/error.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <thread>
@@ -267,7 +268,7 @@ void connect_pack_payload(std::vector<std::uint8_t>& payload,
     // a distinct bit precisely because a server must NOT send a backward block
     // to a client that only understands forward ones (see kCapPrefetchBackward).
     std::uint32_t caps = kCapPrefetchConsume | kCapPrefetchBackward
-                       | kCapOpenTableMode;
+                       | kCapOpenTableMode | kCapSetFieldsBatch;
     for (int i = 0; i < 4; ++i)
         payload.push_back(static_cast<std::uint8_t>((caps >> (8 * i)) & 0xFFu));
 }
@@ -304,6 +305,30 @@ RemoteConnection::connect_with_transport(std::unique_ptr<ITransport> transport,
         std::string msg(rep.value().payload.begin(),
                         rep.value().payload.end());
         return util::Error{5000, 0, "Connect: " + msg, data_dir};
+    }
+    // Server caps echo: new servers append [u32 LE] after
+    // "connected:<dir>" (dir echoed verbatim). Old servers send exactly
+    // "connected:<dir>" — the size/echo check below rejects that shape
+    // so server_caps_ stays 0 and the client keeps legacy single ops.
+    server_caps_ = 0;
+    {
+        const auto& pl = rep.value().payload;
+        constexpr const char* kPrefix = "connected:";
+        constexpr std::size_t kPreLen = 10;
+        if (pl.size() >= kPreLen + 4 &&
+            std::equal(pl.begin(), pl.begin() + kPreLen, kPrefix)) {
+            std::size_t tail = pl.size() - kPreLen - 4;
+            if (tail == data_dir.size() &&
+                std::equal(pl.begin() + kPreLen,
+                           pl.begin() + kPreLen + tail, data_dir.begin())) {
+                const std::uint8_t* c = pl.data() + pl.size() - 4;
+                server_caps_ =
+                    static_cast<std::uint32_t>(c[0]) |
+                    (static_cast<std::uint32_t>(c[1]) <<  8) |
+                    (static_cast<std::uint32_t>(c[2]) << 16) |
+                    (static_cast<std::uint32_t>(c[3]) << 24);
+            }
+        }
     }
     // M12.32 — SET DELETED often runs before AdsConnect60 (rddads apps
     // set it in Main, then connect), so the AdsShowDeleted broadcast
@@ -684,6 +709,40 @@ util::Result<void> RemoteConnection::set_field(std::uint32_t id,
     if (rep.value().opcode != Opcode::SetFieldAck) {
         return util::Error{5000, 0, "SetField: server error",
                            field_name};
+    }
+    return {};
+}
+
+util::Result<void> RemoteConnection::set_fields_batch(
+        std::uint32_t id,
+        const std::vector<std::pair<std::string, std::string>>& fields) {
+    if (fields.empty()) return {};
+    if (fields.size() > kMaxWireFields) {
+        return util::Error{5000, 0,
+            "SetFields: too many fields", ""};
+    }
+    Frame req;
+    req.opcode = Opcode::SetFields;
+    write_u32_le(id, req.payload);
+    write_u16_le(static_cast<std::uint16_t>(fields.size()), req.payload);
+    for (const auto& [name, value] : fields) {
+        if (name.size() > 0xFFFFu || value.size() > 0xFFFFFFFFu) {
+            return util::Error{5000, 0,
+                "SetFields: field too large", name};
+        }
+        write_u16_le(static_cast<std::uint16_t>(name.size()), req.payload);
+        req.payload.insert(req.payload.end(), name.begin(), name.end());
+        std::uint32_t vlen = static_cast<std::uint32_t>(value.size());
+        req.payload.push_back(static_cast<std::uint8_t>( vlen        & 0xFFu));
+        req.payload.push_back(static_cast<std::uint8_t>((vlen >>  8) & 0xFFu));
+        req.payload.push_back(static_cast<std::uint8_t>((vlen >> 16) & 0xFFu));
+        req.payload.push_back(static_cast<std::uint8_t>((vlen >> 24) & 0xFFu));
+        req.payload.insert(req.payload.end(), value.begin(), value.end());
+    }
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::SetFieldsAck) {
+        return util::Error{5000, 0, "SetFields: server error", ""};
     }
     return {};
 }

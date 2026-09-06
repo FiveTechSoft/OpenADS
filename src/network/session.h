@@ -14,6 +14,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace openads::engine { class Table; }
@@ -215,6 +216,21 @@ private:
                                std::uint16_t lookahead_n = 0,
                                std::int8_t dir = 1);
     void      sync_engine_cursor(std::uint32_t id);
+    // Apply field writes to the current record; shared by the SetField
+    // (single) and SetFields (batch) handlers so both maintain the twin
+    // handle, bags and engine cursor identically. tbl is the already
+    // looked-up engine table for id.Twin cursor is synced once up front
+    // and the engine cursor once at the end (not per field). Returns 0
+    // on success; on failure the ACE code, with column_missing set when
+    // a field name did not resolve (caller reports "column not found"
+    // instead of "write failed", matching the single-field handler).
+    struct FieldWriteResult {
+        UNSIGNED32 code = 0;
+        bool       column_missing = false;
+    };
+    FieldWriteResult write_fields(std::uint32_t id,
+        openads::engine::Table* tbl,
+        const std::vector<std::pair<std::string, std::string>>& pairs);
 };
 
 } // namespace openads::network

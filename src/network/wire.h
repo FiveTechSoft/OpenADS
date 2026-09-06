@@ -130,6 +130,18 @@ enum class Opcode : std::uint8_t {
     AppendBlankAck     = 0x51,
     SetField           = 0x52,
     SetFieldAck        = 0x53,
+    // Write coalescing for RDD-only apps (no app change possible): the
+    // client buffers consecutive AdsSet* calls and flushes them as ONE
+    // frame on the next visibility event (read/nav/lock/commit/close),
+    // collapsing N-field voucher entry from N RTTs to 1. Capability-
+    // gated via kCapSetFieldsBatch in ConnectAck (old servers never see
+    // 0x5E: the client only sends it when the ack advertised the bit).
+    // Request SetFields: [u32 tid][u16 n][per field: u16 nlen][name]
+    //                    [u32 vlen][value]  (n==0 is a no-op success)
+    // Reply SetFieldsAck: (empty). First failing field stops the apply,
+    // exactly like a sequential SetField loop failing at the same field.
+    SetFields          = 0x5E,
+    SetFieldsAck       = 0x5F,
     DeleteRecord       = 0x54,
     DeleteRecordAck    = 0x55,
     RecallRecord       = 0x56,
@@ -577,6 +589,13 @@ inline constexpr std::uint32_t kCapPrefetchBackward = 0x00000004u;
 // payload as the table name and the leading null bytes make the path invalid;
 // the open_table fallback then fails with AE_TABLE_NOT_FOUND (5018).
 inline constexpr std::uint32_t kCapOpenTableMode = 0x00000008u;
+
+// Write coalescing (SetFields 0x5E). Client→server: advertised in the
+// Connect caps word like the other bits (old servers ignore unknown
+// bits). Server→client: echoed in ConnectAck (see Session::dispatch
+// Connect) — the client sends 0x5E only when the ack carried this bit,
+// so an old server never receives the frame and needs no fallback path.
+inline constexpr std::uint32_t kCapSetFieldsBatch = 0x00000010u;
 
 // RCB 07/14/2026: M12.23 — AdsCacheRecords support. Why a bare trailing field
 // and not a new opcode or a capability bit: the Skip request grew an OPTIONAL

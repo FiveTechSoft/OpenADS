@@ -26,6 +26,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <utility>
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -1207,6 +1208,80 @@ void Session::sync_engine_cursor(std::uint32_t id) {
     (void)tbl->goto_record(rn);
 }
 
+Session::FieldWriteResult Session::write_fields(std::uint32_t id,
+        openads::engine::Table* tbl,
+        const std::vector<std::pair<std::string, std::string>>& pairs) {
+    FieldWriteResult out;
+    if (tbl == nullptr) { out.code = openads::AE_INTERNAL_ERROR; return out; }
+    // When indexes live on the parallel ABI handle, write through
+    // AdsSetString so the bag is maintained (see AppendBlank).
+    if (auto hit = tbls_h_.find(id); hit != tbls_h_.end()) {
+        // The engine cursor is authoritative: navigation opcodes move only
+        // the engine table, the twin syncs lazily. Land the twin on the
+        // same row ONCE up front (not per field) — otherwise the 5035
+        // write guard checks the wrong row's lock.
+        UNSIGNED32 cur = 0;
+        AdsGetRecordNum(hit->second, 0, &cur);
+        UNSIGNED32 eng = tbl->recno();
+        if (eng != 0 && cur != eng) {
+            (void)AdsGotoRecord(hit->second, eng);
+        }
+        for (const auto& [fname, val] : pairs) {
+            std::vector<UNSIGNED8> fn(fname.begin(), fname.end());
+            fn.push_back(0);
+            std::vector<UNSIGNED8> vv(val.begin(), val.end());
+            // AdsSetString takes length; do not require NUL in value.
+            UNSIGNED32 rrc = AdsSetString(
+                hit->second, fn.data(),
+                vv.empty() ? reinterpret_cast<UNSIGNED8*>(const_cast<char*>(""))
+                           : vv.data(),
+                static_cast<UNSIGNED32>(val.size()));
+            if (rrc != 0) { out.code = rrc; return out; }
+        }
+        // Storm fix — no per-field flush; the record is made durable by
+        // DbCommit→FlushTable at the end of the append.
+        sync_engine_cursor(id);
+        return out;
+    }
+
+    for (const auto& [fname, val] : pairs) {
+        std::int32_t fi = tbl->field_index(fname);
+        if (fi < 0) { out.column_missing = true; return out; }
+        const auto& fdesc =
+            tbl->field_descriptor(static_cast<std::uint16_t>(fi));
+        util::Result<void> r;
+        auto fi_u = static_cast<std::uint16_t>(fi);
+        switch (fdesc.type) {
+            case drivers::DbfFieldType::Logical: {
+                bool lv = !val.empty() &&
+                    (val[0] == '1' || val[0] == 'T' || val[0] == 't' ||
+                     val[0] == 'Y' || val[0] == 'y');
+                r = tbl->set_field(fi_u, lv);
+                break;
+            }
+            case drivers::DbfFieldType::Integer:
+            case drivers::DbfFieldType::AutoInc:
+            case drivers::DbfFieldType::Double:
+            case drivers::DbfFieldType::ShortInt:
+            case drivers::DbfFieldType::Currency:
+            case drivers::DbfFieldType::AdtMoney:
+            case drivers::DbfFieldType::Time:
+            case drivers::DbfFieldType::Numeric:
+                try {
+                    r = tbl->set_field(fi_u, std::stod(val));
+                } catch (...) {
+                    r = tbl->set_field(fi_u, val);
+                }
+                break;
+            default:
+                r = tbl->set_field(fi_u, val);
+                break;
+        }
+        if (!r) { out.code = 5035; return out; }
+    }
+    return out;
+}
+
 DispatchResult Session::dispatch(const Frame& f) {
     Frame reply;
     WTRACE("[wire] op=%u\n", (unsigned)f.opcode);
@@ -1425,6 +1500,23 @@ DispatchResult Session::dispatch(const Frame& f) {
             reply.opcode = Opcode::ConnectAck;
             std::string ackmsg = "connected:" + dir;
             reply.payload.assign(ackmsg.begin(), ackmsg.end());
+            // Server caps echo (write coalescing): trailing [u32 LE].
+            // Old clients ignore the ack payload entirely (opcode-only
+            // check), so this is backward compatible; new clients match
+            // the "connected:<dir>" echo against their requested dir
+            // before trusting the trailing word (see connect_with_transport).
+            {
+                const std::uint32_t scaps =
+                    openads::network::kCapSetFieldsBatch;
+                reply.payload.push_back(
+                    static_cast<std::uint8_t>( scaps        & 0xFFu));
+                reply.payload.push_back(
+                    static_cast<std::uint8_t>((scaps >>  8) & 0xFFu));
+                reply.payload.push_back(
+                    static_cast<std::uint8_t>((scaps >> 16) & 0xFFu));
+                reply.payload.push_back(
+                    static_cast<std::uint8_t>((scaps >> 24) & 0xFFu));
+            }
             break;
         }
         case Opcode::Disconnect: {
@@ -3729,76 +3821,75 @@ DispatchResult Session::dispatch(const Frame& f) {
             auto* tbl = sess_conn_->lookup_table(it->second);
             if (!tbl) { reply = err("SetField: lookup failed"); break; }
 
-            // When indexes live on the parallel ABI handle, write through
-            // AdsSetString so the bag is maintained (see AppendBlank).
-            if (auto hit = tbls_h_.find(id); hit != tbls_h_.end()) {
-                // The engine cursor is authoritative: navigation opcodes
-                // (GotoRecord / unordered Skip) move only the engine table,
-                // the twin is synced lazily for ordered walks. Land the
-                // twin on the same row before writing through it —
-                // otherwise the 5035 write guard checks the lock of
-                // whatever record the twin happens to sit on (e.g. a fresh
-                // auto-locked append) and the write lands on the WRONG row.
-                UNSIGNED32 cur = 0;
-                AdsGetRecordNum(hit->second, 0, &cur);
-                UNSIGNED32 eng = tbl->recno();
-                if (eng != 0 && cur != eng) {
-                    (void)AdsGotoRecord(hit->second, eng);
-                }
-                std::vector<UNSIGNED8> fn(fname.begin(), fname.end());
-                fn.push_back(0);
-                std::vector<UNSIGNED8> vv(val.begin(), val.end());
-                // AdsSetString takes length; do not require NUL in value.
-                UNSIGNED32 rrc = AdsSetString(
-                    hit->second, fn.data(),
-                    vv.empty() ? reinterpret_cast<UNSIGNED8*>(const_cast<char*>(""))
-                               : vv.data(),
-                    static_cast<UNSIGNED32>(val.size()));
-                if (rrc != 0) {
-                    reply = err("SetField: write failed", rrc);
-                    break;
-                }
-                // Storm fix — no per-field flush; the record is made
-                // durable by DbCommit→FlushTable at the end of the append.
-                sync_engine_cursor(id);
-                reply.opcode = Opcode::SetFieldAck;
+            auto wr = write_fields(id, tbl, {{fname, val}});
+            if (wr.code != 0) {
+                reply = wr.column_missing
+                    ? err("SetField: column not found")
+                    : err("SetField: write failed", wr.code);
                 break;
             }
-
-            std::int32_t fi = tbl->field_index(fname);
-            if (fi < 0) { reply = err("SetField: column not found"); break; }
-            const auto& fdesc =
-                tbl->field_descriptor(static_cast<std::uint16_t>(fi));
-            util::Result<void> r;
-            auto fi_u = static_cast<std::uint16_t>(fi);
-            switch (fdesc.type) {
-                case drivers::DbfFieldType::Logical: {
-                    bool lv = !val.empty() &&
-                        (val[0] == '1' || val[0] == 'T' || val[0] == 't' ||
-                         val[0] == 'Y' || val[0] == 'y');
-                    r = tbl->set_field(fi_u, lv);
-                    break;
-                }
-                case drivers::DbfFieldType::Integer:
-                case drivers::DbfFieldType::AutoInc:
-                case drivers::DbfFieldType::Double:
-                case drivers::DbfFieldType::ShortInt:
-                case drivers::DbfFieldType::Currency:
-                case drivers::DbfFieldType::AdtMoney:
-                case drivers::DbfFieldType::Time:
-                case drivers::DbfFieldType::Numeric:
-                    try {
-                        r = tbl->set_field(fi_u, std::stod(val));
-                    } catch (...) {
-                        r = tbl->set_field(fi_u, val);
-                    }
-                    break;
-                default:
-                    r = tbl->set_field(fi_u, val);
-                    break;
-            }
-            if (!r) { reply = err("SetField: write failed", 5035); break; }
             reply.opcode = Opcode::SetFieldAck;
+            break;
+        }
+        case Opcode::SetFields: {
+            // payload: [u32 tid][u16 n][per field: u16 nlen][name]
+            //          [u32 vlen][value]. Write-coalescing batch: the
+            //          client buffers consecutive AdsSet* calls and flushes
+            //          them here in ONE round-trip. First failing field
+            //          stops the apply, exactly like a sequential SetField
+            //          loop failing at the same field.
+            if (f.payload.size() < 6) { reply = err("SetFields: bad payload"); break; }
+            std::uint32_t id = read_u32_le(f.payload.data());
+            std::size_t pos = 4;
+            std::uint16_t n = static_cast<std::uint16_t>(
+                static_cast<std::uint16_t>(f.payload[pos]) |
+                (static_cast<std::uint16_t>(f.payload[pos + 1]) << 8));
+            pos += 2;
+            std::vector<std::pair<std::string, std::string>> pairs;
+            pairs.reserve(n);
+            bool truncated = false;
+            for (std::uint16_t k = 0; k < n; ++k) {
+                if (pos + 2 > f.payload.size()) { truncated = true; break; }
+                std::uint16_t nlen = static_cast<std::uint16_t>(
+                    static_cast<std::uint16_t>(f.payload[pos]) |
+                    (static_cast<std::uint16_t>(f.payload[pos + 1]) << 8));
+                pos += 2;
+                if (pos + nlen + 4 > f.payload.size()) { truncated = true; break; }
+                std::string fname(reinterpret_cast<const char*>(
+                                      f.payload.data() + pos), nlen);
+                pos += nlen;
+                std::uint32_t vlen =
+                    static_cast<std::uint32_t>(f.payload[pos]) |
+                    (static_cast<std::uint32_t>(f.payload[pos + 1]) <<  8) |
+                    (static_cast<std::uint32_t>(f.payload[pos + 2]) << 16) |
+                    (static_cast<std::uint32_t>(f.payload[pos + 3]) << 24);
+                pos += 4;
+                if (pos + vlen > f.payload.size()) { truncated = true; break; }
+                std::string val(reinterpret_cast<const char*>(
+                                    f.payload.data() + pos), vlen);
+                pos += vlen;
+                pairs.emplace_back(std::move(fname), std::move(val));
+            }
+            if (truncated) { reply = err("SetFields: truncated"); break; }
+            if (pairs.size() > openads::network::kMaxWireFields) {
+                reply = err("SetFields: too many fields"); break;
+            }
+
+            auto it = tbls_.find(id);
+            if (it == tbls_.end() || !sess_conn_) {
+                reply = err("SetFields: bad table id"); break;
+            }
+            auto* tbl = sess_conn_->lookup_table(it->second);
+            if (!tbl) { reply = err("SetFields: lookup failed"); break; }
+
+            auto wr = write_fields(id, tbl, pairs);
+            if (wr.code != 0) {
+                reply = wr.column_missing
+                    ? err("SetFields: column not found")
+                    : err("SetFields: write failed", wr.code);
+                break;
+            }
+            reply.opcode = Opcode::SetFieldsAck;
             break;
         }
         case Opcode::DeleteRecord: {
