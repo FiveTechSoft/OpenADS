@@ -670,10 +670,15 @@ UNSIGNED32 remote_buffered_set(openads::network::RemoteTable* rt,
     remote_settle_cursor(rt);
     rt->row_valid = false;                      // M12.17 cache invalidation
     if (rt->pending_sets.empty()) {
+        // Probe: the first set of a run goes out immediately so
+        // write-guard errors surface on the writing call itself (see
+        // above). The value is ALSO buffered: after a twin-path append
+        // the engine cursor has no fetchable row yet, so same-handle
+        // reads would otherwise miss even the just-probed value. The
+        // flush re-applies it idempotently (same value, same record).
         if (auto r = rt->conn->set_field(rt->id, fname, val); !r) {
             return fail(r.error());
         }
-        return ok();
     }
     rt->pending_sets.emplace_back(fname, val);
     return ok();
@@ -710,15 +715,26 @@ UNSIGNED32 remote_flush_pending(openads::network::RemoteTable* rt) {
     // locally the server cursor lags behind, and the batch must apply to
     // the row the buffered sets targeted — not where the server sits.
     remote_settle_cursor(rt);
+    // pending[0] is always the probe (already applied server-side at
+    // buffer time), so the flush covers pending[1:]. A lone probe needs
+    // no frame at all — single-field edits cost exactly what they did
+    // before coalescing existed.
+    if (rt->pending_sets.size() == 1) {
+        rt->pending_sets.clear();
+        rt->row_valid = false;
+        return ok();
+    }
+    const std::vector<std::pair<std::string, std::string>> rest(
+        rt->pending_sets.begin() + 1, rt->pending_sets.end());
     if (rt->conn->server_setfields_batch()) {
-        if (auto r = rt->conn->set_fields_batch(rt->id, rt->pending_sets);
+        if (auto r = rt->conn->set_fields_batch(rt->id, rest);
             !r) {
             rt->pending_sets.clear();
             rt->row_valid = false;
             return fail(r.error());
         }
     } else {
-        for (auto& [fname, val] : rt->pending_sets) {
+        for (auto& [fname, val] : rest) {
             if (auto r = rt->conn->set_field(rt->id, fname, val); !r) {
                 rt->pending_sets.clear();
                 rt->row_valid = false;
