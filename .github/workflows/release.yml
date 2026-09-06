@@ -254,6 +254,22 @@ jobs:
           T="${{ steps.tag.outputs.tag }}"
           echo "version=${T#v}" >> "$GITHUB_OUTPUT"
 
+      # Repo convention: every release commit ships release-notes-<ver>.md
+      # (see v1.09.22/v1.09.23). The published GitHub Release body is that
+      # file verbatim — never the auto-generated commit list — so the
+      # "What to test" and Packages sections reach users intact.
+      - name: Resolve release notes
+        id: notes
+        shell: bash
+        run: |
+          F="release-notes-${{ steps.ver.outputs.version }}.md"
+          if [ ! -f "$F" ]; then
+            echo "::error::Missing $F — every release tag needs its notes file."
+            ls release-notes-*.md || true
+            exit 1
+          fi
+          echo "path=$F" >> "$GITHUB_OUTPUT"
+
       - name: Verify required Windows release assets
         shell: bash
         run: |
@@ -289,7 +305,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
-          generate_release_notes: true
+          body_path: ${{ steps.notes.outputs.path }}
           files: out/*
 
       # If the tag was published by hand with the old slim kit already
