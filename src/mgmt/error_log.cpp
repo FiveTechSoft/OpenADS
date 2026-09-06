@@ -7,6 +7,13 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
+#include <thread>
+#ifdef _WIN32
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace openads::mgmt {
 
@@ -15,6 +22,22 @@ namespace fs = std::filesystem;
 namespace {
 
 constexpr const char* kLogName = "ads_err.dbf";
+constexpr const char* kTextName = "ads_err.log";
+
+// Fixed-width text mirror layout. Every leading column is padded (or
+// truncated) to exactly its width; columns are joined with 3 spaces.
+// DETAIL is the tail column and is NOT truncated (DBF already caps at 200).
+constexpr const char* kSep = "   ";
+constexpr std::size_t kWDatetime = 19;   // "YYYY-MM-DD HH:MM:SS"
+constexpr std::size_t kWCode     = 6;    // right-aligned
+constexpr std::size_t kWSource   = 8;
+constexpr std::size_t kWLine     = 8;    // right-aligned
+constexpr std::size_t kWPid      = 8;    // right-aligned
+constexpr std::size_t kWTid      = 8;    // last 8 hex of hashed thread id
+constexpr std::size_t kWSession  = 8;    // right-aligned
+constexpr std::size_t kWClient   = 21;   // "ip:port"
+constexpr std::size_t kWOp       = 12;
+constexpr std::size_t kWTable    = 24;
 
 // On-disk DBF3 schema. Field layout mirrors what the SAP docs describe for
 // ads_err.dbf: separate DATE and TIME fields (no Error_Number — that
@@ -126,6 +149,188 @@ bool dir_usable(const fs::path& dir) {
     return f.good();
 }
 
+// Per-thread request context (see set_log_context). Plain log() picks
+// these up so existing call sites gain SESSION/CLIENT/OP/TABLE columns
+// without signature churn.
+struct LogContext {
+    std::uint64_t session = 0;
+    std::string   client;
+    std::string   op;
+    std::string   table;
+};
+thread_local LogContext g_ctx;
+
+void ErrorLog::set_log_context(std::uint64_t session,
+                               const std::string& client,
+                               const std::string& op,
+                               const std::string& table) {
+    g_ctx.session = session;
+    g_ctx.client  = client;
+    g_ctx.op      = op;
+    g_ctx.table   = table;
+}
+
+// When the caller did not set OP/TABLE context, derive them from the
+// conventional "Op: rest" detail shape the server uses
+// (e.g. "OpenIndex: foo.cdx"). Only splits when the head looks like a
+// bare opcode/identifier so free-text messages with colons are untouched.
+void derive_op_table(const std::string& detail, const std::string& op_in,
+                     const std::string& table_in, std::string& op_out,
+                     std::string& table_out) {
+    op_out = op_in;
+    table_out = table_in;
+    if (!op_out.empty() && !table_out.empty()) return;
+    auto pos = detail.find(':');
+    if (pos == std::string::npos || pos == 0 || pos > 24) return;
+    for (std::size_t i = 0; i < pos; ++i) {
+        char c = detail[i];
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+              (c >= '0' && c <= '9') || c == '_' || c == ' ')) return;
+    }
+    std::string head = detail.substr(0, pos);
+    while (!head.empty() && head.back() == ' ') head.pop_back();
+    std::string tail = detail.substr(pos + 1);
+    std::size_t b = tail.find_first_not_of(' ');
+    if (b != std::string::npos) tail = tail.substr(b);
+    if (op_out.empty()) op_out = head;
+    // Only treat the tail as a TABLE when it looks like a path (has an
+    // extension or a slash); otherwise it stays in DETAIL only.
+    if (table_out.empty() && (tail.find('.') != std::string::npos ||
+                              tail.find('/') != std::string::npos ||
+                              tail.find('\\') != std::string::npos)) {
+        auto sp = tail.find(' ');
+        table_out = (sp == std::string::npos) ? tail : tail.substr(0, sp);
+    }
+}
+
+// --- Fixed-width text mirror (ads_err.log) -------------------------------
+
+std::uint32_t current_pid() {
+#ifdef _WIN32
+    return static_cast<std::uint32_t>(_getpid());
+#else
+    return static_cast<std::uint32_t>(::getpid());
+#endif
+}
+
+std::string current_tid8() {
+    std::uint64_t h = static_cast<std::uint64_t>(
+        std::hash<std::thread::id>{}(std::this_thread::get_id()));
+    char buf[9];
+    std::snprintf(buf, sizeof(buf), "%08X",
+                  static_cast<unsigned>(h & 0xFFFFFFFFu));
+    return std::string(buf);
+}
+
+// Pad or truncate to exactly `width`. Numbers pass right=true.
+std::string fix(const std::string& s, std::size_t width, bool right = false) {
+    if (s.size() == width) return s;
+    if (s.size() > width) return s.substr(0, width);
+    if (right) return std::string(width - s.size(), ' ') + s;
+    return s + std::string(width - s.size(), ' ');
+}
+
+// Single-line sanitise for fixed-width rows: no embedded newlines/tabs.
+std::string flat(const std::string& s, bool pipe_nl = false) {
+    std::string o;
+    o.reserve(s.size());
+    for (char c : s) {
+        if (c == '\r' || c == '\n') {
+            if (pipe_nl) o += " | ";
+            else o += ' ';
+        } else if (c == '\t') {
+            o += ' ';
+        } else {
+            o += c;
+        }
+    }
+    return o;
+}
+
+std::string text_header() {
+    return fix("DATETIME", kWDatetime) + kSep +
+           fix("CODE", kWCode, true) + kSep +
+           fix("SOURCE", kWSource) + kSep +
+           fix("LINE", kWLine, true) + kSep +
+           fix("PID", kWPid, true) + kSep +
+           fix("TID", kWTid) + kSep +
+           fix("SESSION", kWSession, true) + kSep +
+           fix("CLIENT", kWClient) + kSep +
+           fix("OP", kWOp) + kSep +
+           fix("TABLE", kWTable) + kSep + "DETAIL";
+}
+
+std::string text_line(const std::string& datetime, std::int32_t code,
+                      const std::string& source, std::int32_t src_line,
+                      std::uint32_t pid, const std::string& tid,
+                      std::uint64_t session, const std::string& client,
+                      const std::string& op, const std::string& table,
+                      const std::string& detail) {
+    return fix(datetime, kWDatetime) + kSep +
+           fix(std::to_string(code), kWCode, true) + kSep +
+           fix(flat(source), kWSource) + kSep +
+           fix(std::to_string(src_line), kWLine, true) + kSep +
+           fix(std::to_string(pid), kWPid, true) + kSep +
+           fix(tid, kWTid) + kSep +
+           fix(session == 0 ? "" : std::to_string(session), kWSession, true) + kSep +
+           fix(flat(client), kWClient) + kSep +
+           fix(flat(op), kWOp) + kSep +
+           fix(flat(table), kWTable) + kSep + flat(detail, true);
+}
+
+// Append one line to ads_err.log with the same size-cap rotation as the
+// DBF (drop oldest third of data lines). Caller holds mu_. Header is
+// written on file creation; a foreign header-less file gets one prepended.
+void append_text_locked(const fs::path& dir, const std::string& line,
+                        std::uint32_t max_kb) {
+    const fs::path p = dir / kTextName;
+    const std::size_t max_bytes = static_cast<std::size_t>(max_kb) * 1024u;
+    std::error_code ec;
+    std::uint64_t sz = fs::exists(p, ec) ? fs::file_size(p, ec) : 0;
+    if (ec) sz = 0;
+    if (!fs::exists(p, ec)) {
+        std::ofstream out(p, std::ios::binary | std::ios::trunc);
+        if (!out.good()) return;
+        const std::string h = text_header();
+        out << h << "\n" << line << "\n";
+        return;
+    }
+    if (sz + line.size() + 1 <= max_bytes) {
+        std::ofstream out(p, std::ios::binary | std::ios::app);
+        if (!out.good()) return;
+        // A pre-existing file without our header (e.g. operator-created)
+        // still gets one so columns stay self-describing.
+        if (sz == 0) out << text_header() << "\n";
+        out << line << "\n";
+        return;
+    }
+    // Over cap: keep header + newest two thirds of data lines, then append.
+    std::ifstream in(p, std::ios::binary);
+    std::vector<std::string> data;
+    std::string first, row;
+    bool has_header = false;
+    if (in.good() && std::getline(in, first)) {
+        has_header = (first.rfind("DATETIME", 0) == 0);
+        if (!has_header && !first.empty()) data.push_back(std::move(first));
+        while (std::getline(in, row)) {
+            if (!row.empty() && row.back() == '\r') row.pop_back();
+            data.push_back(std::move(row));
+        }
+    }
+    if (data.size() > 2) {
+        data.erase(data.begin(),
+                   data.begin() + static_cast<std::ptrdiff_t>(data.size() / 3));
+    } else if (!data.empty()) {
+        data.erase(data.begin());  // tiny file: drop oldest single line
+    }
+    data.push_back(line);
+    std::ofstream out(p, std::ios::binary | std::ios::trunc);
+    if (!out.good()) return;
+    out << text_header() << "\n";
+    for (const auto& r : data) out << r << "\n";
+    (void)has_header;
+}
+
 }  // namespace
 
 ErrorLog& ErrorLog::instance() {
@@ -200,8 +405,25 @@ std::string ErrorLog::file_path() {
     return (fs::path(d) / kLogName).string();
 }
 
+std::string ErrorLog::text_path() {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::string d = resolve_dir_locked();
+    if (d.empty()) return {};
+    return (fs::path(d) / kTextName).string();
+}
+
 void ErrorLog::log(std::int32_t code, const std::string& source,
                    std::int32_t src_line, const std::string& detail) {
+    // Pick up the thread's request context (set per wire frame by the
+    // server); explicit log_ex args win when both are present.
+    log_ex(code, source, src_line, detail, g_ctx.session, g_ctx.client,
+           g_ctx.op, g_ctx.table);
+}
+
+void ErrorLog::log_ex(std::int32_t code, const std::string& source,
+                      std::int32_t src_line, const std::string& detail,
+                      std::uint64_t session, const std::string& client,
+                      const std::string& op, const std::string& table) {
     if (g_in_log) return;
     g_in_log = true;
     if (code != 0) {
@@ -225,6 +447,29 @@ void ErrorLog::log(std::int32_t code, const std::string& source,
                   tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday);
     std::snprintf(timebuf, sizeof(timebuf), "%02d:%02d:%02d",
                   tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
+
+    // Fixed-width text mirror first (cheap append; never blocks the DBF).
+    // Same timestamp, plus pid/tid captured here and the caller-supplied
+    // session/client/op/table context. Detail keeps its full length.
+    // When OP/TABLE are empty, derive them from "Op: path" details so
+    // the existing NET error call sites gain columns with no churn.
+    {
+        char dt[20];
+        std::snprintf(dt, sizeof(dt), "%04d-%02d-%02d %02d:%02d:%02d",
+                      tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+                      tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
+        std::string eff_op = op.empty() ? g_ctx.op : op;
+        std::string eff_table = table.empty() ? g_ctx.table : table;
+        std::string eff_session_client = client.empty() ? g_ctx.client : client;
+        std::uint64_t eff_session = session != 0 ? session : g_ctx.session;
+        std::string drv_op, drv_table;
+        derive_op_table(detail, eff_op, eff_table, drv_op, drv_table);
+        append_text_locked(fs::path(d),
+            text_line(dt, code, source, src_line, current_pid(),
+                      current_tid8(), eff_session, eff_session_client,
+                      drv_op, drv_table, detail),
+            max_kb_);
+    }
 
     std::vector<std::uint8_t> rec(kRecLen, ' ');
     fill_field(rec.data(), 0, datebuf);

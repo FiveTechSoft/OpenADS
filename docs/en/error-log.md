@@ -12,10 +12,43 @@ OpenADS has **two** different on-disk “logs.” Only the **server error
 log** is relocatable. The **transaction journal** always lives under
 the connection’s data directory.
 
-## Server error log — `ads_err.dbf`
+## Server error log — `ads_err.dbf` + `ads_err.log`
 
 A plain DBF table (SAP-style `ads_err`) that any DBF tool — or OpenADS
-itself — can open. Rows record date, time, error code, subsystem
+itself — can open, plus a developer-friendly fixed-width text mirror
+`ads_err.log` in the same directory. Both are written on every entry;
+the DBF schema is frozen for SAP compatibility while the text line
+carries extra debugging context.
+
+Text format: every leading column occupies a fixed width, columns are
+separated by exactly 3 spaces, one line per entry (multi-line messages
+are flattened with ` | `). A header line is written on file creation:
+
+```text
+DATETIME              CODE   SOURCE         LINE        PID        TID        SESSION   CLIENT                  OP           TABLE                    DETAIL
+2026-09-06 21:07:02     5018   NET               0      1234   1A2B3C4D          7   10.0.0.5:51234         OpenIndex    lmjshd10.cdx             OpenIndex: lmjshd10.cdx
+```
+
+| Column | Width | Notes |
+|--------|-------|-------|
+| `DATETIME` | 19 | `YYYY-MM-DD HH:MM:SS` |
+| `CODE` | 6, right | ACE code (`5018`, `7200`, `0` = info) |
+| `SOURCE` | 8 | `SQL`, `NET`, `SERVER`, ... |
+| `LINE` | 8, right | source line (often 0) |
+| `PID` | 8, right | server process id |
+| `TID` | 8 | last 8 hex of the worker thread hash (MT storms) |
+| `SESSION` | 8, right | server session id (empty when local) |
+| `CLIENT` | 21 | remote `ip:port` (empty when local) |
+| `OP` | 12 | wire op / API (`OpenIndex`, `ExecuteSQL`, ...) |
+| `TABLE` | 24 | table/index path (basename, tail-24 if long) |
+| `DETAIL` | rest | full message / SQL, never truncated |
+
+`OP`/`TABLE` come from the request context when the server knows it;
+otherwise they are derived from `Op: path` details, so the `5018
+OpenIndex: xxx.cdx` flood that used to need DBF decoding is now
+`grep OpenIndex ads_err.log`.
+
+Rows record date, time, error code, subsystem
 (`SQL`, `NET`, `SERVER`), optional source line, and detail text.
 
 Written for:
@@ -33,7 +66,8 @@ Written for:
 | Command line | `--error-log-path <dir>`, `--error-log-max <KB>` |
 | SQL at runtime | `EXECUTE PROCEDURE sp_mgSetConfigValue('ERROR_ASSERT_LOGS', '<dir>')` / `('ERROR_LOG_MAX', '<KB>')` |
 
-The path is a **directory**. The file name is always `ads_err.dbf`.
+The path is a **directory**. The file names are always `ads_err.dbf`
+(DBF table) and `ads_err.log` (fixed-width text mirror).
 
 **Defaults** when nothing is set:
 
@@ -43,8 +77,8 @@ The path is a **directory**. The file name is always `ads_err.dbf`.
 | Linux | `/var/log/advantage` | `~/.openads`, then temp |
 | macOS | same idea as Linux | `~/.openads`, then temp |
 
-**Size cap:** default **1000 KB**. When an entry would exceed the cap,
-the oldest third of rows is dropped and the table is packed (same
+**Size cap:** default **1000 KB**, shared by both files. When an entry would exceed the cap,
+the oldest third of rows/lines is dropped and the table is packed (same
 rotation idea SAP documents for `ads_err`).
 
 ### Examples
@@ -82,8 +116,13 @@ Or set `OPENADS_ERROR_LOG_PATH` for the service account.
 
 ### Reading the log
 
-Open `ads_err.dbf` as a table, or query it over any connection.  
+Tail the text mirror, or open `ads_err.dbf` as a table, or query it over any connection.
 `sp_mgGetConfigInfo` reports the active path and max size.
+
+```bash
+tail -f /openads-data/logs/ads_err.log
+grep "  5018" /openads-data/logs/ads_err.log | grep OpenIndex
+```
 
 ---
 

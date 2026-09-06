@@ -66,6 +66,10 @@ private:
     Server*       srv_;
     Socket        s_;
     std::uint64_t sid_;
+    // Cached "ip:port" of the remote peer for the text error log
+    // (resolved once at accept; getpeername per frame would be a
+    // syscall on every request).
+    std::string   peer_str_;
     // Reassembles complete frames from partial non-blocking reads (reactor
     // path). Harmless on the blocking path — each read yields a whole frame.
     FrameReader   reader_;

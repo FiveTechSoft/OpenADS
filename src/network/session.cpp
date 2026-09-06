@@ -24,6 +24,7 @@
 #include "sql_backend/enterprise_config.h"
 
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <memory>
@@ -105,6 +106,43 @@ inline void write_lstr16(const std::string& s,
     out.push_back(static_cast<std::uint8_t>(n & 0xFFu));
     out.push_back(static_cast<std::uint8_t>((n >> 8) & 0xFFu));
     out.insert(out.end(), s.begin(), s.end());
+}
+
+// Short opcode label for the text error log (OP column). Covers the
+// hot paths developers actually grep for; everything else falls back
+// to a stable hex tag so columns stay aligned.
+const char* opcode_label(Opcode op) {
+    switch (op) {
+        case Opcode::Connect:      return "Connect";
+        case Opcode::OpenTable:    return "OpenTable";
+        case Opcode::CloseTable:   return "CloseTable";
+        case Opcode::ExecuteSQL:   return "ExecuteSQL";
+        case Opcode::Fetch:        return "Fetch";
+        case Opcode::FetchWhere:   return "FetchWhere";
+        case Opcode::Aggregate:    return "Aggregate";
+        case Opcode::GotoTop:      return "GotoTop";
+        case Opcode::GotoBottom:   return "GotoBottom";
+        case Opcode::GotoRecord:   return "GotoRecord";
+        case Opcode::Skip:         return "Skip";
+        case Opcode::GetField:     return "GetField";
+        case Opcode::SetField:     return "SetField";
+        case Opcode::AppendBlank:  return "AppendBlank";
+        case Opcode::DeleteRecord: return "DeleteRecord";
+        case Opcode::RecallRecord: return "RecallRecord";
+        case Opcode::FlushTable:   return "FlushTable";
+        case Opcode::OpenIndex:    return "OpenIndex";
+        case Opcode::CloseIndex:   return "CloseIndex";
+        case Opcode::SetOrder:     return "SetOrder";
+        case Opcode::SetOrderByName: return "SetOrderByNm";
+        case Opcode::Seek:         return "Seek";
+        case Opcode::CreateIndex:  return "CreateIndex";
+        case Opcode::CreateTable:  return "CreateTable";
+        case Opcode::DropTable:    return "DropTable";
+        case Opcode::Reindex:      return "Reindex";
+        case Opcode::GetRecord:    return "GetRecord";
+        case Opcode::SetRecord:    return "SetRecord";
+        default:                   return nullptr;
+    }
 }
 
 // Null-terminated UNSIGNED8 buffer for a std::string — the AdsDD* ABI takes
@@ -263,6 +301,7 @@ Session::Session(Server& srv, Socket s, std::string default_data_dir,
     if (auto pa = socket_peer_addr(s_); pa) {
         init.peer_ip   = pa.value().ip;
         init.peer_port = pa.value().port;
+        peer_str_ = pa.value().ip + ":" + std::to_string(pa.value().port);
     }
     init.listener_port = listener_port;
     init.connected_at  = std::chrono::system_clock::now();
@@ -299,6 +338,45 @@ bool Session::process_frame(const Frame& f) {
         srv_->set_session_sql(sid_, sql);
     }
     srv_->set_session_executing(sid_, true);
+    // Stamp the text error log context for this frame so any err() the
+    // handler emits carries SESSION/CLIENT/OP/TABLE columns. Cheap:
+    // label lookup + payload slice, no validation (handlers re-parse).
+    {
+        std::string op;
+        if (const char* l = opcode_label(f.opcode)) op = l;
+        else {
+            char hex[8];
+            std::snprintf(hex, sizeof(hex), "0x%02X",
+                          static_cast<unsigned>(f.opcode));
+            op = hex;
+        }
+        std::string table;
+        if (f.opcode == Opcode::OpenTable && !f.payload.empty()) {
+            std::size_t off = (client_open_table_mode_ok_ && f.payload.size() >= 2)
+                ? 2 : 0;
+            if (off <= f.payload.size()) {
+                table.assign(reinterpret_cast<const char*>(f.payload.data() + off),
+                             f.payload.size() - off);
+                if (table.size() > 7 &&
+                    (table.rfind("tcp://", 0) == 0 || table.rfind("TCP://", 0) == 0)) {
+                    auto sep = table.find_last_of("/\\");
+                    if (sep != std::string::npos) table = table.substr(sep + 1);
+                }
+            }
+        } else if (f.opcode == Opcode::OpenIndex && f.payload.size() > 4) {
+            table.assign(reinterpret_cast<const char*>(f.payload.data() + 4),
+                         f.payload.size() - 4);
+        }
+        // Keep the column readable: basename for paths.
+        if (!table.empty()) {
+            auto sep = table.find_last_of("/\\");
+            if (sep != std::string::npos && sep + 1 < table.size())
+                table = table.substr(sep + 1);
+            if (table.size() > 24) table = table.substr(table.size() - 24);
+        }
+        openads::mgmt::ErrorLog::instance().set_log_context(
+            sid_, peer_str_, op, table);
+    }
     auto t0 = std::chrono::steady_clock::now();
     DispatchResult res;
     try {

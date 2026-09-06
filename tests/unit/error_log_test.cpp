@@ -4,7 +4,9 @@
 
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <string>
+#include <vector>
 
 namespace fs = std::filesystem;
 using openads::mgmt::ErrorLog;
@@ -92,4 +94,46 @@ TEST_CASE("error log: ads_err.dbf is a valid DBF the engine can open") {
     CHECK(cnt == 1);
     REQUIRE(AdsCloseTable(hTable) == 0);
     REQUIRE(AdsDisconnect(hConn) == 0);
+}
+
+TEST_CASE("error log: ads_err.log is fixed-width with 3-space separators") {
+    LogDirGuard g("openads_errlog_txt");
+
+    ErrorLog::instance().log_ex(5018, "NET", 0, "OpenIndex: lmjshd10.cdx",
+                                7, "10.0.0.5:51234", "OpenIndex",
+                                "lmjshd10.cdx");
+    ErrorLog::instance().log(7200, "SQL", 0, "select broken from nowhere");
+
+    std::ifstream in(g.dir / "ads_err.log", std::ios::binary);
+    REQUIRE(in.good());
+    std::vector<std::string> lines;
+    std::string row;
+    while (std::getline(in, row)) {
+        if (!row.empty() && row.back() == '\r') row.pop_back();
+        lines.push_back(row);
+    }
+    REQUIRE(lines.size() == 3);  // header + 2 entries
+    CHECK(lines[0].rfind("DATETIME", 0) == 0);
+    CHECK(lines[0].find("DETAIL") != std::string::npos);
+
+    // Fixed widths: DATETIME(19) + 3sp + CODE(6) + 3sp + SOURCE(8) ...
+    // CODE field of the first entry is right-aligned "  5018".
+    CHECK(lines[1].substr(0, 19).size() == 19);
+    CHECK(lines[1].substr(19, 3) == "   ");
+    CHECK(lines[1].substr(22, 6) == "  5018");
+    CHECK(lines[1].substr(28, 3) == "   ");
+    CHECK(lines[1].substr(31, 8) == "NET     ");
+    // Extra developer context made it into the row.
+    CHECK(lines[1].find("10.0.0.5:51234") != std::string::npos);
+    CHECK(lines[1].find("OpenIndex") != std::string::npos);
+    CHECK(lines[1].find("lmjshd10.cdx") != std::string::npos);
+    // Second entry logged via plain log(): columns still aligned.
+    CHECK(lines[2].substr(19, 3) == "   ");
+    CHECK(lines[2].substr(22, 6) == "  7200");
+
+    // DBF side is untouched: both rows round-trip.
+    auto all = ErrorLog::instance().read_last(10);
+    REQUIRE(all.size() == 2);
+    CHECK(all[0].code == 5018);
+    CHECK(all[1].code == 7200);
 }
