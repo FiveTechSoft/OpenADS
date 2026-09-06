@@ -144,6 +144,8 @@ milestones reused gaps left by earlier ones.
 | `AppendBlankAck`      | `0x51` | S→C |                                 | M12.6 |
 | `SetField`            | `0x52` | C→S | Write one column at cursor      | M12.6 |
 | `SetFieldAck`         | `0x53` | S→C |                                 | M12.6 |
+| `SetFields`           | `0x5E` | C→S | Batched column writes (coalesced) | WAN batch |
+| `SetFieldsAck`        | `0x5F` | S→C |                                 | WAN batch |
 | `DeleteRecord`        | `0x54` | C→S | Mark deleted                    | M12.6 |
 | `DeleteRecordAck`     | `0x55` | S→C |                                 | M12.6 |
 | `RecallRecord`        | `0x56` | C→S | Undelete                        | M12.6 |
@@ -288,7 +290,11 @@ Notation:
 - Connect: `[u16 dlen][dir][u16 ulen][user][u16 plen][password]`
   (M12.9 — `user` and `password` may be empty if the server
   doesn't require auth).
-- ConnectAck: `bytes` — `connected:<dir>` (informational).
+- ConnectAck: `connected:<dir>` (informational) + optional trailing
+  `[u32 LE server_caps]` (server capability echo — currently
+  `kCapSetFieldsBatch`; old servers send exactly `connected:<dir>`).
+  Old clients ignore the payload; new clients accept the trailing word
+  only when the echo matches their requested dir byte-for-byte.
 
 When the server has `--auth-user` / `auth_user` credentials, the user and
 password must match a configured account or the server returns `AE_LOGIN_FAILED`
@@ -424,6 +430,23 @@ password must match a configured account or the server returns `AE_LOGIN_FAILED`
   `Table::set_field(idx, std::string)`, which handles all
   field types (C / N / D / L / M / V / Q / I / Y / B).
 - Ack: empty.
+
+### 5.12b SetFields / SetFieldsAck (write coalescing)
+- For RDD-only apps (Vouch/ERP) that cannot batch: the client buffers
+  consecutive `AdsSet*` calls and flushes them here in ONE round-trip
+  on the next visibility event (read/nav/lock/commit/close), so
+  N-field voucher entry costs 1 RTT instead of N.
+- SetFields: `[u32 tid][u16 n][per field: u16 nlen][name][u32 vlen][val]`.
+  `n == 0` is a no-op success. First failing field stops the apply,
+  exactly like a sequential `SetField` loop failing at the same field
+  (twin-handle write + single engine-cursor sync shared with §5.12).
+- Ack: empty.
+- Capability-gated by `kCapSetFieldsBatch` (`0x10`): the server echoes
+  its caps as a trailing `[u32 LE]` after `connected:<dir>` in
+  `ConnectAck` (old clients ignore the ack payload entirely); the
+  client sends `0x5E` only when the echo matches its requested dir and
+  carries the bit, so an old server never sees the frame. No fallback
+  path is needed on either side.
 
 ### 5.13 Error
 - S→C only. Layout (M12.10 onwards):

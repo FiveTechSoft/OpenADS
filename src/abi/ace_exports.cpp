@@ -649,6 +649,72 @@ void remote_settle_cursor(openads::network::RemoteTable* rt) {
     }
 }
 
+// Write coalescing for RDD-only apps over WAN (Vouch/ERP — the app cannot
+// be changed to batch). Consecutive AdsSet* calls buffer (field, value)
+// locally instead of paying 1 RTT each; the buffer flushes as one
+// SetFields batch on the next visibility event (see remote_flush_pending
+// call sites). Settle-then-buffer keeps the server cursor where the
+// buffered writes belong: any cursor move flushes first.
+void remote_buffered_set(openads::network::RemoteTable* rt,
+                         const std::string& fname, const std::string& val) {
+    if (rt == nullptr) return;
+    remote_settle_cursor(rt);
+    rt->row_valid = false;                      // M12.17 cache invalidation
+    rt->pending_sets.emplace_back(fname, val);
+}
+
+// Overlay coalesced writes onto a cached row value (latest buffered set
+// wins). Lets same-handle read-after-write stay exact without flushing,
+// so interleaved validation reads don't break the batching.
+bool remote_pending_overlay(openads::network::RemoteTable* rt,
+                            std::size_t i, std::string& vstr) {
+    if (rt == nullptr || rt->pending_sets.empty() ||
+        i >= rt->fields.size()) {
+        return false;
+    }
+    const std::string& want = rt->fields[i].name;
+    for (auto it = rt->pending_sets.rbegin();
+         it != rt->pending_sets.rend(); ++it) {
+        if (it->first == want) { vstr = it->second; return true; }
+    }
+    return false;
+}
+
+// Flush buffered sets: one SetFields batch when the server advertised
+// kCapSetFieldsBatch in ConnectAck, else the legacy per-field loop
+// (old servers behave exactly as before). No-op when clean, so hooking
+// every visibility event is free for read-mostly flows. Returns an ACE
+// code (0 = ok); on error the buffer is dropped with the server-side
+// prefix applied — identical to a sequential loop failing mid-way.
+UNSIGNED32 remote_flush_pending(openads::network::RemoteTable* rt) {
+    if (rt == nullptr || rt->conn == nullptr || rt->pending_sets.empty()) {
+        return ok();
+    }
+    // Land the server on our logical row first: with prefetch drained
+    // locally the server cursor lags behind, and the batch must apply to
+    // the row the buffered sets targeted — not where the server sits.
+    remote_settle_cursor(rt);
+    if (rt->conn->server_setfields_batch()) {
+        if (auto r = rt->conn->set_fields_batch(rt->id, rt->pending_sets);
+            !r) {
+            rt->pending_sets.clear();
+            rt->row_valid = false;
+            return fail(r.error());
+        }
+    } else {
+        for (auto& [fname, val] : rt->pending_sets) {
+            if (auto r = rt->conn->set_field(rt->id, fname, val); !r) {
+                rt->pending_sets.clear();
+                rt->row_valid = false;
+                return fail(r.error());
+            }
+        }
+    }
+    rt->pending_sets.clear();
+    rt->row_valid = false;
+    return ok();
+}
+
 #if defined(OPENADS_WITH_SQLITE)
 std::unordered_map<Handle,
     std::unique_ptr<openads::sql_backend::SqliteConnection>>&
@@ -1430,6 +1496,10 @@ UNSIGNED32 remote_query_key_num(openads::network::RemoteTable* rt,
     if (rt == nullptr || pulKeyNum == nullptr) {
         return fail(openads::AE_INTERNAL_ERROR, "");
     }
+    // Key position is computed server-side from committed values; a
+    // buffered key-field write would misplace us. Flush first (no-op
+    // when clean).
+    if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
     if (ri != nullptr) {
         auto act = openads::network::remote_activate_index(ri);
         if (!act) return fail(act.error());
@@ -1476,9 +1546,12 @@ UNSIGNED32 remote_query_key_num(openads::network::RemoteTable* rt,
 }
 
 UNSIGNED32 remote_goto_key_num(openads::network::RemoteTable* rt,
-                               openads::network::RemoteIndex* ri,
-                               UNSIGNED32 keyno) {
+                                openads::network::RemoteIndex* ri,
+                                std::uint32_t keyno) {
     if (rt == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    // Scrollbar jump moves the cursor: buffered sets belong to the row
+    // under the old position. Land them first (no-op when clean).
+    if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
     if (keyno < 1u) keyno = 1u;
     if (ri != nullptr) {
         auto act = openads::network::remote_activate_index(ri);
@@ -4074,6 +4147,9 @@ bool remote_parent_positioned(openads::network::RemoteTable* parent) {
 
 std::string remote_parent_field(openads::network::RemoteTable* parent,
                                 const std::string& expr) {
+    // Defensive: the seek key must derive from committed parent values.
+    // Normally clean here (every parent nav flushes), so this is free.
+    (void)remote_flush_pending(parent);
     std::string field = openads::engine::strip_alias_qualifiers(expr);
     if (!parent->row_valid) {
         (void)parent->conn->fetch_current_row(parent);
@@ -4120,7 +4196,9 @@ std::string remote_parent_field(openads::network::RemoteTable* parent,
                                        parent->current_row.size());
         for (std::size_t i = 0; i < n; ++i) {
             if (upper(parent->fields[i].name) == want) {
-                return parent->current_row[i];
+                std::string vstr = parent->current_row[i];
+                remote_pending_overlay(parent, i, vstr);
+                return vstr;
             }
         }
     }
@@ -4189,6 +4267,10 @@ void seek_remote_child_relation(openads::network::RemoteTable* parent,
                                 const std::string& expr,
                                 bool scoped) {
     if (parent == nullptr || child == nullptr || child->conn == nullptr) return;
+    // A detail line edited but not yet flushed belongs to the child row
+    // under the previous parent; the seek below moves the child cursor,
+    // so land the buffered writes first (no-op when clean).
+    (void)remote_flush_pending(child);
     if (!remote_parent_positioned(parent)) {
         if (scoped && child->active_index_id != 0) {
             (void)child->conn->clear_scope(child->active_index_id, ADS_TOP);
@@ -4263,6 +4345,8 @@ void seek_remote_child_relation(Table* parent,
                                 const std::string& expr,
                                 bool scoped) {
     if (parent == nullptr || child == nullptr || child->conn == nullptr) return;
+    // Same child-cursor flush as the RemoteTable-parent overload above.
+    (void)remote_flush_pending(child);
     if (!parent->positioned() || parent->eof()) {
         if (scoped && child->active_index_id != 0) {
             (void)child->conn->clear_scope(child->active_index_id, ADS_TOP);
@@ -9021,6 +9105,7 @@ UNSIGNED32 ENTRYPOINT AdsRestructureTable(ADSHANDLE   hConnect,
 UNSIGNED32 ENTRYPOINT AdsRefreshRecord(ADSHANDLE hTable) {
     arc2_trace("AdsRefreshRecord");
     if (auto* rt = get_remote_table(hTable)) {
+        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         remote_settle_cursor(rt);                   // M12.21 option C
         rt->row_valid = false;                      // M12.17 cache invalidation
         rt->rec_count_cached = false;
@@ -9073,6 +9158,7 @@ UNSIGNED32 ENTRYPOINT AdsExtractKey(ADSHANDLE hIndex, UNSIGNED8* pucBuf,
 UNSIGNED32 ENTRYPOINT AdsGotoRecord(ADSHANDLE hTable, UNSIGNED32 ulRecord) {
     arc2_trace("AdsGotoRecord");
     if (auto* rt = get_remote_table(hTable)) {
+        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         rt->found_cached = true; rt->current_found = false;  // M12.21: GoTo clears Found()
         remote_clear_nav_boundaries(rt);
         // M12.29 -- preserve keyno_valid when navigating to the same record.
@@ -9658,9 +9744,10 @@ UNSIGNED32 ENTRYPOINT AdsCloseTable(ADSHANDLE hTable) {
     arc2_trace("AdsCloseTable");
     arc2_trace("AdsCloseTable");
     {
-        if (auto* rt = get_remote_table(hTable)) {
-            // conn is nulled out by AdsDisconnect before the RemoteConnection
-            // is freed; skip the wire close op if the connection is already gone.
+    if (auto* rt = get_remote_table(hTable)) {
+        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
+        // conn is nulled out by AdsDisconnect before the RemoteConnection
+        // is freed; skip the wire close op if the connection is already gone.
             auto* rc = rt->conn;
             const bool counted = rt->close_counted;
             if (rc != nullptr)
@@ -9729,6 +9816,7 @@ UNSIGNED32 ENTRYPOINT AdsCloseTable(ADSHANDLE hTable) {
 UNSIGNED32 ENTRYPOINT AdsGotoTop(ADSHANDLE hTable) {
     arc2_trace("AdsGotoTop");
     if (auto* ri = get_remote_index(hTable)) {
+        if (UNSIGNED32 frc = remote_flush_pending(ri->parent); frc != 0) return frc;
         auto r = openads::network::remote_index_goto_top(ri);
         if (!r) return fail(r.error());
         remote_sync_keyno_gototop(ri->parent);
@@ -9741,6 +9829,7 @@ UNSIGNED32 ENTRYPOINT AdsGotoTop(ADSHANDLE hTable) {
         return ok();
     }
     if (auto* rt = get_remote_table(hTable)) {
+        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         // M12.18 -- rt-aware overload parses the row trailer in the
         // same RTT, so AdsGetField immediately after GoTop hits
         // the cache.
@@ -9770,6 +9859,7 @@ UNSIGNED32 ENTRYPOINT AdsGotoTop(ADSHANDLE hTable) {
 UNSIGNED32 ENTRYPOINT AdsGotoBottom(ADSHANDLE hTable) {
     arc2_trace("AdsGotoBottom");
     if (auto* ri = get_remote_index(hTable)) {
+        if (UNSIGNED32 frc = remote_flush_pending(ri->parent); frc != 0) return frc;
         auto r = openads::network::remote_index_goto_bottom(ri);
         if (!r) return fail(r.error());
         remote_sync_keyno_gotobottom(ri->parent);
@@ -9782,6 +9872,7 @@ UNSIGNED32 ENTRYPOINT AdsGotoBottom(ADSHANDLE hTable) {
         return ok();
     }
     if (auto* rt = get_remote_table(hTable)) {
+        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         rt->found_cached = true; rt->current_found = false;  // M12.21: GoBottom clears Found()
         auto r = rt->conn->goto_bottom(rt);
         if (!r) return fail(r.error());
@@ -9811,6 +9902,7 @@ UNSIGNED32 ENTRYPOINT AdsSkip(ADSHANDLE hTable, SIGNED32 lRows) {
     if (auto* ri = get_remote_index(hTable)) {
         cli_trace("[cli] AdsSkip(idx) rows=%d", (int)lRows);
         openads::network::RemoteTable* rt = ri->parent;
+        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         const std::uint32_t rec_before =
             (rt != nullptr && rt->row_valid) ? rt->current_recno : 0u;
         const bool row_valid_before = rt != nullptr && rt->row_valid;
@@ -9826,6 +9918,7 @@ UNSIGNED32 ENTRYPOINT AdsSkip(ADSHANDLE hTable, SIGNED32 lRows) {
         return ok();
     }
     if (auto* rt = get_remote_table(hTable)) {
+        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         rt->found_cached = true; rt->current_found = false;  // M12.21: Skip clears Found()
         const std::uint32_t rec_before =
             rt->row_valid ? rt->current_recno : 0u;
@@ -10377,6 +10470,7 @@ UNSIGNED32 ENTRYPOINT AdsGetLong(ADSHANDLE hTable, UNSIGNED8* pucField, SIGNED32
         std::string vstr;
         if (rt->row_valid && i < rt->current_row.size()) {
             vstr = rt->current_row[i];
+            remote_pending_overlay(rt, i, vstr);
         } else if (i < rt->fields.size()) {
             auto v = rt->conn->get_field(rt->id, rt->fields[i].name);
             if (!v) return fail(v.error());
@@ -10428,6 +10522,7 @@ UNSIGNED32 ENTRYPOINT AdsGetDouble(ADSHANDLE hTable, UNSIGNED8* pucField, double
         std::string vstr;
         if (rt->row_valid && i < rt->current_row.size()) {
             vstr = rt->current_row[i];
+            remote_pending_overlay(rt, i, vstr);
         } else if (i < rt->fields.size()) {
             auto v = rt->conn->get_field(rt->id, rt->fields[i].name);
             if (!v) return fail(v.error());
@@ -10579,6 +10674,7 @@ UNSIGNED32 ENTRYPOINT AdsGetJulian(ADSHANDLE hTable, UNSIGNED8* pucField, SIGNED
         std::string vstr;
         if (rt->row_valid && i < rt->current_row.size()) {
             vstr = rt->current_row[i];
+            remote_pending_overlay(rt, i, vstr);
         } else if (i < rt->fields.size()) {
             auto v = rt->conn->get_field(rt->id, rt->fields[i].name);
             if (!v) return fail(v.error());
@@ -10825,6 +10921,7 @@ UNSIGNED32 ENTRYPOINT AdsGetField(ADSHANDLE hTable, UNSIGNED8* pucField,
         }
         if (rt->row_valid) {
             std::string val = rt->current_row[fi];
+            remote_pending_overlay(rt, fi, val);
             if (rt->fields[fi].type == ADS_STRING)
                 val = pad_char_field(std::move(val), rt->fields[fi].length);
             else if (!g_field_read_raw && rt->fields[fi].type == ADS_DATE)
@@ -11384,6 +11481,7 @@ UNSIGNED32 ENTRYPOINT AdsAppendRecord(ADSHANDLE hTable) {
 UNSIGNED32 ENTRYPOINT AdsWriteRecord(ADSHANDLE hTable) {
     arc2_trace("AdsWriteRecord");
     if (auto* rt = get_remote_table(hTable)) {
+        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         rt->row_valid = false;                      // M12.17 cache invalidation
         // Key fields may have moved the row in the active order (or this is
         // the flush of a fresh append). Drop the key position so the next
@@ -11582,6 +11680,7 @@ UNSIGNED32 ENTRYPOINT AdsWriteRecord(ADSHANDLE hTable) {
 UNSIGNED32 ENTRYPOINT AdsDeleteRecord(ADSHANDLE hTable) {
     arc2_trace("AdsDeleteRecord");
     if (auto* rt = get_remote_table(hTable)) {
+        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         remote_settle_cursor(rt);                   // M12.21 option C
         rt->row_valid        = false;               // M12.17
         rt->rec_count_cached = false;
@@ -11749,6 +11848,7 @@ UNSIGNED32 ENTRYPOINT AdsDeleteRecord(ADSHANDLE hTable) {
 UNSIGNED32 ENTRYPOINT AdsRecallRecord(ADSHANDLE hTable) {
     arc2_trace("AdsRecallRecord");
     if (auto* rt = get_remote_table(hTable)) {
+        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         remote_settle_cursor(rt);                   // M12.21 option C
         rt->row_valid        = false;               // M12.17
         rt->rec_count_cached = false;
@@ -11821,10 +11921,7 @@ UNSIGNED32 ENTRYPOINT AdsSetString(ADSHANDLE hTable, UNSIGNED8* pucField,
         if (pucValue != nullptr && ulLen > 0) {
             val.assign(reinterpret_cast<const char*>(pucValue), ulLen);
         }
-        remote_settle_cursor(rt);                   // M12.21 option C
-        rt->row_valid = false;                      // M12.17 cache invalidation
-        auto r = rt->conn->set_field(rt->id, fname, val);
-        if (!r) return fail(r.error());
+        remote_buffered_set(rt, fname, val);
         return ok();
     }
 #if defined(OPENADS_WITH_FIREBIRD)
@@ -11941,10 +12038,7 @@ UNSIGNED32 ENTRYPOINT AdsSetLogical(ADSHANDLE hTable, UNSIGNED8* pucField,
             return fail(openads::AE_COLUMN_NOT_FOUND, "");
         }
         std::string fname = rt->fields[i].name;
-        remote_settle_cursor(rt);                   // M12.21 option C
-        rt->row_valid = false;
-        auto r = rt->conn->set_field(rt->id, fname, bValue ? "1" : "0");
-        if (!r) return fail(r.error());
+        remote_buffered_set(rt, fname, bValue ? "1" : "0");
         return ok();
     }
     Table* t = get_table(hTable);
@@ -11983,10 +12077,7 @@ UNSIGNED32 ENTRYPOINT AdsSetDouble(ADSHANDLE hTable, UNSIGNED8* pucField,
         std::string fname = rt->fields[i].name;
         char nbuf[64];
         std::snprintf(nbuf, sizeof(nbuf), "%.17g", dValue);
-        remote_settle_cursor(rt);                   // M12.21 option C
-        rt->row_valid = false;
-        auto r = rt->conn->set_field(rt->id, fname, std::string(nbuf));
-        if (!r) return fail(r.error());
+        remote_buffered_set(rt, fname, std::string(nbuf));
         return ok();
     }
     Table* t = get_table(hTable);
@@ -12077,6 +12168,8 @@ UNSIGNED32 ENTRYPOINT AdsGetMemoLength(ADSHANDLE hTable, UNSIGNED8* pucField,
     if (auto* rt = get_remote_table(hTable)) {
         // Reuse the existing GetField wire op -- the returned string
         // is the full memo content; size() is the memo length.
+        // Flush first: a buffered memo write must be visible to this read.
+        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         auto i = remote_field_index(rt, pucField);
         if (i == std::numeric_limits<std::size_t>::max() || i >= rt->fields.size()) {
             return fail(openads::AE_COLUMN_NOT_FOUND, "");
@@ -12329,10 +12422,7 @@ UNSIGNED32 ENTRYPOINT AdsSetStringW(ADSHANDLE hTable, UNSIGNED8* pucField,
             return fail(openads::AE_COLUMN_NOT_FOUND, "");
         }
         std::string fname = rt->fields[i].name;
-        remote_settle_cursor(rt);
-        rt->row_valid = false;
-        auto r = rt->conn->set_field(rt->id, fname, utf8);
-        if (!r) return fail(r.error());
+        remote_buffered_set(rt, fname, utf8);
         return ok();
     }
     Table* t = get_table(hTable);
@@ -12406,10 +12496,7 @@ UNSIGNED32 ENTRYPOINT AdsSetJulian(ADSHANDLE hTable, UNSIGNED8* pucField,
             return fail(openads::AE_COLUMN_NOT_FOUND, "");
         }
         std::string fname = rt->fields[i].name;
-        remote_settle_cursor(rt);
-        rt->row_valid = false;
-        auto r = rt->conn->set_field(rt->id, fname, val);
-        if (!r) return fail(r.error());
+        remote_buffered_set(rt, fname, val);
         return ok();
     }
     Table* t = get_table(hTable);
@@ -12522,6 +12609,7 @@ UNSIGNED32 ENTRYPOINT AdsGetLockRetryCount(ADSHANDLE /*hConnect*/, UNSIGNED16* p
 UNSIGNED32 ENTRYPOINT AdsLockRecord(ADSHANDLE hTable, UNSIGNED32 ulRecord) {
     arc2_trace("AdsLockRecord");
     if (auto* rt = get_remote_table(hTable)) {
+        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         auto r = rt->conn->lock_record(rt->id, ulRecord);
         if (!r) return fail(r.error());
         return ok();
@@ -12597,6 +12685,7 @@ UNSIGNED32 ENTRYPOINT AdsLockRecord(ADSHANDLE hTable, UNSIGNED32 ulRecord) {
 UNSIGNED32 ENTRYPOINT AdsUnlockRecord(ADSHANDLE hTable, UNSIGNED32 ulRecord) {
     arc2_trace("AdsUnlockRecord");
     if (auto* rt = get_remote_table(hTable)) {
+        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         auto r = rt->conn->unlock_record(rt->id, ulRecord);
         if (!r) return fail(r.error());
         return ok();
@@ -12667,6 +12756,7 @@ UNSIGNED32 ENTRYPOINT AdsUnlockRecord(ADSHANDLE hTable, UNSIGNED32 ulRecord) {
 UNSIGNED32 ENTRYPOINT AdsLockTable(ADSHANDLE hTable) {
     arc2_trace("AdsLockTable");
     if (auto* rt = get_remote_table(hTable)) {
+        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         auto r = rt->conn->lock_table(rt->id);
         if (!r) return fail(r.error());
         return ok();
@@ -12738,6 +12828,7 @@ UNSIGNED32 ENTRYPOINT AdsLockTable(ADSHANDLE hTable) {
 UNSIGNED32 ENTRYPOINT AdsUnlockTable(ADSHANDLE hTable) {
     arc2_trace("AdsUnlockTable");
     if (auto* rt = get_remote_table(hTable)) {
+        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         auto r = rt->conn->unlock_table(rt->id);
         if (!r) return fail(r.error());
         return ok();
@@ -12812,6 +12903,7 @@ UNSIGNED32 ENTRYPOINT AdsUnlockTable(ADSHANDLE hTable) {
 UNSIGNED32 ENTRYPOINT AdsFlushFileBuffers(ADSHANDLE hTable) {
     arc2_trace("AdsFlushFileBuffers");
     if (auto* rt = get_remote_table(hTable)) {
+        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         auto r = rt->conn->flush_file_buffers(rt->id);
         if (!r) return fail(r.error());
         return ok();
@@ -15267,10 +15359,7 @@ UNSIGNED32 ENTRYPOINT AdsSetFieldRaw(ADSHANDLE hTable, UNSIGNED8* pucField,
             return fail(openads::AE_COLUMN_NOT_FOUND, "");
         }
         std::string fname = rt->fields[i].name;
-        remote_settle_cursor(rt);
-        rt->row_valid = false;
-        auto r = rt->conn->set_field(rt->id, fname, raw);
-        if (!r) return fail(r.error());
+        remote_buffered_set(rt, fname, raw);
         return ok();
     }
     Table* t = get_table(hTable);
@@ -15363,6 +15452,7 @@ UNSIGNED32 ENTRYPOINT AdsGetAllLocks(ADSHANDLE hTable, UNSIGNED32* paRecnos,
 UNSIGNED32 ENTRYPOINT AdsSetIndexOrder(ADSHANDLE hTable, UNSIGNED8* pucName) {
     arc2_trace("AdsSetIndexOrder");
     if (auto* rt = get_remote_table(hTable)) {
+        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         std::string name = pucName
             ? openads::abi::to_internal(pucName, 0) : std::string();
         auto r = rt->conn->set_order_by_name(rt->id, name);
@@ -15521,6 +15611,7 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrder(ADSHANDLE hTable, UNSIGNED8* pucName) {
 UNSIGNED32 ENTRYPOINT AdsSetIndexOrderByHandle(ADSHANDLE hTable, ADSHANDLE hIndex) {
     arc2_trace("AdsSetIndexOrderByHandle");
     if (auto* rt = get_remote_table(hTable)) {
+        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         if (hIndex == 0) {
             // "Back to natural order" via the explicit API: send the reset
             // frame so the server drops its ordered_tables_ entry (it used
@@ -15604,7 +15695,10 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrderByHandle(ADSHANDLE hTable, ADSHANDLE hInde
 UNSIGNED32 ENTRYPOINT AdsSkipUnique(ADSHANDLE hIndex, SIGNED32 lDirection) {
     arc2_trace("AdsSkipUnique");
     if (auto* ri = get_remote_index(hIndex)) {
-        if (ri->parent) ri->parent->row_valid = false;   // M12.17
+        if (ri->parent) {
+            if (UNSIGNED32 frc = remote_flush_pending(ri->parent); frc != 0) return frc;
+            ri->parent->row_valid = false;   // M12.17
+        }
         auto r = ri->conn->skip_unique(ri->id, lDirection);
         if (!r) return fail(r.error());
         return ok();
@@ -18354,6 +18448,7 @@ UNSIGNED32 ENTRYPOINT AdsSeek(ADSHANDLE hIndex,
         std::string key(reinterpret_cast<const char*>(pucKey),
                         u16KeyLen);
         if (ri->parent) {
+            if (UNSIGNED32 frc = remote_flush_pending(ri->parent); frc != 0) return frc;
             ri->parent->row_valid = false;               // M12.17
             // RCB 07/14/2026: BUG FIX -- this path invalidated the cached row
             // but not the lookahead queue. A seek repositions the server cursor
@@ -18524,6 +18619,7 @@ UNSIGNED32 ENTRYPOINT AdsSeekLast(ADSHANDLE hIndex,
         std::string key(reinterpret_cast<const char*>(pucKey),
                         u16KeyLen);
         if (ri->parent) {
+            if (UNSIGNED32 frc = remote_flush_pending(ri->parent); frc != 0) return frc;
             ri->parent->row_valid = false;               // M12.17
             // RCB 07/14/2026: same stale-queue bug as AdsSeek -- see the note
             // there for why dropping the block is mandatory after a seek.
@@ -18589,6 +18685,9 @@ UNSIGNED32 ENTRYPOINT AdsSetScope(ADSHANDLE hIndex, UNSIGNED16 usScope,
                        UNSIGNED16 usDataType) {
     arc2_trace("AdsSetScope");
     if (auto* ri = get_remote_index(hIndex)) {
+        if (ri->parent) {
+            if (UNSIGNED32 frc = remote_flush_pending(ri->parent); frc != 0) return frc;
+        }
         std::string key = pucScope
             ? openads::abi::to_internal(pucScope, usLen) : std::string();
         auto r = ri->conn->set_scope(ri->id, usScope, key,
@@ -18689,6 +18788,9 @@ UNSIGNED32 ENTRYPOINT AdsSetScope(ADSHANDLE hIndex, UNSIGNED16 usScope,
 UNSIGNED32 ENTRYPOINT AdsClearScope(ADSHANDLE hIndex, UNSIGNED16 usScope) {
     arc2_trace("AdsClearScope");
     if (auto* ri = get_remote_index(hIndex)) {
+        if (ri->parent) {
+            if (UNSIGNED32 frc = remote_flush_pending(ri->parent); frc != 0) return frc;
+        }
         auto r = ri->conn->clear_scope(ri->id, usScope);
         if (!r) return fail(r.error());
         if (ri->parent != nullptr) {
@@ -18732,6 +18834,7 @@ UNSIGNED32 ENTRYPOINT AdsGetScope(ADSHANDLE hIndex, UNSIGNED16 usScope,
 UNSIGNED32 ENTRYPOINT AdsPackTable(ADSHANDLE hTable) {
     arc2_trace("AdsPackTable");
     if (auto* rt = get_remote_table(hTable)) {
+        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         rt->row_valid        = false;               // M12.17/19
         rt->rec_count_cached = false;
         rt->key_count_cached = false;
@@ -18759,6 +18862,7 @@ UNSIGNED32 ENTRYPOINT AdsPackTable120(ADSHANDLE hTable,
 UNSIGNED32 ENTRYPOINT AdsZapTable(ADSHANDLE hTable) {
     arc2_trace("AdsZapTable");
     if (auto* rt = get_remote_table(hTable)) {
+        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         rt->row_valid        = false;               // M12.17/19
         rt->rec_count_cached = false;
         rt->key_count_cached = false;
@@ -18910,6 +19014,7 @@ UNSIGNED32 ENTRYPOINT AdsConvertTable(ADSHANDLE   hHandle,
 UNSIGNED32 ENTRYPOINT AdsReindex(ADSHANDLE hTable) {
     arc2_trace("AdsReindex");
     if (auto* rt = get_remote_table(hTable)) {
+        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         auto r = rt->conn->reindex(rt->id);
         if (!r) return fail(r.error());
         return ok();
@@ -18966,6 +19071,7 @@ UNSIGNED32 ENTRYPOINT AdsSetAOF(ADSHANDLE hTable, UNSIGNED8* pucCondition,
         return fail(openads::AE_INTERNAL_ERROR, "AdsSetAOF: NULL condition");
     }
     if (auto* rt = get_remote_table(hTable)) {
+        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         std::string cond = openads::abi::to_internal(pucCondition, 0);
         auto r = rt->conn->set_aof(rt->id, cond);
         if (!r) return fail(r.error());
@@ -19133,6 +19239,7 @@ UNSIGNED32 ENTRYPOINT AdsGetAOFOptLevel100(ADSHANDLE hTable,
 UNSIGNED32 ENTRYPOINT AdsClearAOF(ADSHANDLE hTable) {
     arc2_trace("AdsClearAOF");
     if (auto* rt = get_remote_table(hTable)) {
+        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         auto r = rt->conn->clear_aof(rt->id);
         if (!r) return fail(r.error());
         return ok();
@@ -19183,6 +19290,7 @@ UNSIGNED32 ENTRYPOINT AdsBinaryToFile(ADSHANDLE hTable, UNSIGNED8* pucField,
         return ok();
     };
     if (auto* rt = get_remote_table(hTable)) {
+        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         auto i = remote_field_index(rt, pucField);
         if (i == std::numeric_limits<std::size_t>::max() || i >= rt->fields.size()) {
             return fail(openads::AE_COLUMN_NOT_FOUND, "");
@@ -19236,8 +19344,7 @@ UNSIGNED32 ENTRYPOINT AdsFileToBinary(ADSHANDLE hTable, UNSIGNED8* pucField,
             return fail(openads::AE_COLUMN_NOT_FOUND, "");
         }
         std::string fname = rt->fields[i].name;
-        auto r = rt->conn->set_field(rt->id, fname, payload);
-        if (!r) return fail(r.error());
+        remote_buffered_set(rt, fname, payload);
         return ok();
     }
     Table* t = get_table(hTable);
@@ -34702,6 +34809,7 @@ UNSIGNED32 ENTRYPOINT AdsCustomizeAOF(ADSHANDLE hTable, UNSIGNED32 ulNumRecords,
     if (pulRecords == nullptr || ulNumRecords == 0) return ok();
 
     if (auto* rt = get_remote_table(hTable)) {
+        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         std::vector<std::uint32_t> recnos;
         recnos.reserve(ulNumRecords);
         for (UNSIGNED32 i = 0; i < ulNumRecords; ++i)
@@ -35292,6 +35400,7 @@ UNSIGNED32 ENTRYPOINT AdsGetRecord(ADSHANDLE hTable, UNSIGNED8* pucRecord,
         // lookahead block; today the block carries decoded per-field values,
         // which is what AdsGetField and friends want and what AdsGetRecord
         // specifically cannot use. Tracked in todo.local.md.
+        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         remote_settle_cursor(rt);
         auto r = rt->conn->get_record(rt->id);
         if (!r) return fail(r.error());
@@ -36040,6 +36149,7 @@ UNSIGNED32 ENTRYPOINT AdsSetRecord(ADSHANDLE hTable, UNSIGNED8* pucRecord,
     arc2_trace("AdsSetRecord");
     if (pucRecord == nullptr) return fail(openads::AE_INTERNAL_ERROR, "null record");
     if (auto* rt = get_remote_table(hTable)) {
+        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         remote_settle_cursor(rt);
         rt->row_valid = false;
         rt->prefetch_queue.clear();
@@ -37586,6 +37696,7 @@ UNSIGNED32 ENTRYPOINT AdsGetRecordCRC(ADSHANDLE hTable, UNSIGNED32* pulCRC,
     if (pulCRC == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
     *pulCRC = 0;
     if (auto* rt = get_remote_table(hTable)) {
+        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         auto r = rt->conn->get_record_crc(rt->id);
         if (!r) return fail(r.error());
         *pulCRC = r.value();
@@ -37678,10 +37789,7 @@ UNSIGNED32 ENTRYPOINT AdsSetNull(ADSHANDLE hObj, UNSIGNED8* pId) {
     if (auto* rt = get_remote_table(hObj)) {
         if (pId == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
         std::string fname(reinterpret_cast<const char*>(pId));
-        remote_settle_cursor(rt);
-        rt->row_valid = false;
-        auto r = rt->conn->set_field(rt->id, fname, std::string());
-        if (!r) return fail(r.error());
+        remote_buffered_set(rt, fname, std::string());
         return ok();
     }
     Table* t = get_table(hObj);
@@ -38100,6 +38208,7 @@ UNSIGNED32 ENTRYPOINT AdsFetchWhere(ADSHANDLE hTbl, UNSIGNED8* pszExpr, UNSIGNED
 
     openads::network::FetchWhereBatch batch;
     if (auto* rt = get_remote_table(hTbl)) {
+        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         auto r = rt->conn->fetch_where(rt->id, ulMaxRows, expr, cols, wire_flags);
         if (!r) return fail(r.error());
         batch = std::move(r).value();
@@ -38365,6 +38474,7 @@ UNSIGNED32 ENTRYPOINT AdsAggregate(ADSHANDLE hTbl, UNSIGNED8* pszForCond,
 
     // Remote (tcp://) table: the server scans + folds (opcode 0xA6).
     if (auto* rt = get_remote_table(hTbl)) {
+        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         auto r = rt->conn->aggregate(rt->id, for_expr, specs);
         if (!r) return fail(r.error());
         std::lock_guard<std::mutex> lk(agg_mu());

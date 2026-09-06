@@ -323,6 +323,7 @@ add_executable(openads_unit_tests
     unit/network_client_test.cpp
     unit/abi_dd_invoicing_test.cpp
     unit/abi_fetch_where_test.cpp
+    unit/network_setfields_test.cpp
     unit/abi_remote_lock_introspection_test.cpp
     unit/backend_tier1_test.cpp
     unit/abi_oads_file_funcs_test.cpp
