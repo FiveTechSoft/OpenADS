@@ -1340,12 +1340,13 @@ void Session::append_open_warm_sections(std::vector<std::uint8_t>& out,
             sch.bytes.push_back(static_cast<std::uint8_t>( ftype       & 0xFFu));
             sch.bytes.push_back(static_cast<std::uint8_t>((ftype >> 8) & 0xFFu));
             std::uint32_t flen = fd.length;
+            std::uint16_t fdec = fd.decimals;
             sch.bytes.push_back(static_cast<std::uint8_t>( flen        & 0xFFu));
             sch.bytes.push_back(static_cast<std::uint8_t>((flen >>  8) & 0xFFu));
             sch.bytes.push_back(static_cast<std::uint8_t>((flen >> 16) & 0xFFu));
             sch.bytes.push_back(static_cast<std::uint8_t>((flen >> 24) & 0xFFu));
-            sch.bytes.push_back(static_cast<std::uint8_t>( fd.decimals       & 0xFFu));
-            sch.bytes.push_back(static_cast<std::uint8_t>((fd.decimals >> 8) & 0xFFu));
+            sch.bytes.push_back(static_cast<std::uint8_t>( fdec        & 0xFFu));
+            sch.bytes.push_back(static_cast<std::uint8_t>((fdec >> 8) & 0xFFu));
         }
         secs.push_back(std::move(sch));
         // 2. first row — the exact positioning + trailer + lookahead an
