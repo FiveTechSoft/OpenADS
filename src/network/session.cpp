@@ -1317,7 +1317,7 @@ Session::FieldWriteResult Session::write_fields(std::uint32_t id,
 void Session::append_open_warm_sections(std::vector<std::uint8_t>& out,
                                                 std::uint32_t id,
                                                 openads::engine::Table* tbl) {
-    using Sec = openads::network::OpenTableAckSections;
+    namespace Sec = openads::network::OpenTableAckSections;
     struct Tlv { std::uint8_t tag = 0; std::vector<std::uint8_t> bytes; };
     std::vector<Tlv> secs;
     if (tbl != nullptr) {
