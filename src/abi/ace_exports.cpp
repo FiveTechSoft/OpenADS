@@ -6962,6 +6962,19 @@ void remote_close_table_live(ADSHANDLE hTable,
     if (fire != nullptr) fire->disconnect();
 }
 
+// Real-close every parked table on rc (drop/create/erase/rename and
+// exclusive opens change what paths mean on disk; a parked server
+// handle would pin or shadow them). Drops are rare; flushing the whole
+// small pool is cheaper than path-matching subtleties. Wire closes run
+// without s.mu held (in-process server re-enters it) — callers must
+// arrange that (disconnect/open paths unlock first).
+void remote_flush_pools(openads::network::RemoteConnection* rc) {
+    if (rc == nullptr) return;
+    std::vector<std::unique_ptr<openads::network::RemoteTable>> parked;
+    rc->parked_flush(parked);
+    for (auto& e : parked) remote_close_table_live(0, e.get());
+}
+
 } // extern "C++" (lazy-close pool helpers end; ABI exports resume in C)
 
 UNSIGNED32 ENTRYPOINT AdsDisconnect(ADSHANDLE hConnect) {
@@ -7308,6 +7321,13 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
             }
             apply_relations_for_handle(to_ads_handle(gh2));
             return ok();
+        }
+        // Exclusive opens cannot share the file with a parked shared
+        // handle: evict the pool first (wire closes run unlocked).
+        if (map_open_mode(usMode) == openads::engine::OpenMode::Exclusive) {
+            lk.unlock();
+            remote_flush_pools(rc);
+            lk.lock();
         }
         auto otr = rc->open_table(name,
             static_cast<std::uint16_t>(map_open_mode(usMode)));
@@ -8430,6 +8450,9 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
             rc_h = resolve_remote_conn_handle(hConn);
         }
         if (auto* rc = get_remote_connection(rc_h)) {
+            // Create-over-existing must see closed files (SAP: overwrite
+            // when closed, 7040 when open) — a parked handle reads as open.
+            remote_flush_pools(rc);
             auto cr = rc->create_table(rel, defs,
                                        static_cast<std::uint16_t>(usTableType),
                                        static_cast<std::uint16_t>(usCharType),
@@ -8885,6 +8908,8 @@ UNSIGNED32 ENTRYPOINT AdsDropTable(ADSHANDLE     hConnect,
             rc_h = resolve_remote_conn_handle(hConnect);
         }
         if (auto* rc = get_remote_connection(rc_h)) {
+            // Parked handles pin files server-side; drop must really drop.
+            remote_flush_pools(rc);
             auto dr = rc->drop_table(rel, /*delete_files=*/1);
             if (!dr) return fail(dr.error());
             return ok();
@@ -9520,6 +9545,7 @@ UNSIGNED32 ENTRYPOINT AdsDeleteFile(ADSHANDLE hConn, UNSIGNED8* pucName) {
     auto name = openads::abi::to_internal(pucName, 0);
     auto ctx = resolve_fs_conn(hConn);
     if (ctx.remote) {
+        remote_flush_pools(ctx.remote);
         auto r = ctx.remote->file_erase(name);
         if (!r) return fail(r.error());
         return ok();
@@ -9541,6 +9567,7 @@ UNSIGNED32 ENTRYPOINT AdsRenameFile(ADSHANDLE hConn, UNSIGNED8* pucOld,
     auto n = openads::abi::to_internal(pucNew, 0);
     auto ctx = resolve_fs_conn(hConn);
     if (ctx.remote) {
+        remote_flush_pools(ctx.remote);
         auto r = ctx.remote->file_rename(o, n);
         if (!r) return fail(r.error());
         return ok();

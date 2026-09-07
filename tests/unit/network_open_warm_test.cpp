@@ -168,8 +168,7 @@ TEST_CASE("Pooled re-USE: close/reopen skips OpenTable+CloseTable frames") {
     srv.stop();
 }
 
-TEST_CASE("Pooled re-USE skipped after a lock (real close)") {
-    ow_wipe();
+TEST_CASE("Pooled re-USE skipped after a lock (real close)") {    ow_wipe();
     auto dir = ow_tmp_dir();
     seed_ow_fixture(dir);
 
@@ -204,6 +203,46 @@ TEST_CASE("Pooled re-USE skipped after a lock (real close)") {
     CHECK(ow_get(hTable, "NM") == "alpha");
 
     REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
+    REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
+    srv.stop();
+}
+
+TEST_CASE("DropTable after pooled close really removes the file") {
+    ow_wipe();
+    auto dir = ow_tmp_dir();
+    seed_ow_fixture(dir);
+
+    openads::network::Server srv;
+    REQUIRE(srv.start("127.0.0.1", 0).has_value());
+
+    char uri[512]{};
+    std::snprintf(uri, sizeof(uri), "tcp://127.0.0.1:%u/%s",
+                  static_cast<unsigned>(srv.port()), dir.string().c_str());
+    UNSIGNED8 srvbuf[512]{};
+    std::memcpy(srvbuf, uri, std::strlen(uri) + 1);
+    ADSHANDLE hConn = 0;
+    REQUIRE(AdsConnect60(srvbuf, ADS_REMOTE_SERVER, nullptr, nullptr, 0, &hConn)
+            == AE_SUCCESS);
+
+    // Open + close parks the handle (shared, natural, never locked).
+    UNSIGNED8 tname[] = "ow.dbf";
+    ADSHANDLE hTable  = 0;
+    REQUIRE(AdsOpenTable(hConn, tname, nullptr, ADS_CDX, ADS_ANSI, ADS_SHARED,
+                         ADS_COMPATIBLE_LOCKING, ADS_DEFAULT, &hTable)
+            == AE_SUCCESS);
+    REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
+    {
+        std::error_code ec;
+        CHECK(fs::exists(dir / "ow.dbf"));
+        (void)ec;
+    }
+    // Drop must evict the parked handle first: the file really goes.
+    REQUIRE(AdsDropTable(hConn, tname, 1) == AE_SUCCESS);
+    {
+        std::error_code ec;
+        CHECK_FALSE(fs::exists(dir / "ow.dbf", ec));
+    }
+
     REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
     srv.stop();
 }
