@@ -305,9 +305,27 @@ password must match a configured account or the server returns `AE_LOGIN_FAILED`
 
 ### 5.4 OpenTable / OpenTableAck
 - OpenTable: `bytes` — table leaf path (e.g. `data.dbf`),
-  resolved against the session's data dir.
+  resolved against the session's data dir. With `kCapOpenTableMode`
+  the payload is `[u16 mode][path]` instead.
 - OpenTableAck: `[u32 wire_table_id]` — opaque to the client;
-  every subsequent table op echoes this id.
+  every subsequent table op echoes this id — followed by
+  `[u16 bag_len][bag]` (production index, empty when absent; always
+  emitted) and `[u8 section_count]` plus that many warm sections
+  (`[u8 tag][u32 len][bytes]`, §5.4b). Servers predating sections
+  stop after the bag (or after the id);   clients that predate them
+  stop after the bag and run `DescribeTable` + `GotoTop` as before.
+
+#### 5.4b Warm OpenTableAck sections (USE latency)
+- A remote `USE` used to cost up to 4 round-trips (`OpenTable` +
+  production auto-`OpenIndex` + `DescribeTable` + implicit `GotoTop`).
+  The ack now warms the two cacheable ones: tag `1` carries the schema
+  (byte-identical to a `DescribeTableAck` body), tag `2` the first row
+  (byte-identical to a `GotoTopAck` row trailer, lookahead block
+  included — positioned by the same `goto_top` + ramp machinery an
+  explicit `GotoTop` would run, so the client skips that call and lands
+  in the identical state). A `USE` drops to ~2 RTTs.
+- Unknown tags skip by length; truncation drops the sections, never the
+  open (client falls back to the legacy calls).
 
 ### 5.5 CloseTable / CloseTableAck
 - CloseTable: `[u32 wire_table_id]`.

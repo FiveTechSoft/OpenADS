@@ -58,6 +58,44 @@ inline bool read_lstr16(const std::vector<std::uint8_t>& pl,
     return true;
 }
 
+// Schema body shared by DescribeTableAck and the warm OpenTableAck
+// section (identical layout by construction — see Session::
+// append_open_warm_sections). Returns the fields or an error with the
+// same messages DescribeTable has always produced.
+inline util::Result<std::vector<RemoteConnection::FieldDesc>>
+parse_schema_body(const std::vector<std::uint8_t>& pl, std::size_t base,
+                  std::size_t len) {
+    std::vector<RemoteConnection::FieldDesc> out;
+    if (len < 2) {
+        return util::Error{5000, 0,
+            "DescribeTable: short payload", ""};
+    }
+    std::size_t pos = base;
+    const std::size_t end = base + len;
+    std::uint16_t n = read_u16_le(&pl[pos]); pos += 2;
+    out.reserve(n);
+    for (std::uint16_t i = 0; i < n; ++i) {
+        if (pos >= end) {
+            return util::Error{5000, 0,
+                "DescribeTable: truncated field record", ""};
+        }
+        std::uint8_t name_len = pl[pos++];
+        if (pos + name_len + 8 > end) {
+            return util::Error{5000, 0,
+                "DescribeTable: truncated field record", ""};
+        }
+        RemoteConnection::FieldDesc f;
+        f.name.assign(pl.begin() + static_cast<std::ptrdiff_t>(pos),
+                      pl.begin() + static_cast<std::ptrdiff_t>(pos + name_len));
+        pos += name_len;
+        f.type     = read_u16_le(&pl[pos]); pos += 2;
+        f.length   = read_u32_le(&pl[pos]); pos += 4;
+        f.decimals = read_u16_le(&pl[pos]); pos += 2;
+        out.push_back(std::move(f));
+    }
+    return out;
+}
+
 } // namespace
 
 // M12.18 — parse the per-row trailer the server appends to every
@@ -416,19 +454,61 @@ RemoteConnection::open_table(const std::string& rel, std::uint16_t mode) {
     }
     OpenTableResult result;
     result.id = read_u32_le(pl.data());
-    // Parse optional production bag path appended by the server.
-    // Old servers send exactly 4 bytes; new servers append:
-    //   [u16 bag_len][bag_bytes]
+    // Fixed prefix: [u32 id][u16 bag_len][bag]. The bag field is always
+    // emitted (possibly empty) so the warm sections have a fixed anchor;
+    // servers predating sections send exactly the id, servers predating
+    // the always-emit rule send id+bag with no trailing sections.
     size_t off = 4;
     if (off + 2 <= pl.size()) {
         std::uint16_t blen = read_u16_le(pl.data() + off);
         off += 2;
-        if (blen > 0 && off + blen <= pl.size()) {
-            result.prod_bag_path.assign(
-                reinterpret_cast<const char*>(pl.data() + off), blen);
+        if (off + blen <= pl.size()) {
+            if (blen > 0) {
+                result.prod_bag_path.assign(
+                    reinterpret_cast<const char*>(pl.data() + off), blen);
+            }
+            off += blen;
+            // Warm sections: [u8 count][tag u8][len u32 LE][bytes]...
+            // Unknown tags skip by length; truncation drops the sections
+            // (never the open — fall back to DescribeTable + GotoTop).
+            if (off < pl.size()) {
+                std::uint8_t nsec = pl[off++];
+                for (std::uint8_t s = 0; s < nsec; ++s) {
+                    if (off + 1 + 4 > pl.size()) break;
+                    std::uint8_t tag = pl[off++];
+                    std::uint32_t slen =
+                        static_cast<std::uint32_t>(pl[off]) |
+                        (static_cast<std::uint32_t>(pl[off + 1]) <<  8) |
+                        (static_cast<std::uint32_t>(pl[off + 2]) << 16) |
+                        (static_cast<std::uint32_t>(pl[off + 3]) << 24);
+                    off += 4;
+                    if (off + slen > pl.size()) break;
+                    if (tag == OpenTableAckSections::kSchema) {
+                        if (auto sr = parse_schema_body(pl, off, slen)) {
+                            result.fields = std::move(sr).value();
+                            result.has_schema = true;
+                        }
+                    } else if (tag == OpenTableAckSections::kFirstRow) {
+                        result.first_row.assign(
+                            pl.begin() + static_cast<std::ptrdiff_t>(off),
+                            pl.begin() + static_cast<std::ptrdiff_t>(off + slen));
+                        result.has_first_row = true;
+                    }
+                    off += slen;
+                }
+            }
         }
     }
     return result;
+}
+
+util::Result<void> RemoteConnection::apply_open_row(RemoteTable* rt,
+        const std::vector<std::uint8_t>& trailer) {
+    // Feed the warm row section through the same parser every nav ack
+    // uses, so the table lands exactly as an explicit GotoTop would
+    // leave it (row cache + prefetch block + lag reset).
+    parse_row_trailer_into(rt, trailer, 0);
+    return {};
 }
 
 util::Result<void> RemoteConnection::close_table(std::uint32_t id) {
@@ -1106,30 +1186,7 @@ RemoteConnection::describe_table(std::uint32_t id) {
         return util::Error{5000, 0,
             "DescribeTable: short payload", ""};
     }
-    std::vector<FieldDesc> out;
-    std::size_t pos = 0;
-    std::uint16_t n = read_u16_le(&pl[pos]); pos += 2;
-    out.reserve(n);
-    for (std::uint16_t i = 0; i < n; ++i) {
-        if (pos >= pl.size()) {
-            return util::Error{5000, 0,
-                "DescribeTable: truncated field record", ""};
-        }
-        std::uint8_t name_len = pl[pos++];
-        if (pos + name_len + 8 > pl.size()) {
-            return util::Error{5000, 0,
-                "DescribeTable: truncated field record", ""};
-        }
-        FieldDesc f;
-        f.name.assign(pl.begin() + static_cast<std::ptrdiff_t>(pos),
-                      pl.begin() + static_cast<std::ptrdiff_t>(pos + name_len));
-        pos += name_len;
-        f.type     = read_u16_le(&pl[pos]); pos += 2;
-        f.length   = read_u32_le(&pl[pos]); pos += 4;
-        f.decimals = read_u16_le(&pl[pos]); pos += 2;
-        out.push_back(std::move(f));
-    }
-    return out;
+    return parse_schema_body(pl, 0, pl.size());
 }
 
 util::Result<bool> RemoteConnection::at_bof(std::uint32_t id) {

@@ -7142,6 +7142,20 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
             HandleKind::RemoteTable, rt.get());
         remote_tables.emplace(gh, std::move(rt));
         *phTable = to_ads_handle(gh);
+        // Warm open: schema + first row rode along in the ack. Install
+        // both so DescribeTable and the implicit GotoTop below cost zero
+        // RTTs. Absent on old servers — the legacy path runs unchanged.
+        bool open_warm = false;
+        if (auto* rtp = get_remote_table(to_ads_handle(gh))) {
+            if (ot.has_schema) {
+                rtp->fields = std::move(ot.fields);
+                rtp->fields_cached = true;
+            }
+            if (ot.has_first_row) {
+                (void)rc->apply_open_row(rtp, ot.first_row);
+                open_warm = true;
+            }
+        }
         // Mirror the local M-AOF.6 production-index auto-open over the
         // wire: opening <base>.dbf binds <base>.cdx (or <base>.adi for
         // ADT) when the server has it, so rddads / X# see the production
@@ -7206,7 +7220,17 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
         // would read uninitialized memory.  One extra round-trip on
         // table open positions the cursor on record 1 and populates
         // the record cache, matching LOCAL semantics.
-        if (get_remote_table(to_ads_handle(gh)) != nullptr) {
+        //
+        // Warm opens skip the round-trip: the ack already positioned
+        // the cursor and populated the cache identically. Mirror
+        // AdsGotoTop's local tail (found flags, keyno seed, relations).
+        if (open_warm) {
+            if (auto* rtp = get_remote_table(to_ads_handle(gh))) {
+                rtp->found_cached = true; rtp->current_found = false;
+                remote_sync_keyno_gototop(rtp);
+            }
+            apply_relations_for_handle(to_ads_handle(gh));
+        } else if (get_remote_table(to_ads_handle(gh)) != nullptr) {
             (void)AdsGotoTop(to_ads_handle(gh));
         }
         return ok();

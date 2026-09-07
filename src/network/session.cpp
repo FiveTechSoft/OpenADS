@@ -109,6 +109,38 @@ inline void write_lstr16(const std::string& s,
     out.insert(out.end(), s.begin(), s.end());
 }
 
+// Mirror the ABI map_field_type() table so the wire reports ADS_* type
+// codes (4 = STRING, 2 = NUMERIC, 11 = INTEGER, …) regardless of which
+// server-side branch produced the schema. Shared by DescribeTable and
+// the warm OpenTableAck schema section (which must agree byte-for-byte).
+std::uint16_t ads_type_for_wire(openads::drivers::DbfFieldType t) {
+    using T = openads::drivers::DbfFieldType;
+    switch (t) {
+        case T::Character:    return ADS_STRING;
+        case T::Numeric:
+        case T::Float:        return ADS_NUMERIC;
+        case T::Logical:      return ADS_LOGICAL;
+        case T::Date:
+        case T::AdtDate:      return ADS_DATE;
+        case T::DateTime:
+        case T::AdtTimestamp: return ADS_TIMESTAMP;
+        case T::Memo:         return ADS_MEMO;
+        case T::Integer:
+        case T::ShortInt:
+        case T::AutoInc:      return ADS_INTEGER;
+        case T::Currency:
+        case T::AdtMoney:     return ADS_MONEY;
+        case T::Double:       return ADS_DOUBLE;
+        case T::Varchar:
+        case T::CiCharacter:  return ADS_STRING;
+        case T::Varbinary:
+        case T::Binary:       return ADS_RAW;
+        case T::Time:         return ADS_TIME;
+        case T::Unknown:
+        default:              return ADS_FIELD_TYPE_UNKNOWN;
+    }
+}
+
 // Short opcode label for the text error log (OP column). Covers the
 // hot paths developers actually grep for; everything else falls back
 // to a stable hex tag so columns stay aligned.
@@ -1282,6 +1314,66 @@ Session::FieldWriteResult Session::write_fields(std::uint32_t id,
     return out;
 }
 
+void Session::append_open_warm_sections(std::vector<std::uint8_t>& out,
+                                                std::uint32_t id,
+                                                openads::engine::Table* tbl) {
+    using Sec = openads::network::OpenTableAckSections;
+    struct Tlv { std::uint8_t tag = 0; std::vector<std::uint8_t> bytes; };
+    std::vector<Tlv> secs;
+    if (tbl != nullptr) {
+        // 1. schema — byte-identical to the DescribeTableAck engine
+        // branch (same mapper, same u8 name_LEN + u16 type + u32 length
+        // + u16 decimals layout the client already parses).
+        Tlv sch;
+        sch.tag = Sec::kSchema;
+        auto nf = static_cast<std::uint16_t>(tbl->field_count());
+        sch.bytes.push_back(static_cast<std::uint8_t>( nf       & 0xFFu));
+        sch.bytes.push_back(static_cast<std::uint8_t>((nf >> 8) & 0xFFu));
+        for (std::uint16_t i = 0; i < nf; ++i) {
+            const auto& fd = tbl->field_descriptor(i);
+            auto name_len = static_cast<std::uint8_t>(fd.name.size() & 0xFFu);
+            sch.bytes.push_back(name_len);
+            sch.bytes.insert(sch.bytes.end(),
+                             fd.name.begin(),
+                             fd.name.begin() + name_len);
+            auto ftype = ads_type_for_wire(fd.type);
+            sch.bytes.push_back(static_cast<std::uint8_t>( ftype       & 0xFFu));
+            sch.bytes.push_back(static_cast<std::uint8_t>((ftype >> 8) & 0xFFu));
+            std::uint32_t flen = fd.length;
+            sch.bytes.push_back(static_cast<std::uint8_t>( flen        & 0xFFu));
+            sch.bytes.push_back(static_cast<std::uint8_t>((flen >>  8) & 0xFFu));
+            sch.bytes.push_back(static_cast<std::uint8_t>((flen >> 16) & 0xFFu));
+            sch.bytes.push_back(static_cast<std::uint8_t>((flen >> 24) & 0xFFu));
+            sch.bytes.push_back(static_cast<std::uint8_t>( fd.decimals       & 0xFFu));
+            sch.bytes.push_back(static_cast<std::uint8_t>((fd.decimals >> 8) & 0xFFu));
+        }
+        secs.push_back(std::move(sch));
+        // 2. first row — the exact positioning + trailer + lookahead an
+        // explicit GotoTop would have produced (same goto_top call the
+        // GotoTop handler issues on the natural-order path, same pack
+        // machinery incl. the prefetch-cap gate inside next_lookahead).
+        // The return is ignored exactly like there: an empty table packs
+        // has_row=0, which the client reads as unpositioned.
+        (void)tbl->goto_top();
+        Frame tmp;
+        pack_row_trailer(tmp, id, next_lookahead(id));
+        Tlv row;
+        row.tag = Sec::kFirstRow;
+        row.bytes = std::move(tmp.payload);
+        secs.push_back(std::move(row));
+    }
+    out.push_back(static_cast<std::uint8_t>(secs.size()));
+    for (auto& s : secs) {
+        out.push_back(s.tag);
+        std::uint32_t n = static_cast<std::uint32_t>(s.bytes.size());
+        out.push_back(static_cast<std::uint8_t>( n        & 0xFFu));
+        out.push_back(static_cast<std::uint8_t>((n >>  8) & 0xFFu));
+        out.push_back(static_cast<std::uint8_t>((n >> 16) & 0xFFu));
+        out.push_back(static_cast<std::uint8_t>((n >> 24) & 0xFFu));
+        out.insert(out.end(), s.bytes.begin(), s.bytes.end());
+    }
+}
+
 DispatchResult Session::dispatch(const Frame& f) {
     Frame reply;
     WTRACE("[wire] op=%u\n", (unsigned)f.opcode);
@@ -1710,6 +1802,7 @@ DispatchResult Session::dispatch(const Frame& f) {
             // for this ack).
             {
                 auto* tbl = sess_conn_->lookup_table(th.value());
+                std::string bag;
                 if (tbl) {
                     std::filesystem::path tp(tbl->path());
                     std::string ext = tp.extension().string();
@@ -1740,24 +1833,29 @@ DispatchResult Session::dispatch(const Frame& f) {
                             // <base>.cdx — without this the client falls
                             // back to a speculative <base>.cdx OpenIndex
                             // that always 5018s + writes ads_err.dbf.
-                            std::string bag = bag_leaf;
+                            bag = bag_leaf;
                             std::filesystem::path base(sess_conn_->data_dir());
                             auto bag_rel = std::filesystem::relative(bagp, base, ec);
                             if (!ec && !bag_rel.empty() && bag_rel != ".") {
                                 bag = bag_rel.generic_string();
                             }
-                            // Append: [u16 bag_len][bag_bytes]
-                            auto bn = static_cast<std::uint16_t>(bag.size());
-                            reply.payload.push_back(
-                                static_cast<std::uint8_t>( bn       & 0xFFu));
-                            reply.payload.push_back(
-                                static_cast<std::uint8_t>((bn >> 8) & 0xFFu));
-                            reply.payload.insert(reply.payload.end(),
-                                                 bag.begin(), bag.end());
                             break;
                         }
                     }
                 }
+                // Always emit the bag field (empty when absent): old
+                // clients parse it the same way, and the sections below
+                // need a fixed anchor (see wire.h OpenTableAckSections).
+                {
+                    auto bn = static_cast<std::uint16_t>(bag.size());
+                    reply.payload.push_back(
+                        static_cast<std::uint8_t>( bn       & 0xFFu));
+                    reply.payload.push_back(
+                        static_cast<std::uint8_t>((bn >> 8) & 0xFFu));
+                    reply.payload.insert(reply.payload.end(),
+                                         bag.begin(), bag.end());
+                }
+                append_open_warm_sections(reply.payload, id, tbl);
             }
             break;
         }
@@ -2182,36 +2280,10 @@ DispatchResult Session::dispatch(const Frame& f) {
                     reply.payload.push_back(static_cast<std::uint8_t>((fdec >> 8) & 0xFFu));
                 }
             } else {
-                // Mirror the ABI map_field_type() table so the wire
-                // payload reports ADS_* type codes (4 = STRING, 2 =
-                // NUMERIC, 11 = INTEGER, …) regardless of which
-                // server-side branch we took.
+                // Engine branch: shared mapper (must agree byte-for-byte
+                // with the warm OpenTableAck schema section).
                 auto map_type = [](openads::drivers::DbfFieldType t) -> std::uint16_t {
-                    using T = openads::drivers::DbfFieldType;
-                    switch (t) {
-                        case T::Character:    return ADS_STRING;
-                        case T::Numeric:
-                        case T::Float:        return ADS_NUMERIC;
-                        case T::Logical:      return ADS_LOGICAL;
-                        case T::Date:
-                        case T::AdtDate:      return ADS_DATE;
-                        case T::DateTime:
-                        case T::AdtTimestamp: return ADS_TIMESTAMP;
-                        case T::Memo:         return ADS_MEMO;
-                        case T::Integer:
-                        case T::ShortInt:
-                        case T::AutoInc:      return ADS_INTEGER;
-                        case T::Currency:
-                        case T::AdtMoney:     return ADS_MONEY;
-                        case T::Double:       return ADS_DOUBLE;
-                        case T::Varchar:
-                        case T::CiCharacter:  return ADS_STRING;
-                        case T::Varbinary:
-                        case T::Binary:       return ADS_RAW;
-                        case T::Time:         return ADS_TIME;
-                        case T::Unknown:
-                        default:              return ADS_FIELD_TYPE_UNKNOWN;
-                    }
+                    return ads_type_for_wire(t);
                 };
                 auto nf = static_cast<std::uint16_t>(tbl->field_count());
                 reply.payload.push_back(static_cast<std::uint8_t>(nf & 0xFFu));

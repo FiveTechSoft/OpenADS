@@ -597,6 +597,22 @@ inline constexpr std::uint32_t kCapOpenTableMode = 0x00000008u;
 // so an old server never receives the frame and needs no fallback path.
 inline constexpr std::uint32_t kCapSetFieldsBatch = 0x00000010u;
 
+// Warm OpenTableAck sections (USE latency). After the fixed
+// `[u32 id][u16 bag_len][bag]` prefix, the ack carries
+// `[u8 section_count]` then that many TLVs:
+//   `[u8 tag][u32 len LE][bytes]`
+// Tag 1 (schema) reuses the DescribeTableAck body layout; tag 2
+// (first-row) reuses the nav-ack row-trailer layout (row + optional
+// lookahead block, same bytes pack_row_trailer emits). Clients that
+// predate sections stop after the bag field (which is always emitted,
+// empty when absent) and fall back to DescribeTable + GotoTop; new
+// clients skip both round-trips. Unknown tags are skipped by length,
+// so the section list stays extensible in both directions.
+namespace OpenTableAckSections {
+    constexpr std::uint8_t kSchema   = 1;
+    constexpr std::uint8_t kFirstRow = 2;
+}
+
 // RCB 07/14/2026: M12.23 — AdsCacheRecords support. Why a bare trailing field
 // and not a new opcode or a capability bit: the Skip request grew an OPTIONAL
 // trailing [u16 LE] carrying the caller's requested read-ahead depth:

@@ -98,10 +98,25 @@ public:
         bool          is_unique = false;
         bool          is_descending = false;
     };
+    // M12.14 — remote field metadata + extended cursor state.
+    struct FieldDesc {
+        std::string   name;
+        std::uint16_t type     = 0;     // ADS_* code
+        std::uint32_t length   = 0;
+        std::uint16_t decimals = 0;
+    };
     // M-AOF.6 — extended OpenTableAck carries production bag path.
     struct OpenTableResult {
         std::uint32_t id = 0;
         std::string   prod_bag_path;  // production CDX/ADI filename (if found)
+        // Warm sections (USE latency): schema + first row piggybacked on
+        // the open ack (see wire.h OpenTableAckSections). Absent when the
+        // server predates sections — the caller falls back to
+        // DescribeTable + GotoTop exactly as before.
+        std::vector<FieldDesc> fields;
+        bool                   has_schema = false;
+        std::vector<std::uint8_t> first_row;  // nav-ack trailer layout
+        bool                      has_first_row = false;
     };
     util::Result<OpenTableResult> open_table(const std::string& rel, std::uint16_t mode = 0);
     util::Result<void>          close_table(std::uint32_t id);
@@ -117,13 +132,6 @@ public:
     // active order's walk. O(1) via pos_of_recno_cached() on the server.
     util::Result<std::uint32_t> key_num(std::uint32_t table_id);
     util::Result<bool>          at_eof(std::uint32_t id);
-    // M12.14 — remote field metadata + extended cursor state.
-    struct FieldDesc {
-        std::string   name;
-        std::uint16_t type     = 0;     // ADS_* code
-        std::uint32_t length   = 0;
-        std::uint16_t decimals = 0;
-    };
     util::Result<std::vector<FieldDesc>>
                                 describe_table(std::uint32_t id);
     util::Result<bool>          at_bof(std::uint32_t id);
@@ -330,6 +338,12 @@ public:
     };
     util::Result<RowSnapshot>   fetch_current_row(std::uint32_t table_id);
     util::Result<void>          fetch_current_row(RemoteTable* rt);
+    // Warm open: feed the OpenTableAck first-row section through the nav
+    // trailer parser so the table lands exactly as an explicit GotoTop
+    // would leave it (caller then mirrors GotoTop's local bookkeeping
+    // and skips the round-trip).
+    util::Result<void>          apply_open_row(RemoteTable* rt,
+        const std::vector<std::uint8_t>& trailer);
     // M12.6 — remote write surface.
     util::Result<void>          append_blank(std::uint32_t id);
     util::Result<void>          set_field(std::uint32_t id,

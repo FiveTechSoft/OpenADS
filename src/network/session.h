@@ -215,6 +215,15 @@ private:
     void      pack_row_trailer(Frame& reply, std::uint32_t id,
                                std::uint16_t lookahead_n = 0,
                                std::int8_t dir = 1);
+    // Warm OpenTableAck sections (USE latency): schema + first-row TLVs
+    // appended after the bag field (see wire.h OpenTableAckSections).
+    // The row section positions the engine cursor exactly like an
+    // explicit GotoTop would (same goto_top + pack_row_trailer +
+    // lookahead machinery), so a client that consumes it must skip its
+    // GotoTop round-trip. tbl may be nullptr (schema/row omitted).
+    void      append_open_warm_sections(std::vector<std::uint8_t>& out,
+                                        std::uint32_t id,
+                                        openads::engine::Table* tbl);
     void      sync_engine_cursor(std::uint32_t id);
     // Apply field writes to the current record; shared by the SetField
     // (single) and SetFields (batch) handlers so both maintain the twin
