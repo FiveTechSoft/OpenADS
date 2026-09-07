@@ -6842,6 +6842,11 @@ namespace { void park_active_order(Table* t); }
 
 // --- Lazy-close table pool (USE latency) ----------------------------------
 //
+// NOTE: this block must stay inside extern "C++": the file-scope
+// extern "C" gives every function here C linkage, and MSVC errors
+// (C4190) on C++ return types like unique_ptr/string under /WX.
+
+extern "C++" {
 // Vouch-style apps re-USE the same lookup tables every few seconds; each
 // USE costs open+index+describe+goto round-trips. Parking an eligible
 // table at close keeps its server handle, schema, tags and order
@@ -6956,6 +6961,8 @@ void remote_close_table_live(ADSHANDLE hTable,
     }
     if (fire != nullptr) fire->disconnect();
 }
+
+} // extern "C++" (lazy-close pool helpers end; ABI exports resume in C)
 
 UNSIGNED32 ENTRYPOINT AdsDisconnect(ADSHANDLE hConnect) {
     arc2_trace("AdsDisconnect");
