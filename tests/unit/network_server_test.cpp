@@ -268,12 +268,47 @@ TEST_CASE("M12.4 remote OpenTable + GetRecordCount + walk + GetField") {
         auto rep = read_frame(cs);
         REQUIRE(rep.has_value());
         REQUIRE(rep.value().opcode == Opcode::OpenTableAck);
-        REQUIRE(rep.value().payload.size() == 4);
-        tid = static_cast<std::uint32_t>(rep.value().payload[0]) |
-              (static_cast<std::uint32_t>(rep.value().payload[1]) <<  8) |
-              (static_cast<std::uint32_t>(rep.value().payload[2]) << 16) |
-              (static_cast<std::uint32_t>(rep.value().payload[3]) << 24);
+        // Warm ack shape: [u32 id][u16 bag_len][bag][u8 section_count]
+        // [TLVs...]. The fixture has no production index, so the bag is
+        // empty and both warm sections (schema, first row) follow.
+        const auto& pl = rep.value().payload;
+        REQUIRE(pl.size() > 7);
+        tid = static_cast<std::uint32_t>(pl[0]) |
+              (static_cast<std::uint32_t>(pl[1]) <<  8) |
+              (static_cast<std::uint32_t>(pl[2]) << 16) |
+              (static_cast<std::uint32_t>(pl[3]) << 24);
         CHECK(tid == 1);
+        CHECK(pl[4] == 0);
+        CHECK(pl[5] == 0);   // bag_len == 0 (no index)
+        REQUIRE(pl[6] == 2);                // schema + first row
+        {
+            std::size_t off = 7;
+            bool saw_schema = false, saw_row = false;
+            for (int s = 0; s < 2; ++s) {
+                REQUIRE(off + 5 <= pl.size());
+                std::uint8_t tag = pl[off];
+                std::uint32_t slen =
+                    static_cast<std::uint32_t>(pl[off + 1]) |
+                    (static_cast<std::uint32_t>(pl[off + 2]) <<  8) |
+                    (static_cast<std::uint32_t>(pl[off + 3]) << 16) |
+                    (static_cast<std::uint32_t>(pl[off + 4]) << 24);
+                off += 5;
+                REQUIRE(off + slen <= pl.size());
+                if (tag == 1) {
+                    saw_schema = true;
+                    CHECK(slen > 2);
+                } else if (tag == 2) {
+                    saw_row = true;
+                    std::string body(
+                        reinterpret_cast<const char*>(&pl[off]), slen);
+                    CHECK(body.find("AAAA") != std::string::npos);
+                }
+                off += slen;
+            }
+            CHECK(saw_schema);
+            CHECK(saw_row);
+            CHECK(off == pl.size());
+        }
     }
 
     // GetRecordCount.
