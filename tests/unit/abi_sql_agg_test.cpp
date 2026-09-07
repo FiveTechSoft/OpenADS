@@ -476,6 +476,11 @@ TEST_CASE("MIN/MAX over date and character columns compare as text") {
     std::error_code ec;
     fs::remove_all(dir, ec);
     fs::create_directories(dir);
+    // SAP behavior: aggregates surface through AdsGetField, which formats
+    // dates per the process date format. Pin MM/DD/CCYY (the default) so
+    // these expectations are order-independent.
+    UNSIGNED8 deffmt[16] = "MM/DD/CCYY";
+    REQUIRE(AdsSetDateFormat(deffmt) == 0);
 
     UNSIGNED8 srv[512]{};
     const auto ds = dir.string();
@@ -545,8 +550,8 @@ TEST_CASE("MIN/MAX over date and character columns compare as text") {
     const auto lo = val("SELECT MIN(WHEN) FROM evts", "EXPR");
     const auto hi = val("SELECT MAX(WHEN) FROM evts", "EXPR");
     CAPTURE(lo); CAPTURE(hi);
-    CHECK(lo == "20090816");
-    CHECK(hi == "20170320");
+    CHECK(lo == "08/16/2009");
+    CHECK(hi == "03/20/2017");
 
     // Characters compare as text, and MIN is not simply the first row.
     CHECK(val("SELECT MIN(NAME) FROM evts", "EXPR") == "ALFA");
@@ -556,12 +561,12 @@ TEST_CASE("MIN/MAX over date and character columns compare as text") {
     // it is checked separately — all four aggregate paths had the same
     // double-only bug and were fixed together.
     CHECK(val("SELECT GRP, MIN(WHEN) FROM evts GROUP BY GRP ORDER BY GRP",
-              "EXPR") == "20090816");
+              "EXPR") == "08/16/2009");
 
     // A blank value is absent, not a minimum. Row 4 has an empty date; without
     // the blank guard an empty string sorts below every real date and wins
     // every MIN, which is how the join paths first showed "" instead of a date.
-    CHECK(val("SELECT MIN(WHEN) FROM evts", "EXPR") == "20090816");
+    CHECK(val("SELECT MIN(WHEN) FROM evts", "EXPR") == "08/16/2009");
 
     REQUIRE(AdsCloseSQLStatement(hStmt) == 0);
     REQUIRE(AdsDisconnect(hConn) == 0);

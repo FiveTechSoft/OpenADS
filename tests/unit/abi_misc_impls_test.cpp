@@ -206,10 +206,15 @@ TEST_CASE("ACE setters: AdsSetDate and AdsSetLong write table fields") {
     UNSIGNED8 num_fld[16] = "COUNT";
     REQUIRE(AdsSetLong(hTable, num_fld, -1234) == 0);
 
+    // SAP behavior (5af6fafa): AdsGetField formats dates per the process
+    // date format (AdsGetString stays raw "YYYYMMDD"). Pin MM/DD/CCYY so
+    // this expectation is order-independent.
+    UNSIGNED8 deffmt[16] = "MM/DD/CCYY";
+    REQUIRE(AdsSetDateFormat(deffmt) == 0);
     UNSIGNED8 out[32] = {0};
     UNSIGNED32 cap = sizeof(out);
     REQUIRE(AdsGetField(hTable, date_fld, out, &cap, 0) == 0);
-    CHECK(std::string(reinterpret_cast<char*>(out), cap) == "20260703");
+    CHECK(std::string(reinterpret_cast<char*>(out), cap) == "07/03/2026");
 
     std::memset(out, 0, sizeof(out));
     cap = sizeof(out);
