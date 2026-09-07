@@ -6840,6 +6840,123 @@ extern "C++" void sess_forget_connection(Connection* c);
 namespace { void park_active_order(Table* t); }
 }
 
+// --- Lazy-close table pool (USE latency) ----------------------------------
+//
+// Vouch-style apps re-USE the same lookup tables every few seconds; each
+// USE costs open+index+describe+goto round-trips. Parking an eligible
+// table at close keeps its server handle, schema, tags and order
+// bindings alive, so the next USE of the same path+alias+mode pays a
+// single warm GotoTop. Eligibility is conservative (shared mode, natural
+// order, never locked/scoped, no AOF/filter, no relations); anything
+// else takes the legacy real close, exactly as before.
+//
+// Ownership: live tables live in remote_table_store() keyed by object
+// pointer (moved out of AdsOpenTable, where the map leaked: nothing
+// ever erased it). Parked tables live in the connection pool; the
+// registry slot is released at park time so use-after-close still
+// errors SAP-correct.
+
+// Owns every live RemoteTable. Keyed by object pointer (stable across
+// handle re-registration on pooled reuse).
+std::unordered_map<openads::network::RemoteTable*,
+    std::unique_ptr<openads::network::RemoteTable>>&
+remote_table_store() {
+    static std::unordered_map<openads::network::RemoteTable*,
+        std::unique_ptr<openads::network::RemoteTable>> m;
+    return m;
+}
+
+// Drop ownership without closing (park path hands it to the pool).
+std::unique_ptr<openads::network::RemoteTable>
+remote_table_take(openads::network::RemoteTable* rt) {
+    if (rt == nullptr) return nullptr;
+    auto& m = remote_table_store();
+    auto it = m.find(rt);
+    if (it == m.end()) return nullptr;
+    auto owned = std::move(it->second);
+    m.erase(it);
+    return owned;
+}
+
+void remote_table_forget(openads::network::RemoteTable* rt) {
+    if (rt == nullptr) return;
+    remote_table_store().erase(rt);
+}
+
+// Pool key: connection-implied (pools are per-connection), normalized
+// name + alias + raw open mode. Slashes folded; case preserved (Linux
+// filesystems are case-sensitive -- a miss is always safe).
+std::string remote_pool_key(const std::string& name,
+                            const std::string& alias,
+                            std::uint16_t mode) {
+    std::string n = name;
+    for (auto& c : n) { if (c == '\\') c = '/'; }
+    return n + '\x01' + alias + '\x01' + std::to_string(mode);
+}
+
+// True when the table participates in any relation (as parent or child).
+// Parked tables keep no registry handle, so relations addressed by
+// handle could neither follow nor clean up -- real-close those.
+bool remote_table_has_relations(ADSHANDLE hTable) {
+    auto& tbl = relation_map();
+    if (tbl.find(hTable) != tbl.end()) return true;
+    for (auto& [parent, kids] : tbl) {
+        (void)parent;
+        for (auto& k : kids) {
+            if (k.child == hTable) return true;
+        }
+    }
+    return false;
+}
+
+// Eligibility snapshot at close time: every line must still read
+// fresh-open equivalent.
+bool remote_table_poolable(openads::network::RemoteTable* rt) {
+    if (rt == nullptr || rt->conn == nullptr) return false;
+    if (!rt->close_counted) return false;   // SQL cursors etc.
+    if (rt->open_exclusive) return false;   // parked exclusive blocks peers
+    if (!rt->pending_sets.empty()) return false;  // flushed before close
+    if (rt->ever_locked || rt->scope_touched) return false;
+    if (!rt->aof_expr.empty() || !rt->filter_expr.empty()) return false;
+    if (rt->active_index_id != 0) return false;
+    if (rt->server_order_id != 0 &&
+        rt->server_order_id !=
+            openads::network::RemoteTable::kOrderUnknown) return false;
+    return true;
+}
+
+// The actual server close + accounting for a live remote table.
+// hTable==0 for already-unregistered (parked eviction/disconnect flush):
+// skips registry/relations/cursor-map steps. Never holds s.mu across
+// the wire close (in-process server re-enters it) -- callers must not
+// hold it either; the mutex below covers accounting only.
+void remote_close_table_live(ADSHANDLE hTable,
+                             openads::network::RemoteTable* rt) {
+    if (rt == nullptr) return;
+    (void)remote_flush_pending(rt);
+    auto* rc = rt->conn;
+    const bool counted = rt->close_counted;
+    if (rc != nullptr) (void)rc->close_table(rt->id);
+    if (hTable != 0) forget_relations(hTable);
+    auto& s2 = state();
+    openads::network::RemoteConnection* fire = nullptr;
+    {
+        std::lock_guard<std::recursive_mutex> lk2(s2.mu);
+        if (counted && rc != nullptr) {
+            if (--rc->deferred_open_tables == 0 && rc->close_pending) {
+                rc->close_pending = false;
+                fire = rc;
+            }
+        }
+        if (hTable != 0) {
+            s2.registry.release(hTable);
+            remote_sql_cursors_map().erase(hTable);
+        }
+        remote_table_forget(rt);
+    }
+    if (fire != nullptr) fire->disconnect();
+}
+
 UNSIGNED32 ENTRYPOINT AdsDisconnect(ADSHANDLE hConnect) {
     arc2_trace("AdsDisconnect");
     arc2_trace("AdsDisconnect");
@@ -6847,7 +6964,7 @@ UNSIGNED32 ENTRYPOINT AdsDisconnect(ADSHANDLE hConnect) {
     bool deferred_close = false;
     {
         auto& s_local = state();
-        std::lock_guard<std::recursive_mutex> lk_local(s_local.mu);
+        std::unique_lock<std::recursive_mutex> lk_local(s_local.mu);
         connect101_open_options().erase(hConnect);
 #if defined(OPENADS_WITH_SQLITE)
         if (auto* sc = s_local.registry.lookup<openads::sql_backend::SqliteConnection>(
@@ -6946,6 +7063,18 @@ UNSIGNED32 ENTRYPOINT AdsDisconnect(ADSHANDLE hConnect) {
             for (auto& kv : remote_sql_cursors_map()) {
                 if (kv.second && kv.second->conn == rc)
                     kv.second->conn = nullptr;
+            }
+            // Drain parked tables first: they count as open
+            // (deferred_open_tables) and would otherwise pin a deferred
+            // disconnect forever — nothing will ever close them. Wire
+            // closes run with s.mu released (in-process server
+            // re-enters it); accounting re-locks inside.
+            {
+                std::vector<std::unique_ptr<openads::network::RemoteTable>> parked;
+                rc->parked_flush(parked);
+                lk_local.unlock();
+                for (auto& e : parked) remote_close_table_live(0, e.get());
+                lk_local.lock();
             }
             if (rc->deferred_open_tables > 0 && rc->valid()) {
                 // Tables opened through this connection are still in use
@@ -7125,22 +7254,71 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
             alias = std::filesystem::path(name).stem().string();
         }
         openads::util::write_remote_open_audit(name, alias);
+        // Pooled re-USE (USE latency): same connection/path/alias/mode
+        // within TTL reuses the parked server handle — no OpenTable wire
+        // op. Caches reset below; one warm GotoTop repositions (after
+        // lk is released — wire must never run under s.mu).
+        std::unique_ptr<openads::network::RemoteTable> adopted;
+        {
+            std::unique_ptr<openads::network::RemoteTable> hit;
+            if (rc->parked_reuse(remote_pool_key(name, alias, usMode), hit) &&
+                hit && hit->conn == rc) {
+                adopted = std::move(hit);
+            }
+        }
+        if (adopted) {
+            adopted->row_valid = false;
+            adopted->rec_count_cached = false;
+            adopted->key_count_cached = false;
+            adopted->keyno_valid = false;
+            adopted->found_cached = false;
+            adopted->nav_at_bof = adopted->nav_at_eof = false;
+            adopted->invalidate_prefetch();
+            // close_counted stays true (never decremented at park time),
+            // so no re-increment here.
+            lk.unlock();
+            auto r = adopted->conn->goto_top(adopted.get());
+            if (!r) {
+                // Server lost it (only when the session itself is gone —
+                // a live session never drops a parked handle). The count
+                // it still holds would pin a deferred disconnect, so
+                // release it before reporting the failure.
+                lk.lock();
+                if (adopted->close_counted && adopted->conn != nullptr) {
+                    adopted->conn->deferred_open_tables -= 1;
+                }
+                return fail(r.error());
+            }
+            lk.lock();
+            Handle gh2 = s.registry.register_object(
+                HandleKind::RemoteTable, adopted.get());
+            auto* raw = adopted.get();
+            remote_table_store()[raw] = std::move(adopted);
+            *phTable = to_ads_handle(gh2);
+            if (auto* rtp = get_remote_table(to_ads_handle(gh2))) {
+                rtp->found_cached = true; rtp->current_found = false;
+                remote_sync_keyno_gototop(rtp);
+            }
+            apply_relations_for_handle(to_ads_handle(gh2));
+            return ok();
+        }
         auto otr = rc->open_table(name,
             static_cast<std::uint16_t>(map_open_mode(usMode)));
         if (!otr) return fail(otr.error());
         auto& ot = otr.value();
-        static std::unordered_map<Handle,
-            std::unique_ptr<openads::network::RemoteTable>> remote_tables;
         auto rt = std::make_unique<openads::network::RemoteTable>();
         rt->conn = rc;
         rt->id   = ot.id;
         rt->name = name;
         rt->alias = std::move(alias);
         rt->close_counted = true;
+        rt->open_mode_raw = usMode;
+        rt->open_exclusive =
+            (map_open_mode(usMode) == openads::engine::OpenMode::Exclusive);
         rc->deferred_open_tables += 1;
         Handle gh = s.registry.register_object(
             HandleKind::RemoteTable, rt.get());
-        remote_tables.emplace(gh, std::move(rt));
+        remote_table_store()[rt.get()] = std::move(rt);
         *phTable = to_ads_handle(gh);
         // Warm open: schema + first row rode along in the ack. Install
         // both so DescribeTable and the implicit GotoTop below cost zero
@@ -9802,32 +9980,36 @@ UNSIGNED32 ENTRYPOINT AdsCloseTable(ADSHANDLE hTable) {
     {
     if (auto* rt = get_remote_table(hTable)) {
         if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
-        // conn is nulled out by AdsDisconnect before the RemoteConnection
-        // is freed; skip the wire close op if the connection is already gone.
-            auto* rc = rt->conn;
-            const bool counted = rt->close_counted;
-            if (rc != nullptr)
-                (void)rc->close_table(rt->id);
-            forget_relations(hTable);
-            auto& s2 = state();
-            openads::network::RemoteConnection* fire = nullptr;
-            {
-                std::lock_guard<std::recursive_mutex> lk2(s2.mu);
-                // Deferred disconnect: AdsDisconnect marked the connection
-                // close_pending while tables were still open; the last
-                // close performs the real disconnect (outside s.mu below).
-                if (counted && rc != nullptr) {
-                    if (--rc->deferred_open_tables == 0 && rc->close_pending) {
-                        rc->close_pending = false;
-                        fire = rc;
-                    }
+        auto* rc = rt->conn;
+        // Pooled re-USE: park eligible tables instead of closing. The
+        // registry slot dies (use-after-close still errors SAP-correct)
+        // but the server handle, schema, tags and order bindings survive
+        // for the next open of the same path+alias+mode.
+        if (rc != nullptr && remote_table_poolable(rt) &&
+            !remote_table_has_relations(hTable)) {
+            std::unique_ptr<openads::network::RemoteTable> owned =
+                remote_table_take(rt);
+            if (owned) {
+                auto& s2 = state();
+                {
+                    std::lock_guard<std::recursive_mutex> lk2(s2.mu);
+                    s2.registry.release(hTable);
+                    remote_sql_cursors_map().erase(hTable);
                 }
-                s2.registry.release(hTable);
-                remote_sql_cursors_map().erase(hTable);
+                std::vector<std::unique_ptr<openads::network::RemoteTable>> evicted;
+                // NOTE: key first, move second — argument evaluation
+                // order is indeterminate, and moving `owned` before
+                // reading its members is use-after-move (it crashed).
+                std::string pkey = remote_pool_key(owned->name, owned->alias,
+                                                   owned->open_mode_raw);
+                rc->parked_store(std::move(pkey), std::move(owned), evicted);
+                for (auto& e : evicted) remote_close_table_live(0, e.get());
+                return ok();
             }
-            if (fire != nullptr) fire->disconnect();
-            return ok();
         }
+        remote_close_table_live(hTable, rt);
+        return ok();
+    }
         if (auto* ops = openads::abi::backend_table_ops_for(hTable))
             if (ops->close_table) return ops->close_table(hTable);
     }
@@ -11428,6 +11610,9 @@ UNSIGNED32 ENTRYPOINT AdsAppendRecord(ADSHANDLE hTable) {
         rt->invalidate_prefetch();
         auto r = rt->conn->append_blank(rt->id);
         if (!r) return fail(r.error());
+        // Fresh appends auto-lock (non-exclusive tables): pooled reuse
+        // must not resurrect a locked handle.
+        rt->ever_locked = true;
         return ok();
     }
 #if defined(OPENADS_WITH_FIREBIRD)
@@ -12674,6 +12859,7 @@ UNSIGNED32 ENTRYPOINT AdsLockRecord(ADSHANDLE hTable, UNSIGNED32 ulRecord) {
         if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         auto r = rt->conn->lock_record(rt->id, ulRecord);
         if (!r) return fail(r.error());
+        rt->ever_locked = true;
         return ok();
     }
 #if defined(OPENADS_WITH_FIREBIRD)
@@ -12821,6 +13007,7 @@ UNSIGNED32 ENTRYPOINT AdsLockTable(ADSHANDLE hTable) {
         if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         auto r = rt->conn->lock_table(rt->id);
         if (!r) return fail(r.error());
+        rt->ever_locked = true;
         return ok();
     }
 #if defined(OPENADS_WITH_FIREBIRD)
@@ -18757,10 +18944,13 @@ UNSIGNED32 ENTRYPOINT AdsSetScope(ADSHANDLE hIndex, UNSIGNED16 usScope,
         // The scoped key count and every keyno/rel-pos value derived
         // from it just changed; recompute lazily on next use. Also drop
         // read-ahead rows -- they were read under the old scope.
+        // A scope once set disqualifies the table from lazy-close
+        // pooling (server index state is no longer fresh-open shaped).
         if (ri->parent != nullptr) {
             ri->parent->key_count_cached = false;
             ri->parent->keyno_valid      = false;
             ri->parent->invalidate_prefetch();
+            ri->parent->scope_touched    = true;
         }
         return ok();
     }

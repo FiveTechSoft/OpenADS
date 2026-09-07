@@ -379,8 +379,61 @@ RemoteConnection::connect_with_transport(std::unique_ptr<ITransport> transport,
     return {};
 }
 
-void RemoteConnection::disconnect() noexcept {
-    // Serialise with request(): resetting transport_ while another
+bool RemoteConnection::parked_reuse(const std::string& key,
+                                     std::unique_ptr<RemoteTable>& out) {
+    std::lock_guard<std::mutex> lk(park_mu_);
+    const auto now = std::chrono::steady_clock::now();
+    for (auto it = parked_.begin(); it != parked_.end(); ++it) {
+        const auto age =
+            std::chrono::duration_cast<std::chrono::seconds>(now - it->parked_at);
+        if (age.count() > static_cast<long long>(kParkedTtlSec)) continue;
+        if (it->key == key) {
+            out = std::move(it->table);
+            parked_.erase(it);
+            return true;
+        }
+    }
+    return false;
+}
+
+void RemoteConnection::parked_store(std::string key,
+                                    std::unique_ptr<RemoteTable> rt,
+                                    std::vector<std::unique_ptr<RemoteTable>>& evicted) {
+    std::lock_guard<std::mutex> lk(park_mu_);
+    const auto now = std::chrono::steady_clock::now();
+    // Drop expired first (caller really-closes them like any eviction).
+    for (auto it = parked_.begin(); it != parked_.end();) {
+        const auto age =
+            std::chrono::duration_cast<std::chrono::seconds>(now - it->parked_at);
+        if (age.count() > static_cast<long long>(kParkedTtlSec)) {
+            evicted.push_back(std::move(it->table));
+            it = parked_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    ParkedTable e;
+    e.table = std::move(rt);
+    e.key = std::move(key);
+    e.parked_at = now;
+    parked_.push_back(std::move(e));
+    // Cap: evict oldest (front) beyond the limit.
+    while (parked_.size() > kParkedMax) {
+        evicted.push_back(std::move(parked_.front().table));
+        parked_.erase(parked_.begin());
+    }
+}
+
+void RemoteConnection::parked_flush(
+        std::vector<std::unique_ptr<RemoteTable>>& out) {
+    std::lock_guard<std::mutex> lk(park_mu_);
+    for (auto& e : parked_) {
+        if (e.table) out.push_back(std::move(e.table));
+    }
+    parked_.clear();
+}
+
+void RemoteConnection::disconnect() noexcept {    // Serialise with request(): resetting transport_ while another
     // thread is mid-round-trip on this connection made that thread
     // dereference a null transport_ (AV) or read a corrupted stream.
     std::lock_guard<std::mutex> lk(mu_);

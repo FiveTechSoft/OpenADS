@@ -123,3 +123,87 @@ TEST_CASE("Warm open: schema + first row ride the OpenTableAck") {
     REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
     srv.stop();
 }
+
+TEST_CASE("Pooled re-USE: close/reopen skips OpenTable+CloseTable frames") {
+    ow_wipe();
+    auto dir = ow_tmp_dir();
+    seed_ow_fixture(dir);
+
+    openads::network::Server srv;
+    REQUIRE(srv.start("127.0.0.1", 0).has_value());
+
+    char uri[512]{};
+    std::snprintf(uri, sizeof(uri), "tcp://127.0.0.1:%u/%s",
+                  static_cast<unsigned>(srv.port()), dir.string().c_str());
+    UNSIGNED8 srvbuf[512]{};
+    std::memcpy(srvbuf, uri, std::strlen(uri) + 1);
+    ADSHANDLE hConn = 0;
+    REQUIRE(AdsConnect60(srvbuf, ADS_REMOTE_SERVER, nullptr, nullptr, 0, &hConn)
+            == AE_SUCCESS);
+
+    UNSIGNED8 tname[] = "ow.dbf";
+    ADSHANDLE hTable  = 0;
+    REQUIRE(AdsOpenTable(hConn, tname, nullptr, ADS_CDX, ADS_ANSI, ADS_SHARED,
+                         ADS_COMPATIBLE_LOCKING, ADS_DEFAULT, &hTable)
+            == AE_SUCCESS);
+    REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
+
+    const std::uint64_t open_before  = op_count(0x20);  // OpenTable
+    const std::uint64_t close_before = op_count(0x22);  // CloseTable
+    const std::uint64_t top_before   = op_count(0x40);  // GotoTop
+
+    // Re-USE within TTL: parked server handle is adopted, so neither
+    // OpenTable nor the first CloseTable reached the wire. Exactly one
+    // warm GotoTop repositions.
+    REQUIRE(AdsOpenTable(hConn, tname, nullptr, ADS_CDX, ADS_ANSI, ADS_SHARED,
+                         ADS_COMPATIBLE_LOCKING, ADS_DEFAULT, &hTable)
+            == AE_SUCCESS);
+    CHECK(op_count(0x20) == open_before);
+    CHECK(ow_get(hTable, "NM") == "alpha");
+    REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
+    CHECK(op_count(0x22) == close_before);
+    CHECK(op_count(0x40) == top_before + 1);
+
+    REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
+    srv.stop();
+}
+
+TEST_CASE("Pooled re-USE skipped after a lock (real close)") {
+    ow_wipe();
+    auto dir = ow_tmp_dir();
+    seed_ow_fixture(dir);
+
+    openads::network::Server srv;
+    REQUIRE(srv.start("127.0.0.1", 0).has_value());
+
+    char uri[512]{};
+    std::snprintf(uri, sizeof(uri), "tcp://127.0.0.1:%u/%s",
+                  static_cast<unsigned>(srv.port()), dir.string().c_str());
+    UNSIGNED8 srvbuf[512]{};
+    std::memcpy(srvbuf, uri, std::strlen(uri) + 1);
+    ADSHANDLE hConn = 0;
+    REQUIRE(AdsConnect60(srvbuf, ADS_REMOTE_SERVER, nullptr, nullptr, 0, &hConn)
+            == AE_SUCCESS);
+
+    UNSIGNED8 tname[] = "ow.dbf";
+    ADSHANDLE hTable  = 0;
+    REQUIRE(AdsOpenTable(hConn, tname, nullptr, ADS_CDX, ADS_ANSI, ADS_SHARED,
+                         ADS_COMPATIBLE_LOCKING, ADS_DEFAULT, &hTable)
+            == AE_SUCCESS);
+    REQUIRE(AdsGotoRecord(hTable, 1) == AE_SUCCESS);
+    REQUIRE(AdsLockRecord(hTable, 0) == AE_SUCCESS);
+    REQUIRE(AdsUnlockRecord(hTable, 0) == AE_SUCCESS);
+    REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
+
+    // Locked once: pool-ineligible, so the reopen is a full wire open.
+    const std::uint64_t open_before = op_count(0x20);
+    REQUIRE(AdsOpenTable(hConn, tname, nullptr, ADS_CDX, ADS_ANSI, ADS_SHARED,
+                         ADS_COMPATIBLE_LOCKING, ADS_DEFAULT, &hTable)
+            == AE_SUCCESS);
+    CHECK(op_count(0x20) == open_before + 1);
+    CHECK(ow_get(hTable, "NM") == "alpha");
+
+    REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
+    REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
+    srv.stop();
+}

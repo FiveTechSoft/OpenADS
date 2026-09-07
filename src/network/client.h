@@ -8,6 +8,7 @@
 #include "engine/server_fs.h"
 #include "util/result.h"
 
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <memory>
@@ -441,6 +442,36 @@ public:
     // state mutex; disconnect() itself stays unconditional.
     int  deferred_open_tables = 0;
     bool close_pending        = false;
+
+public:
+    // Short-lived handle reuse across close/reopen (Vouch startup: the
+    // same lookup tables re-USE every few seconds). A parked table keeps
+    // its server handle, schema, tags and order bindings; a re-USE only
+    // pays a warm GotoTop instead of open+index+describe+goto (~4 RTTs).
+    // Eligibility is conservative (shared mode, natural order, never
+    // locked/scoped, decided by the ABI layer); the pool here is pure
+    // storage with cap + TTL eviction. Guarded by park_mu_ (never held
+    // across wire calls — callers extract under it, then go to the wire).
+    struct ParkedTable {
+        std::unique_ptr<RemoteTable> table;
+        std::string                  key;
+        std::chrono::steady_clock::time_point parked_at{};
+    };
+    static constexpr std::size_t kParkedMax = 16;
+    static constexpr std::uint64_t kParkedTtlSec = 30;
+    // Move a matching entry out (most-recent first). True on hit.
+    bool parked_reuse(const std::string& key,
+                      std::unique_ptr<RemoteTable>& out);
+    // Store; evicted entries (beyond cap / expired) are returned for the
+    // caller to really close (wire + accounting live in the ABI layer).
+    void parked_store(std::string key, std::unique_ptr<RemoteTable> rt,
+                      std::vector<std::unique_ptr<RemoteTable>>& evicted);
+    // Drain everything (disconnect). Caller really-closes each entry.
+    void parked_flush(std::vector<std::unique_ptr<RemoteTable>>& out);
+
+private:
+    std::vector<ParkedTable> parked_;
+    mutable std::mutex       park_mu_;
 };
 
 // Per-handle wrapper for a remote table. Stores back-pointer to
@@ -475,6 +506,13 @@ struct RemoteTable {
     // ace_exports.cpp). Empty = clean. Reads overlay these values onto
     // current_row so same-handle read-after-write stays exact.
     std::vector<std::pair<std::string, std::string>> pending_sets;
+    // Lazy-close pooling (USE latency): eligibility observed over the
+    // handle lifetime. Parked only when every line below still reads
+    // fresh-open equivalent at close time.
+    std::uint16_t open_mode_raw = 0;  // usMode as passed to open_table
+    bool          open_exclusive = false;  // mapped mode (never pooled)
+    bool          ever_locked = false;     // AppendBlank/LockRecord/Table
+    bool          scope_touched = false;   // SetScope (server state unclear)
     // M12.18 — recno + deleted flag arrive together with the row
     // bytes so AdsGetRecordNum / AdsIsRecordDeleted can serve from
     // cache instead of a separate RTT each.
