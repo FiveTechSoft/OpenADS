@@ -296,7 +296,7 @@ TEST_CASE("M12.4 remote OpenTable + GetRecordCount + walk + GetField") {
                 REQUIRE(off + slen <= pl.size());
                 if (tag == 1) {
                     saw_schema = true;
-                    CHECK(slen > 2);
+                    CHECK(slen > 2u);
                 } else if (tag == 2) {
                     saw_row = true;
                     std::string body(
