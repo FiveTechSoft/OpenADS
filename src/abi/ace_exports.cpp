@@ -6915,7 +6915,11 @@ bool remote_table_has_relations(ADSHANDLE hTable) {
 }
 
 // Eligibility snapshot at close time: every line must still read
-// fresh-open equivalent.
+// fresh-open equivalent. Order state is EXEMPT: no close reaches the
+// server while parked, and server order/index bindings are per-session,
+// so no peer can invalidate them behind our back — an active order
+// resumes exactly (Vouch keeps IndexOrd()=1 across USEs; excluding it
+// would empty the pool).
 bool remote_table_poolable(openads::network::RemoteTable* rt) {
     if (rt == nullptr || rt->conn == nullptr) return false;
     if (!rt->close_counted) return false;   // SQL cursors etc.
@@ -6923,10 +6927,6 @@ bool remote_table_poolable(openads::network::RemoteTable* rt) {
     if (!rt->pending_sets.empty()) return false;  // flushed before close
     if (rt->ever_locked || rt->scope_touched) return false;
     if (!rt->aof_expr.empty() || !rt->filter_expr.empty()) return false;
-    if (rt->active_index_id != 0) return false;
-    if (rt->server_order_id != 0 &&
-        rt->server_order_id !=
-            openads::network::RemoteTable::kOrderUnknown) return false;
     return true;
 }
 
