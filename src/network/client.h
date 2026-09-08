@@ -90,6 +90,14 @@ public:
         return (server_caps_ & kCapSetFieldsBatch) != 0;
     }
 
+    // Server version from the HelloAck handshake ("openads/1.09.27";
+    // pre-1.8.14 servers answer the literal "openads/0.3.2"). Empty
+    // when the Hello probe failed — callers treat that as unknown,
+    // never as an error (the Connect that follows decides success).
+    const std::string& server_version() const noexcept {
+        return server_version_;
+    }
+
     // M12.16 — remote index handle subsystem.
     struct OpenIndexEntry {
         std::uint32_t id = 0;
@@ -432,6 +440,11 @@ private:
     std::mutex                  mu_;
     // Server caps echoed in ConnectAck (0 when the server predates caps).
     std::uint32_t               server_caps_ = 0;
+    // Raw HelloAck payload (see above). Written once during
+    // connect_with_transport, read afterwards without mu_ (the
+    // connection is fully established before any other thread
+    // can hold its handle).
+    std::string                 server_version_;
 
 public:
     // Deferred disconnect (MT shared connections). AdsDisconnect on a

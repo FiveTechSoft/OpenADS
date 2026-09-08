@@ -254,6 +254,7 @@ EXPORTS
     AdsGetSearchPath
     AdsGetServerName
     AdsGetServerTime
+    AdsGetServerVersion
     AdsGetString
     AdsGetStringW
     AdsGetTableAlias

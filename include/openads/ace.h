@@ -276,6 +276,11 @@ UNSIGNED32 ENTRYPOINT AdsGetServerTime (ADSHANDLE   hConnect,
                               UNSIGNED8*  pucDateBuf, UNSIGNED16* pusDateLen,
                               SIGNED32*   plTime,
                               UNSIGNED8*  pucTimeBuf, UNSIGNED16* pusTimeLen);
+// OpenADS extension: dotted version of the server behind hConnect
+// ("1.09.27"); local connections report the DLL's own build version.
+// Empty string (still AE_SUCCESS) = version probe failed / unknown.
+UNSIGNED32 ENTRYPOINT AdsGetServerVersion (ADSHANDLE   hConnect,
+                              UNSIGNED8*  pucBuf, UNSIGNED16* pusLen);
 
 UNSIGNED32 ENTRYPOINT AdsAppendRecord  (ADSHANDLE hTable);
 UNSIGNED32 ENTRYPOINT AdsWriteRecord   (ADSHANDLE hTable);

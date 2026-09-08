@@ -2700,6 +2700,18 @@ __declspec(dllexport) UNSIGNED32 __stdcall AdsGetServerTime(ADSHANDLE a0, UNSIGN
     return rc;
 }
 
+/* ---- AdsGetServerVersion ---- */
+#define AdsGetServerVersion oadsimpl_AdsGetServerVersion
+extern UNSIGNED32 ENTRYPOINT AdsGetServerVersion(ADSHANDLE hConnect, UNSIGNED8* pucBuf, UNSIGNED16* pusLen);
+#undef AdsGetServerVersion
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsGetServerVersion=_AdsGetServerVersion")
+#pragma comment(linker, "/export:AdsGetServerVersion=_AdsGetServerVersion")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsGetServerVersion(ADSHANDLE a0, UNSIGNED8* a1, UNSIGNED16* a2) {
+    UNSIGNED32 rc = oadsimpl_AdsGetServerVersion(a0, a1, a2);
+    arc_log_rc("AdsGetServerVersion", rc, 3, (uintptr_t)a0, (uintptr_t)a1, (uintptr_t)a2);
+    return rc;
+}
+
 /* ---- AdsGetString ---- */
 #define AdsGetString oadsimpl_AdsGetString
 extern UNSIGNED32 ENTRYPOINT AdsGetString(ADSHANDLE hTable, UNSIGNED8* pucField, UNSIGNED8* pucBuf, UNSIGNED32* pulLen, UNSIGNED16 usOption);

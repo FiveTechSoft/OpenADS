@@ -404,6 +404,7 @@ RETURN aRows
 #include "hbapi.h"
 #include "hbapiitm.h"
 #include "openads/ace.h"
+#include <string.h>
 
 HB_FUNC( OADS_CONNECT60 )    /* ( uri, server, user, pass, opts, @hConn ) -> .T./.F. */
 {
@@ -426,7 +427,7 @@ HB_FUNC( OADS_DISCONNECT )   /* ( hConn ) -> .T./.F. */
    hb_retl( AdsDisconnect( ( ADSHANDLE ) hb_parnint( 1 ) ) == 0 );
 }
 
-HB_FUNC( OADS_ADSVERSION )   /* () -> "major.minorletter" like rddads AdsVersion */
+HB_FUNC( OADS_ADSVERSION )   /* () -> full "1.09.27", not SAP "1.9a" */
 {
    UNSIGNED32 ulMajor = 0, ulMinor = 0;
    UNSIGNED8  ucLetter = 0;
@@ -435,9 +436,44 @@ HB_FUNC( OADS_ADSVERSION )   /* () -> "major.minorletter" like rddads AdsVersion
    char       szVer[ 32 ];
 
    AdsGetVersion( &ulMajor, &ulMinor, &ucLetter, ( UNSIGNED8 * ) szDesc, &usLen );
+   szDesc[ sizeof( szDesc ) - 1 ] = '\0';
+   /* Desc is "OpenADS 1.09.27 ACE-compatible engine": take the token
+      after "OpenADS " so Harbour sees the full dotted build. The
+      SAP-shaped major.minor+letter ("1.9a") drops the patch and can
+      not tell 1.09.26 from 1.09.27 apart. */
+   if( strncmp( szDesc, "OpenADS ", 8 ) == 0 )
+   {
+      const char * p = szDesc + 8;
+      size_t n = strcspn( p, " " );
+      if( n > 0 && n < sizeof( szVer ) )
+      {
+         memcpy( szVer, p, n );
+         szVer[ n ] = '\0';
+         hb_retc( szVer );
+         return;
+      }
+   }
    hb_snprintf( szVer, sizeof( szVer ), "%u.%u%c",
                 ( unsigned ) ulMajor, ( unsigned ) ulMinor, ( char ) ucLetter );
    hb_retc( szVer );
+}
+
+HB_FUNC( OADS_SERVERVERSION )   /* ( hConn ) -> server "1.09.27", "" = unknown */
+{
+   char       szVer[ 64 ];
+   UNSIGNED16 usCap = ( UNSIGNED16 ) sizeof( szVer );
+   UNSIGNED16 usLen = usCap;
+   UNSIGNED32 ulRc;
+
+   ulRc = AdsGetServerVersion( ( ADSHANDLE ) hb_parnint( 1 ),
+                               ( UNSIGNED8 * ) szVer, &usLen );
+   szVer[ sizeof( szVer ) - 1 ] = '\0';
+   if( ulRc != 0 )
+      hb_retc( "" );
+   else if( usLen < usCap )
+      hb_retc( szVer );
+   else
+      hb_retclen( szVer, usCap - 1 );
 }
 
 HB_FUNC( OADS_GETLASTERROR ) /* ( @code, @msg, @len ) -> rc */

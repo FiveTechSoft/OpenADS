@@ -6,6 +6,41 @@
 
 ---
 
+## 2026-09-08 — Server/DLL version reporting (Vouch triage)
+
+### Pedido de Pritpal Bedi
+
+Deployed v1.09.27 on both sides. Needs two things: (1) `AdsVersion()`
+returns `1.09.a`-style (SAP major.minor+letter) which drops the patch —
+1.09.26 vs 1.09.27 indistinguishable; (2) no Harbour-callable function
+for the **server's** version ("the fix didn't help" keeps being an old
+serverd still running).
+
+### Implementado (sin commit de release)
+
+- **Hello probe at connect.** `RemoteConnection::connect_with_transport`
+  sends `Hello` before `Connect` and stores the `HelloAck` payload
+  (`"openads/1.09.27"`, literal `"openads/0.3.2"` on pre-1.8.14 servers).
+  Best-effort: failed probe → empty (unknown), connect still decides
+  success. +1 RTT per *connect* only (connects are rare; USEs untouched).
+- **New `AdsGetServerVersion(hConn, buf, len)`** (OpenADS extension,
+  `ace.h` + `.def` + x86 stdcall wrapper). Remote → stripped dotted
+  version; local/unresolvable → DLL's own `OPENADS_VERSION_STR`. Empty +
+  `AE_SUCCESS` = unknown. Valid local handles never adopt an unrelated
+  remote via the thread-default fallback (same guard as `AdsCreateTable`).
+- **Bridge:** `OADS_ADSVERSION()` now returns the full dotted build
+  parsed from the desc (`"1.09.27"`, SAP-shape fallback); new
+  `OADS_SERVERVERSION(hConn)` (`tools/fwh_patch/openads_ado_bridge.prg`).
+- **Tests:** `tests/unit/network_version_test.cpp` — remote == local ==
+  desc token (same binary in-process). Full suite 1535/1536 (only the
+  pre-existing MinGW-only CDX alloc-tail case).
+
+### Pendiente
+
+- User's `TimeToReadiness == 3:16.963 == 197s` metric is not produced by
+  this repo — awaiting definition (server startup on EC2 vs app startup
+  over WAN) before investigating.
+
 ## 2026-07-27 — Fix: Legacy AdsCreateIndex path resolution
 
 ### Problema reportado por Pritpal Bedi

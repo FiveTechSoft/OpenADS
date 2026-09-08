@@ -11380,6 +11380,46 @@ UNSIGNED32 ENTRYPOINT AdsGetServerTime(ADSHANDLE  /*hConnect*/,
     return openads::AE_SUCCESS;
 }
 
+// OpenADS extension (no SAP equivalent): dotted version of the server
+// behind hConnect ("1.09.27"), so a Harbour app can prove WHICH
+// serverd binary it is talking to — "the fix didn't help" reports
+// keep turning out to be an old serverd still running.
+//
+// Remote: the HelloAck handshake version captured at connect time
+// ("openads/1.09.27" on current servers, the literal "openads/0.3.2"
+// on pre-1.8.14 ones), prefix stripped. Empty when the probe failed —
+// still AE_SUCCESS; the caller treats empty as unknown.
+// Local (or unresolvable handle): the DLL's own build version, which
+// IS the server in-process.
+UNSIGNED32 ENTRYPOINT AdsGetServerVersion(ADSHANDLE hConnect,
+                            UNSIGNED8* pucBuf, UNSIGNED16* pusLen) {
+    arc2_trace("AdsGetServerVersion");
+    // Remote only: a valid LOCAL Connection handle must never adopt an
+    // unrelated live remote connection through resolve_remote_conn_handle's
+    // thread-default/any-live fallback — same guard as AdsCreateTable.
+    openads::network::RemoteConnection* rc = get_remote_connection(hConnect);
+    if (rc == nullptr &&
+        state().registry.lookup<Connection>(
+            hConnect, HandleKind::Connection) == nullptr) {
+        ADSHANDLE rh = resolve_remote_conn_handle(hConnect);
+        if (rh != 0) rc = get_remote_connection(rh);
+    }
+    std::string v;
+    if (rc != nullptr) {
+        v = rc->server_version();
+        auto slash = v.find('/');
+        if (slash != std::string::npos) v.erase(0, slash + 1);
+        // Empty probe stays empty: unknown, still AE_SUCCESS.
+    } else {
+#ifdef OPENADS_VERSION_STR
+        v = OPENADS_VERSION_STR;
+#else
+        v = "0.0";
+#endif
+    }
+    return emit_text_with_u16len(pucBuf, pusLen, v);
+}
+
 // Ã¢â€â‚¬Ã¢â€â‚¬ Trigger execution Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 // Fires enabled triggers on `table_alias` matching `event_mask` (1=INSERT
 // 2=UPDATE 3=DELETE) and `timing` (1=BEFORE 2=INSTEAD_OF 4=AFTER).

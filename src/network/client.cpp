@@ -334,6 +334,23 @@ RemoteConnection::connect_with_transport(std::unique_ptr<ITransport> transport,
             "RemoteConnection: invalid transport", data_dir};
     }
     transport_ = std::move(transport);
+    // Version probe: Hello predates every capability word and every
+    // server answers it (HelloAck payload = "openads/<version>"), so a
+    // client can report WHICH serverd binary is answering without any
+    // new opcode. Best-effort: a failed probe leaves server_version_
+    // empty (unknown) and the Connect below still decides success, so
+    // old or half-open peers behave exactly as before at the cost of
+    // one extra RTT per connect (connects are rare; USEs are not).
+    server_version_.clear();
+    {
+        Frame hello;
+        hello.opcode = Opcode::Hello;
+        if (auto hrep = request(hello);
+            hrep && hrep.value().opcode == Opcode::HelloAck) {
+            const auto& pl = hrep.value().payload;
+            server_version_.assign(pl.begin(), pl.end());
+        }
+    }
     Frame req;
     req.opcode = Opcode::Connect;
     connect_pack_payload(req.payload, data_dir, user, password);
