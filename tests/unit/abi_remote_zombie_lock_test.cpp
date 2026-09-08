@@ -113,30 +113,36 @@ TEST_CASE("remote: record lock is released when the table is closed") {
     srv.stop();
 }
 
-TEST_CASE("remote: closing a table releases its files on the server") {
+TEST_CASE("remote: file erase after ordered close evicts the parked handle") {
     using openads::network::Server;
     auto dir = fs::temp_directory_path() / "openads_close_release";
     make_dbf(dir);
 
     Server srv;
     REQUIRE(srv.start("127.0.0.1", 0).has_value());
+    srv.set_enable_file_func(true);   // AdsDeleteFile rides the fs ops
 
     ADSHANDLE hConn = remote_connect(dir, srv.port());
     ADSHANDLE hT = open_ordered(hConn);       // ordered nav => shadow ABI handle
     REQUIRE(AdsCloseTable(hT) == 0);
 
     // The app-side pattern behind "exit the invoice": close the work files,
-    // then erase/rename them. If the session's shadow ABI handle leaks, the
-    // server still holds ZL.DBF/.CDX open here and Windows refuses the
-    // delete, which an app-level retry loop turns into a hang.
+    // then erase them. Since lazy-close pooling (v1.09.26, extended to
+    // ordered tables in v1.09.27) the close above PARKS the server handle
+    // instead of closing it, so a raw out-of-band fs::remove would hit a
+    // Windows sharing violation until the pool entry expires or the
+    // connection drops. File lifecycle must go through the Ads* entry
+    // points, which evict parked handles first (remote_flush_pools).
+    UNSIGNED8 dbf[] = "ZL.DBF";
+    UNSIGNED8 cdx[] = "ZL.CDX";
+    REQUIRE(AdsDeleteFile(hConn, dbf) == 0);
+    REQUIRE(AdsDeleteFile(hConn, cdx) == 0);
     std::error_code ec;
-    bool dbf_gone = fs::remove(dir / "ZL.DBF", ec) && !ec;
+    CHECK_MESSAGE(!fs::exists(dir / "ZL.DBF", ec),
+                  "ZL.DBF still present after AdsDeleteFile");
     std::error_code ec2;
-    bool cdx_gone = fs::remove(dir / "ZL.CDX", ec2) && !ec2;
-    CHECK_MESSAGE(dbf_gone, "ZL.DBF still open server-side after CloseTable: ",
-                  ec.message());
-    CHECK_MESSAGE(cdx_gone, "ZL.CDX still open server-side after CloseTable: ",
-                  ec2.message());
+    CHECK_MESSAGE(!fs::exists(dir / "ZL.CDX", ec2),
+                  "ZL.CDX still present after AdsDeleteFile");
 
     (void)AdsDisconnect(hConn);
     fs::remove_all(dir, ec);
