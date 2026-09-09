@@ -10,7 +10,8 @@
  * server-side distributed mutex functions OADS_MUTEXCREATE(),
  * OADS_MUTEXLOCK(), OADS_MUTEXTRYLOCK(), OADS_MUTEXUNLOCK(),
  * OADS_MUTEXDESTROY() callable from Harbour PRG code, plus the
- * logging kill-switch OADS_SETLOGGING().
+ * logging kill-switch OADS_SETLOGGING() and the version reporters
+ * OADS_ADSVERSION() (DLL build) / OADS_SERVERVERSION() (server build).
  *
  * The actual C implementations live in adsfunc.c (or inside the
  * OpenADS DLL).  This file only contains the Harbour<->C glue.
@@ -39,6 +40,14 @@
 #include "hbapi.h"
 #include "hbapiitm.h"
 #include "ace.h"
+#include <string.h>
+
+/* AdsGetServerVersion is an OpenADS extension (v1.09.28+). Declared
+   here as well so this file still compiles against an older ace.h;
+   an identical redeclaration is legal C when the new ace.h is used. */
+extern UNSIGNED32 ENTRYPOINT AdsGetServerVersion( ADSHANDLE   hConnect,
+                                                  UNSIGNED8 * pucBuf,
+                                                  UNSIGNED16 * pusLen );
 
 /* ------------------------------------------------------------------ */
 /*  OADS_SETCONNECTION( hConn ) -> lOk                                 */
@@ -671,4 +680,71 @@ HB_FUNC( OADS_MUTEXDESTROY )
     if( szName )
         ulRc = AdsMutexDestroy( hConn, ( UNSIGNED8 * ) szName );
     hb_retl( ulRc == 0 );
+}
+
+/* ------------------------------------------------------------------ */
+/*  OAds_AdsVersion() -> cVersion   ("1.09.28")                        */
+/*  Full dotted DLL build parsed from the version description.         */
+/*  The SAP-shaped major.minor+letter ("1.9a") drops the patch and     */
+/*  can not tell 1.09.27 from 1.09.28 apart.                           */
+/* ------------------------------------------------------------------ */
+HB_FUNC( OADS_ADSVERSION )
+{
+    UNSIGNED32 ulMajor = 0, ulMinor = 0;
+    UNSIGNED8  ucLetter = 0;
+    char       szDesc[ 128 ];
+    UNSIGNED16 usLen = ( UNSIGNED16 ) sizeof( szDesc );
+    char       szVer[ 32 ];
+    const char *p;
+    size_t     n;
+
+    AdsGetVersion( &ulMajor, &ulMinor, &ucLetter,
+                   ( UNSIGNED8 * ) szDesc, &usLen );
+    szDesc[ sizeof( szDesc ) - 1 ] = '\0';
+    /* Desc is "OpenADS 1.09.28 ACE-compatible engine". */
+    if( strncmp( szDesc, "OpenADS ", 8 ) == 0 )
+    {
+        p = szDesc + 8;
+        n = strcspn( p, " " );
+        if( n > 0 && n < sizeof( szVer ) )
+        {
+            memcpy( szVer, p, n );
+            szVer[ n ] = '\0';
+            hb_retc( szVer );
+            return;
+        }
+    }
+    hb_snprintf( szVer, sizeof( szVer ), "%u.%u%c",
+                 ( unsigned ) ulMajor,
+                 ( unsigned ) ulMinor, ( char ) ucLetter );
+    hb_retc( szVer );
+}
+
+/* ------------------------------------------------------------------ */
+/*  OAds_ServerVersion( hConn ) -> cVersion   ("1.09.28", ""=unknown)  */
+/*  OAds_ServerVersion()           -> cVersion (default conn)          */
+/*  Dotted build of the serverd behind the connection, so an app can   */
+/*  prove WHICH server binary it is talking to.                        */
+/* ------------------------------------------------------------------ */
+HB_FUNC( OADS_SERVERVERSION )
+{
+    ADSHANDLE  hConn;
+    char       szVer[ 64 ];
+    UNSIGNED16 usCap = ( UNSIGNED16 ) sizeof( szVer );
+    UNSIGNED16 usLen = usCap;
+    UNSIGNED32 ulRc;
+
+    if( hb_pcount() >= 1 )
+        hConn = ( ADSHANDLE ) hb_parnint( 1 );
+    else
+        AdsGetDefaultConnection( &hConn );
+
+    ulRc = AdsGetServerVersion( hConn, ( UNSIGNED8 * ) szVer, &usLen );
+    szVer[ sizeof( szVer ) - 1 ] = '\0';
+    if( ulRc != 0 )
+        hb_retc( "" );
+    else if( usLen < usCap )
+        hb_retc( szVer );
+    else
+        hb_retclen( szVer, usCap - 1 );
 }

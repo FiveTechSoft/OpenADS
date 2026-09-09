@@ -97,6 +97,17 @@ OAds_MutexDestroy( "invoice_seq" )
 Mutexes are released automatically when the owning session
 disconnects.
 
+## Version reporting (v1.09.28+ DLL)
+
+```harbour
+? OADS_ADSVERSION()            // DLL build, e.g. "1.09.28"
+? OADS_SERVERVERSION( hConn )  // serverd build, "" = unknown
+```
+
+`OADS_ADSVERSION()` returns the full dotted build. `OADS_SERVERVERSION()`
+reports the server behind `hConn` (default connection when omitted), so
+an app can prove which server binary it is talking to at startup.
+
 ## Logging kill-switch (production)
 
 `OAds_SetLogging( lOn )` enables/disables every log line the ace DLL
