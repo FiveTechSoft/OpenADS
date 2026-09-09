@@ -679,6 +679,9 @@ UNSIGNED32 remote_buffered_set(openads::network::RemoteTable* rt,
         if (auto r = rt->conn->set_field(rt->id, fname, val); !r) {
             return fail(r.error());
         }
+        // The probe applies server-side at once: a conditional-order
+        // row may just have entered/left the key set.
+        rt->key_count_cached = false;
     }
     rt->pending_sets.emplace_back(fname, val);
     return ok();
@@ -707,7 +710,17 @@ bool remote_pending_overlay(openads::network::RemoteTable* rt,
 // every visibility event is free for read-mostly flows. Returns an ACE
 // code (0 = ok); on error the buffer is dropped with the server-side
 // prefix applied — identical to a sequential loop failing mid-way.
+UNSIGNED32 remote_flush_teardown(openads::network::RemoteTable* rt);
+UNSIGNED32 remote_flush_sets(openads::network::RemoteTable* rt);
 UNSIGNED32 remote_flush_pending(openads::network::RemoteTable* rt) {
+    if (UNSIGNED32 rc = remote_flush_sets(rt); rc != 0) return rc;
+    return remote_flush_teardown(rt);
+}
+
+// Buffered-sets half of remote_flush_pending (no teardown): the close
+// path uses this so deferred teardown survives to the absorb-or-park
+// decision below instead of being emitted first.
+UNSIGNED32 remote_flush_sets(openads::network::RemoteTable* rt) {
     if (rt == nullptr || rt->conn == nullptr || rt->pending_sets.empty()) {
         return ok();
     }
@@ -744,6 +757,31 @@ UNSIGNED32 remote_flush_pending(openads::network::RemoteTable* rt) {
     }
     rt->pending_sets.clear();
     rt->row_valid = false;
+    return ok();
+}
+
+// Deferred teardown (WAN chattiness): AdsFlushFileBuffers and
+// AdsCloseAllIndexes set flags instead of sending when a CloseTable
+// is expected to absorb them. If any OTHER wire op intervenes first,
+// emit the deferred frames here, ahead of it, in the app's original
+// relative order (flush, then close-all). The close path itself never
+// reaches this function with flags set — it absorbs them silently.
+UNSIGNED32 remote_flush_teardown(openads::network::RemoteTable* rt) {
+    if (rt == nullptr || rt->conn == nullptr) {
+        return fail(openads::AE_INTERNAL_ERROR, "");
+    }
+    if (rt->flush_file_pending) {
+        if (auto r = rt->conn->flush_file_buffers(rt->id); !r) {
+            return fail(r.error());
+        }
+        rt->flush_file_pending = false;
+    }
+    if (rt->close_all_indexes_pending) {
+        if (auto r = rt->conn->close_all_indexes(rt->id); !r) {
+            return fail(r.error());
+        }
+        rt->close_all_indexes_pending = false;
+    }
     return ok();
 }
 
@@ -6965,6 +7003,12 @@ bool remote_table_poolable(openads::network::RemoteTable* rt) {
     if (!rt->pending_sets.empty()) return false;  // flushed before close
     if (rt->ever_locked || rt->scope_touched) return false;
     if (!rt->aof_expr.empty() || !rt->filter_expr.empty()) return false;
+    // Deferred teardown (FlushFileBuffers/CloseAllIndexes) is absorbed
+    // by a real close, never by a park (no server close happens) — the
+    // close path drops the flags before deciding, so this line is an
+    // invariant guard for future park paths, not a live branch.
+    if (rt->flush_file_pending || rt->close_all_indexes_pending)
+        return false;
     return true;
 }
 
@@ -7008,9 +7052,18 @@ void remote_close_table_live(ADSHANDLE hTable,
 // arrange that (disconnect/open paths unlock first).
 void remote_flush_pools(openads::network::RemoteConnection* rc) {
     if (rc == nullptr) return;
+    // File lifecycle changed meaning on disk: drop the existence
+    // cache alongside the parked handles.
+    rc->file_exists_invalidate();
     std::vector<std::unique_ptr<openads::network::RemoteTable>> parked;
     rc->parked_flush(parked);
-    for (auto& e : parked) remote_close_table_live(0, e.get());
+    for (auto& e : parked) {
+        // A drop/create/erase/rename absorbs deferred teardown the
+        // same way a close does — never emit it first.
+        e->flush_file_pending = false;
+        e->close_all_indexes_pending = false;
+        remote_close_table_live(0, e.get());
+    }
 }
 
 } // extern "C++" (lazy-close pool helpers end; ABI exports resume in C)
@@ -7332,6 +7385,8 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
             adopted->found_cached = false;
             adopted->nav_at_bof = adopted->nav_at_eof = false;
             adopted->last_nav = 0;  // re-stamped by the warm GotoTop below
+            adopted->flush_file_pending = false;
+            adopted->close_all_indexes_pending = false;
             adopted->invalidate_prefetch();
             // close_counted stays true (never decremented at park time),
             // so no re-increment here.
@@ -10060,7 +10115,12 @@ UNSIGNED32 ENTRYPOINT AdsCloseTable(ADSHANDLE hTable) {
     arc2_trace("AdsCloseTable");
     {
     if (auto* rt = get_remote_table(hTable)) {
-        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
+        // Buffered sets flush before anything else (data must land).
+        // Deferred teardown does NOT flush here: a real close absorbs
+        // it below (server close flushes + purges), while a park keeps
+        // the server handle untouched — so tables carrying either flag
+        // are never parked (see remote_table_poolable).
+        if (UNSIGNED32 frc = remote_flush_sets(rt); frc != 0) return frc;
         auto* rc = rt->conn;
         // Pooled re-USE: park eligible tables instead of closing. The
         // registry slot dies (use-after-close still errors SAP-correct)
@@ -10088,6 +10148,11 @@ UNSIGNED32 ENTRYPOINT AdsCloseTable(ADSHANDLE hTable) {
                 return ok();
             }
         }
+        // Real close: absorb deferred teardown (never emitted). The
+        // server close flushes data via its shadow handle and purges
+        // the table's index bindings, so these frames would be waste.
+        rt->flush_file_pending = false;
+        rt->close_all_indexes_pending = false;
         remote_close_table_live(hTable, rt);
         return ok();
     }
@@ -11899,6 +11964,9 @@ UNSIGNED32 ENTRYPOINT AdsWriteRecord(ADSHANDLE hTable) {
     if (auto* rt = get_remote_table(hTable)) {
         if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         rt->row_valid = false;                      // M12.17 cache invalidation
+        // A write can move the row in/out of a conditional order or
+        // scope: the cached key count may have changed with it.
+        rt->key_count_cached = false;
         // Key fields may have moved the row in the active order (or this is
         // the flush of a fresh append). Drop the key position so the next
         // AdsGetKeyNum / AdsGetRelKeyPos re-seeds via server GetKeyNum (O(1))
@@ -13317,8 +13385,10 @@ UNSIGNED32 ENTRYPOINT AdsFlushFileBuffers(ADSHANDLE hTable) {
     arc2_trace("AdsFlushFileBuffers");
     if (auto* rt = get_remote_table(hTable)) {
         if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
-        auto r = rt->conn->flush_file_buffers(rt->id);
-        if (!r) return fail(r.error());
+        // Deferred: a CloseTable is expected to absorb this (the server
+        // close flushes via its shadow handle). If any other wire op
+        // intervenes, remote_flush_pending emits it ahead of that op.
+        rt->flush_file_pending = true;
         return ok();
     }
     Table* t = get_table(hTable);
@@ -13795,6 +13865,10 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
     }
     if (auto* rt = get_remote_table(hTable)) {
         std::string path = openads::abi::to_internal(pucName, 0);
+        // Deferred teardown (CloseAll/FlushFileBuffers) must land before
+        // any index-state change: the server still holds the old
+        // bindings until it does.
+        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         // Zero-RTT dedup (RDD-only apps, no app change possible): the
         // production bag is already bound on this handle by the OpenTable
         // auto-open, but rddads issues an explicit AdsOpenIndex for the
@@ -14311,8 +14385,11 @@ UNSIGNED32 ENTRYPOINT AdsCloseIndex(ADSHANDLE hIndex) {
 UNSIGNED32 ENTRYPOINT AdsCloseAllIndexes(ADSHANDLE hTable) {
     arc2_trace("AdsCloseAllIndexes");
     if (auto* rt = get_remote_table(hTable)) {
-        auto r = rt->conn->close_all_indexes(rt->id);
-        if (!r) return fail(r.error());
+        // Deferred: a CloseTable is expected to absorb this (the server
+        // close purges the table's index bindings). If any other
+        // index-observing wire op intervenes, remote_flush_pending
+        // emits it ahead of that op. The client cache drops NOW so
+        // reads in the window answer post-close semantics.
         // Drop the client-side index cache too: the server hands out fresh
         // wire index ids on the next open_index, so the stale tag->id map
         // would otherwise make the reopen dedup keep dead ids (SetOrder
@@ -14322,6 +14399,10 @@ UNSIGNED32 ENTRYPOINT AdsCloseAllIndexes(ADSHANDLE hTable) {
         rt->index_by_tag.clear();
         rt->index_handles.clear();
         rt->active_index_id = 0;
+        // Order belief changed with no frame: expire the nav stamp so a
+        // subsequent GotoTop cannot dedupe against the old binding.
+        rt->last_nav = 0;
+        rt->close_all_indexes_pending = true;
         return ok();
     }
     Table* t = get_table(hTable);
@@ -15867,6 +15948,40 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrder(ADSHANDLE hTable, UNSIGNED8* pucName) {
         if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         std::string name = pucName
             ? openads::abi::to_internal(pucName, 0) : std::string();
+        // Skip a redundant switch: SetOrder never moves the cursor, so
+        // when the ack-confirmed server binding already equals the
+        // target the frame would change nothing observable. (Vouch
+        // re-sets the same order on every USE; pooled re-USEs keep the
+        // binding server-side.) Unmapped names still go out: the server
+        // resolves those, and a wrong local guess is the "remote browse
+        // shows no index" bug.
+        {
+            std::uint32_t want =
+                openads::network::RemoteTable::kOrderUnknown;
+            if (name.empty()) {
+                want = 0;
+            } else {
+                for (auto& [tag, wid] : rt->index_by_tag) {
+                    if (tag.size() != name.size()) continue;
+                    bool eq = true;
+                    for (std::size_t i = 0; i < tag.size(); ++i) {
+                        if (std::toupper(
+                                static_cast<unsigned char>(tag[i])) !=
+                            std::toupper(
+                                static_cast<unsigned char>(name[i]))) {
+                            eq = false;
+                            break;
+                        }
+                    }
+                    if (eq) { want = wid; break; }
+                }
+            }
+            if (want != openads::network::RemoteTable::kOrderUnknown &&
+                rt->server_order_id == want) {
+                rt->active_index_id = want;
+                return ok();
+            }
+        }
         auto r = rt->conn->set_order_by_name(rt->id, name);
         if (!r) return fail(r.error());
         // RCB 07/14/2026: BUG FIX -- the controlling order just changed, so the
@@ -16028,7 +16143,13 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrderByHandle(ADSHANDLE hTable, ADSHANDLE hInde
             // "Back to natural order" via the explicit API: send the reset
             // frame so the server drops its ordered_tables_ entry (it used
             // to send NO frame, and table-handle Skips kept walking the
-            // old index order).
+            // old index order). Skip only when the server is ack-confirmed
+            // natural already — the frame would change nothing (SetOrder
+            // never moves the cursor, so position is untouched either way).
+            if (rt->server_order_id == 0) {
+                rt->active_index_id = 0;
+                return ok();
+            }
             auto r = rt->conn->set_order_by_name(rt->id, "");
             if (!r) return fail(r.error());
             rt->active_index_id = 0;
@@ -16040,6 +16161,13 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrderByHandle(ADSHANDLE hTable, ADSHANDLE hInde
             return ok();
         }
         if (auto* ri = get_remote_index(hIndex)) {
+            // Same-order repeat: the server binding is already correct
+            // and SetOrder moves no cursor — skip the frame, sync the
+            // client belief only. Caches stay: nothing observable changed.
+            if (rt->server_order_id == ri->id) {
+                rt->active_index_id = ri->id;
+                return ok();
+            }
             auto r = rt->conn->set_order(rt->id, ri->id);
             if (!r) return fail(r.error());
             rt->active_index_id = ri->id;
@@ -36570,6 +36698,8 @@ UNSIGNED32 ENTRYPOINT AdsSetRecord(ADSHANDLE hTable, UNSIGNED8* pucRecord,
         if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         remote_settle_cursor(rt);
         rt->row_valid = false;
+        rt->key_count_cached = false;  // full-record write: conditional
+                                       // membership may have changed
         rt->prefetch_queue.clear();
         auto r = rt->conn->set_record(rt->id, pucRecord,
                                       static_cast<std::size_t>(ulLen));
@@ -37712,6 +37842,12 @@ UNSIGNED32 ENTRYPOINT AdsGetKeyCount(ADSHANDLE hIndex, UNSIGNED16 /*usFilter*/,
     *pulCount = 0;
     // M12.28 - route remote index handles through the wire.
     if (auto* ri = get_remote_index(hIndex)) {
+        if (ri->parent != nullptr) {
+            if (UNSIGNED32 frc = remote_flush_pending(ri->parent);
+                frc != 0) {
+                return frc;
+            }
+        }
         auto r = openads::network::remote_index_key_count(ri);
         if (!r) return fail(r.error());
         *pulCount = r.value();
@@ -37720,6 +37856,7 @@ UNSIGNED32 ENTRYPOINT AdsGetKeyCount(ADSHANDLE hIndex, UNSIGNED16 /*usFilter*/,
     // M12.28 - route remote table handles: key_count = physical count.
     if (auto* rt = get_remote_table(hIndex)) {
         if (rt->conn == nullptr) return fail(openads::AE_INTERNAL_ERROR, "remote table: no connection");
+        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         auto r = rt->conn->key_count(rt->id);
         if (!r) return fail(r.error());
         *pulCount = r.value();

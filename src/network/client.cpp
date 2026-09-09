@@ -2281,6 +2281,10 @@ std::uint64_t read_u64_le(const std::uint8_t* p) {
 
 util::Result<bool>
 RemoteConnection::file_exists(const std::string& path) {
+    {
+        std::lock_guard<std::mutex> lk(file_exists_mu_);
+        if (file_exists_cache_.count(path) != 0) return true;
+    }
     Frame req;
     req.opcode = Opcode::FileExists;
     push_lp_str(req.payload, path);
@@ -2289,7 +2293,17 @@ RemoteConnection::file_exists(const std::string& path) {
     if (rep.value().opcode != Opcode::FileExistsAck ||
         rep.value().payload.empty())
         return fs_wire_err(rep.value(), "FileExists");
-    return rep.value().payload[0] != 0;
+    bool exists = rep.value().payload[0] != 0;
+    if (exists) {
+        std::lock_guard<std::mutex> lk(file_exists_mu_);
+        file_exists_cache_.insert(path);
+    }
+    return exists;
+}
+
+void RemoteConnection::file_exists_invalidate() {
+    std::lock_guard<std::mutex> lk(file_exists_mu_);
+    file_exists_cache_.clear();
 }
 
 util::Result<void>
@@ -2301,6 +2315,7 @@ RemoteConnection::file_erase(const std::string& path) {
     if (!rep) return rep.error();
     if (rep.value().opcode != Opcode::FileEraseAck)
         return fs_wire_err(rep.value(), "FileErase");
+    file_exists_invalidate();
     return {};
 }
 
@@ -2315,6 +2330,7 @@ RemoteConnection::file_rename(const std::string& old_p,
     if (!rep) return rep.error();
     if (rep.value().opcode != Opcode::FileRenameAck)
         return fs_wire_err(rep.value(), "FileRename");
+    file_exists_invalidate();
     return {};
 }
 

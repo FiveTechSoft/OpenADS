@@ -146,10 +146,22 @@ util::Result<std::uint32_t> remote_index_key_count(RemoteIndex* ri) {
             openads::AE_INTERNAL_ERROR, 0,
             "remote index key count: missing parent or connection", ""};
     }
+    // rddads' OrdKeyCount routes through the order handle on every
+    // browse paint; the count for the CURRENT order is already cached
+    // on the parent (invalidated on order/scope/write), so serve it
+    // with no round-trip when this handle IS that order.
+    if (ri->parent->active_index_id == ri->id &&
+        ri->parent->key_count_cached) {
+        return ri->parent->cached_key_count;
+    }
     auto act = remote_activate_index(ri);
     if (!act) return act.error();
     auto r = ri->conn->key_count(ri->parent->id);
     if (!r) return r.error();
+    if (ri->parent->active_index_id == ri->id) {
+        ri->parent->cached_key_count = r.value();
+        ri->parent->key_count_cached = true;
+    }
     return r.value();
 }
 

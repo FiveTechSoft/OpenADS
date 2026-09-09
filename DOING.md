@@ -6,6 +6,37 @@
 
 ---
 
+## 2026-09-09 — USE-teardown batching (segundo cuello: 406 SetOrders, 183 flushes, 169 exists)
+
+### Evidencia (`ace_calls.log`, 9925 llamadas)
+
+El startup no son aperturas: por USE hay workloads — `AdsGetRecordCount`
+994, `IsFound/AtEOF/AtBOF` 801 (poll por fila), `SetOrder` 406,
+`GotoRecord` 266, `OpenIndex` 204, `FlushFileBuffers` 183, `Seek` 174,
+`CheckExistence` 169, `CloseAllIndexes` 166. Patrón por tag:
+`SetOrder → Flush → CloseAll → OpenIndex` (~5 frames ≈ 0.25 s/tag;
+una tabla de 157 tags ≈ 40 s). Medición: ciclo USE realista = 10
+frames (test `network_use_budget_test`); apertura local plana vs tags
+(2.6 ms) — el parse CDX no es el cuello. Servidor exonerado (0.53%
+CPU, burst 100%).
+
+### Implementado (sin release)
+
+- **Flush+CloseAll difieren al Close** (server close flushea vía
+  shadow + purga bindings; si otra op interviene, se emiten antes en
+  orden). Tablas con flags pendientes no se parkean; `OpenIndex`/
+  `SetOrder`/`KeyCount` enganchan el hook. Pool-adopt resetea.
+- **CheckExistence cachea positivos** por conexión; solo
+  drop/create/erase/rename (vía `remote_flush_pools`) y
+  erase/rename directos invalidan. Negativos siempre a wire.
+- **SetOrder salta si el binding ack-confirmado ya es el target**
+  (SetOrder no mueve cursor). ByHandle ambas ramas + ByName mapeado.
+- **KeyCount por handle ridea el cache de la orden activa**; fix:
+  `WriteRecord`/`SetRecord`/probe invalidan (FOR membership cambia
+  con writes — lo cazó `abi_index_intensive2_test`).
+- **Tests:** `network_teardown_batch_test` (5 casos con contadores).
+  Suite 1546/1547 (solo CDX pre-existente).
+
 ## 2026-09-08 — Nav-probe batching (Vouch 197s root cause)
 
 ### Evidencia de Pritpal Bedi

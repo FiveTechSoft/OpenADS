@@ -328,6 +328,7 @@ add_executable(openads_unit_tests
     unit/network_version_test.cpp
     unit/network_nav_batch_test.cpp
     unit/network_use_budget_test.cpp
+    unit/network_teardown_batch_test.cpp
     unit/abi_remote_lock_introspection_test.cpp
     unit/backend_tier1_test.cpp
     unit/abi_oads_file_funcs_test.cpp

@@ -14,6 +14,7 @@
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -321,7 +322,14 @@ public:
                                             std::uint16_t delete_files);
 
     // Server filesystem (EnableFileFunc on server).
+    // Positive-only existence cache (rddads probes the same production
+    // bags every USE): a "true" answer is served locally until any
+    // file-mutating op on this connection (erase/rename/drop/create,
+    // via file_exists_invalidate) clears it. Negatives always go to
+    // the wire — caching "missing" would hide a concurrently created
+    // table, while a stale "present" degrades to a clean open error.
     util::Result<bool>          file_exists(const std::string& path);
+    void                        file_exists_invalidate();
     util::Result<void>          file_erase(const std::string& path);
     util::Result<void>          file_rename(const std::string& old_p,
                                             const std::string& new_p);
@@ -484,6 +492,11 @@ private:
     // connection is fully established before any other thread
     // can hold its handle).
     std::string                 server_version_;
+    // Positive-only file-existence cache (see file_exists). Guarded
+    // by its own mutex: consulted on the read path, cleared by
+    // file-mutating ops, never held across wire calls.
+    std::set<std::string>       file_exists_cache_;
+    std::mutex                  file_exists_mu_;
 
 public:
     // Deferred disconnect (MT shared connections). AdsDisconnect on a
@@ -716,6 +729,15 @@ struct RemoteTable {
     // OpenTableAck auto-open or AdsOpenIndex. Lets AdsGetIndexFilename
     // (OrdBagName) return the bag name without a separate wire round-trip.
     std::string prod_bag_path;
+    // Deferred teardown (WAN chattiness: rddads issues FlushFileBuffers
+    // + CloseAllIndexes before every CloseTable — 2 wasted frames per
+    // USE, since the server close flushes data and purges index
+    // bindings anyway). Set instead of sending; remote_flush_pending
+    // emits them ahead of any other intervening wire op, and the close
+    // path absorbs them silently. Tables carrying either flag are
+    // never parked (a park performs no server close to absorb into).
+    bool flush_file_pending      = false;
+    bool close_all_indexes_pending = false;
 };
 
 // M12.16 — per-handle wrapper for a remote index. Each tag
