@@ -306,7 +306,8 @@ void connect_pack_payload(std::vector<std::uint8_t>& payload,
     // a distinct bit precisely because a server must NOT send a backward block
     // to a client that only understands forward ones (see kCapPrefetchBackward).
     std::uint32_t caps = kCapPrefetchConsume | kCapPrefetchBackward
-                       | kCapOpenTableMode | kCapSetFieldsBatch;
+                       | kCapOpenTableMode | kCapSetFieldsBatch
+                       | kCapFlushInCloseAll;
     for (int i = 0; i < 4; ++i)
         payload.push_back(static_cast<std::uint8_t>((caps >> (8 * i)) & 0xFFu));
 }

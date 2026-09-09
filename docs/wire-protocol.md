@@ -445,6 +445,14 @@ password must match a configured account or the server returns `AE_LOGIN_FAILED`
   tables — X#'s `GoHot` refuses to write a record it sees as
   unlocked).
 
+### 5.11b FlushFileBuffers / CloseAllIndexes merge
+- `CloseAllIndexes` (`0x80`): `[u32 tid]`, ack empty. The server
+  flushes table data first, then drops the order and extra views —
+  so clients merge a preceding `FlushFileBuffers` (`0x7E`) into this
+  single frame instead of paying two round-trips for the
+  flush→closeall teardown pair. Old servers (no in-handler flush)
+  simply drop bindings; clients targeting them keep both frames.
+
 ### 5.12 SetField / SetFieldAck
 - SetField: `[u32 tid][u16 namelen][name_bytes][value_bytes]`.
   Value runs from `5 + namelen` to end of payload. The engine

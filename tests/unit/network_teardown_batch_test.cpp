@@ -149,12 +149,13 @@ TEST_CASE("Teardown batching: intervening op flushes teardown first") {
     const std::uint64_t fl0 = tb_op(kOpFlushFile);
     const std::uint64_t ca0 = tb_op(kOpCloseAllIdx);
 
-    // CloseAll, then a real nav: the deferred frame goes out ahead of
-    // it (server drops bindings before navigating), in order.
+    // CloseAll, then a real nav: the deferred teardown goes out ahead
+    // of it — merged into a single CloseAllIndexes frame (the server
+    // flushes inside that handler).
     REQUIRE(AdsFlushFileBuffers(hTable) == AE_SUCCESS);
     REQUIRE(AdsCloseAllIndexes(hTable) == AE_SUCCESS);
     REQUIRE(AdsGotoTop(hTable) == AE_SUCCESS);
-    CHECK(tb_op(kOpFlushFile) == fl0 + 1);
+    CHECK(tb_op(kOpFlushFile) == fl0);
     CHECK(tb_op(kOpCloseAllIdx) == ca0 + 1);
 
     REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);

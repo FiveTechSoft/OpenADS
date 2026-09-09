@@ -1600,7 +1600,8 @@ DispatchResult Session::dispatch(const Frame& f) {
             // before trusting the trailing word (see connect_with_transport).
             {
                 const std::uint32_t scaps =
-                    openads::network::kCapSetFieldsBatch;
+                    openads::network::kCapSetFieldsBatch |
+                    openads::network::kCapFlushInCloseAll;
                 reply.payload.push_back(
                     static_cast<std::uint8_t>( scaps        & 0xFFu));
                 reply.payload.push_back(
@@ -2839,7 +2840,12 @@ DispatchResult Session::dispatch(const Frame& f) {
                 if      (f.opcode == Opcode::PackTable)        AdsPackTable(cit->second);
                 else if (f.opcode == Opcode::ZapTable)         AdsZapTable(cit->second);
                 else if (f.opcode == Opcode::FlushFileBuffers) AdsFlushFileBuffers(cit->second);
-                else                                            AdsCloseAllIndexes(cit->second);
+                else {
+                    // Best-effort flush first (see engine branch below):
+                    // clients may have merged a FlushFileBuffers here.
+                    (void)AdsFlushFileBuffers(cit->second);
+                    AdsCloseAllIndexes(cit->second);
+                }
                 reply.opcode = ack_op;
                 break;
             }
@@ -2855,7 +2861,12 @@ DispatchResult Session::dispatch(const Frame& f) {
             else if (f.opcode == Opcode::FlushFileBuffers) rb = tbl->flush();
             else {
                 // CloseAllIndexes: drop both active order +
-                // every parked extra view in lockstep.
+                // every parked extra view in lockstep. Flush first:
+                // clients merge a preceding FlushFileBuffers into this
+                // frame (one RTT instead of two), so durability must
+                // not depend on a separate flush arriving.
+                rb = tbl->flush();
+                if (!rb) { reply = err("Maintenance: " + rb.error().message); break; }
                 tbl->clear_order();
                 tbl->clear_extra_index_views();
             }

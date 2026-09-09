@@ -92,6 +92,12 @@ public:
         return (server_caps_ & kCapSetFieldsBatch) != 0;
     }
 
+    // Server flushes inside CloseAllIndexes (see kCapFlushInCloseAll):
+    // a deferred FlushFileBuffers merges into that single frame.
+    bool server_flush_in_closeall() const noexcept {
+        return (server_caps_ & kCapFlushInCloseAll) != 0;
+    }
+
     // Current cursor-generation sequence (see nav_seq_). Relaxed load
     // is enough: it only orders the ABI layer's own duplicate
     // detection, never data.

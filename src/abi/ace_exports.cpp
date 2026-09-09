@@ -770,6 +770,20 @@ UNSIGNED32 remote_flush_teardown(openads::network::RemoteTable* rt) {
     if (rt == nullptr || rt->conn == nullptr) {
         return fail(openads::AE_INTERNAL_ERROR, "");
     }
+    // Merged flush: when both are owed, the CloseAllIndexes frame
+    // alone suffices — the server flushes table data inside that
+    // handler before dropping bindings. One RTT instead of two for
+    // rddads' flush→closeall teardown pair. Only against servers that
+    // advertise kCapFlushInCloseAll; old servers keep both frames.
+    if (rt->flush_file_pending && rt->close_all_indexes_pending &&
+        rt->conn->server_flush_in_closeall()) {
+        if (auto r = rt->conn->close_all_indexes(rt->id); !r) {
+            return fail(r.error());
+        }
+        rt->flush_file_pending = false;
+        rt->close_all_indexes_pending = false;
+        return ok();
+    }
     if (rt->flush_file_pending) {
         if (auto r = rt->conn->flush_file_buffers(rt->id); !r) {
             return fail(r.error());

@@ -602,6 +602,13 @@ inline constexpr std::uint32_t kCapOpenTableMode = 0x00000008u;
 // so an old server never receives the frame and needs no fallback path.
 inline constexpr std::uint32_t kCapSetFieldsBatch = 0x00000010u;
 
+// Flush merged into CloseAllIndexes: the server flushes table data
+// inside the CloseAllIndexes handler before dropping bindings, so a
+// preceding FlushFileBuffers is redundant. Same two-way gating as
+// kCapSetFieldsBatch — clients merge only when the ConnectAck echo
+// carries this bit.
+inline constexpr std::uint32_t kCapFlushInCloseAll = 0x00000020u;
+
 // Warm OpenTableAck sections (USE latency). After the fixed
 // `[u32 id][u16 bag_len][bag]` prefix, the ack carries
 // `[u8 section_count]` then that many TLVs:
