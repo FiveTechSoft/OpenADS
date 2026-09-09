@@ -133,11 +133,11 @@ milestones reused gaps left by earlier ones.
 | `GetRecordCount`      | `0x46` | C→S |                                 | M12.4 |
 | `GetRecordCountAck`   | `0x47` | S→C |                                 | M12.4 |
 | `AtEOF`               | `0x48` | C→S |                                 | M12.4 |
-| `AtEOFAck`            | `0x49` | S→C | 0 / 1 byte                      | M12.4 |
+| `AtEOFAck`            | `0x49` | S→C | `[u8 eof][u8 bof]` (2nd byte: twin flag, new servers) | M12.4 |
 | `DescribeTable`       | `0x4A` | C→S | Schema in one round-trip        | M12.14 |
 | `DescribeTableAck`    | `0x4B` | S→C | Column list + types             | M12.14 |
 | `AtBOF`               | `0x4C` | C→S |                                 | M12.14 |
-| `AtBOFAck`            | `0x4D` | S→C | 0 / 1 byte                      | M12.14 |
+| `AtBOFAck`            | `0x4D` | S→C | `[u8 bof][u8 eof]` (2nd byte: twin flag, new servers) | M12.14 |
 | `GetRecordNum`        | `0x4E` | C→S | Current recno                   | M12.14 |
 | `GetRecordNumAck`     | `0x4F` | S→C |                                 | M12.14 |
 | `AppendBlank`         | `0x50` | C→S |                                 | M12.6 |
@@ -432,7 +432,11 @@ password must match a configured account or the server returns `AE_LOGIN_FAILED`
 
 ### 5.10 GetRecordCount / GetRecordCountAck, AtEOF / AtEOFAck
 - GetRecordCount: `[u32 tid]`. Ack: `[u32 record_count]`.
-- AtEOF: `[u32 tid]`. Ack: 1 byte (`0` = not EOF, `1` = EOF).
+- AtEOF: `[u32 tid]`. Ack: `[u8 eof][u8 bof]` — the twin BOF answer
+  rides along so the client's AtBOF+AtEOF pair costs one round-trip.
+  Old servers send only the first byte; old clients read only the
+  first byte.
+- AtBOF: `[u32 tid]`. Ack: `[u8 bof][u8 eof]`, mirrored.
 
 ### 5.11 AppendBlank, DeleteRecord, RecallRecord, FlushTable, Reindex, Pack, Zap
 - All seven: `[u32 tid]`, ack empty.

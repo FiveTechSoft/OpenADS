@@ -1452,6 +1452,43 @@ void remote_sync_keyno_gotobottom(openads::network::RemoteTable* rt) {
     }
 }
 
+// Consecutive-duplicate nav detection (WAN chattiness: rddads issues
+// back-to-back GotoTop/GotoBottom pairs per USE). True when the table's
+// last wire op was `which` (1 = top, 2 = bottom) in the same order
+// context with no frame on the connection since — the skipped frame
+// would re-establish byte-identical state, so the only observable
+// difference is one less round-trip.
+// The dedupe path still re-runs the keyno sync + relation apply (both
+// local once caches are warm) so every side effect but the frame stays.
+bool remote_nav_duplicate(openads::network::RemoteTable* rt, int which,
+                          std::uint32_t order) {
+    return rt != nullptr && rt->conn != nullptr && rt->last_nav == which &&
+           rt->last_nav_order == order &&
+           rt->last_nav_seq == rt->conn->wire_seq();
+}
+
+// Stamp after a successful wire GotoTop/GotoBottom. Also feeds the
+// empty-cursor sticky: a top/bottom that produced no row proves an
+// empty cursor, so AtBOF/AtEOF answer locally until anything else
+// touches the wire (any frame bumps the seq and expires the stamp).
+void remote_nav_stamp(openads::network::RemoteTable* rt, int which,
+                      std::uint32_t order) {
+    if (rt == nullptr || rt->conn == nullptr) return;
+    rt->last_nav       = which;
+    rt->last_nav_order = order;
+    rt->last_nav_row   = rt->row_valid;
+    rt->last_nav_seq   = rt->conn->wire_seq();
+}
+
+// Empty-cursor sticky for AdsAtBOF/AdsAtEOF: true when the last wire
+// nav on this table established an empty cursor with nothing on the
+// wire since. An empty cursor is simultaneously BOF and EOF (xBase).
+bool remote_nav_empty_sticky(openads::network::RemoteTable* rt) {
+    return rt != nullptr && rt->conn != nullptr && rt->last_nav != 0 &&
+           !rt->last_nav_row &&
+           rt->last_nav_seq == rt->conn->wire_seq();
+}
+
 void remote_sync_keyno_skip(openads::network::RemoteTable* rt,
                             std::int32_t step) {
     if (rt == nullptr) return;
@@ -7293,6 +7330,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
             adopted->keyno_valid = false;
             adopted->found_cached = false;
             adopted->nav_at_bof = adopted->nav_at_eof = false;
+            adopted->last_nav = 0;  // re-stamped by the warm GotoTop below
             adopted->invalidate_prefetch();
             // close_counted stays true (never decremented at park time),
             // so no re-increment here.
@@ -7317,6 +7355,10 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
             *phTable = to_ads_handle(gh2);
             if (auto* rtp = get_remote_table(to_ads_handle(gh2))) {
                 rtp->found_cached = true; rtp->current_found = false;
+                // The warm GotoTop above is a real wire nav: stamp it so
+                // the app's immediate GoTop probing dedupes + an empty
+                // re-USE answers boundaries locally.
+                remote_nav_stamp(rtp, 1, rtp->server_order_id);
                 remote_sync_keyno_gototop(rtp);
             }
             apply_relations_for_handle(to_ads_handle(gh2));
@@ -7433,6 +7475,10 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
             if (auto* rtp = get_remote_table(to_ads_handle(gh))) {
                 rtp->found_cached = true; rtp->current_found = false;
                 remote_sync_keyno_gototop(rtp);
+                // Warm sections positioned the cursor at top with no
+                // frame: stamp it so the app's immediate GoTop probing
+                // dedupes like a real wire nav.
+                remote_nav_stamp(rtp, 1, rtp->server_order_id);
             }
             apply_relations_for_handle(to_ads_handle(gh));
         } else if (get_remote_table(to_ads_handle(gh)) != nullptr) {
@@ -10089,9 +10135,17 @@ UNSIGNED32 ENTRYPOINT AdsGotoTop(ADSHANDLE hTable) {
     arc2_trace("AdsGotoTop");
     if (auto* ri = get_remote_index(hTable)) {
         if (UNSIGNED32 frc = remote_flush_pending(ri->parent); frc != 0) return frc;
+        if (remote_nav_duplicate(ri->parent, 1, ri->id)) {
+            cli_trace("[cli] AdsGotoTop(idx): duplicate suppressed");
+            remote_sync_keyno_gototop(ri->parent);
+            if (Handle th = handle_for_remote_table(ri->parent))
+                apply_relations_for_handle(to_ads_handle(th));
+            return ok();
+        }
         auto r = openads::network::remote_index_goto_top(ri);
         if (!r) return fail(r.error());
         remote_sync_keyno_gototop(ri->parent);
+        remote_nav_stamp(ri->parent, 1, ri->id);
         cli_trace("[cli] AdsGotoTop(idx): row_valid=%d recno=%u keyno=%u eof=%d bof=%d",
                   (int)ri->parent->row_valid, ri->parent->current_recno,
                   ri->parent->current_keyno, (int)ri->parent->nav_at_eof,
@@ -10106,9 +10160,16 @@ UNSIGNED32 ENTRYPOINT AdsGotoTop(ADSHANDLE hTable) {
         // same RTT, so AdsGetField immediately after GoTop hits
         // the cache.
         rt->found_cached = true; rt->current_found = false;  // M12.21: GoTop clears Found()
+        if (remote_nav_duplicate(rt, 1, rt->server_order_id)) {
+            cli_trace("[cli] AdsGotoTop: duplicate suppressed");
+            remote_sync_keyno_gototop(rt);
+            apply_relations_for_handle(hTable);
+            return ok();
+        }
         auto r = rt->conn->goto_top(rt);
         if (!r) return fail(r.error());
         remote_sync_keyno_gototop(rt);
+        remote_nav_stamp(rt, 1, rt->server_order_id);
         apply_relations_for_handle(hTable);
         return ok();
     }
@@ -10132,9 +10193,17 @@ UNSIGNED32 ENTRYPOINT AdsGotoBottom(ADSHANDLE hTable) {
     arc2_trace("AdsGotoBottom");
     if (auto* ri = get_remote_index(hTable)) {
         if (UNSIGNED32 frc = remote_flush_pending(ri->parent); frc != 0) return frc;
+        if (remote_nav_duplicate(ri->parent, 2, ri->id)) {
+            cli_trace("[cli] AdsGotoBottom(idx): duplicate suppressed");
+            remote_sync_keyno_gotobottom(ri->parent);
+            if (Handle th = handle_for_remote_table(ri->parent))
+                apply_relations_for_handle(to_ads_handle(th));
+            return ok();
+        }
         auto r = openads::network::remote_index_goto_bottom(ri);
         if (!r) return fail(r.error());
         remote_sync_keyno_gotobottom(ri->parent);
+        remote_nav_stamp(ri->parent, 2, ri->id);
         cli_trace("[cli] AdsGotoBottom(idx): row_valid=%d recno=%u keyno=%u eof=%d bof=%d",
                   (int)ri->parent->row_valid, ri->parent->current_recno,
                   ri->parent->current_keyno, (int)ri->parent->nav_at_eof,
@@ -10146,9 +10215,16 @@ UNSIGNED32 ENTRYPOINT AdsGotoBottom(ADSHANDLE hTable) {
     if (auto* rt = get_remote_table(hTable)) {
         if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         rt->found_cached = true; rt->current_found = false;  // M12.21: GoBottom clears Found()
+        if (remote_nav_duplicate(rt, 2, rt->server_order_id)) {
+            cli_trace("[cli] AdsGotoBottom: duplicate suppressed");
+            remote_sync_keyno_gotobottom(rt);
+            apply_relations_for_handle(hTable);
+            return ok();
+        }
         auto r = rt->conn->goto_bottom(rt);
         if (!r) return fail(r.error());
         remote_sync_keyno_gotobottom(rt);
+        remote_nav_stamp(rt, 2, rt->server_order_id);
         apply_relations_for_handle(hTable);
         return ok();
     }
@@ -10260,9 +10336,17 @@ UNSIGNED32 ENTRYPOINT AdsAtEOF(ADSHANDLE hTable, UNSIGNED16* pbAtEnd) {
         // trip. This is what lets a prefetched scan loop, which polls
         // Eof() every iteration, actually shed its per-step round trips.
         if (rt->row_valid) { *pbAtEnd = 0; return ok(); }
-        auto r = rt->conn->at_eof(rt->id);
+        // Empty-cursor sticky (see remote_nav_empty_sticky): the last
+        // wire nav proved the cursor empty with nothing on the wire
+        // since — an empty cursor is EOF without asking the server.
+        if (remote_nav_empty_sticky(rt)) { *pbAtEnd = 1; return ok(); }
+        auto r = rt->conn->eof_bof(rt->id);
         if (!r) return fail(r.error());
-        *pbAtEnd = r.value() ? 1 : 0;
+        // Twin flag: the ack carried the BOF answer too — cache it so
+        // the twin half of rddads' pair is served locally.
+        if (r.value().has_twin)
+            rt->nav_at_bof = r.value().bof;
+        *pbAtEnd = r.value().eof ? 1 : 0;
         return ok();
     }
     if (auto* ops = openads::abi::backend_table_ops_for(hTable))
@@ -10284,9 +10368,14 @@ UNSIGNED32 ENTRYPOINT AdsAtBOF(ADSHANDLE hTable, UNSIGNED16* pbAtBegin) {
         // is on a record, so it cannot be at BOF: answer with no round
         // trip (see AdsAtEOF).
         if (rt->row_valid) { *pbAtBegin = 0; return ok(); }
-        auto r = rt->conn->at_bof(rt->id);
+        // Empty-cursor sticky: an empty cursor is BOF without asking.
+        if (remote_nav_empty_sticky(rt)) { *pbAtBegin = 1; return ok(); }
+        auto r = rt->conn->bof_eof(rt->id);
         if (!r) return fail(r.error());
-        *pbAtBegin = r.value() ? 1 : 0;
+        // Twin flag: cache the EOF answer for the twin half of the pair.
+        if (r.value().has_twin)
+            rt->nav_at_eof = r.value().eof;
+        *pbAtBegin = r.value().bof ? 1 : 0;
         return ok();
     }
     if (auto* ops = openads::abi::backend_table_ops_for(hTable))
@@ -19583,6 +19672,7 @@ UNSIGNED32 ENTRYPOINT AdsClearFilter(ADSHANDLE hTable) {
     arc2_trace("AdsClearFilter");
     if (auto* rt = get_remote_table(hTable)) {
         rt->filter_expr.clear();
+        rt->last_nav = 0;  // local visibility change: expire nav stamp
         return ok();
     }
     if (auto* ops = openads::abi::backend_table_ops_for(hTable);
@@ -36449,6 +36539,9 @@ UNSIGNED32 ENTRYPOINT AdsSetFilter(ADSHANDLE hTable, UNSIGNED8* pucFilter) {
     if (auto* rt = get_remote_table(hTable)) {
         // Remote: store the filter expression for later retrieval.
         rt->filter_expr = openads::abi::to_internal(pucFilter, 0);
+        // Purely local visibility change (no wire frame): expire the
+        // nav stamp explicitly — the wire-seq rule cannot see it.
+        rt->last_nav = 0;
         return ok();
     }
     if (UNSIGNED32 rc = 0;

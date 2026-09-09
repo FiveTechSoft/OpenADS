@@ -2192,11 +2192,16 @@ DispatchResult Session::dispatch(const Frame& f) {
             if (f.payload.size() < 4) { reply = err("AtEOF: bad payload"); break; }
             std::uint32_t id = read_u32_le(f.payload.data());
             if (auto cit = cursor_tbls_.find(id); cit != cursor_tbls_.end()) {
-                UNSIGNED16 v = 0;
+                UNSIGNED16 v = 0, vbof = 0;
                 AdsAtEOF(cit->second, &v);
+                AdsAtBOF(cit->second, &vbof);
                 WTRACE("[wire] AtEOF id=%u via twin -> %u\n", id, (unsigned)v);
                 reply.opcode = Opcode::AtEOFAck;
                 reply.payload.push_back(v != 0 ? 1 : 0);
+                // Twin flag: the BOF answer rides along ([u8 eof][u8 bof])
+                // so the client skips rddads' inevitable follow-up AtBOF.
+                // Old clients read byte 0 and ignore the trailer.
+                reply.payload.push_back(vbof != 0 ? 1 : 0);
                 break;
             }
             auto it = tbls_.find(id);
@@ -2219,16 +2224,21 @@ DispatchResult Session::dispatch(const Frame& f) {
                     AdsAtBOF(hord_eof, &v2); AdsAtEOF(hord_eof, &v);
                     if (v && v2) AdsGotoBottom(hord_eof);
                     AdsAtEOF(hord_eof, &v);
+                    // Twin must be re-read after the rescue reposition:
+                    // v2 above is pre-rescue and would cache stale BOF.
+                    AdsAtBOF(hord_eof, &v2);
                     WTRACE("[wire] AtEOF id=%u Limbo rescue -> %u\n", id, (unsigned)v);
                 }
                 WTRACE("[wire] AtEOF id=%u via ordered twin -> %u\n", id, (unsigned)v);
                 reply.opcode = Opcode::AtEOFAck;
                 reply.payload.push_back(v != 0 ? 1 : 0);
+                reply.payload.push_back(v2 != 0 ? 1 : 0);
                 break;
             }
             WTRACE("[wire] AtEOF id=%u engine eof=%d bof=%d\n", id, (int)tbl->eof(), (int)tbl->bof());
             reply.opcode = Opcode::AtEOFAck;
             reply.payload.push_back(tbl->eof() ? 1 : 0);
+            reply.payload.push_back(tbl->bof() ? 1 : 0);
             break;
         }
         // M12.14 — DescribeTable: serialize the schema in one
@@ -2314,11 +2324,14 @@ DispatchResult Session::dispatch(const Frame& f) {
             std::uint32_t id = read_u32_le(f.payload.data());
             WTRACE("[wire] AtBOF id=%u\n", id);
             if (auto cit = cursor_tbls_.find(id); cit != cursor_tbls_.end()) {
-                UNSIGNED16 v = 0;
+                UNSIGNED16 v = 0, veof = 0;
                 AdsAtBOF(cit->second, &v);
+                AdsAtEOF(cit->second, &veof);
                 WTRACE("[wire] AtBOF id=%u via twin -> %u\n", id, (unsigned)v);
                 reply.opcode = Opcode::AtBOFAck;
                 reply.payload.push_back(v != 0 ? 1 : 0);
+                // Twin flag: [u8 bof][u8 eof] (see AtEOF).
+                reply.payload.push_back(veof != 0 ? 1 : 0);
                 break;
             }
             auto it = tbls_.find(id);
@@ -2348,16 +2361,21 @@ DispatchResult Session::dispatch(const Frame& f) {
                     AdsAtBOF(hord_bof, &v); AdsAtEOF(hord_bof, &v2);
                     if (v && v2) AdsGotoBottom(hord_bof);
                     AdsAtBOF(hord_bof, &v);
+                    // Twin must be re-read after the rescue reposition
+                    // (see AtEOF).
+                    AdsAtEOF(hord_bof, &v2);
                     WTRACE("[wire] AtBOF id=%u Limbo rescue -> %u\n", id, (unsigned)v);
                 }
                 WTRACE("[wire] AtBOF id=%u via ordered twin -> %u\n", id, (unsigned)v);
                 reply.opcode = Opcode::AtBOFAck;
                 reply.payload.push_back(v != 0 ? 1 : 0);
+                reply.payload.push_back(v2 != 0 ? 1 : 0);
                 break;
             }
             WTRACE("[wire] AtBOF id=%u engine bof=%d eof=%d\n", id, (int)tbl->bof(), (int)tbl->eof());
             reply.opcode = Opcode::AtBOFAck;
             reply.payload.push_back(tbl->bof() ? 1 : 0);
+            reply.payload.push_back(tbl->eof() ? 1 : 0);
             break;
         }
         case Opcode::GetRecordNum: {

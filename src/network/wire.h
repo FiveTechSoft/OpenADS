@@ -44,6 +44,11 @@ enum class Opcode : std::uint8_t {
     GetFieldAck        = 0x45,
     GetRecordCount     = 0x46,
     GetRecordCountAck  = 0x47,
+    // Nav-boundary twin flag: AtEOFAck carries [u8 eof][u8 bof] and
+    // AtBOFAck carries [u8 bof][u8 eof]. Old single-byte servers send
+    // only byte 0; old clients read only byte 0 — rddads' AtBOF+AtEOF
+    // pair therefore collapses to one round-trip when both ends are
+    // new, with zero fallback paths in any version mix.
     AtEOF              = 0x48,
     AtEOFAck           = 0x49,
     // M12.14 — remote field metadata + extended cursor state.
@@ -53,7 +58,7 @@ enum class Opcode : std::uint8_t {
     DescribeTable      = 0x4A,
     DescribeTableAck   = 0x4B,
     AtBOF              = 0x4C,
-    AtBOFAck           = 0x4D,
+    AtBOFAck           = 0x4D,  // [u8 bof][u8 eof] — see AtEOFAck note
     GetRecordNum       = 0x4E,
     GetRecordNumAck    = 0x4F,
     IsRecordDeleted    = 0x62,

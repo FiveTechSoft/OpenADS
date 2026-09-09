@@ -6,6 +6,45 @@
 
 ---
 
+## 2026-09-08 — Nav-probe batching (Vouch 197s root cause)
+
+### Evidencia de Pritpal Bedi
+
+`C:/tmp/cli_trace.log` (199 líneas): **133 wire RTTs en ~4 aperturas
+(~33 por USE)** — `GotoTop×2 + AtBOF/AtEOF×N + GotoBottom + ...` por
+tabla, antes de contar open/order/keycount. Desglose: BOF/EOF sin fila
+válida 96 RTTs (72%), tops/bottoms/skips 37. A ~100 ms RTT → ~2 s/USE
+× ~90 = 197 s. Cuadra al segundo.
+
+### Implementado (sin release)
+
+- **A. Dedup de GotoTop/GotoBottom consecutivos.** Sello
+  `(op, orden, wire_seq)` por tabla; `wire_seq` atómico del
+  `RemoteConnection` sube con cada frame. Duplicado con seq intacta =
+  frame omitido (sync keyno + relations se re-ejecutan en local).
+  El sello lleva contexto de orden (id del `RemoteIndex`, o
+  `server_order_id` ack-confirmado): un top en orden A no dice nada
+  del orden B (esto rompió 9 tests en el primer intento —
+  `GotoTop(hOrd)` tras resolver handle dedupaba contra el sello
+  natural y devolvía rec 1 en vez de rec 3).
+- **B. Sticky de cursor vacío.** Top/bottom sin fila = cursor vacío =
+  BOF y EOF a la vez (xBase) hasta que algo toque el wire. Resets
+  manuales solo para mutaciones puramente locales (`SetFilter`/
+  `ClearFilter`); todo lo demás auto-expira vía seq. Los drains de
+  prefetch (movimiento local sin wire) resetean en
+  `remote_drain_prefetch`.
+- **C. Twin flag en acks.** `AtEOFAck [u8 eof][u8 bof]`,
+  `AtBOFAck [u8 bof][u8 eof]` (6 sitios en `session.cpp`, incl. fix de
+  `v2` stale tras Limbo-rescue). Cliente cachea el gemelo;
+  length-gated: mezcla viejo/nuevo sin fallback. Spec en
+  `docs/wire-protocol.md` §5.10.
+- **Tests:** `tests/unit/network_nav_batch_test.cpp` — 4 casos con
+  contadores de opcodes (dup 0 frames, vacía 0 frames, gemelo 1 frame
+  por par, contexto de orden). Suite 1539/1540 (solo el CDX
+  pre-existente MinGW-only).
+
+### Efecto estimado (fragmento de 133 RTTs → ~28, −80% en probes)
+
 ## 2026-09-08 — Server/DLL version reporting (Vouch triage)
 
 ### Pedido de Pritpal Bedi

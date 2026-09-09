@@ -240,6 +240,12 @@ util::Result<Frame> RemoteConnection::request(const Frame& f) {
         return util::Error{5036 /* AE_NO_CONNECTION */, 0,
                            "RemoteConnection: not connected", ""};
     }
+    // Wire-sequence stamp for nav-duplicate detection (see wire_seq_):
+    // bumped for every frame sent, so the ABI layer can prove nothing
+    // observable happened since its last nav op. Bumped even when the
+    // send/recv below fails — over-invalidation only costs a missed
+    // dedup, never correctness.
+    wire_seq_.fetch_add(1, std::memory_order_relaxed);
     if (auto r = write_frame(*transport_,f); !r) {
         // Storm fix (run30): a failed send leaves the wire in an unknown
         // state. Poison the connection so every later request() fails
@@ -755,7 +761,31 @@ util::Result<std::uint32_t> RemoteConnection::key_num(std::uint32_t id) {
     return read_u32_le(rep.value().payload.data());
 }
 
-util::Result<bool> RemoteConnection::at_eof(std::uint32_t id) {
+util::Result<RemoteConnection::BofEof>
+RemoteConnection::bof_eof(std::uint32_t id) {
+    Frame req;
+    req.opcode = Opcode::AtBOF;
+    write_u32_le(id, req.payload);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::AtBOFAck ||
+        rep.value().payload.empty()) {
+        return util::Error{5000, 0, "AtBOF: server error", ""};
+    }
+    BofEof out;
+    out.bof = rep.value().payload[0] != 0;
+    // Twin flag: new servers append the EOF answer ([u8 bof][u8 eof]).
+    // Old single-byte servers leave has_twin false and the caller
+    // behaves exactly as before.
+    if (rep.value().payload.size() >= 2) {
+        out.eof      = rep.value().payload[1] != 0;
+        out.has_twin = true;
+    }
+    return out;
+}
+
+util::Result<RemoteConnection::BofEof>
+RemoteConnection::eof_bof(std::uint32_t id) {
     Frame req;
     req.opcode = Opcode::AtEOF;
     write_u32_le(id, req.payload);
@@ -765,7 +795,20 @@ util::Result<bool> RemoteConnection::at_eof(std::uint32_t id) {
         rep.value().payload.empty()) {
         return util::Error{5000, 0, "AtEOF: server error", ""};
     }
-    return rep.value().payload[0] != 0;
+    BofEof out;
+    out.eof = rep.value().payload[0] != 0;
+    // Twin flag: new servers append the BOF answer ([u8 eof][u8 bof]).
+    if (rep.value().payload.size() >= 2) {
+        out.bof      = rep.value().payload[1] != 0;
+        out.has_twin = true;
+    }
+    return out;
+}
+
+util::Result<bool> RemoteConnection::at_eof(std::uint32_t id) {
+    auto r = eof_bof(id);
+    if (!r) return r.error();
+    return r.value().eof;
 }
 
 util::Result<void> RemoteConnection::append_blank(std::uint32_t id) {
@@ -1260,16 +1303,9 @@ RemoteConnection::describe_table(std::uint32_t id) {
 }
 
 util::Result<bool> RemoteConnection::at_bof(std::uint32_t id) {
-    Frame req;
-    req.opcode = Opcode::AtBOF;
-    write_u32_le(id, req.payload);
-    auto rep = request(req);
-    if (!rep) return rep.error();
-    if (rep.value().opcode != Opcode::AtBOFAck ||
-        rep.value().payload.empty()) {
-        return util::Error{5000, 0, "AtBOF: server error", ""};
-    }
-    return rep.value().payload[0] != 0;
+    auto r = bof_eof(id);
+    if (!r) return r.error();
+    return r.value().bof;
 }
 
 util::Result<std::uint32_t>

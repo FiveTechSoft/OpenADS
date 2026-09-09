@@ -8,6 +8,7 @@
 #include "engine/server_fs.h"
 #include "util/result.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <deque>
@@ -90,6 +91,13 @@ public:
         return (server_caps_ & kCapSetFieldsBatch) != 0;
     }
 
+    // Current wire-request sequence (see wire_seq_). Relaxed load is
+    // enough: it only orders the ABI layer's own duplicate detection,
+    // never data.
+    std::uint64_t wire_seq() const noexcept {
+        return wire_seq_.load(std::memory_order_relaxed);
+    }
+
     // Server version from the HelloAck handshake ("openads/1.09.27";
     // pre-1.8.14 servers answer the literal "openads/0.3.2"). Empty
     // when the Hello probe failed — callers treat that as unknown,
@@ -144,6 +152,18 @@ public:
     util::Result<std::vector<FieldDesc>>
                                 describe_table(std::uint32_t id);
     util::Result<bool>          at_bof(std::uint32_t id);
+    // Nav-boundary twin read: AtBOF/AtEOF acks carry the twin flag as a
+    // trailing byte ([u8 bof][u8 eof] / [u8 eof][u8 bof]); has_twin is
+    // false against old single-byte servers. Lets the ABI layer serve
+    // the twin answer locally instead of paying a second round-trip
+    // for rddads' inevitable AtBOF+AtEOF pair.
+    struct BofEof {
+        bool bof      = false;
+        bool eof      = false;
+        bool has_twin = false;
+    };
+    util::Result<BofEof>        bof_eof(std::uint32_t id);
+    util::Result<BofEof>        eof_bof(std::uint32_t id);
     util::Result<std::uint32_t> get_record_num(std::uint32_t id);
     util::Result<bool>          is_record_deleted(std::uint32_t id);
     util::Result<void>          goto_bottom(std::uint32_t id);
@@ -440,6 +460,14 @@ private:
     std::mutex                  mu_;
     // Server caps echoed in ConnectAck (0 when the server predates caps).
     std::uint32_t               server_caps_ = 0;
+    // Monotonic wire-request counter, bumped on every request() (under
+    // mu_). The ABI layer stamps nav operations with it so a consecutive
+    // duplicate GotoTop/GotoBottom — with provably nothing on the wire
+    // since — can skip its round-trip. Any frame on the connection
+    // invalidates, so cross-table and cross-station staleness is
+    // impossible by construction (stale data would require a wire
+    // round-trip to observe, which is exactly what bumps the counter).
+    std::atomic<std::uint64_t>  wire_seq_{0};
     // Raw HelloAck payload (see above). Written once during
     // connect_with_transport, read afterwards without mu_ (the
     // connection is fully established before any other thread
@@ -545,6 +573,24 @@ struct RemoteTable {
     bool                     nav_at_bof      = false;
     // Set when a forward Skip cannot move (bottom of order).
     bool                     nav_at_eof      = false;
+    // Last wire nav op on this table (0 = none/other, 1 = GotoTop,
+    // 2 = GotoBottom), whether it produced a row, and the connection
+    // wire_seq_ at the time. Serves two WAN-chattiness kills with one
+    // stamp: (a) a consecutive duplicate GotoTop/GotoBottom with an
+    // unchanged seq provably re-establishes identical state, so the
+    // frame is skipped; (b) a top/bottom that produced NO row proves
+    // an empty cursor, so AtBOF/AtEOF answer locally until anything
+    // else touches the wire. Purely-local visibility mutations
+    // (AdsSetFilter/ClearFilter) reset last_nav to 0 — every wire op
+    // invalidates automatically via the seq.
+    int                      last_nav     = 0;
+    bool                     last_nav_row = false;
+    std::uint64_t            last_nav_seq = 0;
+    // Order context of last_nav: the RemoteIndex id for index-handle
+    // nav, the ack-confirmed server_order_id for table-handle nav.
+    // A top in order A says nothing about order B, so the duplicate
+    // check requires the context to match, not just the op.
+    std::uint32_t            last_nav_order = 0;
     // M12.19 — cached record count. Serves AdsGetRecordCount and
     // AdsGetRelKeyPos (scrollbar) without an extra RTT. Invalidated
     // on writes that may change the row count: AppendBlank /

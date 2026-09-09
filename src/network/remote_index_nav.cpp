@@ -83,6 +83,10 @@ bool remote_drain_prefetch(RemoteTable* rt, std::int8_t dir) {
     rt->current_deleted = pr.deleted;
     rt->current_row     = std::move(pr.fields);
     rt->row_valid       = true;
+    // Local cursor move with no wire frame: expire the ABI nav stamp
+    // (duplicate-Top suppression + empty-cursor sticky) — the wire-seq
+    // rule cannot see this move, and the stamped position is stale now.
+    rt->last_nav = 0;
     // The server cursor did not move; the client's logical position did (by dir).
     // cursor_lag = client_logical - server, so it moves by dir: +1 forward,
     // -1 backward. The next wire op resyncs via (step + cursor_lag).
