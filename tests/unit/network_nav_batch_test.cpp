@@ -211,8 +211,7 @@ TEST_CASE("Nav batching: twin flag halves the BOF/EOF pair") {
     srv.stop();
 }
 
-TEST_CASE("Nav batching: order context defeats duplicate suppression") {
-    nb_wipe();
+TEST_CASE("Nav batching: order context defeats duplicate suppression") {    nb_wipe();
     auto dir = nb_tmp_dir();
 
     // Physical IDs 30/10/20: natural top is rec 1, ordered top is rec 2.
@@ -276,6 +275,38 @@ TEST_CASE("Nav batching: order context defeats duplicate suppression") {
     CHECK(nb_op(kOpGotoTop) == top0 + 2);
     REQUIRE(AdsGetRecordNum(hTable, 0, &rec) == AE_SUCCESS);
     CHECK(rec == 1u);
+
+    REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
+    REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
+    s.stop();
+}
+
+TEST_CASE("Nav batching: stamps survive read traffic") {
+    nb_wipe();
+    auto dir = nb_tmp_dir();
+    nb_seed(dir, "rdempty.dbf", 0);
+
+    openads::network::Server s;
+    REQUIRE(s.start("127.0.0.1", 0).has_value());
+    ADSHANDLE hConn = nb_connect_remote(dir, s.port());
+    ADSHANDLE hTable = nb_open(hConn, "rdempty.dbf");
+
+    // rddads interleaves field/count reads between probes. Reads must
+    // not expire the empty-cursor stamp: top, a wire count read, then
+    // boundaries — still zero boundary frames.
+    REQUIRE(AdsGotoTop(hTable) == AE_SUCCESS);
+    UNSIGNED32 nrec = 0;
+    REQUIRE(AdsGetRecordCount(hTable, 0, &nrec) == AE_SUCCESS);
+    CHECK(nrec == 0u);
+
+    const std::uint64_t bof0 = nb_op(kOpAtBOF);
+    const std::uint64_t eof0 = nb_op(kOpAtEOF);
+    CHECK(nb_bof(hTable) == 1);
+    CHECK(nb_eof(hTable) == 1);
+    CHECK(nb_bof(hTable) == 1);
+    CHECK(nb_eof(hTable) == 1);
+    CHECK(nb_op(kOpAtBOF) == bof0);
+    CHECK(nb_op(kOpAtEOF) == eof0);
 
     REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
     REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);

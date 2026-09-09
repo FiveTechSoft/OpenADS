@@ -45,6 +45,17 @@ válida 96 RTTs (72%), tops/bottoms/skips 37. A ~100 ms RTT → ~2 s/USE
 
 ### Efecto estimado (fragmento de 133 RTTs → ~28, −80% en probes)
 
+### Fix post-campo (mismo día)
+
+El trace de producción (1896 líneas, 80 KB) mostró solo **2 dedupes**:
+el `wire_seq` subía con CADA frame incluidos reads — rddads intercala
+`FieldGet` entre probes y el sello moría al instante (638 BOF + 281
+EOF a wire). Rediseño: `nav_seq_` solo sube en frames que mueven el
+cursor o cambian visibilidad (nav/seek/order/scope/AOF/show-deleted/
+writes/pack/zap/reindex, 32 métodos); los reads ya no invalidan. Nuevo
+test "stamps survive read traffic". Suite 1540/1541 (solo CDX
+pre-existente + 1 flake transitorio de carga).
+
 ## 2026-09-08 — Server/DLL version reporting (Vouch triage)
 
 ### Pedido de Pritpal Bedi

@@ -91,11 +91,11 @@ public:
         return (server_caps_ & kCapSetFieldsBatch) != 0;
     }
 
-    // Current wire-request sequence (see wire_seq_). Relaxed load is
-    // enough: it only orders the ABI layer's own duplicate detection,
-    // never data.
-    std::uint64_t wire_seq() const noexcept {
-        return wire_seq_.load(std::memory_order_relaxed);
+    // Current cursor-generation sequence (see nav_seq_). Relaxed load
+    // is enough: it only orders the ABI layer's own duplicate
+    // detection, never data.
+    std::uint64_t nav_seq() const noexcept {
+        return nav_seq_.load(std::memory_order_relaxed);
     }
 
     // Server version from the HelloAck handshake ("openads/1.09.27";
@@ -456,18 +456,29 @@ public:
 private:
     util::Result<Frame> request(const Frame& f);
 
+    // Record a cursor/visibility-affecting frame. Called at the top of
+    // every method that can move the server cursor or change what it
+    // shows (never by pure reads). Lock-free atomic: callable with or
+    // without mu_ held.
+    void note_nav_frame() noexcept {
+        nav_seq_.fetch_add(1, std::memory_order_relaxed);
+    }
+
     std::unique_ptr<ITransport> transport_;
     std::mutex                  mu_;
     // Server caps echoed in ConnectAck (0 when the server predates caps).
     std::uint32_t               server_caps_ = 0;
-    // Monotonic wire-request counter, bumped on every request() (under
-    // mu_). The ABI layer stamps nav operations with it so a consecutive
-    // duplicate GotoTop/GotoBottom — with provably nothing on the wire
-    // since — can skip its round-trip. Any frame on the connection
-    // invalidates, so cross-table and cross-station staleness is
-    // impossible by construction (stale data would require a wire
-    // round-trip to observe, which is exactly what bumps the counter).
-    std::atomic<std::uint64_t>  wire_seq_{0};
+    // Monotonic cursor-generation counter. Bumped ONLY by frames that
+    // can move the server cursor or change visibility (nav, seek,
+    // order/scope/AOF/show-deleted, writes, pack/zap/reindex) — never
+    // by reads (fetch, counts, describe, keynum, boundary probes).
+    // The ABI layer stamps nav operations with it, so a consecutive
+    // duplicate GotoTop/GotoBottom or a proven-empty cursor survives
+    // the read traffic rddads interleaves between probes (a blanket
+    // per-frame counter died on the first fetch). Cross-station
+    // staleness is impossible by construction: observing a change
+    // requires a cursor-affecting frame, which is exactly what bumps.
+    std::atomic<std::uint64_t>  nav_seq_{0};
     // Raw HelloAck payload (see above). Written once during
     // connect_with_transport, read afterwards without mu_ (the
     // connection is fully established before any other thread
@@ -575,14 +586,14 @@ struct RemoteTable {
     bool                     nav_at_eof      = false;
     // Last wire nav op on this table (0 = none/other, 1 = GotoTop,
     // 2 = GotoBottom), whether it produced a row, and the connection
-    // wire_seq_ at the time. Serves two WAN-chattiness kills with one
+    // nav_seq_ at the time. Serves two WAN-chattiness kills with one
     // stamp: (a) a consecutive duplicate GotoTop/GotoBottom with an
     // unchanged seq provably re-establishes identical state, so the
     // frame is skipped; (b) a top/bottom that produced NO row proves
-    // an empty cursor, so AtBOF/AtEOF answer locally until anything
-    // else touches the wire. Purely-local visibility mutations
-    // (AdsSetFilter/ClearFilter) reset last_nav to 0 — every wire op
-    // invalidates automatically via the seq.
+    // an empty cursor, so AtBOF/AtEOF answer locally until a
+    // cursor-affecting frame lands. Purely-local visibility mutations
+    // (AdsSetFilter/ClearFilter) reset last_nav to 0 — every
+    // cursor-affecting wire op invalidates automatically via the seq.
     int                      last_nav     = 0;
     bool                     last_nav_row = false;
     std::uint64_t            last_nav_seq = 0;

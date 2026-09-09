@@ -240,12 +240,6 @@ util::Result<Frame> RemoteConnection::request(const Frame& f) {
         return util::Error{5036 /* AE_NO_CONNECTION */, 0,
                            "RemoteConnection: not connected", ""};
     }
-    // Wire-sequence stamp for nav-duplicate detection (see wire_seq_):
-    // bumped for every frame sent, so the ABI layer can prove nothing
-    // observable happened since its last nav op. Bumped even when the
-    // send/recv below fails — over-invalidation only costs a missed
-    // dedup, never correctness.
-    wire_seq_.fetch_add(1, std::memory_order_relaxed);
     if (auto r = write_frame(*transport_,f); !r) {
         // Storm fix (run30): a failed send leaves the wire in an unknown
         // state. Poison the connection so every later request() fails
@@ -600,6 +594,7 @@ util::Result<void> RemoteConnection::close_table(std::uint32_t id) {
 }
 
 util::Result<void> RemoteConnection::goto_top(std::uint32_t id) {
+    note_nav_frame();
     Frame req;
     req.opcode = Opcode::GotoTop;
     write_u32_le(id, req.payload);
@@ -616,6 +611,7 @@ util::Result<void> RemoteConnection::goto_top(std::uint32_t id) {
 // row cache in-place. xbrowse repaint becomes 1 RTT per Skip
 // (the row arrives with the ack) instead of 2.
 util::Result<void> RemoteConnection::goto_top(RemoteTable* rt) {
+    note_nav_frame();
     // RCB 07/15/2026: rt is non-null by caller contract -- every caller resolves
     // it from the handle registry (get_remote_table) or from a ri->parent that
     // was already checked. Deliberately NOT null-checked here, matching every
@@ -645,6 +641,7 @@ util::Result<void> RemoteConnection::goto_top(RemoteTable* rt) {
 
 util::Result<void> RemoteConnection::skip(std::uint32_t id,
                                            std::int32_t step) {
+    note_nav_frame();
     Frame req;
     req.opcode = Opcode::Skip;
     write_u32_le(id, req.payload);
@@ -659,6 +656,7 @@ util::Result<void> RemoteConnection::skip(std::uint32_t id,
 
 util::Result<void> RemoteConnection::skip(RemoteTable* rt,
                                            std::int32_t step) {
+    note_nav_frame();
     // RCB 07/15/2026: rt is non-null by caller contract (resolved from the
     // handle registry, or a checked ri->parent). Not null-checked, for the same
     // reason as goto_top(rt) above -- consistent with the rest of this class.
@@ -812,6 +810,7 @@ util::Result<bool> RemoteConnection::at_eof(std::uint32_t id) {
 }
 
 util::Result<void> RemoteConnection::append_blank(std::uint32_t id) {
+    note_nav_frame();
     Frame req;
     req.opcode = Opcode::AppendBlank;
     write_u32_le(id, req.payload);
@@ -865,6 +864,7 @@ RemoteConnection::get_record_crc(std::uint32_t id) {
 util::Result<void> RemoteConnection::set_record(std::uint32_t id,
                                                 const std::uint8_t* bytes,
                                                 std::size_t len) {
+    note_nav_frame();
     if (len > 0xFFFFu) {
         return util::Error{5000, 0, "SetRecord: record too large", ""};
     }
@@ -887,6 +887,7 @@ util::Result<void> RemoteConnection::set_record(std::uint32_t id,
 util::Result<void> RemoteConnection::set_field(std::uint32_t id,
                                                 const std::string& field_name,
                                                 const std::string& value) {
+    note_nav_frame();
     if (field_name.size() > 0xFFFFu) {
         return util::Error{5000, 0,
             "SetField: field name too long", field_name};
@@ -912,6 +913,7 @@ util::Result<void> RemoteConnection::set_field(std::uint32_t id,
 util::Result<void> RemoteConnection::set_fields_batch(
         std::uint32_t id,
         const std::vector<std::pair<std::string, std::string>>& fields) {
+    note_nav_frame();
     if (fields.empty()) return {};
     if (fields.size() > kMaxWireFields) {
         return util::Error{5000, 0,
@@ -944,6 +946,7 @@ util::Result<void> RemoteConnection::set_fields_batch(
 }
 
 util::Result<void> RemoteConnection::delete_record(std::uint32_t id) {
+    note_nav_frame();
     Frame req;
     req.opcode = Opcode::DeleteRecord;
     write_u32_le(id, req.payload);
@@ -956,6 +959,7 @@ util::Result<void> RemoteConnection::delete_record(std::uint32_t id) {
 }
 
 util::Result<void> RemoteConnection::recall_record(std::uint32_t id) {
+    note_nav_frame();
     Frame req;
     req.opcode = Opcode::RecallRecord;
     write_u32_le(id, req.payload);
@@ -969,6 +973,7 @@ util::Result<void> RemoteConnection::recall_record(std::uint32_t id) {
 
 util::Result<void> RemoteConnection::goto_record(std::uint32_t id,
                                                   std::uint32_t recno) {
+    note_nav_frame();
     Frame req;
     req.opcode = Opcode::GotoRecord;
     write_u32_le(id, req.payload);
@@ -983,6 +988,7 @@ util::Result<void> RemoteConnection::goto_record(std::uint32_t id,
 
 util::Result<void> RemoteConnection::goto_record(RemoteTable* rt,
                                                   std::uint32_t recno) {
+    note_nav_frame();
     Frame req;
     req.opcode = Opcode::GotoRecord;
     write_u32_le(rt->id, req.payload);
@@ -997,6 +1003,7 @@ util::Result<void> RemoteConnection::goto_record(RemoteTable* rt,
 }
 
 util::Result<void> RemoteConnection::goto_bottom(RemoteTable* rt) {
+    note_nav_frame();
     Frame req;
     req.opcode = Opcode::GotoBottom;
     write_u32_le(rt->id, req.payload);
@@ -1010,6 +1017,7 @@ util::Result<void> RemoteConnection::goto_bottom(RemoteTable* rt) {
 }
 
 util::Result<void> RemoteConnection::flush_table(std::uint32_t id) {
+    note_nav_frame();
     Frame req;
     req.opcode = Opcode::FlushTable;
     write_u32_le(id, req.payload);
@@ -1050,6 +1058,7 @@ RemoteConnection::find_record(
 }
 
 util::Result<void> RemoteConnection::reindex(std::uint32_t id) {
+    note_nav_frame();
     Frame req;
     req.opcode = Opcode::Reindex;
     write_u32_le(id, req.payload);
@@ -1065,6 +1074,7 @@ util::Result<std::vector<std::vector<std::string>>>
 RemoteConnection::fetch_batch(std::uint32_t id,
                                std::uint32_t max_rows,
                                const std::vector<std::string>& columns) {
+    note_nav_frame();
     if (columns.size() > 0xFFu) {
         return util::Error{5000, 0,
             "Fetch: too many columns (max 255)", ""};
@@ -1125,6 +1135,7 @@ RemoteConnection::fetch_where(std::uint32_t id,
                               const std::string& where_expr,
                               const std::vector<std::string>& columns,
                               std::uint8_t flags) {
+    note_nav_frame();
     if (columns.size() > 0xFFu) {
         return util::Error{5000, 0,
             "FetchWhere: too many columns (max 255)", ""};
@@ -1209,6 +1220,7 @@ util::Result<AggregateBatch>
 RemoteConnection::aggregate(std::uint32_t               id,
                             const std::string&          for_expr,
                             const std::vector<AggSpec>& specs) {
+    note_nav_frame();
     if (specs.size() > 0xFFu)
         return util::Error{5000, 0,
             "Aggregate: too many aggregates (max 255)", ""};
@@ -1339,6 +1351,7 @@ RemoteConnection::is_record_deleted(std::uint32_t id) {
 }
 
 util::Result<void> RemoteConnection::goto_bottom(std::uint32_t id) {
+    note_nav_frame();
     Frame req;
     req.opcode = Opcode::GotoBottom;
     write_u32_le(id, req.payload);
@@ -1580,6 +1593,7 @@ util::Result<void> RemoteConnection::unlock_table(std::uint32_t id) {
 }
 
 util::Result<void> RemoteConnection::pack_table(std::uint32_t id) {
+    note_nav_frame();
     Frame req; req.opcode = Opcode::PackTable;
     write_u32_le(id, req.payload);
     auto rep = request(req);
@@ -1591,6 +1605,7 @@ util::Result<void> RemoteConnection::pack_table(std::uint32_t id) {
 }
 
 util::Result<void> RemoteConnection::zap_table(std::uint32_t id) {
+    note_nav_frame();
     Frame req; req.opcode = Opcode::ZapTable;
     write_u32_le(id, req.payload);
     auto rep = request(req);
@@ -1602,6 +1617,7 @@ util::Result<void> RemoteConnection::zap_table(std::uint32_t id) {
 }
 
 util::Result<void> RemoteConnection::flush_file_buffers(std::uint32_t id) {
+    note_nav_frame();
     Frame req; req.opcode = Opcode::FlushFileBuffers;
     write_u32_le(id, req.payload);
     auto rep = request(req);
@@ -1625,6 +1641,7 @@ util::Result<void> RemoteConnection::close_all_indexes(std::uint32_t id) {
 
 util::Result<void> RemoteConnection::set_aof(std::uint32_t id,
                                               const std::string& cond) {
+    note_nav_frame();
     Frame req; req.opcode = Opcode::SetAOF;
     write_u32_le(id, req.payload);
     req.payload.insert(req.payload.end(), cond.begin(), cond.end());
@@ -1638,6 +1655,7 @@ util::Result<void> RemoteConnection::set_aof(std::uint32_t id,
 }
 
 util::Result<void> RemoteConnection::clear_aof(std::uint32_t id) {
+    note_nav_frame();
     Frame req; req.opcode = Opcode::ClearAOFRemote;
     write_u32_le(id, req.payload);
     auto rep = request(req);
@@ -1651,6 +1669,7 @@ util::Result<void> RemoteConnection::clear_aof(std::uint32_t id) {
 util::Result<void> RemoteConnection::customize_aof(
     std::uint32_t id, std::uint16_t option,
     const std::vector<std::uint32_t>& recnos) {
+    note_nav_frame();
     if (recnos.size() > 0xFFFFu) {
         return util::Error{5000, 0, "CustomizeAOF: too many records", ""};
     }
@@ -2123,6 +2142,7 @@ util::Result<void> RemoteConnection::dd_grant_permission(
 
 util::Result<void> RemoteConnection::set_order(std::uint32_t table_id,
                                                 std::uint32_t index_id) {
+    note_nav_frame();
     Frame req; req.opcode = Opcode::SetOrder;
     write_u32_le(table_id, req.payload);
     write_u32_le(index_id, req.payload);
@@ -2141,6 +2161,7 @@ util::Result<void> RemoteConnection::set_order(std::uint32_t table_id,
 util::Result<void>
 RemoteConnection::set_order_by_name(std::uint32_t table_id,
                                      const std::string& tag) {
+    note_nav_frame();
     Frame req; req.opcode = Opcode::SetOrderByName;
     write_u32_le(table_id, req.payload);
     req.payload.insert(req.payload.end(), tag.begin(), tag.end());
@@ -2514,6 +2535,7 @@ RemoteConnection::fseek(std::uint32_t file_id, std::int32_t offset,
 util::Result<void>
 RemoteConnection::skip_unique(std::uint32_t index_id,
                                std::int32_t  direction) {
+    note_nav_frame();
     Frame req; req.opcode = Opcode::SkipUnique;
     write_u32_le(index_id, req.payload);
     write_u32_le(static_cast<std::uint32_t>(direction), req.payload);
@@ -2530,6 +2552,7 @@ RemoteConnection::set_scope(std::uint32_t index_id,
                              std::uint16_t which,
                              const std::string& key,
                              std::uint16_t data_type) {
+    note_nav_frame();
     // Payload: u32 index_id | u16 which | u16 data_type | bytes key.
     // Key length is the trailing byte count (payload.size() - 8).
     Frame req; req.opcode = Opcode::SetScope;
@@ -2586,6 +2609,7 @@ RemoteConnection::fetch_current_row(RemoteTable* rt) {
 }
 
 void RemoteConnection::show_deleted(bool visible) noexcept {
+    note_nav_frame();
     if (!transport_ || !transport_->valid()) return;
     Frame req;
     req.opcode = Opcode::ShowDeleted;
@@ -2598,6 +2622,7 @@ void RemoteConnection::show_deleted(bool visible) noexcept {
 util::Result<void>
 RemoteConnection::clear_scope(std::uint32_t index_id,
                                std::uint16_t which) {
+    note_nav_frame();
     Frame req; req.opcode = Opcode::ClearScope;
     write_u32_le(index_id, req.payload);
     write_u16_le(which, req.payload);
@@ -2615,6 +2640,7 @@ RemoteConnection::seek(std::uint32_t index_id,
                         std::uint8_t soft,
                         std::uint8_t last,
                         RemoteTable* parent) {
+    note_nav_frame();
     Frame req;
     req.opcode = last ? Opcode::SeekLast : Opcode::Seek;
     write_u32_le(index_id, req.payload);

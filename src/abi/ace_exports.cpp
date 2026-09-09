@@ -1455,38 +1455,39 @@ void remote_sync_keyno_gotobottom(openads::network::RemoteTable* rt) {
 // Consecutive-duplicate nav detection (WAN chattiness: rddads issues
 // back-to-back GotoTop/GotoBottom pairs per USE). True when the table's
 // last wire op was `which` (1 = top, 2 = bottom) in the same order
-// context with no frame on the connection since — the skipped frame
-// would re-establish byte-identical state, so the only observable
-// difference is one less round-trip.
+// context with no cursor-affecting frame on the connection since — the
+// skipped frame would re-establish byte-identical state, so the only
+// observable difference is one less round-trip.
 // The dedupe path still re-runs the keyno sync + relation apply (both
 // local once caches are warm) so every side effect but the frame stays.
 bool remote_nav_duplicate(openads::network::RemoteTable* rt, int which,
                           std::uint32_t order) {
     return rt != nullptr && rt->conn != nullptr && rt->last_nav == which &&
            rt->last_nav_order == order &&
-           rt->last_nav_seq == rt->conn->wire_seq();
+           rt->last_nav_seq == rt->conn->nav_seq();
 }
 
 // Stamp after a successful wire GotoTop/GotoBottom. Also feeds the
 // empty-cursor sticky: a top/bottom that produced no row proves an
-// empty cursor, so AtBOF/AtEOF answer locally until anything else
-// touches the wire (any frame bumps the seq and expires the stamp).
+// empty cursor, so AtBOF/AtEOF answer locally until a cursor-affecting
+// frame lands (any such frame bumps the seq and expires the stamp).
 void remote_nav_stamp(openads::network::RemoteTable* rt, int which,
                       std::uint32_t order) {
     if (rt == nullptr || rt->conn == nullptr) return;
     rt->last_nav       = which;
     rt->last_nav_order = order;
     rt->last_nav_row   = rt->row_valid;
-    rt->last_nav_seq   = rt->conn->wire_seq();
+    rt->last_nav_seq   = rt->conn->nav_seq();
 }
 
 // Empty-cursor sticky for AdsAtBOF/AdsAtEOF: true when the last wire
-// nav on this table established an empty cursor with nothing on the
-// wire since. An empty cursor is simultaneously BOF and EOF (xBase).
+// nav on this table established an empty cursor with no
+// cursor-affecting frame since. An empty cursor is simultaneously BOF
+// and EOF (xBase).
 bool remote_nav_empty_sticky(openads::network::RemoteTable* rt) {
     return rt != nullptr && rt->conn != nullptr && rt->last_nav != 0 &&
            !rt->last_nav_row &&
-           rt->last_nav_seq == rt->conn->wire_seq();
+           rt->last_nav_seq == rt->conn->nav_seq();
 }
 
 void remote_sync_keyno_skip(openads::network::RemoteTable* rt,
