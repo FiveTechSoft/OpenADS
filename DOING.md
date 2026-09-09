@@ -56,6 +56,17 @@ writes/pack/zap/reindex, 32 métodos); los reads ya no invalidan. Nuevo
 test "stamps survive read traffic". Suite 1540/1541 (solo CDX
 pre-existente + 1 flake transitorio de carga).
 
+### Medición decisiva (v1.09.30 en campo: 140 s vs 145 s)
+
+Un ciclo USE realista (open+setorder+gotop×2+bof/eof×2+bottom×2+
+keycount+close) cuesta **10 frames totales** (Hello+Connect incluidos;
+0 frames de probes, 1 top, 1 bottom) — test
+`network_use_budget_test.cpp` lo fija como regresión (≤14). Coste de
+apertura local plano vs tags (2.6 ms con 5/50/157 tags): el parse CDX
+NO es el cuello. A ~50 ms RTT el wire son ~0.5 s/USE; el resto (~1 s)
+es proceso servidor (instancia mínima) + RDD cliente. Siguiente:
+latencia de open en servidor y pool-hit rate en campo.
+
 ## 2026-09-08 — Server/DLL version reporting (Vouch triage)
 
 ### Pedido de Pritpal Bedi
