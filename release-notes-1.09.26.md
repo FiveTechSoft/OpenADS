@@ -53,3 +53,5 @@ warm `GotoTop` and first opens to ~2 RTTs.
 - `openads-1.09.26-windows-x86.zip`
 - `openads-1.09.26-linux-x64.tar.gz`
 - `openads-1.09.26-macos-universal.tar.gz`
+
+*Field triage, release engineering and validation: Pritpal Bedi.*

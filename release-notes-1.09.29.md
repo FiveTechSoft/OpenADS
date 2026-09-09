@@ -52,3 +52,5 @@ Three kills, all client-transparent, all proven by opcode counters:
 - `openads-1.09.29-windows-x86.zip`
 - `openads-1.09.29-linux-x64.tar.gz`
 - `openads-1.09.29-macos-universal.tar.gz`
+
+*Field triage, release engineering and validation: Pritpal Bedi.*

@@ -65,3 +65,5 @@ both ways with older peers.
 - `openads-1.09.24-windows-x86.zip`
 - `openads-1.09.24-linux-x64.tar.gz`
 - `openads-1.09.24-macos-universal.tar.gz`
+
+*Field triage, release engineering and validation: Pritpal Bedi.*

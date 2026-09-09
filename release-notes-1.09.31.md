@@ -54,3 +54,5 @@ real shape: per tag index, `SetOrder → Flush → CloseAll → OpenIndex`
 - `openads-1.09.31-windows-x86.zip`
 - `openads-1.09.31-linux-x64.tar.gz`
 - `openads-1.09.31-macos-universal.tar.gz`
+
+*Field triage, release engineering and validation: Pritpal Bedi.*

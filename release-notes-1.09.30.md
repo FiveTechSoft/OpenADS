@@ -38,3 +38,5 @@ first `FieldGet`, leaving 638 wire BOFs + 281 wire EOFs standing.
 - `openads-1.09.30-windows-x86.zip`
 - `openads-1.09.30-linux-x64.tar.gz`
 - `openads-1.09.30-macos-universal.tar.gz`
+
+*Field triage, release engineering and validation: Pritpal Bedi.*

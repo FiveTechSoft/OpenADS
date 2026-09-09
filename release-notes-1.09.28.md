@@ -55,3 +55,5 @@ gaps with zero wire-protocol changes.
 - `openads-1.09.28-windows-x86.zip`
 - `openads-1.09.28-linux-x64.tar.gz`
 - `openads-1.09.28-macos-universal.tar.gz`
+
+*Field triage, release engineering and validation: Pritpal Bedi.*

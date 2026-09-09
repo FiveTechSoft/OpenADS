@@ -50,3 +50,5 @@ repositions, same as before).
 - `openads-1.09.27-windows-x86.zip`
 - `openads-1.09.27-linux-x64.tar.gz`
 - `openads-1.09.27-macos-universal.tar.gz`
+
+*Field triage, release engineering and validation: Pritpal Bedi.*
