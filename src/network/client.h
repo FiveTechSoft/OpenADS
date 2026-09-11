@@ -771,6 +771,13 @@ struct RemoteTable {
     // OpenTableAck auto-open or AdsOpenIndex. Lets AdsGetIndexFilename
     // (OrdBagName) return the bag name without a separate wire round-trip.
     std::string prod_bag_path;
+    // Immutable-per-handle metadata: table type and record length never
+    // change for an open table (only a restructure alters them, and that
+    // closes/reopens). Cached on first hit; rddads asks both per USE.
+    bool                     table_type_cached = false;
+    std::uint16_t            cached_table_type = 0;
+    bool                     record_length_cached = false;
+    std::uint32_t            cached_record_length = 0;
     // Deferred teardown (WAN chattiness: rddads issues FlushFileBuffers
     // + CloseAllIndexes before every CloseTable — 2 wasted frames per
     // USE, since the server close flushes data and purges index

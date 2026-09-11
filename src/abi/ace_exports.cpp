@@ -8174,9 +8174,17 @@ UNSIGNED32 ENTRYPOINT AdsGetTableType(ADSHANDLE hTable, UNSIGNED16* pusType) {
     arc2_trace("AdsGetTableType");
     if (pusType == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
     if (auto* rt = get_remote_table(hTable)) {
+        // Immutable for an open handle: cache after the first hit
+        // (rddads asks per USE).
+        if (rt->table_type_cached) {
+            *pusType = rt->cached_table_type;
+            return ok();
+        }
         auto r = rt->conn->get_table_type(rt->id);
         if (!r) return fail(r.error());
         *pusType = r.value();
+        rt->cached_table_type = r.value();
+        rt->table_type_cached = true;
         arc2_log("TABLETYPE ret %u", (unsigned)*pusType);
         return ok();
     }
@@ -8241,9 +8249,17 @@ UNSIGNED32 ENTRYPOINT AdsGetRecordLength(ADSHANDLE hTable, UNSIGNED32* pulLen) {
     arc2_trace("AdsGetRecordLength");
     if (pulLen == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
     if (auto* rt = get_remote_table(hTable)) {
+        // Immutable for an open handle (only a restructure alters it,
+        // and that closes/reopens): cache after the first hit.
+        if (rt->record_length_cached) {
+            *pulLen = rt->cached_record_length;
+            return ok();
+        }
         auto r = rt->conn->get_record_length(rt->id);
         if (!r) return fail(r.error());
         *pulLen = r.value();
+        rt->cached_record_length = r.value();
+        rt->record_length_cached = true;
         return ok();
     }
     Table* t = get_table(hTable);

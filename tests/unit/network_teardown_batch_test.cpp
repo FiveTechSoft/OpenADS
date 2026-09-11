@@ -236,8 +236,7 @@ TEST_CASE("Teardown batching: SetOrder defers until use") {
     srv.stop();
 }
 
-TEST_CASE("Teardown batching: order key counts ride the parent cache") {
-    tb_wipe();
+TEST_CASE("Teardown batching: order key counts ride the parent cache") {    tb_wipe();
     auto dir = tb_tmp_dir();
     tb_seed(dir);
 
@@ -261,6 +260,36 @@ TEST_CASE("Teardown batching: order key counts ride the parent cache") {
     REQUIRE(AdsGetKeyCount(hOrd, 0, &kc) == AE_SUCCESS);
     CHECK(kc == 5u);
     CHECK(tb_op(kOpKeyCount) == kc0 + 1);
+
+    REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
+    REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
+    srv.stop();
+}
+
+TEST_CASE("Teardown batching: immutable metadata caches per handle") {
+    tb_wipe();
+    auto dir = tb_tmp_dir();
+    tb_seed(dir);
+
+    openads::network::Server srv;
+    REQUIRE(srv.start("127.0.0.1", 0).has_value());
+    ADSHANDLE hConn = tb_connect_remote(dir, srv.port());
+    ADSHANDLE hTable = tb_open(hConn);
+
+    // Table type + record length never change for an open handle:
+    // one frame each no matter how often rddads asks per USE.
+    const std::uint64_t tt0 = tb_op(0x6A);  // GetTableType
+    const std::uint64_t rl0 = tb_op(0x6C);  // GetRecordLength
+    UNSIGNED16 tt = 0;
+    UNSIGNED32 rl = 0;
+    for (int i = 0; i < 3; ++i) {
+        REQUIRE(AdsGetTableType(hTable, &tt) == AE_SUCCESS);
+        REQUIRE(AdsGetRecordLength(hTable, &rl) == AE_SUCCESS);
+    }
+    CHECK(tt == 2u);  // ADS_CDX
+    CHECK(rl > 0u);
+    CHECK(tb_op(0x6A) == tt0 + 1);
+    CHECK(tb_op(0x6C) == rl0 + 1);
 
     REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
     REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
