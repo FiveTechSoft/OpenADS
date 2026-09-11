@@ -762,6 +762,11 @@ UNSIGNED32 remote_close_parked_indexes(openads::network::RemoteTable* rt) {
     if (rt == nullptr || rt->conn == nullptr || !rt->indexes_parked) {
         return ok();
     }
+    // A nav carrying its own order context converges the server
+    // explicitly (fused install / pending switch / active belief
+    // already acked), so adoption is safe. Only a truly natural nav
+    // (no context) would walk the stale parked order: close for real.
+    if (rt->pending_order || rt->active_index_id != 0) return ok();
     return remote_emit_close_all(rt);
 }
 UNSIGNED32 remote_flush_pending(openads::network::RemoteTable* rt) {
@@ -16480,20 +16485,34 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrder(ADSHANDLE hTable, UNSIGNED8* pucName) {
         // guess is the "remote browse shows no index" bug.
         auto resolve_want = [&]() {
             if (name.empty()) return std::uint32_t{0};
-            for (auto& [tag, wid] : rt->index_by_tag) {
-                if (tag.size() != name.size()) continue;
-                bool eq = true;
-                for (std::size_t i = 0; i < tag.size(); ++i) {
-                    if (std::toupper(
-                            static_cast<unsigned char>(tag[i])) !=
-                        std::toupper(
-                            static_cast<unsigned char>(name[i]))) {
-                        eq = false;
-                        break;
+            auto match_in = [&](const std::vector<
+                                    std::pair<std::string,
+                                              std::uint32_t>>& m) {
+                for (auto& [tag, wid] : m) {
+                    if (tag.size() != name.size()) continue;
+                    bool eq = true;
+                    for (std::size_t i = 0; i < tag.size(); ++i) {
+                        if (std::toupper(
+                                static_cast<unsigned char>(tag[i])) !=
+                            std::toupper(
+                                static_cast<unsigned char>(name[i]))) {
+                            eq = false;
+                            break;
+                        }
                     }
+                    if (eq) return wid;
                 }
-                if (eq) return wid;
+                return openads::network::RemoteTable::kOrderUnknown;
+            };
+            const std::uint32_t live = match_in(rt->index_by_tag);
+            if (live != openads::network::RemoteTable::kOrderUnknown) {
+                return live;
             }
+            // Parked fallback: the snapshot's server ids are live
+            // (the park kept the bindings open), so a tag switch
+            // while parked defers normally instead of paying a wire
+            // by-name frame for a binding we already hold.
+            if (rt->indexes_parked) return match_in(rt->parked_by_tag);
             return openads::network::RemoteTable::kOrderUnknown;
         };
         // Skip a redundant switch: SetOrder never moves the cursor, so
@@ -18960,6 +18979,29 @@ UNSIGNED32 ENTRYPOINT AdsGetIndexHandle(ADSHANDLE hTable, UNSIGNED8* pucName,
                 return ok();
             }
         }
+        // Parked fallback (per-tag rotation resolves orders between
+        // CloseAll and reopen): parked ids are server-live, so serve
+        // them exactly like live ones instead of failing.
+        if (rt->indexes_parked) {
+            const std::size_t pn = std::min(rt->parked_by_tag.size(),
+                                            rt->parked_handles.size());
+            for (std::size_t i = 0; i < pn; ++i) {
+                const std::string& tag = rt->parked_by_tag[i].first;
+                if (tag.size() != name.size()) continue;
+                bool eq = true;
+                for (std::size_t k = 0; k < tag.size(); ++k) {
+                    if (std::toupper(static_cast<unsigned char>(tag[k])) !=
+                        std::toupper(static_cast<unsigned char>(name[k]))) {
+                        eq = false; break;
+                    }
+                }
+                if (eq) {
+                    *phIndex =
+                        static_cast<ADSHANDLE>(rt->parked_handles[i]);
+                    return ok();
+                }
+            }
+        }
         return fail(openads::AE_INTERNAL_ERROR, "remote index name not found");
     }
 #if defined(OPENADS_WITH_POSTGRESQL)
@@ -19082,12 +19124,16 @@ UNSIGNED32 ENTRYPOINT AdsGetIndexHandleByOrder(ADSHANDLE hTable, UNSIGNED16 usOr
     // path rddads' DbSetOrder(<number>) takes -- without it, CDX falls back
     // to natural order and remote browses show no index.
     if (auto* rt = get_remote_table(hTable)) {
-        if (rt->index_handles.empty()) {
+        const std::vector<std::uint64_t>& handles =
+            rt->index_handles.empty() && rt->indexes_parked
+                ? rt->parked_handles
+                : rt->index_handles;
+        if (handles.empty()) {
             return fail(openads::AE_INTERNAL_ERROR, "no remote index");
         }
-        std::size_t idx = (usOrder == 0 || usOrder > rt->index_handles.size())
+        std::size_t idx = (usOrder == 0 || usOrder > handles.size())
                               ? 0 : static_cast<std::size_t>(usOrder - 1);
-        *phIndex = static_cast<ADSHANDLE>(rt->index_handles[idx]);
+        *phIndex = static_cast<ADSHANDLE>(handles[idx]);
         return ok();
     }
     Table* t = get_table(hTable);

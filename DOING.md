@@ -107,6 +107,35 @@ Su chunk mostró el hueco restante: probes AtBOF post-EOF a wire.
 
 ---
 
+## 2026-09-11 — Park that never fires (v1.09.39 field: 94 s)
+
+### Field result v1.09.39
+
+`v.1.09.39 1:34.510 == 94 secs`, census again ~1919. But the new
+trace lines told the real story: **84× `parked 1 tags` + 82×
+`nothing open`, and ZERO `unpark hit`** — the rotation never
+reopens. It goes Clear → Clear → order-by-handle/tag → nav, with
+no `AdsOpenIndex` in between. Two park holes, both fixed:
+
+1. **Force-close fired every rotation.** Each round ends with
+   `dbGoBottom()` — a table nav that hit the order-divergence
+   guard and sent a real close, killing the park it just made.
+   Refined: navs carrying order context (pending switch or live
+   active belief — the fused path installs it explicitly) adopt
+   safely; only truly natural navs force the close.
+2. **Order resolution failed while parked.** `SetIndexOrder` /
+   `GetIndexHandle` / `GetIndexHandleByOrder` consulted only the
+   (empty) live maps, so tag switches fell back to wire frames
+   and ordinal resolution errored. All three now fall back to
+   the parked snapshot (server-live ids).
+
+### Shipped (v1.09.40)
+
+- Full rotation without reopen proven by counter: Clear, Clear,
+  GetIndexHandle + ByOrder, SetOrder(tag), GotoTop, KeyCount =
+  **one GotoTop frame total**, zero open/close/order frames.
+- 5 park tests green; suite 1559/1560 (pre-existing CDX only).
+
 ## 2026-09-11 — Index park double-clear fix (v1.09.38 field: 94 s)
 
 ### Field result v1.09.38 (both sides 1.09.38)
