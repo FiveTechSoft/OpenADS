@@ -470,11 +470,13 @@ int run_server(const Args& args, bool console) {
                                  st.op_timing[i].max_us.load(
                                      std::memory_order_relaxed)};
                 }
-                // top-5 by avg desc (insertion sort, tiny n)
+                // All non-zero opcodes, sorted by count desc (volume is
+                // what WAN triage needs; avg/max ride along per opcode).
+                // Insertion sort, tiny n.
                 for (int i = 1; i < n; ++i) {
                     Row r = rows[i];
                     int j = i - 1;
-                    while (j >= 0 && rows[j].avg < r.avg) {
+                    while (j >= 0 && rows[j].n < r.n) {
                         rows[j + 1] = rows[j];
                         --j;
                     }
@@ -507,7 +509,7 @@ int run_server(const Args& args, bool console) {
                         " sess=" +
                         std::to_string(srv.active_session_threads()) +
                         " top:";
-                    for (int i = 0; i < n && i < 5; ++i) {
+                    for (int i = 0; i < n; ++i) {
                         char opb[8];
                         std::snprintf(opb, sizeof(opb), "%02X",
                                       unsigned(rows[i].op));
