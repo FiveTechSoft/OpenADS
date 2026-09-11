@@ -371,6 +371,42 @@ TEST_CASE("Index park: same-bag rotation costs zero frames") {
     srv.stop();
 }
 
+TEST_CASE("Index park: repeated clears keep the snapshot") {
+    tb_wipe();
+    auto dir = tb_tmp_dir();
+    tb_seed(dir);
+
+    openads::network::Server srv;
+    REQUIRE(srv.start("127.0.0.1", 0).has_value());
+    ADSHANDLE hConn = tb_connect_remote(dir, srv.port());
+    ADSHANDLE hTable = tb_open(hConn);
+
+    // The RDD issues OrdListClear twice per rotation: the second
+    // clear must not overwrite the parked snapshot with empty maps,
+    // or every reopen misses and pays both frames (the v1.09.38
+    // field shape — identical counts with the park loaded).
+    const std::uint64_t ca0 = tb_op(kOpCloseAllIdx);
+    const std::uint64_t oi0 = tb_op(kOpOpenIndex);
+    REQUIRE(AdsCloseAllIndexes(hTable) == AE_SUCCESS);
+    REQUIRE(AdsCloseAllIndexes(hTable) == AE_SUCCESS);
+    CHECK(tb_numidx(hTable) == 0u);
+    tb_open_bag(hTable, "TB.CDX");
+    CHECK(tb_op(kOpCloseAllIdx) == ca0);
+    CHECK(tb_op(kOpOpenIndex) == oi0);
+    CHECK(tb_numidx(hTable) == 1u);
+    ADSHANDLE hOrd = 0;
+    UNSIGNED8 want[] = "BYID";
+    REQUIRE(AdsGetIndexHandle(hTable, want, &hOrd) == AE_SUCCESS);
+    REQUIRE(hOrd != 0);
+    UNSIGNED32 kc = 0;
+    REQUIRE(AdsGetKeyCount(hOrd, 0, &kc) == AE_SUCCESS);
+    CHECK(kc == 5u);
+
+    REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
+    REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
+    srv.stop();
+}
+
 TEST_CASE("Index park: table nav inside the window forces a real close") {
     tb_wipe();
     auto dir = tb_tmp_dir();

@@ -107,6 +107,31 @@ Su chunk mostró el hueco restante: probes AtBOF post-EOF a wire.
 
 ---
 
+## 2026-09-11 — Index park double-clear fix (v1.09.38 field: 94 s)
+
+### Field result v1.09.38 (both sides 1.09.38)
+
+`v.1.09.38 1:34.004 == 94 secs` — identical to .37 AND a
+byte-identical opcode census (1919 frames). Deterministic app +
+unchanged behavior ⇒ the park never fired a single time.
+
+Root cause (code reasoning, confirmed by `mus_d_file` in the
+session notes): the RDD issues **`OrdListClear` twice per
+rotation**. The first Clear parked a good snapshot; the second
+moved empty maps over it. Every reopen then missed (empty
+snapshot → real close + wire open) — exactly today's frames.
+
+### Shipped (v1.09.39)
+
+- **CloseAll snapshots only live maps.** A repeat clear with
+  nothing live keeps the existing snapshot (no-op); genuinely
+  empty closes still pend a real close.
+- **Park decision traced:** `AdsCloseAllIndexes` logs
+  parked/repeat/nothing; `AdsOpenIndex` logs unpark hit/miss —
+  the next field run proves the hit rate in the log itself.
+- **Tests:** double-clear rotation (the field shape — would have
+  failed on .38: reopen paid both frames).
+
 ## 2026-09-11 — Index-binding park (v1.09.37 field: 94 s)
 
 ### Field result v1.09.37 (both sides 1.09.37)

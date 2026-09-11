@@ -14345,6 +14345,8 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
                 rt->active_index_id = rt->parked_active;
                 rt->indexes_parked = false;
                 rt->close_all_indexes_pending = false;
+                cli_trace_tbl(rt, "AdsOpenIndex", "unpark hit %.32s",
+                              rt->parked_bag_stem.c_str());
                 auto& s = state();
                 std::lock_guard<std::recursive_mutex> lk(s.mu);
                 const std::uint16_t cap =
@@ -14365,6 +14367,8 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
             if (auto r = remote_emit_close_all(rt); r != 0) {
                 return r;
             }
+            cli_trace_tbl(rt, "AdsOpenIndex", "unpark miss %.32s",
+                          path.c_str());
         }
         // Zero-RTT dedup (RDD-only apps, no app change possible): the
         // production bag is already bound on this handle by the OpenTable
@@ -14886,20 +14890,32 @@ UNSIGNED32 ENTRYPOINT AdsCloseAllIndexes(ADSHANDLE hTable) {
         // a same-bag OpenIndex restores them with zero frames and any
         // op that only needs live bindings adopts the park. Getters in
         // the window still see empty maps (post-close answers), exactly
-        // as when the maps were cleared outright.
-        rt->parked_by_tag = std::move(rt->index_by_tag);
-        rt->parked_handles = std::move(rt->index_handles);
-        rt->parked_active = rt->active_index_id;
-        rt->parked_bag_stem = bag_stem_ci(rt->last_open_bag.empty() ?
-                                          rt->prod_bag_path :
-                                          rt->last_open_bag);
-        rt->index_by_tag.clear();
-        rt->index_handles.clear();
-        rt->active_index_id = 0;
+        // as when the maps were cleared outright. Repeat clears (the
+        // RDD issues OrdListClear twice per rotation) must NOT
+        // overwrite a good snapshot with empty maps — snapshot only
+        // when something is live.
+        if (!rt->index_by_tag.empty()) {
+            const unsigned ntags =
+                static_cast<unsigned>(rt->index_by_tag.size());
+            rt->parked_by_tag = std::move(rt->index_by_tag);
+            rt->parked_handles = std::move(rt->index_handles);
+            rt->parked_active = rt->active_index_id;
+            rt->parked_bag_stem = bag_stem_ci(rt->last_open_bag.empty() ?
+                                              rt->prod_bag_path :
+                                              rt->last_open_bag);
+            rt->index_by_tag.clear();
+            rt->index_handles.clear();
+            rt->active_index_id = 0;
+            rt->indexes_parked = true;
+            cli_trace_tbl(rt, "AdsCloseAllIndexes", "parked %u tags", ntags);
+        } else if (rt->indexes_parked) {
+            cli_trace_tbl(rt, "AdsCloseAllIndexes", "repeat clear, park kept");
+        } else {
+            cli_trace_tbl(rt, "AdsCloseAllIndexes", "nothing open");
+        }
         // Order belief changed with no frame: expire the nav stamp so a
         // subsequent GotoTop cannot dedupe against the old binding.
         rt->last_nav = 0;
-        rt->indexes_parked = true;
         rt->close_all_indexes_pending = true;
         return ok();
     }
