@@ -145,13 +145,15 @@ std::size_t parse_one_row(const std::vector<std::uint8_t>& pl,
 // Skip(-1) pop a forward row and serve the wrong record. Callers that never
 // request a block (GotoBottom / Seek / FetchCurrentRow) can leave the default;
 // if no block comes back the queue ends up empty and prefetch_dir is set to 0.
-void parse_row_trailer_into(RemoteTable* rt,
-                             const std::vector<std::uint8_t>& pl,
-                             std::size_t pos = 0,
-                             std::int8_t block_dir = 1) {
+std::size_t parse_row_trailer_into(RemoteTable* rt,
+                                   const std::vector<std::uint8_t>& pl,
+                                   std::size_t pos = 0,
+                                   std::int8_t block_dir = 1) {
+    // Returns the offset where trailer parsing stopped, so callers
+    // can read trailing sections (reposition-bound piggyback).
     if (rt == nullptr || pos >= pl.size()) {
         if (rt) rt->row_valid = false;
-        return;
+        return pos;
     }
     rt->prefetch_queue.clear();
     // M12.21 option C — every nav ack re-anchors the server cursor to the
@@ -161,19 +163,21 @@ void parse_row_trailer_into(RemoteTable* rt,
     std::uint8_t has_row = pl[pos++];
     if (has_row == 0) {
         rt->row_valid = false;
-        // Optional lookahead count (always 0 when has_row=0, but
-        // accept the trailing 2 bytes for protocol stability).
-        return;
+        // Lookahead count is always 0 when has_row=0, but the 2 bytes
+        // are still on the wire: consume them so the returned offset
+        // points past the trailer (trailing sections key off it).
+        if (pos + 2 <= pl.size()) pos += 2;
+        return pos;
     }
     auto end = parse_one_row(pl, pos,
         rt->current_recno, rt->current_deleted, rt->current_row);
     if (end == static_cast<std::size_t>(-1)) {
-        rt->row_valid = false; return;
+        rt->row_valid = false; return pos;
     }
     pos = end;
     rt->row_valid = true;
     // M12.21 lookahead block. [u16 count] then count rows.
-    if (pos + 2 > pl.size()) return;     // M12.18 server (no lookahead) — done.
+    if (pos + 2 > pl.size()) return pos;     // M12.18 server (no lookahead) — done.
     std::uint16_t la = read_u16_le(&pl[pos]); pos += 2;
     for (std::uint16_t i = 0; i < la; ++i) {
         RemoteTable::PrefetchedRow pr;
@@ -183,6 +187,7 @@ void parse_row_trailer_into(RemoteTable* rt,
         rt->prefetch_queue.push_back(std::move(pr));
     }
     if (!rt->prefetch_queue.empty()) rt->prefetch_dir = block_dir;
+    return pos;
 }
 
 } // namespace
@@ -987,8 +992,34 @@ util::Result<void> RemoteConnection::goto_record(std::uint32_t id,
     return {};
 }
 
+// Reposition-bound truth: the server appended [u8 bof][u8 eof][u32 recno]
+// after the row trailer because it just positioned explicitly and knows
+// all three exactly. Applies them as certified state so the poll burst
+// that always follows a reposition (AtBOF/AtEOF/RecNo per paint row)
+// is served locally. Length-gated by the caller: absent on old servers.
+static void apply_bound_trailer(RemoteTable* rt, bool bof, bool eof,
+                                std::uint32_t recno) {
+    if (rt == nullptr || rt->conn == nullptr) return;
+    rt->nav_at_bof  = bof;
+    rt->nav_at_eof  = eof;
+    // xBase truth table (mirrors the proven-false stickies): a defined
+    // position that is not a limit is provably not that limit; an
+    // empty cursor proves neither.
+    rt->nav_not_bof = !bof;
+    rt->nav_not_eof = !eof;
+    const std::uint64_t seq = rt->conn->nav_seq();
+    rt->bound_bof_ok = true;
+    rt->bound_bof    = bof;
+    rt->bound_eof_ok = true;
+    rt->bound_eof    = eof;
+    rt->bound_seq    = seq;
+    rt->recno_bound     = recno;
+    rt->recno_bound_ok  = true;
+    rt->recno_bound_seq = seq;
+}
+
 util::Result<void> RemoteConnection::goto_record(RemoteTable* rt,
-                                                  std::uint32_t recno) {
+                                                   std::uint32_t recno) {
     note_nav_frame();
     Frame req;
     req.opcode = Opcode::GotoRecord;
@@ -999,7 +1030,16 @@ util::Result<void> RemoteConnection::goto_record(RemoteTable* rt,
     if (rep.value().opcode != Opcode::GotoRecordAck) {
         return util::Error{5000, 0, "GotoRecord: server error", ""};
     }
-    parse_row_trailer_into(rt, rep.value().payload, 0);
+    const std::size_t tend =
+        parse_row_trailer_into(rt, rep.value().payload, 0);
+    // Reposition-bound piggyback: trailing [u8 bof][u8 eof][u32 recno]
+    // (length-gated; old servers send no tail). Certifies the boundary
+    // + recno answers so the post-reposition poll burst costs nothing.
+    const auto& pl = rep.value().payload;
+    if (pl.size() >= tend + 6) {
+        apply_bound_trailer(rt, pl[tend] != 0, pl[tend + 1] != 0,
+                            read_u32_le(pl.data() + tend + 2));
+    }
     return {};
 }
 
@@ -2721,7 +2761,15 @@ RemoteConnection::seek(std::uint32_t index_id,
     // older server sends exactly 5 bytes, we parse no trailer, row_valid stays
     // false, and the old FetchCurrentRow fallback takes over unchanged.
     if (parent != nullptr && rep.value().payload.size() > 5) {
-        parse_row_trailer_into(parent, rep.value().payload, 5);
+        const std::size_t tend = parse_row_trailer_into(
+            parent, rep.value().payload, 5);
+        // Reposition-bound piggyback (see goto_record): trailing
+        // [u8 bof][u8 eof][u32 recno], length-gated.
+        const auto& pl = rep.value().payload;
+        if (pl.size() >= tend + 6) {
+            apply_bound_trailer(parent, pl[tend] != 0, pl[tend + 1] != 0,
+                                read_u32_le(pl.data() + tend + 2));
+        }
     }
     return o;
 }

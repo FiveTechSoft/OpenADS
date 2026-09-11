@@ -30,8 +30,11 @@ namespace {
 constexpr std::uint8_t kOpGotoTop    = 0x40;
 constexpr std::uint8_t kOpAtEOF      = 0x48;
 constexpr std::uint8_t kOpAtBOF      = 0x4C;
+constexpr std::uint8_t kOpGetRecordNum = 0x4E;
+constexpr std::uint8_t kOpGotoRecord = 0x58;
 constexpr std::uint8_t kOpGotoBottom = 0x64;
 constexpr std::uint8_t kOpSetOrder   = 0x8C;
+constexpr std::uint8_t kOpSeek       = 0x90;
 constexpr std::uint8_t kOpKeyCount   = 0xB0;
 constexpr std::uint8_t kOpCloseTable = 0x22;
 
@@ -470,6 +473,185 @@ TEST_CASE("Nav batching: non-nav op flushes a deferred switch plainly") {
     REQUIRE(AdsGetKeyCount(hOrd, 0, &kc) == AE_SUCCESS);
     CHECK(kc == 3u);
     CHECK(nb_op(kOpKeyCount) == kc0 + 1);
+
+    REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
+    REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
+    s.stop();
+}
+
+// Reposition-bound piggyback (Vouch paint loop: GotoRecord/Seek, then
+// AtBOF/AtEOF/RecNo per row — 266 + 174 repositions/startup, 548 RecNo
+// + 352 AtBOF wire frames). The server appends [u8 bof][u8 eof][u32 recno]
+// after the row trailer of GotoRecordAck/SeekAck, so the whole
+// post-reposition burst is served locally. Trailing section,
+// length-gated: old servers send no tail (M12.24 convention, no caps bit).
+
+UNSIGNED32 nb_recno(ADSHANDLE hTable) {
+    UNSIGNED32 v = 0;
+    REQUIRE(AdsGetRecordNum(hTable, 0, &v) == AE_SUCCESS);
+    return v;
+}
+
+TEST_CASE("Reposition truth: GotoRecord certifies bounds and recno") {
+    nb_wipe();
+    auto dir = nb_tmp_dir();
+    nb_seed(dir, "gr.dbf", 3);
+
+    openads::network::Server s;
+    REQUIRE(s.start("127.0.0.1", 0).has_value());
+    ADSHANDLE hConn = nb_connect_remote(dir, s.port());
+    ADSHANDLE hTable = nb_open(hConn, "gr.dbf");
+
+    const std::uint64_t gr0 = nb_op(kOpGotoRecord);
+    const std::uint64_t bof0 = nb_op(kOpAtBOF);
+    const std::uint64_t eof0 = nb_op(kOpAtEOF);
+    const std::uint64_t rn0 = nb_op(kOpGetRecordNum);
+
+    // Mid-table restore: one frame, then the full paint burst is local.
+    REQUIRE(AdsGotoRecord(hTable, 2) == AE_SUCCESS);
+    CHECK(nb_op(kOpGotoRecord) == gr0 + 1);
+    for (int i = 0; i < 3; ++i) {
+        CHECK(nb_bof(hTable) == 0);
+        CHECK(nb_eof(hTable) == 0);
+        CHECK(nb_recno(hTable) == 2u);
+    }
+    CHECK(nb_op(kOpAtBOF) == bof0);
+    CHECK(nb_op(kOpAtEOF) == eof0);
+    CHECK(nb_op(kOpGetRecordNum) == rn0);
+
+    // Past-the-end restore: Clipper-phantom Limbo (BOF+EOF, recno
+    // LastRec()+1) — certified in the ack, still zero frames.
+    REQUIRE(AdsGotoRecord(hTable, 4) == AE_SUCCESS);
+    CHECK(nb_op(kOpGotoRecord) == gr0 + 2);
+    CHECK(nb_bof(hTable) == 1);
+    CHECK(nb_eof(hTable) == 1);
+    CHECK(nb_recno(hTable) == 4u);
+    CHECK(nb_op(kOpAtBOF) == bof0);
+    CHECK(nb_op(kOpAtEOF) == eof0);
+    CHECK(nb_op(kOpGetRecordNum) == rn0);
+
+    REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
+    REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
+    s.stop();
+}
+
+// Character-tag fixture for seeks: rows r0/r1/r2, tag BYNM on NM.
+void nb_seed_chr(const fs::path& dir) {
+    UNSIGNED8 srv[512]{};
+    std::memcpy(srv, dir.string().c_str(), dir.string().size());
+    ADSHANDLE hConn0 = 0;
+    REQUIRE(AdsConnect60(srv, ADS_LOCAL_SERVER, nullptr, nullptr, 0, &hConn0)
+            == AE_SUCCESS);
+    UNSIGNED8 def[]   = "NM,C,10,0";
+    UNSIGNED8 tname[] = "chr.dbf";
+    ADSHANDLE hT = 0;
+    REQUIRE(AdsCreateTable(hConn0, tname, nullptr, ADS_CDX, 0, 0, 0, 0, def,
+                           &hT) == AE_SUCCESS);
+    UNSIGNED8 fld[] = "NM";
+    for (int i = 0; i < 3; ++i) {
+        char v[16]{};
+        std::snprintf(v, sizeof(v), "r%d", i);
+        REQUIRE(AdsAppendRecord(hT) == AE_SUCCESS);
+        REQUIRE(AdsSetString(hT, fld, reinterpret_cast<UNSIGNED8*>(v),
+                             static_cast<UNSIGNED32>(std::strlen(v)))
+                == AE_SUCCESS);
+        REQUIRE(AdsWriteRecord(hT) == AE_SUCCESS);
+    }
+    ADSHANDLE hI = 0;
+    UNSIGNED8 bag[] = "chr.cdx";
+    UNSIGNED8 tag[] = "BYNM";
+    UNSIGNED8 exp[] = "NM";
+    REQUIRE(AdsCreateIndex61(hT, bag, tag, exp, nullptr, nullptr,
+                             ADS_COMPOUND, 512, &hI) == AE_SUCCESS);
+    REQUIRE(AdsCloseTable(hT) == AE_SUCCESS);
+    REQUIRE(AdsDisconnect(hConn0) == AE_SUCCESS);
+}
+
+UNSIGNED16 nb_seek(ADSHANDLE hOrd, const char* key) {
+    UNSIGNED16 found = 0;
+    REQUIRE(AdsSeek(hOrd, reinterpret_cast<UNSIGNED8*>(
+                        const_cast<char*>(key)),
+                    static_cast<UNSIGNED16>(std::strlen(key)),
+                    ADS_STRINGKEY, 0, &found) == AE_SUCCESS);
+    return found;
+}
+
+TEST_CASE("Reposition truth: Seek hit certifies bounds and recno") {
+    nb_wipe();
+    auto dir = nb_tmp_dir();
+    nb_seed_chr(dir);
+
+    openads::network::Server s;
+    REQUIRE(s.start("127.0.0.1", 0).has_value());
+    ADSHANDLE hConn = nb_connect_remote(dir, s.port());
+    ADSHANDLE hTable = nb_open(hConn, "chr.dbf");
+    ADSHANDLE hOrd = 0;
+    REQUIRE(AdsGetIndexHandleByOrder(hTable, 1, &hOrd) == AE_SUCCESS);
+    REQUIRE(hOrd != 0);
+
+    const std::uint64_t sk0 = nb_op(kOpSeek);
+    const std::uint64_t bof0 = nb_op(kOpAtBOF);
+    const std::uint64_t eof0 = nb_op(kOpAtEOF);
+    const std::uint64_t rn0 = nb_op(kOpGetRecordNum);
+
+    // Mid-key hit: one Seek frame, burst local.
+    CHECK(nb_seek(hOrd, "r1") == 1);
+    CHECK(nb_op(kOpSeek) == sk0 + 1);
+    CHECK(nb_bof(hTable) == 0);
+    CHECK(nb_eof(hTable) == 0);
+    CHECK(nb_recno(hTable) == 2u);
+    CHECK(nb_op(kOpAtBOF) == bof0);
+    CHECK(nb_op(kOpAtEOF) == eof0);
+    CHECK(nb_op(kOpGetRecordNum) == rn0);
+
+    // First-key hit: positioned on a row, so BOF is false (ACE truth:
+    // BOF means positioned *before* first, not *on* first). The point
+    // stands: the piggyback — not a follow-up frame — certifies it.
+    CHECK(nb_seek(hOrd, "r0") == 1);
+    CHECK(nb_op(kOpSeek) == sk0 + 2);
+    CHECK(nb_bof(hTable) == 0);
+    CHECK(nb_eof(hTable) == 0);
+    CHECK(nb_recno(hTable) == 1u);
+    CHECK(nb_op(kOpAtBOF) == bof0);
+    CHECK(nb_op(kOpAtEOF) == eof0);
+    CHECK(nb_op(kOpGetRecordNum) == rn0);
+
+    REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
+    REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
+    s.stop();
+}
+
+TEST_CASE("Reposition truth: Seek miss certifies EOF locally") {
+    nb_wipe();
+    auto dir = nb_tmp_dir();
+    nb_seed_chr(dir);
+
+    openads::network::Server s;
+    REQUIRE(s.start("127.0.0.1", 0).has_value());
+    ADSHANDLE hConn = nb_connect_remote(dir, s.port());
+    ADSHANDLE hTable = nb_open(hConn, "chr.dbf");
+    ADSHANDLE hOrd = 0;
+    REQUIRE(AdsGetIndexHandleByOrder(hTable, 1, &hOrd) == AE_SUCCESS);
+    REQUIRE(hOrd != 0);
+
+    const std::uint64_t sk0 = nb_op(kOpSeek);
+    const std::uint64_t bof0 = nb_op(kOpAtBOF);
+    const std::uint64_t eof0 = nb_op(kOpAtEOF);
+    const std::uint64_t rn0 = nb_op(kOpGetRecordNum);
+
+    // Hard miss past the end: the cursor is in Limbo (BOF+EOF, the
+    // Clipper-phantom convention) — certified in the ack, all local.
+    // Value-identical to the old wire poll (the server twin is the
+    // same ACE engine either way); only the frame is gone.
+    CHECK(nb_seek(hOrd, "zzz") == 0);
+    CHECK(nb_op(kOpSeek) == sk0 + 1);
+    CHECK(nb_eof(hTable) == 1);
+    CHECK(nb_bof(hTable) == 1);
+    const std::uint64_t rn_after = nb_op(kOpGetRecordNum);
+    (void)nb_recno(hTable);
+    CHECK(nb_op(kOpGetRecordNum) == rn_after);
+    CHECK(nb_op(kOpAtBOF) == bof0);
+    CHECK(nb_op(kOpAtEOF) == eof0);
 
     REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
     REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);

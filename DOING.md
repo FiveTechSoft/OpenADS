@@ -107,6 +107,54 @@ Su chunk mostró el hueco restante: probes AtBOF post-EOF a wire.
 
 ---
 
+## 2026-09-11 — Reposition-bound piggyback (v1.09.35 field: 124 s)
+
+### Field result v1.09.35 (both sides 1.09.35)
+
+`v.1.09.35 2:04.375 == 124 secs` (was 143.2 s on .32 ≈ −19 s, as
+estimated for fused order + metadata caches). Full census from
+`ads_err.log` OPDUMP (2600+ frames / 124 s ≈ 21 frames/s ≈ 48 ms —
+Time ≈ frames × RTT, server exonerated again with ~50–120 µs/op):
+
+| Frames | Op | Share |
+|--------|----|-------|
+| 548 | GetRecordNum (RecNo per paint row, always `!row_valid`) | 21% |
+| 352 | AtBOF (first of pair after every reposition) | 13.5% |
+| 266 | GotoRecord (bookmark restores) | 10% |
+| 174 | Seek | 7% |
+| 166+125+121 | CloseAll + OpenIndex + SetOrder (per-tag rotation) | 16% |
+| 3 | AtEOF of 801 polls — twin verified perfect | — |
+
+Pattern per xBrowse row: reposition (bumps seq, clears flags) →
+RecNo wire → BOF wire → EOF twin-local = 3 frames/row.
+
+### Shipped (v1.09.36)
+
+- **Bound piggyback on GotoRecordAck/SeekAck.** Server appends
+  `[u8 bof][u8 eof][u32 recno]` after the row trailer (length-gated,
+  no caps bit — M12.24 convention; old peers ignore the tail). Client
+  certifies flags + bound cache + phantom recno from it: one frame
+  per reposition instead of 3–4. No Limbo rescue on the pack path
+  (pure read); both-true genuinely means empty (Clipper phantom —
+  past-end goto and hard-miss seek both land in Limbo, value-identical
+  to the old wire polls).
+- **Phantom RecNo cache.** `AdsGetRecordNum` serves `recno_bound`
+  while no cursor frame lands (same currency as the bound cache,
+  cleared with it); stored on wire answers and piggybacks.
+- **Trace:** `AdsGotoRecord`/`AdsSeek`/`AdsSeekLast` lines with
+  alias (the previously invisible invalidators).
+- **Tests:** 3 opcode-counter cases (mid/past-end goto, hit/first/
+  miss seek — incl. the `has_row=0` 2-byte lookahead misalignment
+  this caught: trailer end offset now consumed exactly).
+- Estimate: ~850–950 frames ≈ **40–45 s** → ~80 s next field run.
+
+### Deferred
+
+- Per-table cursor generation (cross-table seq eviction) — measured
+  unnecessary: the dominant pattern is same-table reposition→poll,
+  which the piggyback kills without any seq surgery.
+- Rotation CloseAll+OpenIndex (~290 frames) — structural, next.
+
 ## 2026-09-11 — Fused SetOrder+Goto (rotación por tag en 1 frame)
 
 ### Pedido de Pritpal Bedi

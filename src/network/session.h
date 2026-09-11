@@ -215,6 +215,17 @@ private:
     void      pack_row_trailer(Frame& reply, std::uint32_t id,
                                std::uint16_t lookahead_n = 0,
                                std::int8_t dir = 1);
+    // Reposition-bound piggyback: after an explicit reposition
+    // (GotoRecord/Seek) the server knows BOF/EOF/recno exactly, so it
+    // appends [u8 bof][u8 eof][u32 recno] AFTER the row trailer. The
+    // client serves the poll burst that always follows a reposition
+    // (AtBOF/AtEOF/RecNo per paint row) locally. Trailing section,
+    // length-gated: old clients ignore the tail (same convention as
+    // the M12.24 row trailer and the twin flag), so no caps bit.
+    // No Limbo rescue here: a rescue would MOVE the cursor during
+    // what must stay a pure read. A freshly repositioned twin is not
+    // in limbo; both-true genuinely means an empty cursor.
+    void      pack_bound_trailer(Frame& reply, std::uint32_t id);
     // Warm OpenTableAck sections (USE latency): schema + first-row TLVs
     // appended after the bag field (see wire.h OpenTableAckSections).
     // The row section positions the engine cursor exactly like an

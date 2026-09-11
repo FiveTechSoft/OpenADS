@@ -151,7 +151,7 @@ milestones reused gaps left by earlier ones.
 | `RecallRecord`        | `0x56` | C→S | Undelete                        | M12.6 |
 | `RecallRecordAck`     | `0x57` | S→C |                                 | M12.6 |
 | `GotoRecord`          | `0x58` | C→S | Jump to recno                   | M12.6 |
-| `GotoRecordAck`       | `0x59` | S→C |                                 | M12.6 |
+| `GotoRecordAck`       | `0x59` | S→C | Row trailer + `[u8 bof][u8 eof][u32 recno]` bound piggyback (§5.8) | M12.6 |
 | `FlushTable`          | `0x5A` | C→S | Force write-through             | M12.6 |
 | `FlushTableAck`       | `0x5B` | S→C |                                 | M12.6 |
 | `Reindex`             | `0x60` | C→S | Rebuild bound indexes           | M12.8 |
@@ -397,6 +397,21 @@ password must match a configured account or the server returns `AE_LOGIN_FAILED`
   Clients that pre-date M12.18 can ignore extra bytes past the prior
   0-length frame — the wire codec passes the full payload through.
 
+  **Reposition-bound piggyback.** `GotoRecordAck` and `SeekAck` /
+  `SeekLastAck` append `[u8 bof][u8 eof][u32 recno]` *after* the row
+  trailer. The server just positioned explicitly, so it knows all three
+  exactly; the client certifies its boundary flags, bound cache and
+  phantom-recno cache from them and serves the poll burst that always
+  follows a reposition (AtBOF/AtEOF/RecNo per paint row) locally —
+  one frame per reposition instead of 3–4. Trailing section,
+  length-gated, no capability bit (same convention as the row trailer
+  and the twin flag): old clients parse the trailer and ignore the
+  tail; new clients against old servers see no tail and fall back to
+  the wire polls exactly as before. No Limbo rescue on the pack path —
+  a rescue would move the cursor during what must stay a pure read;
+  a freshly repositioned cursor reporting both-true genuinely means
+  an empty cursor (Clipper-phantom convention).
+
   **Read-ahead block.** A client that advertised `kCapPrefetchConsume`
   in the Connect capability word gets a block of look-ahead rows on a
   forward `Skip`, and serves the following skips from it with no
@@ -524,7 +539,8 @@ password must match a configured account or the server returns `AE_LOGIN_FAILED`
 - `CloseIndex`: `[u32 wire_index_id]`, ack empty.
 - `Seek`: `[u32 tid][u32 hindex][u8 soft][u8 last][u16 klen][key]`.
 - `SeekAck`: `[u8 found][u32 recno]` **+ an optional row trailer** (M12.24;
-  same layout as §5.8, always with `lookahead_count == 0`).
+  same layout as §5.8, always with `lookahead_count == 0`) **+ the
+  `[u8 bof][u8 eof][u32 recno]` bound piggyback** (§5.8).
 
   The row the seek landed on now comes back **with** the seek. Previously the
   ack stopped after `recno`, so the client knew where it was but not what was

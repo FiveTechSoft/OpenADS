@@ -1075,6 +1075,37 @@ void Session::pack_row_trailer(Frame& reply, std::uint32_t id,
     }
 }
 
+void Session::pack_bound_trailer(Frame& reply, std::uint32_t id) {
+    // Same source-of-truth rule as the AtBOF/AtEOF handlers: ordered
+    // tables answer from the ABI twin, natural tables from the engine
+    // cursor. The caller just repositioned explicitly, so both are
+    // freshly placed (no rescue moves here — this must stay a pure
+    // read; both-true genuinely means an empty cursor).
+    UNSIGNED16 b = 1, e = 1;
+    UNSIGNED32 rn = 0;
+    if (ordered_tables_.count(id) != 0) {
+        if (ADSHANDLE h = ensure_abi_handle(id); h != 0) {
+            AdsAtBOF(h, &b);
+            AdsAtEOF(h, &e);
+            AdsGetRecordNum(h, 0, &rn);
+        }
+    } else if (auto eit = tbls_.find(id);
+               eit != tbls_.end() && sess_conn_ != nullptr) {
+        if (auto* tbl = sess_conn_->lookup_table(eit->second);
+            tbl != nullptr) {
+            b  = tbl->bof() ? 1 : 0;
+            e  = tbl->eof() ? 1 : 0;
+            rn = tbl->recno();
+        }
+    }
+    reply.payload.push_back(b != 0 ? 1 : 0);
+    reply.payload.push_back(e != 0 ? 1 : 0);
+    reply.payload.push_back(static_cast<std::uint8_t>( rn        & 0xFFu));
+    reply.payload.push_back(static_cast<std::uint8_t>((rn >>  8) & 0xFFu));
+    reply.payload.push_back(static_cast<std::uint8_t>((rn >> 16) & 0xFFu));
+    reply.payload.push_back(static_cast<std::uint8_t>((rn >> 24) & 0xFFu));
+}
+
 // M12.22/M12.23 — read-ahead depth for one forward Skip.
 //
 // `hint` is what the client asked for via AdsCacheRecords, or
@@ -3295,6 +3326,10 @@ DispatchResult Session::dispatch(const Frame& f) {
             // old server sees a 5-byte ack, parses no trailer, and falls back
             // to the FetchCurrentRow path exactly as before.
             if (parent_tid != 0) pack_row_trailer(reply, parent_tid, 0);
+            // Reposition truth rides after the trailer (length-gated on
+            // the client; old peers ignore the tail). parent_tid != 0
+            // whenever a twin exists to read it from.
+            if (parent_tid != 0) pack_bound_trailer(reply, parent_tid);
             break;
         }
         // CreateIndex / SkipUnique / SetScope / ClearScope —
@@ -4142,6 +4177,7 @@ DispatchResult Session::dispatch(const Frame& f) {
             }
             reply.opcode = Opcode::GotoRecordAck;
             pack_row_trailer(reply, id);
+            pack_bound_trailer(reply, id);
             break;
         }
         case Opcode::FlushTable: {

@@ -1671,6 +1671,7 @@ void remote_nav_bound_clear(openads::network::RemoteTable* rt) {
     if (rt == nullptr) return;
     rt->bound_bof_ok = false;
     rt->bound_eof_ok = false;
+    rt->recno_bound_ok = false;
 }
 
 void remote_sync_keyno_skip(openads::network::RemoteTable* rt,
@@ -9696,6 +9697,8 @@ UNSIGNED32 ENTRYPOINT AdsExtractKey(ADSHANDLE hIndex, UNSIGNED8* pucBuf,
 UNSIGNED32 ENTRYPOINT AdsGotoRecord(ADSHANDLE hTable, UNSIGNED32 ulRecord) {
     arc2_trace("AdsGotoRecord");
     if (auto* rt = get_remote_table(hTable)) {
+        cli_trace_tbl(rt, "AdsGotoRecord", "want=%u row_valid=%d",
+                      ulRecord, (int)rt->row_valid);
         if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         rt->found_cached = true; rt->current_found = false;  // M12.21: GoTo clears Found()
         remote_clear_nav_boundaries(rt);
@@ -11464,9 +11467,22 @@ UNSIGNED32 ENTRYPOINT AdsGetRecordNum(ADSHANDLE hTable, UNSIGNED16 /*bFilterOpti
             *pulRecordNum = rt->current_recno;
             return ok();
         }
+        // Reposition-bound recno: the last GotoRecord/Seek certified
+        // the phantom recno in its ack tail (or a wire answer just
+        // did). Serves xBrowse's per-row RecNo() while no
+        // cursor-affecting frame lands — same currency as the bound
+        // cache, cleared with it.
+        if (rt->recno_bound_ok &&
+            rt->recno_bound_seq == rt->conn->nav_seq()) {
+            *pulRecordNum = rt->recno_bound;
+            return ok();
+        }
         auto r = rt->conn->get_record_num(rt->id);
         if (!r) return fail(r.error());
         *pulRecordNum = r.value();
+        rt->recno_bound     = r.value();
+        rt->recno_bound_ok  = true;
+        rt->recno_bound_seq = rt->conn->nav_seq();
         return ok();
     }
     if (auto* ops = openads::abi::backend_table_ops_for(hTable))
@@ -19345,6 +19361,8 @@ UNSIGNED32 ENTRYPOINT AdsSeek(ADSHANDLE hIndex,
             // -- nothing on the network to make it look wrong -- and the wire skip
             // after that sent (step + a lag that no longer applied).
             ri->parent->invalidate_prefetch();
+            cli_trace_tbl(ri->parent, "AdsSeek", "key=%.24s",
+                          key.c_str());
         }
         // RCB 07/14/2026: M12.24 -- pass the parent so the SeekAck's row trailer
         // lands straight in the row cache. Without it row_valid stays false and
@@ -19370,12 +19388,20 @@ UNSIGNED32 ENTRYPOINT AdsSeek(ADSHANDLE hIndex,
             // fPositioned guard, which is why only strings went blank.
             // A miss with recno==0 genuinely lands at EOF (hard miss, or
             // soft miss with no higher key); anything else is a live row.
+            // Piggyback guard: a current server already certified all of
+            // the above (plus the bound cache and recno) in the SeekAck
+            // tail — the manual reset below is the old-server fallback
+            // only. Presence check: the piggyback stamps bound_seq to the
+            // current seq, and seek() bumped it on entry, so equality
+            // holds iff the tail arrived.
+            if (ri->parent->bound_seq != ri->parent->conn->nav_seq()) {
             if (r.value().hit != 0 || r.value().recno != 0) {
                 ri->parent->nav_at_bof = false;
                 ri->parent->nav_at_eof = false;
             } else {
                 ri->parent->nav_at_bof = false;
                 ri->parent->nav_at_eof = true;
+            }
             }
         }
         (void)u16KeyType;
@@ -19510,6 +19536,8 @@ UNSIGNED32 ENTRYPOINT AdsSeekLast(ADSHANDLE hIndex,
             // RCB 07/14/2026: same stale-queue bug as AdsSeek -- see the note
             // there for why dropping the block is mandatory after a seek.
             ri->parent->invalidate_prefetch();
+            cli_trace_tbl(ri->parent, "AdsSeekLast", "key=%.24s",
+                          key.c_str());
         }
         auto r = ri->conn->seek(ri->id, key,
             /*soft=*/0,
@@ -19520,13 +19548,16 @@ UNSIGNED32 ENTRYPOINT AdsSeekLast(ADSHANDLE hIndex,
             ri->parent->found_cached  = true;
             ri->parent->current_found = (r.value().hit != 0);
             // FIX(seek-nav): same stale nav_at_bof / nav_at_eof reset as
-            // AdsSeek -- see the full note there.
+            // AdsSeek -- see the full note there. Same piggyback guard:
+            // a certified SeekLastAck tail already set everything.
+            if (ri->parent->bound_seq != ri->parent->conn->nav_seq()) {
             if (r.value().hit != 0 || r.value().recno != 0) {
                 ri->parent->nav_at_bof = false;
                 ri->parent->nav_at_eof = false;
             } else {
                 ri->parent->nav_at_bof = false;
                 ri->parent->nav_at_eof = true;
+            }
             }
         }
         (void)u16KeyType;

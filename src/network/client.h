@@ -639,6 +639,15 @@ struct RemoteTable {
     bool                     bound_eof_ok = false;
     bool                     bound_eof    = false;
     std::uint64_t            bound_seq    = 0;
+    // Certified recno from the last reposition truth (GotoRecord/Seek
+    // bound piggyback) or GetRecordNum wire answer, with the seq at
+    // answer time. Serves AdsGetRecordNum while no cursor-affecting
+    // frame lands — the phantom-position case (row_valid false) that
+    // used to cost a round-trip per xBrowse paint row. Same currency
+    // rule as the bound cache above; cleared with it.
+    std::uint32_t            recno_bound    = 0;
+    bool                     recno_bound_ok = false;
+    std::uint64_t            recno_bound_seq = 0;
     // Last wire nav op on this table (0 = none/other, 1 = GotoTop,
     // 2 = GotoBottom), whether it produced a row, and the connection
     // nav_seq_ at the time. Serves two WAN-chattiness kills with one
