@@ -98,6 +98,12 @@ public:
         return (server_caps_ & kCapFlushInCloseAll) != 0;
     }
 
+    // Server installs an order section on GotoTop/GotoBottom
+    // (see kCapNavOrderFuse): SetOrder+Goto can go out as one frame.
+    bool server_nav_order_fuse() const noexcept {
+        return (server_caps_ & kCapNavOrderFuse) != 0;
+    }
+
     // Current cursor-generation sequence (see nav_seq_). Relaxed load
     // is enough: it only orders the ABI layer's own duplicate
     // detection, never data.
@@ -146,6 +152,13 @@ public:
     util::Result<void>          close_table(std::uint32_t id);
     util::Result<void>          goto_top(std::uint32_t id);
     util::Result<void>          goto_top(RemoteTable* rt);
+    // Fused nav+order (see kCapNavOrderFuse): installs order_id before
+    // navigating, collapsing SetOrder+Goto into one frame. Only call
+    // when server_nav_order_fuse() is true.
+    util::Result<void>          goto_top_fused(RemoteTable* rt,
+                                               std::uint32_t order_id);
+    util::Result<void>          goto_bottom_fused(RemoteTable* rt,
+                                                  std::uint32_t order_id);
     util::Result<void>          skip(std::uint32_t id, std::int32_t step);
     util::Result<void>          skip(RemoteTable* rt, std::int32_t step);
     util::Result<std::string>   get_field(std::uint32_t id,
@@ -767,6 +780,15 @@ struct RemoteTable {
     // never parked (a park performs no server close to absorb into).
     bool flush_file_pending      = false;
     bool close_all_indexes_pending = false;
+    // Deferred order switch (WAN chattiness: SetOrder+GotoTop/Bottom
+    // per tag rotation). SetOrder never moves the cursor, so the frame
+    // waits here until a nav absorbs it (fused SetOrder+Goto, one
+    // frame) or any other binding-dependent op flushes it plainly.
+    // active_index_id tracks the pending belief immediately;
+    // server_order_id only on ack. Never parked (adopt would inherit
+    // a belief the server doesn't share).
+    bool          pending_order    = false;
+    std::uint32_t pending_order_id = 0;  // wire index id (0 = natural)
 };
 
 // M12.16 — per-handle wrapper for a remote index. Each tag

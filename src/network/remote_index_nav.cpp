@@ -37,12 +37,20 @@ util::Result<void> remote_activate_index(RemoteIndex* ri) {
     // name, by handle, natural-order reset) puts it back to kOrderUnknown.
     if (ri->parent->server_order_id == ri->id) {
         ri->parent->active_index_id = ri->id;
+        // A deferred switch to this same order is fulfilled framelessly:
+        // the server already has it installed.
+        if (ri->parent->pending_order &&
+            ri->parent->pending_order_id == ri->id) {
+            ri->parent->pending_order = false;
+        }
         return {};
     }
     auto r = ri->conn->set_order(ri->parent->id, ri->id);
     if (!r) return r.error();
     ri->parent->server_order_id = ri->id;
     ri->parent->active_index_id = ri->id;
+    // Any deferred switch is superseded by this explicit install.
+    ri->parent->pending_order = false;
     // The controlling order just changed on the server — anything queued was
     // read in the previous order, and the key walk (count + positions) is
     // a different one.

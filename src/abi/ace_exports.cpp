@@ -710,9 +710,34 @@ bool remote_pending_overlay(openads::network::RemoteTable* rt,
 // every visibility event is free for read-mostly flows. Returns an ACE
 // code (0 = ok); on error the buffer is dropped with the server-side
 // prefix applied — identical to a sequential loop failing mid-way.
+// Flush a deferred order switch plainly (see pending_order): used by
+// every binding-dependent wire op except GotoTop/GotoBottom, which
+// absorb it into their fused frame instead. Returns an ACE code.
+UNSIGNED32 remote_flush_order(openads::network::RemoteTable* rt) {
+    if (rt == nullptr || rt->conn == nullptr || !rt->pending_order) {
+        return ok();
+    }
+    rt->pending_order = false;
+    const std::uint32_t oid = rt->pending_order_id;
+    auto r = oid == 0
+        ? rt->conn->set_order_by_name(rt->id, "")
+        : rt->conn->set_order(rt->id, oid);
+    if (!r) return fail(r.error());
+    // Ack-confirmed: the server binding now matches the belief held
+    // since pend time. The switch may have repositioned server-side
+    // state tracking (never the cursor itself — SetOrder moves
+    // nothing), so row/queue caches established under the old binding
+    // go, exactly like the immediate path.
+    rt->server_order_id = oid;
+    rt->row_valid = false;
+    rt->invalidate_prefetch();
+    return ok();
+}
+
 UNSIGNED32 remote_flush_teardown(openads::network::RemoteTable* rt);
 UNSIGNED32 remote_flush_sets(openads::network::RemoteTable* rt);
 UNSIGNED32 remote_flush_pending(openads::network::RemoteTable* rt) {
+    if (UNSIGNED32 orc = remote_flush_order(rt); orc != 0) return orc;
     if (UNSIGNED32 rc = remote_flush_sets(rt); rc != 0) return rc;
     return remote_flush_teardown(rt);
 }
@@ -7127,7 +7152,11 @@ bool remote_table_poolable(openads::network::RemoteTable* rt) {
     // by a real close, never by a park (no server close happens) — the
     // close path drops the flags before deciding, so this line is an
     // invariant guard for future park paths, not a live branch.
+    // A deferred order switch is likewise never parked: adopt would
+    // inherit a belief the server doesn't share.
     if (rt->flush_file_pending || rt->close_all_indexes_pending)
+        return false;
+    if (rt->pending_order)
         return false;
     return true;
 }
@@ -7140,6 +7169,9 @@ bool remote_table_poolable(openads::network::RemoteTable* rt) {
 void remote_close_table_live(ADSHANDLE hTable,
                              openads::network::RemoteTable* rt) {
     if (rt == nullptr) return;
+    // A deferred order switch dies with the bindings: never emit it
+    // ahead of the close that destroys what it would install.
+    rt->pending_order = false;
     (void)remote_flush_pending(rt);
     auto* rc = rt->conn;
     const bool counted = rt->close_counted;
@@ -7507,6 +7539,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
             adopted->last_nav = 0;  // re-stamped by the warm GotoTop below
             adopted->flush_file_pending = false;
             adopted->close_all_indexes_pending = false;
+            adopted->pending_order = false;
             remote_nav_bound_clear(adopted.get());
             adopted->invalidate_prefetch();
             // close_counted stays true (never decremented at park time),
@@ -10321,7 +10354,45 @@ UNSIGNED32 ENTRYPOINT AdsCloseTable(ADSHANDLE hTable) {
 UNSIGNED32 ENTRYPOINT AdsGotoTop(ADSHANDLE hTable) {
     arc2_trace("AdsGotoTop");
     if (auto* ri = get_remote_index(hTable)) {
-        if (UNSIGNED32 frc = remote_flush_pending(ri->parent); frc != 0) return frc;
+        // Sets + teardown flush here, but NOT a deferred order switch:
+        // that absorbs into the nav below (fused frame) when it targets
+        // this order, or flushes plainly inside remote_index_goto_top's
+        // activate path otherwise.
+        if (UNSIGNED32 frc = remote_flush_sets(ri->parent); frc != 0) return frc;
+        if (UNSIGNED32 frc = remote_flush_teardown(ri->parent); frc != 0) return frc;
+        // Deferred switch absorbs into the nav below (fused frame) when
+        // it targets this order; otherwise (or on old servers) it goes
+        // out plainly first and the normal path binds cheap.
+        if (ri->parent != nullptr && ri->parent->pending_order) {
+            if (ri->parent->pending_order_id == ri->id &&
+                ri->parent->conn != nullptr &&
+                ri->parent->conn->server_nav_order_fuse()) {
+                ri->parent->pending_order = false;
+                ri->parent->found_cached = true;
+                ri->parent->current_found = false;
+                ri->parent->invalidate_prefetch();
+                auto fr = ri->conn->goto_top_fused(ri->parent, ri->id);
+                if (!fr) return fail(fr.error());
+                ri->parent->server_order_id = ri->id;
+                ri->parent->active_index_id = ri->id;
+                ri->parent->key_count_cached = false;
+                remote_sync_keyno_gototop(ri->parent);
+                remote_nav_stamp(ri->parent, 1, ri->id);
+                cli_trace_tbl(ri->parent, "AdsGotoTop(idx)", "fused: row_valid=%d recno=%u keyno=%u eof=%d bof=%d",
+                              (int)ri->parent->row_valid,
+                              ri->parent->current_recno,
+                              ri->parent->current_keyno,
+                              (int)ri->parent->nav_at_eof,
+                              (int)ri->parent->nav_at_bof);
+                if (Handle th = handle_for_remote_table(ri->parent))
+                    apply_relations_for_handle(to_ads_handle(th));
+                return ok();
+            }
+            if (UNSIGNED32 frc = remote_flush_order(ri->parent);
+                frc != 0) {
+                return frc;
+            }
+        }
         if (remote_nav_duplicate(ri->parent, 1, ri->id)) {
             cli_trace_tbl(ri->parent, "AdsGotoTop(idx)", "duplicate suppressed");
             remote_sync_keyno_gototop(ri->parent);
@@ -10342,11 +10413,39 @@ UNSIGNED32 ENTRYPOINT AdsGotoTop(ADSHANDLE hTable) {
         return ok();
     }
     if (auto* rt = get_remote_table(hTable)) {
-        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
+        // Sets + teardown flush here; a deferred order switch absorbs
+        // into the nav below (fused frame) instead of going out alone.
+        if (UNSIGNED32 frc = remote_flush_sets(rt); frc != 0) return frc;
+        if (UNSIGNED32 frc = remote_flush_teardown(rt); frc != 0) return frc;
         // M12.18 -- rt-aware overload parses the row trailer in the
         // same RTT, so AdsGetField immediately after GoTop hits
         // the cache.
         rt->found_cached = true; rt->current_found = false;  // M12.21: GoTop clears Found()
+        // Deferred order switch absorbs into this nav (fused frame) on
+        // new servers; on old ones it goes out plainly first and the
+        // normal path below binds cheap.
+        if (rt->pending_order) {
+            if (rt->conn != nullptr &&
+                rt->conn->server_nav_order_fuse()) {
+                const std::uint32_t oid = rt->pending_order_id;
+                rt->pending_order = false;
+                rt->invalidate_prefetch();
+                auto fr = rt->conn->goto_top_fused(rt, oid);
+                if (!fr) return fail(fr.error());
+                rt->server_order_id = oid;
+                rt->active_index_id = oid;
+                rt->key_count_cached = false;
+                remote_sync_keyno_gototop(rt);
+                remote_nav_stamp(rt, 1, oid);
+                cli_trace_tbl(rt, "AdsGotoTop", "fused: row_valid=%d recno=%u keyno=%u eof=%d bof=%d",
+                              (int)rt->row_valid, rt->current_recno,
+                              rt->current_keyno, (int)rt->nav_at_eof,
+                              (int)rt->nav_at_bof);
+                apply_relations_for_handle(hTable);
+                return ok();
+            }
+            if (UNSIGNED32 frc = remote_flush_order(rt); frc != 0) return frc;
+        }
         if (remote_nav_duplicate(rt, 1, rt->server_order_id)) {
             cli_trace_tbl(rt, "AdsGotoTop", "duplicate suppressed");
             remote_sync_keyno_gototop(rt);
@@ -10379,7 +10478,41 @@ UNSIGNED32 ENTRYPOINT AdsGotoTop(ADSHANDLE hTable) {
 UNSIGNED32 ENTRYPOINT AdsGotoBottom(ADSHANDLE hTable) {
     arc2_trace("AdsGotoBottom");
     if (auto* ri = get_remote_index(hTable)) {
-        if (UNSIGNED32 frc = remote_flush_pending(ri->parent); frc != 0) return frc;
+        // Sets + teardown flush here, but NOT a deferred order switch:
+        // that absorbs into the nav below (fused frame) when it targets
+        // this order, or flushes plainly otherwise.
+        if (UNSIGNED32 frc = remote_flush_sets(ri->parent); frc != 0) return frc;
+        if (UNSIGNED32 frc = remote_flush_teardown(ri->parent); frc != 0) return frc;
+        if (ri->parent != nullptr && ri->parent->pending_order) {
+            if (ri->parent->pending_order_id == ri->id &&
+                ri->parent->conn != nullptr &&
+                ri->parent->conn->server_nav_order_fuse()) {
+                ri->parent->pending_order = false;
+                ri->parent->found_cached = true;
+                ri->parent->current_found = false;
+                ri->parent->invalidate_prefetch();
+                auto fr = ri->conn->goto_bottom_fused(ri->parent, ri->id);
+                if (!fr) return fail(fr.error());
+                ri->parent->server_order_id = ri->id;
+                ri->parent->active_index_id = ri->id;
+                ri->parent->key_count_cached = false;
+                remote_sync_keyno_gotobottom(ri->parent);
+                remote_nav_stamp(ri->parent, 2, ri->id);
+                cli_trace_tbl(ri->parent, "AdsGotoBottom(idx)", "fused: row_valid=%d recno=%u keyno=%u eof=%d bof=%d",
+                              (int)ri->parent->row_valid,
+                              ri->parent->current_recno,
+                              ri->parent->current_keyno,
+                              (int)ri->parent->nav_at_eof,
+                              (int)ri->parent->nav_at_bof);
+                if (Handle th = handle_for_remote_table(ri->parent))
+                    apply_relations_for_handle(to_ads_handle(th));
+                return ok();
+            }
+            if (UNSIGNED32 frc = remote_flush_order(ri->parent);
+                frc != 0) {
+                return frc;
+            }
+        }
         if (remote_nav_duplicate(ri->parent, 2, ri->id)) {
             cli_trace_tbl(ri->parent, "AdsGotoBottom(idx)", "duplicate suppressed");
             remote_sync_keyno_gotobottom(ri->parent);
@@ -10400,8 +10533,33 @@ UNSIGNED32 ENTRYPOINT AdsGotoBottom(ADSHANDLE hTable) {
         return ok();
     }
     if (auto* rt = get_remote_table(hTable)) {
-        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
+        // Sets + teardown flush here; a deferred order switch absorbs
+        // into the nav below (fused frame) instead of going out alone.
+        if (UNSIGNED32 frc = remote_flush_sets(rt); frc != 0) return frc;
+        if (UNSIGNED32 frc = remote_flush_teardown(rt); frc != 0) return frc;
         rt->found_cached = true; rt->current_found = false;  // M12.21: GoBottom clears Found()
+        if (rt->pending_order) {
+            if (rt->conn != nullptr &&
+                rt->conn->server_nav_order_fuse()) {
+                const std::uint32_t oid = rt->pending_order_id;
+                rt->pending_order = false;
+                rt->invalidate_prefetch();
+                auto fr = rt->conn->goto_bottom_fused(rt, oid);
+                if (!fr) return fail(fr.error());
+                rt->server_order_id = oid;
+                rt->active_index_id = oid;
+                rt->key_count_cached = false;
+                remote_sync_keyno_gotobottom(rt);
+                remote_nav_stamp(rt, 2, oid);
+                cli_trace_tbl(rt, "AdsGotoBottom", "fused: row_valid=%d recno=%u keyno=%u eof=%d bof=%d",
+                              (int)rt->row_valid, rt->current_recno,
+                              rt->current_keyno, (int)rt->nav_at_eof,
+                              (int)rt->nav_at_bof);
+                apply_relations_for_handle(hTable);
+                return ok();
+            }
+            if (UNSIGNED32 frc = remote_flush_order(rt); frc != 0) return frc;
+        }
         if (remote_nav_duplicate(rt, 2, rt->server_order_id)) {
             cli_trace_tbl(rt, "AdsGotoBottom", "duplicate suppressed");
             remote_sync_keyno_gotobottom(rt);
@@ -16091,43 +16249,66 @@ UNSIGNED32 ENTRYPOINT AdsGetAllLocks(ADSHANDLE hTable, UNSIGNED32* paRecnos,
 UNSIGNED32 ENTRYPOINT AdsSetIndexOrder(ADSHANDLE hTable, UNSIGNED8* pucName) {
     arc2_trace("AdsSetIndexOrder");
     if (auto* rt = get_remote_table(hTable)) {
-        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
+        // Sets + teardown flush here, but NOT a deferred order switch:
+        // a new switch overwrites the pending one (unsent requests have
+        // no observable effect), so flushing first would just add a frame
+        // for a binding nobody will ever navigate in.
+        if (UNSIGNED32 frc = remote_flush_sets(rt); frc != 0) return frc;
+        if (UNSIGNED32 frc = remote_flush_teardown(rt); frc != 0) return frc;
         std::string name = pucName
             ? openads::abi::to_internal(pucName, 0) : std::string();
+        // Resolve the target locally (case-insensitive, like the mirror
+        // block below). Unmapped names stay kOrderUnknown and always go
+        // out on the wire: the server resolves those, and a wrong local
+        // guess is the "remote browse shows no index" bug.
+        auto resolve_want = [&]() {
+            if (name.empty()) return std::uint32_t{0};
+            for (auto& [tag, wid] : rt->index_by_tag) {
+                if (tag.size() != name.size()) continue;
+                bool eq = true;
+                for (std::size_t i = 0; i < tag.size(); ++i) {
+                    if (std::toupper(
+                            static_cast<unsigned char>(tag[i])) !=
+                        std::toupper(
+                            static_cast<unsigned char>(name[i]))) {
+                        eq = false;
+                        break;
+                    }
+                }
+                if (eq) return wid;
+            }
+            return openads::network::RemoteTable::kOrderUnknown;
+        };
         // Skip a redundant switch: SetOrder never moves the cursor, so
         // when the ack-confirmed server binding already equals the
         // target the frame would change nothing observable. (Vouch
         // re-sets the same order on every USE; pooled re-USEs keep the
-        // binding server-side.) Unmapped names still go out: the server
-        // resolves those, and a wrong local guess is the "remote browse
-        // shows no index" bug.
+        // binding server-side.)
         {
-            std::uint32_t want =
-                openads::network::RemoteTable::kOrderUnknown;
-            if (name.empty()) {
-                want = 0;
-            } else {
-                for (auto& [tag, wid] : rt->index_by_tag) {
-                    if (tag.size() != name.size()) continue;
-                    bool eq = true;
-                    for (std::size_t i = 0; i < tag.size(); ++i) {
-                        if (std::toupper(
-                                static_cast<unsigned char>(tag[i])) !=
-                            std::toupper(
-                                static_cast<unsigned char>(name[i]))) {
-                            eq = false;
-                            break;
-                        }
-                    }
-                    if (eq) { want = wid; break; }
-                }
-            }
+            const std::uint32_t want = resolve_want();
             if (want != openads::network::RemoteTable::kOrderUnknown &&
                 rt->server_order_id == want) {
                 rt->active_index_id = want;
                 return ok();
             }
+            // Defer: a following GotoTop/Bottom absorbs this into its
+            // fused frame; anything else flushes it plainly first.
+            // Overwrites any earlier pending switch (unsent requests
+            // have no observable effect). Belief updates now; position
+            // is retained but order-relative caches must go.
+            if (want != openads::network::RemoteTable::kOrderUnknown) {
+                rt->active_index_id = want;
+                rt->pending_order = true;
+                rt->pending_order_id = want;
+                rt->keyno_valid = false;
+                rt->key_count_cached = false;
+                rt->invalidate_prefetch();
+                return ok();
+            }
         }
+        // Unmapped: legacy immediate wire path (errors surface now).
+        // Any pending switch is superseded by this explicit request.
+        rt->pending_order = false;
         auto r = rt->conn->set_order_by_name(rt->id, name);
         if (!r) return fail(r.error());
         // RCB 07/14/2026: BUG FIX -- the controlling order just changed, so the
@@ -16284,7 +16465,10 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrder(ADSHANDLE hTable, UNSIGNED8* pucName) {
 UNSIGNED32 ENTRYPOINT AdsSetIndexOrderByHandle(ADSHANDLE hTable, ADSHANDLE hIndex) {
     arc2_trace("AdsSetIndexOrderByHandle");
     if (auto* rt = get_remote_table(hTable)) {
-        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
+        // Sets + teardown flush here, but NOT a deferred order switch
+        // (overwritten below — see ByName).
+        if (UNSIGNED32 frc = remote_flush_sets(rt); frc != 0) return frc;
+        if (UNSIGNED32 frc = remote_flush_teardown(rt); frc != 0) return frc;
         if (hIndex == 0) {
             // "Back to natural order" via the explicit API: send the reset
             // frame so the server drops its ordered_tables_ entry (it used
@@ -16296,13 +16480,17 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrderByHandle(ADSHANDLE hTable, ADSHANDLE hInde
                 rt->active_index_id = 0;
                 return ok();
             }
-            auto r = rt->conn->set_order_by_name(rt->id, "");
-            if (!r) return fail(r.error());
+            // Defer: a following GotoTop/Bottom absorbs this into its
+            // fused frame; anything else flushes it plainly first.
+            // Belief updates now (active_index_id); the ack-confirmed
+            // server_order_id only when a frame actually goes out.
+            // Position is retained, but order-relative caches must go:
+            // the keyno/count describe the OLD order from here on.
             rt->active_index_id = 0;
-            rt->server_order_id = 0;
-            rt->keyno_valid     = false;
+            rt->pending_order = true;
+            rt->pending_order_id = 0;
+            rt->keyno_valid = false;
             rt->key_count_cached = false;
-            rt->row_valid       = false;
             rt->invalidate_prefetch();
             return ok();
         }
@@ -16314,16 +16502,12 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrderByHandle(ADSHANDLE hTable, ADSHANDLE hInde
                 rt->active_index_id = ri->id;
                 return ok();
             }
-            auto r = rt->conn->set_order(rt->id, ri->id);
-            if (!r) return fail(r.error());
+            // Defer (see above).
             rt->active_index_id = ri->id;
-            rt->server_order_id = ri->id;
-            rt->keyno_valid     = false;
+            rt->pending_order = true;
+            rt->pending_order_id = ri->id;
+            rt->keyno_valid = false;
             rt->key_count_cached = false;
-            // RCB 07/14/2026: BUG FIX -- order changed, so the cached row and
-            // the queued lookahead rows are in the wrong order. Drop them.
-            // (Same stale-queue family as AdsSeek / AdsSetIndexOrder.)
-            rt->row_valid = false;
             rt->invalidate_prefetch();
             return ok();
         }

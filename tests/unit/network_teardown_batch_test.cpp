@@ -195,7 +195,7 @@ TEST_CASE("Teardown batching: existence positives cache until mutation") {
     srv.stop();
 }
 
-TEST_CASE("Teardown batching: same-order SetOrder skips its frame") {
+TEST_CASE("Teardown batching: SetOrder defers until use") {
     tb_wipe();
     auto dir = tb_tmp_dir();
     tb_seed(dir);
@@ -210,23 +210,26 @@ TEST_CASE("Teardown batching: same-order SetOrder skips its frame") {
     REQUIRE(AdsGetIndexHandle(hTable, want, &hOrd) == AE_SUCCESS);
     REQUIRE(hOrd != 0);
 
+    // SetOrder alone sends nothing (deferred); repeats overwrite the
+    // pending switch, by name or by handle alike.
     const std::uint64_t so0 = tb_op(kOpSetOrder);
     REQUIRE(AdsSetIndexOrderByHandle(hTable, hOrd) == AE_SUCCESS);
-    CHECK(tb_op(kOpSetOrder) == so0 + 1);
-    // Repeat to the same binding: no frame (SetOrder moves no cursor).
+    CHECK(tb_op(kOpSetOrder) == so0);
     REQUIRE(AdsSetIndexOrderByHandle(hTable, hOrd) == AE_SUCCESS);
-    REQUIRE(AdsSetIndexOrderByHandle(hTable, hOrd) == AE_SUCCESS);
-    CHECK(tb_op(kOpSetOrder) == so0 + 1);
-
-    // By name to the same tag: also skipped.
     REQUIRE(AdsSetIndexOrder(hTable, want) == AE_SUCCESS);
-    CHECK(tb_op(kOpSetOrder) == so0 + 1);
+    CHECK(tb_op(kOpSetOrder) == so0);
 
-    // Order still functional: top lands on the smallest ID (rec 1).
+    // The following nav absorbs it (fused frame — see nav_batch);
+    // order lands correctly.
     REQUIRE(AdsGotoTop(hOrd) == AE_SUCCESS);
+    CHECK(tb_op(kOpSetOrder) == so0);
     UNSIGNED32 rec = 0;
     REQUIRE(AdsGetRecordNum(hTable, 0, &rec) == AE_SUCCESS);
     CHECK(rec == 1u);
+
+    // Now the server binding matches: a repeat skips outright.
+    REQUIRE(AdsSetIndexOrderByHandle(hTable, hOrd) == AE_SUCCESS);
+    CHECK(tb_op(kOpSetOrder) == so0);
 
     REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
     REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);

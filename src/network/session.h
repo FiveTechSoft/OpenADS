@@ -225,6 +225,11 @@ private:
                                         std::uint32_t id,
                                         openads::engine::Table* tbl);
     void      sync_engine_cursor(std::uint32_t id);
+    // Install index iid as table tid's controlling order (iid 0 =
+    // natural), shared by the SetOrder handler and the fused nav+order
+    // path in GotoTop/GotoBottom. Returns 0 on success, else the ACE
+    // code; the caller formats the err() frame.
+    UNSIGNED32  install_table_order(std::uint32_t tid, std::uint32_t iid);
     // Apply field writes to the current record; shared by the SetField
     // (single) and SetFields (batch) handlers so both maintain the twin
     // handle, bags and engine cursor identically. tbl is the already

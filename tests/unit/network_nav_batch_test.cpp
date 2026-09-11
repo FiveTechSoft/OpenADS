@@ -31,6 +31,9 @@ constexpr std::uint8_t kOpGotoTop    = 0x40;
 constexpr std::uint8_t kOpAtEOF      = 0x48;
 constexpr std::uint8_t kOpAtBOF      = 0x4C;
 constexpr std::uint8_t kOpGotoBottom = 0x64;
+constexpr std::uint8_t kOpSetOrder   = 0x8C;
+constexpr std::uint8_t kOpKeyCount   = 0xB0;
+constexpr std::uint8_t kOpCloseTable = 0x22;
 
 fs::path nb_tmp_dir() {
     return fs::temp_directory_path() / "openads_navbatch_test";
@@ -106,6 +109,36 @@ UNSIGNED16 nb_eof(ADSHANDLE hTable) {
     UNSIGNED16 v = 0;
     REQUIRE(AdsAtEOF(hTable, &v) == AE_SUCCESS);
     return v;
+}
+
+// Ordered fixture: physical IDs 30/10/20, tag BYID on ID.
+// Natural top is rec 1, ordered top is rec 2.
+void nb_seed_ord(const fs::path& dir) {
+    UNSIGNED8 srv[512]{};
+    std::memcpy(srv, dir.string().c_str(), dir.string().size());
+    ADSHANDLE hConn0 = 0;
+    REQUIRE(AdsConnect60(srv, ADS_LOCAL_SERVER, nullptr, nullptr, 0, &hConn0)
+            == AE_SUCCESS);
+    UNSIGNED8 def[]   = "ID,N,8,0";
+    UNSIGNED8 tname[] = "ord.dbf";
+    ADSHANDLE hT = 0;
+    REQUIRE(AdsCreateTable(hConn0, tname, nullptr, ADS_CDX, 0, 0, 0, 0, def,
+                           &hT) == AE_SUCCESS);
+    UNSIGNED8 fld[] = "ID";
+    const double ids[] = {30.0, 10.0, 20.0};
+    for (double id : ids) {
+        REQUIRE(AdsAppendRecord(hT) == AE_SUCCESS);
+        REQUIRE(AdsSetDouble(hT, fld, id) == AE_SUCCESS);
+        REQUIRE(AdsWriteRecord(hT) == AE_SUCCESS);
+    }
+    ADSHANDLE hI = 0;
+    UNSIGNED8 bag[] = "ord.cdx";
+    UNSIGNED8 tag[] = "BYID";
+    UNSIGNED8 exp[] = "ID";
+    REQUIRE(AdsCreateIndex61(hT, bag, tag, exp, nullptr, nullptr,
+                             ADS_COMPOUND, 512, &hI) == AE_SUCCESS);
+    REQUIRE(AdsCloseTable(hT) == AE_SUCCESS);
+    REQUIRE(AdsDisconnect(hConn0) == AE_SUCCESS);
 }
 
 } // namespace
@@ -224,33 +257,7 @@ TEST_CASE("Nav batching: twin flag halves the BOF/EOF pair") {
 
 TEST_CASE("Nav batching: order context defeats duplicate suppression") {    nb_wipe();
     auto dir = nb_tmp_dir();
-
-    // Physical IDs 30/10/20: natural top is rec 1, ordered top is rec 2.
-    UNSIGNED8 srv[512]{};
-    std::memcpy(srv, dir.string().c_str(), dir.string().size());
-    ADSHANDLE hConn0 = 0;
-    REQUIRE(AdsConnect60(srv, ADS_LOCAL_SERVER, nullptr, nullptr, 0, &hConn0)
-            == AE_SUCCESS);
-    UNSIGNED8 def[]   = "ID,N,8,0";
-    UNSIGNED8 tname[] = "ord.dbf";
-    ADSHANDLE hT = 0;
-    REQUIRE(AdsCreateTable(hConn0, tname, nullptr, ADS_CDX, 0, 0, 0, 0, def,
-                           &hT) == AE_SUCCESS);
-    UNSIGNED8 fld[] = "ID";
-    const double ids[] = {30.0, 10.0, 20.0};
-    for (double id : ids) {
-        REQUIRE(AdsAppendRecord(hT) == AE_SUCCESS);
-        REQUIRE(AdsSetDouble(hT, fld, id) == AE_SUCCESS);
-        REQUIRE(AdsWriteRecord(hT) == AE_SUCCESS);
-    }
-    ADSHANDLE hI = 0;
-    UNSIGNED8 bag[] = "ord.cdx";
-    UNSIGNED8 tag[] = "BYID";
-    UNSIGNED8 exp[] = "ID";
-    REQUIRE(AdsCreateIndex61(hT, bag, tag, exp, nullptr, nullptr,
-                             ADS_COMPOUND, 512, &hI) == AE_SUCCESS);
-    REQUIRE(AdsCloseTable(hT) == AE_SUCCESS);
-    REQUIRE(AdsDisconnect(hConn0) == AE_SUCCESS);
+    nb_seed_ord(dir);
 
     openads::network::Server s;
     REQUIRE(s.start("127.0.0.1", 0).has_value());
@@ -360,6 +367,109 @@ TEST_CASE("Nav batching: skip-established limits answer locally") {
     CHECK(nb_eof(hTable) == 0);
     CHECK(nb_op(kOpAtBOF) == bof1);
     CHECK(nb_op(kOpAtEOF) == eof1 + 1);
+
+    REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
+    REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
+    s.stop();
+}
+
+TEST_CASE("Nav batching: deferred SetOrder fuses into GotoTop") {
+    nb_wipe();
+    auto dir = nb_tmp_dir();
+    nb_seed_ord(dir);
+
+    openads::network::Server s;
+    REQUIRE(s.start("127.0.0.1", 0).has_value());
+    ADSHANDLE hConn = nb_connect_remote(dir, s.port());
+    ADSHANDLE hTable = nb_open(hConn, "ord.dbf");
+
+    ADSHANDLE hOrd = 0;
+    REQUIRE(AdsGetIndexHandleByOrder(hTable, 1, &hOrd) == AE_SUCCESS);
+    REQUIRE(hOrd != 0);
+
+    // SetOrder alone sends nothing; the following GotoTop absorbs it:
+    // one GotoTop frame, zero SetOrder frames, ordered position.
+    const std::uint64_t so0 = nb_op(kOpSetOrder);
+    const std::uint64_t top0 = nb_op(kOpGotoTop);
+    REQUIRE(AdsSetIndexOrderByHandle(hTable, hOrd) == AE_SUCCESS);
+    CHECK(nb_op(kOpSetOrder) == so0);
+    REQUIRE(AdsGotoTop(hOrd) == AE_SUCCESS);
+    CHECK(nb_op(kOpSetOrder) == so0);
+    CHECK(nb_op(kOpGotoTop) == top0 + 1);
+    UNSIGNED32 rec = 0;
+    REQUIRE(AdsGetRecordNum(hTable, 0, &rec) == AE_SUCCESS);
+    CHECK(rec == 2u);
+
+    // Same pair to the bottom: fused the same way.
+    const std::uint64_t bot0 = nb_op(kOpGotoBottom);
+    REQUIRE(AdsSetIndexOrderByHandle(hTable, hOrd) == AE_SUCCESS);
+    CHECK(nb_op(kOpSetOrder) == so0);
+    REQUIRE(AdsGotoBottom(hOrd) == AE_SUCCESS);
+    CHECK(nb_op(kOpSetOrder) == so0);
+    CHECK(nb_op(kOpGotoBottom) == bot0 + 1);
+
+    REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
+    REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
+    s.stop();
+}
+
+TEST_CASE("Nav batching: close absorbs a deferred switch") {
+    nb_wipe();
+    auto dir = nb_tmp_dir();
+    nb_seed_ord(dir);
+
+    openads::network::Server s;
+    REQUIRE(s.start("127.0.0.1", 0).has_value());
+    ADSHANDLE hConn = nb_connect_remote(dir, s.port());
+    ADSHANDLE hTable = nb_open(hConn, "ord.dbf");
+
+    ADSHANDLE hOrd = 0;
+    REQUIRE(AdsGetIndexHandleByOrder(hTable, 1, &hOrd) == AE_SUCCESS);
+    REQUIRE(hOrd != 0);
+
+    // Deferred switch that never reaches any wire op dies silently
+    // with the close (bindings die with the handle).
+    const std::uint64_t so0 = nb_op(kOpSetOrder);
+    const std::uint64_t cl0 = nb_op(kOpCloseTable);
+    REQUIRE(AdsSetIndexOrderByHandle(hTable, hOrd) == AE_SUCCESS);
+    CHECK(nb_op(kOpSetOrder) == so0);
+    REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
+    CHECK(nb_op(kOpSetOrder) == so0);
+    CHECK(nb_op(kOpCloseTable) == cl0 + 1);
+
+    REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
+    s.stop();
+}
+
+TEST_CASE("Nav batching: non-nav op flushes a deferred switch plainly") {
+    nb_wipe();
+    auto dir = nb_tmp_dir();
+    nb_seed_ord(dir);
+
+    openads::network::Server s;
+    REQUIRE(s.start("127.0.0.1", 0).has_value());
+    ADSHANDLE hConn = nb_connect_remote(dir, s.port());
+    ADSHANDLE hTable = nb_open(hConn, "ord.dbf");
+
+    ADSHANDLE hOrd = 0;
+    REQUIRE(AdsGetIndexHandleByOrder(hTable, 1, &hOrd) == AE_SUCCESS);
+    REQUIRE(hOrd != 0);
+
+    // A key count needs the binding: the deferred switch goes out
+    // plainly first, then the count.
+    const std::uint64_t so0 = nb_op(kOpSetOrder);
+    const std::uint64_t kc0 = nb_op(kOpKeyCount);
+    REQUIRE(AdsSetIndexOrderByHandle(hTable, hOrd) == AE_SUCCESS);
+    CHECK(nb_op(kOpSetOrder) == so0);
+    UNSIGNED32 kc = 0;
+    REQUIRE(AdsGetKeyCount(hOrd, 0, &kc) == AE_SUCCESS);
+    CHECK(kc == 3u);
+    CHECK(nb_op(kOpSetOrder) == so0 + 1);
+    CHECK(nb_op(kOpKeyCount) == kc0 + 1);
+    // And again, cached this time.
+    REQUIRE(AdsGetKeyCount(hOrd, 0, &kc) == AE_SUCCESS);
+    CHECK(kc == 3u);
+    CHECK(nb_op(kOpKeyCount) == kc0 + 1);
 
     REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
     REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);

@@ -1240,6 +1240,57 @@ void Session::sync_engine_cursor(std::uint32_t id) {
     (void)tbl->goto_record(rn);
 }
 
+// Fused nav+order path (SetOrder+GotoTop in one frame): install index
+// iid as table tid's controlling order. Factored out of the SetOrder
+// handler so GotoTop/GotoBottom can take an order section without
+// duplicating the self-heal logic. Returns 0 on success, else the ACE
+// code for the caller to format.
+UNSIGNED32 Session::install_table_order(std::uint32_t tid,
+                                        std::uint32_t iid) {
+    ADSHANDLE ht = ensure_abi_handle(tid);
+    if (ht == 0) return openads::AE_NO_FILE_FOUND;
+    // iid 0 = natural order (rddads DbSetOrder(0)). A missing
+    // map entry used to err() with default 5000 and poison B_BIG.
+    if (iid == 0) {
+        UNSIGNED32 rrc = AdsSetIndexOrder(ht, nullptr);
+        if (rrc != 0) return rrc;
+        ordered_tables_.erase(tid);
+        sync_engine_cursor(tid);
+        return openads::AE_SUCCESS;
+    }
+    auto iit = index_h_.find(iid);
+    if (iit == index_h_.end()) {
+        return openads::AE_NO_FILE_FOUND;
+    }
+    UNSIGNED32 rrc = AdsSetIndexOrderByHandle(ht, iit->second);
+    if (rrc != 0) {
+        // Self-heal (B_BIG storm 700): a server-side silent-overwrite
+        // CREATE INDEX or AdsCloseAllIndexes re-creates the ABI binding
+        // under a fresh handle while index_h_[iid] still holds the dead
+        // one -> 5000 "index not bound to table". Re-resolve the tag's
+        // CURRENT binding and retry once; on success refresh index_h_.
+        std::string tag;
+        if (auto tit = index_tag_.find(iid); tit != index_tag_.end())
+            tag = tit->second;
+        if (!tag.empty()) {
+            std::vector<UNSIGNED8> tb(tag.size() + 1);
+            std::memcpy(tb.data(), tag.data(), tag.size());
+            ADSHANDLE h_fresh = 0;
+            if (AdsGetIndexHandle(ht, tb.data(), &h_fresh) == 0 &&
+                h_fresh != 0 && h_fresh != iit->second) {
+                WTRACE("[wire] SetOrder iid=%u stale handle, healed via tag '%s'\n",
+                       iid, tag.c_str());
+                rrc = AdsSetIndexOrderByHandle(ht, h_fresh);
+                if (rrc == 0) iit->second = h_fresh;
+            }
+        }
+    }
+    if (rrc != 0) return rrc;
+    ordered_tables_.insert(tid);
+    sync_engine_cursor(tid);
+    return openads::AE_SUCCESS;
+}
+
 Session::FieldWriteResult Session::write_fields(std::uint32_t id,
         openads::engine::Table* tbl,
         const std::vector<std::pair<std::string, std::string>>& pairs) {
@@ -1601,7 +1652,8 @@ DispatchResult Session::dispatch(const Frame& f) {
             {
                 const std::uint32_t scaps =
                     openads::network::kCapSetFieldsBatch |
-                    openads::network::kCapFlushInCloseAll;
+                    openads::network::kCapFlushInCloseAll |
+                    openads::network::kCapNavOrderFuse;
                 reply.payload.push_back(
                     static_cast<std::uint8_t>( scaps        & 0xFFu));
                 reply.payload.push_back(
@@ -1922,6 +1974,16 @@ DispatchResult Session::dispatch(const Frame& f) {
                 reply.opcode = Opcode::GotoTopAck;
                 pack_row_trailer(reply, id);
                 break;
+            }
+            // Fused nav+order: trailing [u8 0x01][u32 order_id] after
+            // the optional depth hint installs the order before
+            // navigating, collapsing SetOrder+GotoTop into one frame.
+            // Length-gated (old clients stop at byte 6); cursor tables
+            // above ignore it (their orders are query-fixed).
+            if (f.payload.size() >= 11 && f.payload[6] == 0x01) {
+                std::uint32_t oiid = read_u32_le(f.payload.data() + 7);
+                UNSIGNED32 oorc = install_table_order(id, oiid);
+                if (oorc != 0) { reply = err("SetOrder", oorc); break; }
             }
             auto it = tbls_.find(id);
             if (it == tbls_.end() || !sess_conn_) {
@@ -2427,6 +2489,14 @@ DispatchResult Session::dispatch(const Frame& f) {
                 reply.opcode = Opcode::GotoBottomAck;
                 pack_row_trailer(reply, id);
                 break;
+            }
+            // Fused nav+order: trailing [u8 0x01][u32 order_id].
+            // (GotoBottom carries no depth hint, so the section starts
+            // at byte 4.)
+            if (f.payload.size() >= 9 && f.payload[4] == 0x01) {
+                std::uint32_t oiid = read_u32_le(f.payload.data() + 5);
+                UNSIGNED32 oorc = install_table_order(id, oiid);
+                if (oorc != 0) { reply = err("SetOrder", oorc); break; }
             }
             auto it = tbls_.find(id);
             if (it == tbls_.end() || !sess_conn_) {
@@ -3125,50 +3195,18 @@ DispatchResult Session::dispatch(const Frame& f) {
             if (f.payload.size() < 8) { reply = err("SetOrder: bad payload"); break; }
             std::uint32_t tid = read_u32_le(f.payload.data());
             std::uint32_t iid = read_u32_le(f.payload.data() + 4);
-            ADSHANDLE ht = ensure_abi_handle(tid);
-            if (ht == 0) { reply = err("SetOrder: bad table id"); break; }
-            // iid 0 = natural order (rddads DbSetOrder(0)). A missing
-            // map entry used to err() with default 5000 and poison B_BIG.
-            if (iid == 0) {
-                UNSIGNED32 rrc = AdsSetIndexOrder(ht, nullptr);
-                if (rrc != 0) { reply = err("SetOrder", rrc); break; }
-                ordered_tables_.erase(tid);
-                sync_engine_cursor(tid);
-                reply.opcode = Opcode::SetOrderAck;
+            UNSIGNED32 orc = install_table_order(tid, iid);
+            if (orc != 0) {
+                // Distinguish unknown-index (5018, historical) from a
+                // bad table id: install returns NO_FILE_FOUND for both,
+                // and the table-id case previously read "bad table id".
+                auto it = tbls_.find(tid);
+                if (it == tbls_.end())
+                    reply = err("SetOrder: bad table id");
+                else
+                    reply = err("SetOrder", orc);
                 break;
             }
-            auto iit = index_h_.find(iid);
-            if (iit == index_h_.end()) {
-                reply = err("SetOrder: unknown index id",
-                            openads::AE_NO_FILE_FOUND);
-                break;
-            }
-            UNSIGNED32 rrc = AdsSetIndexOrderByHandle(ht, iit->second);
-            if (rrc != 0) {
-                // Self-heal (B_BIG storm 700): a server-side silent-overwrite
-                // CREATE INDEX or AdsCloseAllIndexes re-creates the ABI binding
-                // under a fresh handle while index_h_[iid] still holds the dead
-                // one -> 5000 "index not bound to table". Re-resolve the tag's
-                // CURRENT binding and retry once; on success refresh index_h_.
-                std::string tag;
-                if (auto tit = index_tag_.find(iid); tit != index_tag_.end())
-                    tag = tit->second;
-                if (!tag.empty()) {
-                    std::vector<UNSIGNED8> tb(tag.size() + 1);
-                    std::memcpy(tb.data(), tag.data(), tag.size());
-                    ADSHANDLE h_fresh = 0;
-                    if (AdsGetIndexHandle(ht, tb.data(), &h_fresh) == 0 &&
-                        h_fresh != 0 && h_fresh != iit->second) {
-                        WTRACE("[wire] SetOrder iid=%u stale handle, healed via tag '%s'\n",
-                               iid, tag.c_str());
-                        rrc = AdsSetIndexOrderByHandle(ht, h_fresh);
-                        if (rrc == 0) iit->second = h_fresh;
-                    }
-                }
-            }
-            if (rrc != 0) { reply = err("SetOrder", rrc); break; }
-            ordered_tables_.insert(tid);
-            sync_engine_cursor(tid);
             reply.opcode = Opcode::SetOrderAck;
             break;
         }

@@ -609,6 +609,14 @@ inline constexpr std::uint32_t kCapSetFieldsBatch = 0x00000010u;
 // carries this bit.
 inline constexpr std::uint32_t kCapFlushInCloseAll = 0x00000020u;
 
+// Fused nav+order (SetOrder+GotoTop/GotoBottom in one frame): the
+// GotoTop request carries an optional trailing [u8 0x01][u32 order_id]
+// after the depth hint (GotoBottom: right after the table id), and the
+// server installs the order before navigating. Same two-way gating;
+// old servers ignore the trailer (prefix-only parse), old clients
+// never emit it.
+inline constexpr std::uint32_t kCapNavOrderFuse = 0x00000040u;
+
 // Warm OpenTableAck sections (USE latency). After the fixed
 // `[u32 id][u16 bag_len][bag]` prefix, the ack carries
 // `[u8 section_count]` then that many TLVs:

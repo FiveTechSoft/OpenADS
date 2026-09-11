@@ -105,6 +105,33 @@ de la tabla en los paths calientes (goto/skip/bof/eof), para atribuir
 bloques de probes a su tabla y separar locales (~0 ms) de wire (~RTT).
 Su chunk mostró el hueco restante: probes AtBOF post-EOF a wire.
 
+---
+
+## 2026-09-11 — Fused SetOrder+Goto (rotación por tag en 1 frame)
+
+### Pedido de Pritpal Bedi
+
+Vouch rota órdenes por tabla (`SetOrder` + `GotoTop` por tag). Cada
+rotación costaba 2 frames; el trace muestra el par docenas de veces
+por startup (~200 ms por par a ~60 ms RTT con el resto de frames
+intercalados).
+
+### Implementado (sin release)
+
+- **Servidor:** `install_table_order(tid, iid)` factorizado del handler
+  `SetOrder` (incl. self-heal); `GotoTop`/`GotoBottom` aceptan sección
+  trailing `[0x01][order]` (length-gated; viejos la ignoran) e instalan
+  antes de navegar. Bit `kCapNavOrderFuse` (echo + advertise).
+- **Cliente:** `SetOrder*` difiere (belief inmediata, sin frame;
+  overwrite entre switches; probe de error preservada para tags no
+  mapeados). `GotoTop/Bottom` (tabla e índice) absorben el pendiente
+  en frame fusionado (caps) o flushean plano (legacy). `flush_pending`
+  integra el flush; pool excluye pendientes; close/disconnect absorben.
+- **Tests:** fusión top/bottom (1 Goto + 0 SetOrder), absorb en close,
+  flush plano en non-nav, skip-if-same tras fusión. Suite 1550/1551
+  (solo CDX pre-existente).
+- Estimación: ~400 pares/rotación ≈ **20–25 s** del startup.
+
 ### Completitud de límites: not_bof/not_eof + bound cache
 
 - Skip/top/bottom establecen proven-false (`nav_not_*`): skip

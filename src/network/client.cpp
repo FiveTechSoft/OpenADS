@@ -307,7 +307,7 @@ void connect_pack_payload(std::vector<std::uint8_t>& payload,
     // to a client that only understands forward ones (see kCapPrefetchBackward).
     std::uint32_t caps = kCapPrefetchConsume | kCapPrefetchBackward
                        | kCapOpenTableMode | kCapSetFieldsBatch
-                       | kCapFlushInCloseAll;
+                       | kCapFlushInCloseAll | kCapNavOrderFuse;
     for (int i = 0; i < 4; ++i)
         payload.push_back(static_cast<std::uint8_t>((caps >> (8 * i)) & 0xFFu));
 }
@@ -1008,6 +1008,48 @@ util::Result<void> RemoteConnection::goto_bottom(RemoteTable* rt) {
     Frame req;
     req.opcode = Opcode::GotoBottom;
     write_u32_le(rt->id, req.payload);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::GotoBottomAck) {
+        return util::Error{5000, 0, "GotoBottom: server error", ""};
+    }
+    parse_row_trailer_into(rt, rep.value().payload, 0);
+    return {};
+}
+
+// Fused nav+order: trailing [u8 0x01][u32 order_id] installs the order
+// before navigating (see kCapNavOrderFuse). Caller guarantees the
+// server advertised the bit; old servers must never see this shape
+// (their prefix-only parse would navigate the stale binding).
+util::Result<void> RemoteConnection::goto_top_fused(RemoteTable* rt,
+                                                    std::uint32_t order_id) {
+    note_nav_frame();
+    Frame req;
+    req.opcode = Opcode::GotoTop;
+    write_u32_le(rt->id, req.payload);
+    req.payload.push_back(
+        static_cast<std::uint8_t>(rt->cache_records_hint & 0xFFu));
+    req.payload.push_back(
+        static_cast<std::uint8_t>((rt->cache_records_hint >> 8) & 0xFFu));
+    req.payload.push_back(0x01);
+    write_u32_le(order_id, req.payload);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::GotoTopAck) {
+        return util::Error{5000, 0, "GotoTop: server error", ""};
+    }
+    parse_row_trailer_into(rt, rep.value().payload, 0);
+    return {};
+}
+
+util::Result<void> RemoteConnection::goto_bottom_fused(RemoteTable* rt,
+                                                       std::uint32_t order_id) {
+    note_nav_frame();
+    Frame req;
+    req.opcode = Opcode::GotoBottom;
+    write_u32_le(rt->id, req.payload);
+    req.payload.push_back(0x01);
+    write_u32_le(order_id, req.payload);
     auto rep = request(req);
     if (!rep) return rep.error();
     if (rep.value().opcode != Opcode::GotoBottomAck) {
