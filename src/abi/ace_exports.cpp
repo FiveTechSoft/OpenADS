@@ -1394,58 +1394,65 @@ bool remote_table_has_index(const openads::network::RemoteTable* rt) {
            (rt->active_index_id != 0 || !rt->index_by_tag.empty());
 }
 
-static void cli_trace(const char* fmt, ...) {
+// Grid log for WAN diagnosis: fixed-width columns (3-space separated,
+// like ads_err.log) plus a variable-length detail tail, so both naked
+// eyes and analytical tools can parse it:
+//
+//   [+       123ms]   [V_USRCFG    ]   [AdsAtBOF            ]   nav=0 row=1
+//    | ms since trace start | table alias | operation       | detail...
+//
+// Same-ms runs read as locally served calls; an RTT-sized jump between
+// adjacent lines is exactly one wire round-trip.
+static void cli_trace_line(long long ms, const char* who, const char* op,
+                           const char* detail) {
     static const bool on = openads::util::client_setting_truthy(
         "OPENADS_WIRE_TRACE", "wire_trace");
     if (!on) return;
     FILE* hf = std::fopen("C:/tmp/cli_trace.log", "a");
     if (hf == nullptr) return;
+    std::fprintf(hf, "[+%9lldms]   [%-12.12s]   [%-20.20s]   %s\n", ms,
+                 who != nullptr ? who : "-",
+                 op != nullptr ? op : "-", detail != nullptr ? detail : "");
+    std::fclose(hf);
+}
+
+static long long cli_trace_ms() {
     // Millisecond stamp since the first traced call: adjacent-line gaps
     // separate local answers (~0 ms) from wire round-trips (~RTT ms),
     // which is the whole point of reading this log.
     static const auto t0 = std::chrono::steady_clock::now();
-    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - t0).count();
-    std::fprintf(hf, "[+%lldms] ", static_cast<long long>(ms));
+    return static_cast<long long>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t0)
+            .count());
+}
+
+static void cli_trace(const char* op, const char* fmt, ...) {
     char buf[512];
-    va_list ap; va_start(ap, fmt);
+    va_list ap;
+    va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf) - 1, fmt, ap);
     va_end(ap);
     buf[sizeof(buf) - 1] = 0;
-    std::fwrite(buf, 1, std::strlen(buf), hf);
-    std::fwrite("\n", 1, 1, hf);
-    std::fclose(hf);
+    cli_trace_line(cli_trace_ms(), "-", op, buf);
 }
-
-// Table-attributed variant: inserts the table alias (falling back to
-// the file name when the open carried no alias) between the timestamp
-// and the message, so repeated probe blocks can be attributed to the
-// table that paid them: "[+123ms] [V_USRCFG] [cli] AdsAtBOF ...".
+// Table-attributed variant: the alias (file name when the open
+// carried none) goes in the grid's table column, so repeated probe
+// blocks attribute to the table that paid them.
 static void cli_trace_tbl(const openads::network::RemoteTable* rt,
-                          const char* fmt, ...) {
-    static const bool on = openads::util::client_setting_truthy(
-        "OPENADS_WIRE_TRACE", "wire_trace");
-    if (!on) return;
-    FILE* hf = std::fopen("C:/tmp/cli_trace.log", "a");
-    if (hf == nullptr) return;
-    static const auto t0 = std::chrono::steady_clock::now();
-    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - t0).count();
+                          const char* op, const char* fmt, ...) {
     std::string who;
     if (rt != nullptr) {
         who = !rt->alias.empty() ? rt->alias : rt->name;
     }
     if (who.empty()) who = "-";
-    std::fprintf(hf, "[+%lldms] [%s] ",
-                 static_cast<long long>(ms), who.c_str());
     char buf[512];
-    va_list ap; va_start(ap, fmt);
+    va_list ap;
+    va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf) - 1, fmt, ap);
     va_end(ap);
     buf[sizeof(buf) - 1] = 0;
-    std::fwrite(buf, 1, std::strlen(buf), hf);
-    std::fwrite("\n", 1, 1, hf);
-    std::fclose(hf);
+    cli_trace_line(cli_trace_ms(), who.c_str(), op, buf);
 }
 
 void remote_clear_nav_boundaries(openads::network::RemoteTable* rt) {
@@ -1785,7 +1792,7 @@ UNSIGNED32 remote_goto_key_num(openads::network::RemoteTable* rt,
     const std::uint32_t kmax = remote_table_has_index(rt)
         ? remote_ensure_key_count(rt)
         : (rt->rec_count_cached ? rt->cached_rec_count : 0u);
-    cli_trace("[cli] goto_key_num: want=%u kmax=%u", keyno, kmax);
+    cli_trace("goto_key_num", "want=%u kmax=%u", keyno, kmax);
     if (kmax > 0 && keyno > kmax) {
         keyno = kmax;
     }
@@ -10316,7 +10323,7 @@ UNSIGNED32 ENTRYPOINT AdsGotoTop(ADSHANDLE hTable) {
     if (auto* ri = get_remote_index(hTable)) {
         if (UNSIGNED32 frc = remote_flush_pending(ri->parent); frc != 0) return frc;
         if (remote_nav_duplicate(ri->parent, 1, ri->id)) {
-            cli_trace_tbl(ri->parent, "[cli] AdsGotoTop(idx): duplicate suppressed");
+            cli_trace_tbl(ri->parent, "AdsGotoTop(idx)", "duplicate suppressed");
             remote_sync_keyno_gototop(ri->parent);
             if (Handle th = handle_for_remote_table(ri->parent))
                 apply_relations_for_handle(to_ads_handle(th));
@@ -10326,7 +10333,7 @@ UNSIGNED32 ENTRYPOINT AdsGotoTop(ADSHANDLE hTable) {
         if (!r) return fail(r.error());
         remote_sync_keyno_gototop(ri->parent);
         remote_nav_stamp(ri->parent, 1, ri->id);
-        cli_trace_tbl(ri->parent, "[cli] AdsGotoTop(idx): row_valid=%d recno=%u keyno=%u eof=%d bof=%d",
+        cli_trace_tbl(ri->parent, "AdsGotoTop(idx)", "row_valid=%d recno=%u keyno=%u eof=%d bof=%d",
                   (int)ri->parent->row_valid, ri->parent->current_recno,
                   ri->parent->current_keyno, (int)ri->parent->nav_at_eof,
                   (int)ri->parent->nav_at_bof);
@@ -10341,7 +10348,7 @@ UNSIGNED32 ENTRYPOINT AdsGotoTop(ADSHANDLE hTable) {
         // the cache.
         rt->found_cached = true; rt->current_found = false;  // M12.21: GoTop clears Found()
         if (remote_nav_duplicate(rt, 1, rt->server_order_id)) {
-            cli_trace_tbl(rt, "[cli] AdsGotoTop: duplicate suppressed");
+            cli_trace_tbl(rt, "AdsGotoTop", "duplicate suppressed");
             remote_sync_keyno_gototop(rt);
             apply_relations_for_handle(hTable);
             return ok();
@@ -10374,7 +10381,7 @@ UNSIGNED32 ENTRYPOINT AdsGotoBottom(ADSHANDLE hTable) {
     if (auto* ri = get_remote_index(hTable)) {
         if (UNSIGNED32 frc = remote_flush_pending(ri->parent); frc != 0) return frc;
         if (remote_nav_duplicate(ri->parent, 2, ri->id)) {
-            cli_trace_tbl(ri->parent, "[cli] AdsGotoBottom(idx): duplicate suppressed");
+            cli_trace_tbl(ri->parent, "AdsGotoBottom(idx)", "duplicate suppressed");
             remote_sync_keyno_gotobottom(ri->parent);
             if (Handle th = handle_for_remote_table(ri->parent))
                 apply_relations_for_handle(to_ads_handle(th));
@@ -10384,7 +10391,7 @@ UNSIGNED32 ENTRYPOINT AdsGotoBottom(ADSHANDLE hTable) {
         if (!r) return fail(r.error());
         remote_sync_keyno_gotobottom(ri->parent);
         remote_nav_stamp(ri->parent, 2, ri->id);
-        cli_trace_tbl(ri->parent, "[cli] AdsGotoBottom(idx): row_valid=%d recno=%u keyno=%u eof=%d bof=%d",
+        cli_trace_tbl(ri->parent, "AdsGotoBottom(idx)", "row_valid=%d recno=%u keyno=%u eof=%d bof=%d",
                   (int)ri->parent->row_valid, ri->parent->current_recno,
                   ri->parent->current_keyno, (int)ri->parent->nav_at_eof,
                   (int)ri->parent->nav_at_bof);
@@ -10396,7 +10403,7 @@ UNSIGNED32 ENTRYPOINT AdsGotoBottom(ADSHANDLE hTable) {
         if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         rt->found_cached = true; rt->current_found = false;  // M12.21: GoBottom clears Found()
         if (remote_nav_duplicate(rt, 2, rt->server_order_id)) {
-            cli_trace_tbl(rt, "[cli] AdsGotoBottom: duplicate suppressed");
+            cli_trace_tbl(rt, "AdsGotoBottom", "duplicate suppressed");
             remote_sync_keyno_gotobottom(rt);
             apply_relations_for_handle(hTable);
             return ok();
@@ -10428,7 +10435,7 @@ UNSIGNED32 ENTRYPOINT AdsSkip(ADSHANDLE hTable, SIGNED32 lRows) {
     arc2_trace("AdsSkip");
     seek_last_retry_latch() = false;
     if (auto* ri = get_remote_index(hTable)) {
-        cli_trace_tbl(ri->parent, "[cli] AdsSkip(idx) rows=%d", (int)lRows);
+        cli_trace_tbl(ri->parent, "AdsSkip(idx)", "rows=%d", (int)lRows);
         openads::network::RemoteTable* rt = ri->parent;
         if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         const std::uint32_t rec_before =
@@ -10438,7 +10445,7 @@ UNSIGNED32 ENTRYPOINT AdsSkip(ADSHANDLE hTable, SIGNED32 lRows) {
         if (!r) return fail(r.error());
         remote_sync_keyno_skip(rt, lRows);
         remote_update_nav_boundaries(rt, lRows, rec_before, row_valid_before);
-        cli_trace_tbl(rt, "[cli] AdsSkip(idx) done: row_valid=%d recno=%u keyno=%u eof=%d bof=%d",
+        cli_trace_tbl(rt, "AdsSkip(idx)", "done: row_valid=%d recno=%u keyno=%u eof=%d bof=%d",
                   (int)rt->row_valid, rt->current_recno, rt->current_keyno,
                   (int)rt->nav_at_eof, (int)rt->nav_at_bof);
         if (Handle th = handle_for_remote_table(rt))
@@ -10507,7 +10514,7 @@ UNSIGNED32 ENTRYPOINT AdsAtEOF(ADSHANDLE hTable, UNSIGNED16* pbAtEnd) {
     arc2_trace("AdsAtEOF");
     if (auto* rt = get_remote_table(hTable)) {
         if (pbAtEnd == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
-        cli_trace_tbl(rt, "[cli] AdsAtEOF: nav_eof=%d row_valid=%d",
+        cli_trace_tbl(rt, "AdsAtEOF", "nav_eof=%d row_valid=%d",
                   (int)rt->nav_at_eof, (int)rt->row_valid);
         if (rt->nav_at_eof) { *pbAtEnd = 1; return ok(); }
         // M12.21 option C -- a valid cached current row (including one
@@ -10554,7 +10561,7 @@ UNSIGNED32 ENTRYPOINT AdsAtBOF(ADSHANDLE hTable, UNSIGNED16* pbAtBegin) {
     arc2_trace("AdsAtBOF");
     if (pbAtBegin == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
     if (auto* rt = get_remote_table(hTable)) {
-        cli_trace_tbl(rt, "[cli] AdsAtBOF: nav_bof=%d row_valid=%d",
+        cli_trace_tbl(rt, "AdsAtBOF", "nav_bof=%d row_valid=%d",
                   (int)rt->nav_at_bof, (int)rt->row_valid);
         if (rt->nav_at_bof) { *pbAtBegin = 1; return ok(); }
         // M12.21 option C -- a valid cached current row means the cursor
