@@ -1452,6 +1452,8 @@ void remote_clear_nav_boundaries(openads::network::RemoteTable* rt) {
     if (rt == nullptr) return;
     rt->nav_at_bof = false;
     rt->nav_at_eof = false;
+    rt->nav_not_bof = false;
+    rt->nav_not_eof = false;
 }
 
 void remote_ensure_rec_count(openads::network::RemoteTable* rt) {
@@ -1492,23 +1494,39 @@ void remote_update_nav_boundaries(openads::network::RemoteTable* rt,
                                   std::uint32_t rec_before,
                                   bool row_valid_before) {
     if (rt == nullptr || step == 0) return;
+    // Proven-false stickies derive ONLY from row_valid_before and
+    // landed-row facts — never from the at_* flags, which can predate
+    // scope/filter edits elsewhere. A stale TRUE here would answer a
+    // live boundary call wrongly; a stale FALSE only costs a frame.
     if (step < 0) {
         rt->nav_at_eof = false;
+        rt->nav_not_eof = row_valid_before;
         if (!rt->row_valid) {
             rt->nav_at_bof = true;
+            rt->nav_not_bof = false;
             return;
         }
         rt->nav_at_bof =
             row_valid_before && rt->current_recno == rec_before;
+        // A backward step that lands on a row is on neither limit:
+        // from a row it moved back, from the EOF limit it re-entered.
+        rt->nav_not_bof = true;
+        rt->nav_not_eof = true;
         return;
     }
     rt->nav_at_bof = false;
+    rt->nav_not_bof = row_valid_before;
     if (!rt->row_valid) {
         rt->nav_at_eof = true;
+        rt->nav_not_eof = false;
         return;
     }
     rt->nav_at_eof =
         row_valid_before && rt->current_recno == rec_before;
+    // A forward step that lands on a row is on neither limit either.
+    rt->nav_not_bof = true;
+    rt->nav_not_eof = true;
+    return;
 }
 
 void remote_sync_keyno_gototop(openads::network::RemoteTable* rt) {
@@ -1522,6 +1540,13 @@ void remote_sync_keyno_gototop(openads::network::RemoteTable* rt) {
         rt->keyno_valid   = true;
     } else {
         rt->keyno_valid = false;
+    }
+    // Boundary truth: on a row ⇒ not-BOF; no row ⇒ empty ⇒ both limits.
+    if (rt->row_valid) {
+        rt->nav_not_bof = true;
+    } else {
+        rt->nav_at_bof = true;
+        rt->nav_at_eof = true;
     }
 }
 
@@ -1539,6 +1564,13 @@ void remote_sync_keyno_gotobottom(openads::network::RemoteTable* rt) {
         rt->keyno_valid   = true;
     } else {
         rt->keyno_valid = false;
+    }
+    // Boundary truth: on a row ⇒ not-EOF; no row ⇒ empty ⇒ both limits.
+    if (rt->row_valid) {
+        rt->nav_not_eof = true;
+    } else {
+        rt->nav_at_bof = true;
+        rt->nav_at_eof = true;
     }
 }
 
@@ -1578,6 +1610,35 @@ bool remote_nav_empty_sticky(openads::network::RemoteTable* rt) {
     return rt != nullptr && rt->conn != nullptr && rt->last_nav != 0 &&
            !rt->last_nav_row &&
            rt->last_nav_seq == rt->conn->nav_seq();
+}
+
+// Seq-gated boundary-answer cache. A lone wire answer certifies only
+// its own side (bound_*_ok); the twin half is certified only by the
+// piggybacked twin byte. Any cursor-affecting wire frame expires via
+// the seq; purely-local visibility mutations clear explicitly (same
+// sites as last_nav).
+bool remote_nav_bound_get(openads::network::RemoteTable* rt, bool want_eof,
+                          bool* out) {
+    if (rt == nullptr || rt->conn == nullptr || out == nullptr)
+        return false;
+    if (rt->bound_seq != rt->conn->nav_seq()) return false;
+    if (want_eof && rt->bound_eof_ok) { *out = rt->bound_eof; return true; }
+    if (!want_eof && rt->bound_bof_ok) { *out = rt->bound_bof; return true; }
+    return false;
+}
+void remote_nav_bound_store(openads::network::RemoteTable* rt, bool eof,
+                            bool eof_valid, bool bof, bool bof_valid) {
+    if (rt == nullptr || rt->conn == nullptr) return;
+    rt->bound_eof_ok = eof_valid;
+    rt->bound_eof    = eof;
+    rt->bound_bof_ok = bof_valid;
+    rt->bound_bof    = bof;
+    rt->bound_seq    = rt->conn->nav_seq();
+}
+void remote_nav_bound_clear(openads::network::RemoteTable* rt) {
+    if (rt == nullptr) return;
+    rt->bound_bof_ok = false;
+    rt->bound_eof_ok = false;
 }
 
 void remote_sync_keyno_skip(openads::network::RemoteTable* rt,
@@ -7439,6 +7500,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
             adopted->last_nav = 0;  // re-stamped by the warm GotoTop below
             adopted->flush_file_pending = false;
             adopted->close_all_indexes_pending = false;
+            remote_nav_bound_clear(adopted.get());
             adopted->invalidate_prefetch();
             // close_counted stays true (never decremented at park time),
             // so no re-increment here.
@@ -10454,10 +10516,21 @@ UNSIGNED32 ENTRYPOINT AdsAtEOF(ADSHANDLE hTable, UNSIGNED16* pbAtEnd) {
         // trip. This is what lets a prefetched scan loop, which polls
         // Eof() every iteration, actually shed its per-step round trips.
         if (rt->row_valid) { *pbAtEnd = 0; return ok(); }
+        // Proven not-EOF (skip landed on a row, bottom positioned):
+        // answer locally even with no valid row right now.
+        if (rt->nav_not_eof) { *pbAtEnd = 0; return ok(); }
         // Empty-cursor sticky (see remote_nav_empty_sticky): the last
         // wire nav proved the cursor empty with nothing on the wire
         // since — an empty cursor is EOF without asking the server.
         if (remote_nav_empty_sticky(rt)) { *pbAtEnd = 1; return ok(); }
+        // Seq-gated repeat: same answer as moments ago, still current.
+        {
+            bool be = false;
+            if (remote_nav_bound_get(rt, true, &be)) {
+                *pbAtEnd = be ? 1 : 0;
+                return ok();
+            }
+        }
         auto r = rt->conn->eof_bof(rt->id);
         if (!r) return fail(r.error());
         // Twin flag: the ack carried the BOF answer too — cache it so
@@ -10465,6 +10538,8 @@ UNSIGNED32 ENTRYPOINT AdsAtEOF(ADSHANDLE hTable, UNSIGNED16* pbAtEnd) {
         if (r.value().has_twin)
             rt->nav_at_bof = r.value().bof;
         *pbAtEnd = r.value().eof ? 1 : 0;
+        remote_nav_bound_store(rt, r.value().eof, true, r.value().bof,
+                               r.value().has_twin);
         return ok();
     }
     if (auto* ops = openads::abi::backend_table_ops_for(hTable))
@@ -10486,14 +10561,26 @@ UNSIGNED32 ENTRYPOINT AdsAtBOF(ADSHANDLE hTable, UNSIGNED16* pbAtBegin) {
         // is on a record, so it cannot be at BOF: answer with no round
         // trip (see AdsAtEOF).
         if (rt->row_valid) { *pbAtBegin = 0; return ok(); }
+        // Proven not-BOF: answer locally even with no valid row.
+        if (rt->nav_not_bof) { *pbAtBegin = 0; return ok(); }
         // Empty-cursor sticky: an empty cursor is BOF without asking.
         if (remote_nav_empty_sticky(rt)) { *pbAtBegin = 1; return ok(); }
+        // Seq-gated repeat: same answer as moments ago, still current.
+        {
+            bool bb = false;
+            if (remote_nav_bound_get(rt, false, &bb)) {
+                *pbAtBegin = bb ? 1 : 0;
+                return ok();
+            }
+        }
         auto r = rt->conn->bof_eof(rt->id);
         if (!r) return fail(r.error());
         // Twin flag: cache the EOF answer for the twin half of the pair.
         if (r.value().has_twin)
             rt->nav_at_eof = r.value().eof;
         *pbAtBegin = r.value().bof ? 1 : 0;
+        remote_nav_bound_store(rt, r.value().eof, r.value().has_twin,
+                               r.value().bof, true);
         return ok();
     }
     if (auto* ops = openads::abi::backend_table_ops_for(hTable))
@@ -19295,6 +19382,12 @@ UNSIGNED32 ENTRYPOINT AdsSetScope(ADSHANDLE hIndex, UNSIGNED16 usScope,
             ri->parent->keyno_valid      = false;
             ri->parent->invalidate_prefetch();
             ri->parent->scope_touched    = true;
+            // Visibility may have narrowed to empty (or widened): drop
+            // proven-false boundary answers and the empty sticky.
+            ri->parent->nav_not_bof = false;
+            ri->parent->nav_not_eof = false;
+            ri->parent->last_nav    = 0;
+            remote_nav_bound_clear(ri->parent);
         }
         return ok();
     }
@@ -19392,6 +19485,13 @@ UNSIGNED32 ENTRYPOINT AdsClearScope(ADSHANDLE hIndex, UNSIGNED16 usScope) {
             ri->parent->key_count_cached = false;
             ri->parent->keyno_valid      = false;
             ri->parent->invalidate_prefetch();
+            // Widening can un-empty the cursor: expire the nav stamp
+            // and cached boundary answers (proven-false answers survive
+            // widening, but uniformity beats auditing every path).
+            ri->parent->last_nav    = 0;
+            ri->parent->nav_not_bof = false;
+            ri->parent->nav_not_eof = false;
+            remote_nav_bound_clear(ri->parent);
         }
         return ok();
     }
@@ -19433,6 +19533,8 @@ UNSIGNED32 ENTRYPOINT AdsPackTable(ADSHANDLE hTable) {
         rt->row_valid        = false;               // M12.17/19
         rt->rec_count_cached = false;
         rt->key_count_cached = false;
+        rt->nav_not_bof = false;  // row removal can empty the cursor
+        rt->nav_not_eof = false;
         auto r = rt->conn->pack_table(rt->id);
         if (!r) return fail(r.error());
         return ok();
@@ -19461,6 +19563,8 @@ UNSIGNED32 ENTRYPOINT AdsZapTable(ADSHANDLE hTable) {
         rt->row_valid        = false;               // M12.17/19
         rt->rec_count_cached = false;
         rt->key_count_cached = false;
+        rt->nav_not_bof = false;  // row removal can empty the cursor
+        rt->nav_not_eof = false;
         auto r = rt->conn->zap_table(rt->id);
         if (!r) return fail(r.error());
         return ok();
@@ -19673,6 +19777,12 @@ UNSIGNED32 ENTRYPOINT AdsSetAOF(ADSHANDLE hTable, UNSIGNED8* pucCondition,
         rt->aof_expr = cond;
         rt->row_valid = false;
         rt->prefetch_queue.clear();
+        // Replacement filter can narrow to empty or widen to rows:
+        // expire the nav stamp, proven-false answers and cached answers.
+        rt->last_nav = 0;
+        rt->nav_not_bof = false;
+        rt->nav_not_eof = false;
+        remote_nav_bound_clear(rt);
         return ok();
     }
     if (UNSIGNED32 rc = 0;
@@ -19837,6 +19947,13 @@ UNSIGNED32 ENTRYPOINT AdsClearAOF(ADSHANDLE hTable) {
         if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         auto r = rt->conn->clear_aof(rt->id);
         if (!r) return fail(r.error());
+        // Widening can un-empty the cursor: expire the nav stamp and
+        // cached boundary answers (the wire frame already expired the
+        // seq-gated state; this covers the seq-blind sticky).
+        rt->last_nav = 0;
+        rt->nav_not_bof = false;
+        rt->nav_not_eof = false;
+        remote_nav_bound_clear(rt);
         return ok();
     }
     if (auto* ops = openads::abi::backend_table_ops_for(hTable);
@@ -19854,6 +19971,9 @@ UNSIGNED32 ENTRYPOINT AdsClearFilter(ADSHANDLE hTable) {
     if (auto* rt = get_remote_table(hTable)) {
         rt->filter_expr.clear();
         rt->last_nav = 0;  // local visibility change: expire nav stamp
+        rt->nav_not_bof = false;  // widening-safe to keep; uniformity wins
+        rt->nav_not_eof = false;
+        remote_nav_bound_clear(rt);
         return ok();
     }
     if (auto* ops = openads::abi::backend_table_ops_for(hTable);
@@ -36721,8 +36841,12 @@ UNSIGNED32 ENTRYPOINT AdsSetFilter(ADSHANDLE hTable, UNSIGNED8* pucFilter) {
         // Remote: store the filter expression for later retrieval.
         rt->filter_expr = openads::abi::to_internal(pucFilter, 0);
         // Purely local visibility change (no wire frame): expire the
-        // nav stamp explicitly — the wire-seq rule cannot see it.
+        // nav stamp, proven-false answers and cached answers — the
+        // wire-seq rule cannot see any of them.
         rt->last_nav = 0;
+        rt->nav_not_bof = false;
+        rt->nav_not_eof = false;
+        remote_nav_bound_clear(rt);
         return ok();
     }
     if (UNSIGNED32 rc = 0;

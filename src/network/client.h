@@ -603,6 +603,29 @@ struct RemoteTable {
     bool                     nav_at_bof      = false;
     // Set when a forward Skip cannot move (bottom of order).
     bool                     nav_at_eof      = false;
+    // Proven-FALSE stickies (mirror of the above): set only when the
+    // cursor state entails the answer, cleared whenever position or
+    // visibility could have changed. Lets the twin half of a boundary
+    // pair answer locally even with no valid row — e.g. Skip forward
+    // to EOF proves EOF (nav_at_eof) AND not-BOF (arrived from rows),
+    // so the following AtBOF costs nothing. xBase truth table:
+    // on-a-row ⇒ neither limit; empty cursor ⇒ both limits.
+    bool                     nav_not_bof     = false;
+    bool                     nav_not_eof     = false;
+    // Last boundary answers with the connection seq at answer time.
+    // Repeated identical probes (rddads polls BOF/EOF per paint row)
+    // are served locally while no cursor-affecting frame lands in
+    // between — strictly fresher than the flags above because ANY
+    // wire cursor op expires them via the seq. Per-side validity: a
+    // lone wire answer certifies only its own side; the twin half is
+    // certified only by the piggybacked twin byte. Cleared alongside
+    // last_nav at purely-local visibility mutations (the seq rule
+    // can't see those).
+    bool                     bound_bof_ok = false;
+    bool                     bound_bof    = false;
+    bool                     bound_eof_ok = false;
+    bool                     bound_eof    = false;
+    std::uint64_t            bound_seq    = 0;
     // Last wire nav op on this table (0 = none/other, 1 = GotoTop,
     // 2 = GotoBottom), whether it produced a row, and the connection
     // nav_seq_ at the time. Serves two WAN-chattiness kills with one

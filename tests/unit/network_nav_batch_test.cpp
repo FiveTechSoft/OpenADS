@@ -200,8 +200,19 @@ TEST_CASE("Nav batching: twin flag halves the BOF/EOF pair") {
     const std::uint64_t bof0 = nb_op(kOpAtBOF);
     const std::uint64_t eof0 = nb_op(kOpAtEOF);
 
-    // The wire AtBOF carries the EOF twin: the follow-up AtEOF is local.
+    // Arrived from rows, so not-BOF is proven: both answers local, no
+    // wire AtBOF at all (the twin would halve the pair if one went out).
     CHECK(nb_bof(hTable) == 0);  // arrived from rows, not BOF
+    CHECK(nb_op(kOpAtBOF) == bof0);
+    CHECK(nb_eof(hTable) == 1);
+    CHECK(nb_op(kOpAtEOF) == eof0);
+
+    // Force a wire pair: a local filter change drops the proven-false
+    // flags without moving the server cursor (still past end). The
+    // wire AtBOF carries the EOF twin, so the follow-up AtEOF is local.
+    UNSIGNED8 flt[] = "ID > 0";
+    REQUIRE(AdsSetFilter(hTable, flt) == AE_SUCCESS);
+    CHECK(nb_bof(hTable) == 0);
     CHECK(nb_op(kOpAtBOF) == bof0 + 1);
     CHECK(nb_eof(hTable) == 1);
     CHECK(nb_op(kOpAtEOF) == eof0);
@@ -307,6 +318,48 @@ TEST_CASE("Nav batching: stamps survive read traffic") {
     CHECK(nb_eof(hTable) == 1);
     CHECK(nb_op(kOpAtBOF) == bof0);
     CHECK(nb_op(kOpAtEOF) == eof0);
+
+    REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
+    REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
+    s.stop();
+}
+
+TEST_CASE("Nav batching: skip-established limits answer locally") {
+    nb_wipe();
+    auto dir = nb_tmp_dir();
+    nb_seed(dir, "lim.dbf", 2);
+
+    openads::network::Server s;
+    REQUIRE(s.start("127.0.0.1", 0).has_value());
+    ADSHANDLE hConn = nb_connect_remote(dir, s.port());
+    ADSHANDLE hTable = nb_open(hConn, "lim.dbf");
+
+    REQUIRE(AdsGotoTop(hTable) == AE_SUCCESS);
+    REQUIRE(AdsSkip(hTable, 1) == AE_SUCCESS);
+    // Past the end: EOF is flagged, and arriving from rows proves
+    // not-BOF — both answer with zero further frames.
+    REQUIRE(AdsSkip(hTable, 1) == AE_SUCCESS);
+    const std::uint64_t bof0 = nb_op(kOpAtBOF);
+    const std::uint64_t eof0 = nb_op(kOpAtEOF);
+    CHECK(nb_eof(hTable) == 1);
+    CHECK(nb_bof(hTable) == 0);
+    CHECK(nb_eof(hTable) == 1);
+    CHECK(nb_bof(hTable) == 0);
+    CHECK(nb_op(kOpAtBOF) == bof0);
+    CHECK(nb_op(kOpAtEOF) == eof0);
+
+    // Back to the top limit: BOF flags locally; the EOF side has no
+    // row to reason from (overshoot jumps prove nothing), so one EOF
+    // frame goes out — the twin then covers its pair.
+    REQUIRE(AdsSkip(hTable, -10) == AE_SUCCESS);
+    const std::uint64_t bof1 = nb_op(kOpAtBOF);
+    const std::uint64_t eof1 = nb_op(kOpAtEOF);
+    CHECK(nb_bof(hTable) == 1);
+    CHECK(nb_eof(hTable) == 0);
+    CHECK(nb_bof(hTable) == 1);
+    CHECK(nb_eof(hTable) == 0);
+    CHECK(nb_op(kOpAtBOF) == bof1);
+    CHECK(nb_op(kOpAtEOF) == eof1 + 1);
 
     REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
     REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);

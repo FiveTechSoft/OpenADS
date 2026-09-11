@@ -98,6 +98,26 @@ NO es el cuello. A ~50 ms RTT el wire son ~0.5 s/USE; el resto (~1 s)
 es proceso servidor (instancia mínima) + RDD cliente. Siguiente:
 latencia de open en servidor y pool-hit rate en campo.
 
+### Diagnóstico pedidido por Pritpal: trace con tiempo + alias
+
+`cli_trace` ahora estampa ms desde el inicio en cada línea y el alias
+de la tabla en los paths calientes (goto/skip/bof/eof), para atribuir
+bloques de probes a su tabla y separar locales (~0 ms) de wire (~RTT).
+Su chunk mostró el hueco restante: probes AtBOF post-EOF a wire.
+
+### Completitud de límites: not_bof/not_eof + bound cache
+
+- Skip/top/bottom establecen proven-false (`nav_not_*`): skip
+  adelante→EOF prueba EOF + not-BOF; top+row prueba not-BOF, etc.
+  Derivan solo de `row_valid_before`/filas — nunca de flags `at_*`
+  (podrían preceder a scope/filter). Limpieza en narrow/remove
+  (SetScope/SetFilter/SetAOF/Delete/Pack/Zap) + adopt/open.
+- Bound cache por lado con seq: respuestas repetidas idénticas sirven
+  en local mientras ningún frame cursor-moviente aterrice; el gemelo
+  solo lo certifica el byte twin. Misma limpieza que `last_nav`.
+- Tests: skip-limits (ida y vuelta) + twin forzado vía SetFilter.
+  Suite 1547/1548 (solo CDX pre-existente).
+
 ## 2026-09-08 — Server/DLL version reporting (Vouch triage)
 
 ### Pedido de Pritpal Bedi
