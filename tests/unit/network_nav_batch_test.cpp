@@ -647,9 +647,10 @@ TEST_CASE("Reposition truth: Seek miss certifies EOF locally") {
     CHECK(nb_op(kOpSeek) == sk0 + 1);
     CHECK(nb_eof(hTable) == 1);
     CHECK(nb_bof(hTable) == 1);
-    const std::uint64_t rn_after = nb_op(kOpGetRecordNum);
-    (void)nb_recno(hTable);
-    CHECK(nb_op(kOpGetRecordNum) == rn_after);
+    // Certified recno, whatever the twin reports for a miss — served
+    // locally and stable across repeats.
+    CHECK(nb_recno(hTable) == nb_recno(hTable));
+    CHECK(nb_op(kOpGetRecordNum) == rn0);
     CHECK(nb_op(kOpAtBOF) == bof0);
     CHECK(nb_op(kOpAtEOF) == eof0);
 
