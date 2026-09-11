@@ -28,9 +28,11 @@ namespace {
 constexpr std::uint8_t kOpCloseTable   = 0x22;
 constexpr std::uint8_t kOpFlushFile    = 0x7E;
 constexpr std::uint8_t kOpCloseAllIdx  = 0x80;
+constexpr std::uint8_t kOpOpenIndex    = 0x88;
 constexpr std::uint8_t kOpSetOrder     = 0x8C;
 constexpr std::uint8_t kOpKeyCount     = 0xB0;
 constexpr std::uint8_t kOpFileExists   = 0xE0;
+constexpr std::uint8_t kOpGotoTop      = 0x40;
 
 fs::path tb_tmp_dir() {
     return fs::temp_directory_path() / "openads_teardown_test";
@@ -290,6 +292,139 @@ TEST_CASE("Teardown batching: immutable metadata caches per handle") {
     CHECK(rl > 0u);
     CHECK(tb_op(0x6A) == tt0 + 1);
     CHECK(tb_op(0x6C) == rl0 + 1);
+
+    REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
+    REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
+    srv.stop();
+}
+
+// Index-binding park (Vouch per-tag rotation: CloseAll→OpenIndex per
+// tag, 166 + 125 frames/startup). CloseAll parks the live maps with
+// the server bindings still open; a same-bag reopen restores them
+// with zero frames. Post-close answers in the window are unchanged.
+
+UNSIGNED16 tb_numidx(ADSHANDLE hTable) {
+    UNSIGNED16 n = 0;
+    REQUIRE(AdsGetNumIndexes(hTable, &n) == AE_SUCCESS);
+    return n;
+}
+
+void tb_open_bag(ADSHANDLE hTable, const char* bag) {
+    ADSHANDLE arr[64] = {0};
+    UNSIGNED16 alen = 64;
+    UNSIGNED8 b[128]{};
+    std::memcpy(b, bag, std::strlen(bag));
+    REQUIRE(AdsOpenIndex(hTable, b, arr, &alen) == AE_SUCCESS);
+}
+
+TEST_CASE("Index park: same-bag rotation costs zero frames") {
+    tb_wipe();
+    auto dir = tb_tmp_dir();
+    tb_seed(dir);
+
+    openads::network::Server srv;
+    REQUIRE(srv.start("127.0.0.1", 0).has_value());
+    ADSHANDLE hConn = tb_connect_remote(dir, srv.port());
+    ADSHANDLE hTable = tb_open(hConn);
+    CHECK(tb_numidx(hTable) == 1u);
+
+    // The rotation heartbeat: close-all then reopen the same bag.
+    // No frame either way; the bindings never left the server.
+    const std::uint64_t ca0 = tb_op(kOpCloseAllIdx);
+    const std::uint64_t oi0 = tb_op(kOpOpenIndex);
+    REQUIRE(AdsCloseAllIndexes(hTable) == AE_SUCCESS);
+    CHECK(tb_numidx(hTable) == 0u);  // post-close window answers hold
+    tb_open_bag(hTable, "TB.CDX");
+    CHECK(tb_op(kOpCloseAllIdx) == ca0);
+    CHECK(tb_op(kOpOpenIndex) == oi0);
+    CHECK(tb_numidx(hTable) == 1u);
+
+    // Parked ids are live: order + count + seek all work with no
+    // reopen. A stale id would fail 5000 here, not just cost frames.
+    ADSHANDLE hOrd = 0;
+    UNSIGNED8 want[] = "BYID";
+    REQUIRE(AdsGetIndexHandle(hTable, want, &hOrd) == AE_SUCCESS);
+    REQUIRE(AdsSetIndexOrderByHandle(hTable, hOrd) == AE_SUCCESS);
+    const std::uint64_t top0 = tb_op(kOpGotoTop);
+    const std::uint64_t so0 = tb_op(kOpSetOrder);
+    REQUIRE(AdsGotoTop(hTable) == AE_SUCCESS);
+    CHECK(tb_op(kOpSetOrder) == so0);      // fused, nothing plain
+    CHECK(tb_op(kOpGotoTop) == top0 + 1);  // the rotation's one frame
+    CHECK(tb_op(kOpCloseAllIdx) == ca0);
+    CHECK(tb_op(kOpOpenIndex) == oi0);
+    UNSIGNED32 kc = 0;
+    REQUIRE(AdsGetKeyCount(hOrd, 0, &kc) == AE_SUCCESS);
+    CHECK(kc == 5u);
+
+    // Second rotation round-trips the same way (park, reopen, order).
+    REQUIRE(AdsCloseAllIndexes(hTable) == AE_SUCCESS);
+    tb_open_bag(hTable, "TB.CDX");
+    REQUIRE(AdsSetIndexOrderByHandle(hTable, hOrd) == AE_SUCCESS);
+    REQUIRE(AdsGotoTop(hTable) == AE_SUCCESS);
+    CHECK(tb_op(kOpCloseAllIdx) == ca0);
+    CHECK(tb_op(kOpOpenIndex) == oi0);
+    REQUIRE(AdsGetKeyCount(hOrd, 0, &kc) == AE_SUCCESS);
+    CHECK(kc == 5u);
+
+    REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
+    REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
+    srv.stop();
+}
+
+TEST_CASE("Index park: table nav inside the window forces a real close") {
+    tb_wipe();
+    auto dir = tb_tmp_dir();
+    tb_seed(dir);
+
+    openads::network::Server srv;
+    REQUIRE(srv.start("127.0.0.1", 0).has_value());
+    ADSHANDLE hConn = tb_connect_remote(dir, srv.port());
+    ADSHANDLE hTable = tb_open(hConn);
+
+    // A nav between CloseAll and OpenIndex must walk the natural
+    // order (client belief), not the parked server order: one real
+    // close, then the nav. Values prove it (natural top, recno 1).
+    const std::uint64_t ca0 = tb_op(kOpCloseAllIdx);
+    const std::uint64_t top0 = tb_op(kOpGotoTop);
+    REQUIRE(AdsCloseAllIndexes(hTable) == AE_SUCCESS);
+    REQUIRE(AdsGotoTop(hTable) == AE_SUCCESS);
+    CHECK(tb_op(kOpCloseAllIdx) == ca0 + 1);
+    CHECK(tb_op(kOpGotoTop) == top0 + 1);
+    UNSIGNED32 rec = 0;
+    REQUIRE(AdsGetRecordNum(hTable, 0, &rec) == AE_SUCCESS);
+    CHECK(rec == 1u);
+
+    REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
+    REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
+    srv.stop();
+}
+
+TEST_CASE("Index park: CreateIndex invalidates the snapshot") {
+    tb_wipe();
+    auto dir = tb_tmp_dir();
+    tb_seed(dir);
+
+    openads::network::Server srv;
+    REQUIRE(srv.start("127.0.0.1", 0).has_value());
+    ADSHANDLE hConn = tb_connect_remote(dir, srv.port());
+    ADSHANDLE hTable = tb_open(hConn);
+
+    // Park, then structurally change the bag: the snapshot predates
+    // the new tag, so the next rotation reopens for real (frames
+    // flow) and the new tag is visible immediately after.
+    REQUIRE(AdsCloseAllIndexes(hTable) == AE_SUCCESS);
+    ADSHANDLE hI = 0;
+    UNSIGNED8 bag[] = "TB.CDX";
+    UNSIGNED8 tag[] = "BYID2";
+    UNSIGNED8 exp[] = "ID";
+    REQUIRE(AdsCreateIndex61(hTable, bag, tag, exp, nullptr, nullptr,
+                             ADS_COMPOUND, 512, &hI) == AE_SUCCESS);
+    const std::uint64_t ca0 = tb_op(kOpCloseAllIdx);
+    const std::uint64_t oi0 = tb_op(kOpOpenIndex);
+    tb_open_bag(hTable, "TB.CDX");
+    CHECK(tb_op(kOpCloseAllIdx) == ca0 + 1);
+    CHECK(tb_op(kOpOpenIndex) == oi0 + 1);
+    CHECK(tb_numidx(hTable) == 2u);
 
     REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
     REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);

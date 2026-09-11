@@ -107,6 +107,50 @@ Su chunk mostró el hueco restante: probes AtBOF post-EOF a wire.
 
 ---
 
+## 2026-09-11 — Index-binding park (v1.09.37 field: 94 s)
+
+### Field result v1.09.37 (both sides 1.09.37)
+
+`v.1.09.37 1:34.355 == 94 secs` (was 124 s ≈ −30 s for the
+reposition piggyback). Server census (1919 frames / 94 s):
+
+| Frames | Op | Note |
+|--------|----|------|
+| 266 | GotoRecord (bookmark restores — necessary) | — |
+| 219 | GetRecordNum (was 548) | −60% |
+| 174 | Seek (necessary) | — |
+| 166+125+121 | CloseAll + OpenIndex + SetOrder (per-tag rotation) | **next** |
+| 166+87 | GotoTop + GotoBottom (rotation navs, fused) | — |
+| 87+85 | KeyCount + RecordCount | — |
+| 1 | AtBOF (was 352!) + 2 AtEOF | piggyback verified |
+
+Twin verdict: AtBOF 352→1, AtEOF 3→2. Time still ≈ frames × RTT.
+
+### Shipped (v1.09.38)
+
+- **Index-binding park.** `CloseAll` snapshots the live tag→id
+  maps (server bindings stay open, no frame) instead of dropping
+  them. Same-bag `OpenIndex` restores with zero frames; any op
+  that only needs live bindings (SetOrder, seeks, counts, reads)
+  adopts the park; a real `CloseAll` goes out only for
+  different-bag opens and structural changes. Session-scoped
+  validity: our session's bindings die only via our own frames.
+- **Order-divergence guard.** Parked server order vs cleared
+  client belief: table-handle navs (top/bottom/skip/goto) inside
+  a CloseAll→OpenIndex window force a real close first (the
+  rotation never navs mid-window — Clear→Add adjacent — so it
+  costs nothing in flow). Pool adoption force-closes too.
+- **Flush⊂CloseAll merge preserved:** with a flush owed, the
+  merged real close wins over the park (caught by the pre-existing
+  teardown test); real closes clear live maps (no dead ids).
+- **Invalidation:** CreateIndex drops the snapshot; erase/rename
+  drops parks connection-wide; Reindex/Pack/Zap keep ids (safe).
+- **KeyCount bonus:** stable server index ids across rotations
+  keep the order key-count cache alive (was re-minted per open).
+- **Tests:** 3 park cases (zero-frame rotation + live ids,
+  nav-in-window real close, create-invalidation).
+- Estimate: ~290 frames ≈ **14 s** → ~80 s next field run.
+
 ## 2026-09-11 — Reposition-bound piggyback (v1.09.35 field: 124 s)
 
 ### Field result v1.09.35 (both sides 1.09.35)

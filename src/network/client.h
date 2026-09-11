@@ -796,6 +796,30 @@ struct RemoteTable {
     // never parked (a park performs no server close to absorb into).
     bool flush_file_pending      = false;
     bool close_all_indexes_pending = false;
+    // Parked index bindings (WAN chattiness: per-tag CloseAll→OpenIndex
+    // rotation — 166 + 125 frames/startup). CloseAll snapshots the live
+    // maps here instead of dropping them; the server bindings stay open
+    // (no frame sent), so a same-bag OpenIndex restores them with zero
+    // frames and any op that only needs live bindings adopts the park
+    // (pending flag cleared, nothing sent). A real CloseAll frame goes
+    // out only when server state must actually drop: different-bag open
+    // (else the server accumulates bags), structural ops like
+    // CreateIndex (snapshot invalidated explicitly). Table close
+    // absorbs silently (server close purges anyway) and disconnect
+    // drops everything. Session-scoped validity: our session's bindings
+    // die only via our own frames, all of which funnel through the
+    // adopt-or-emit decision, so a parked snapshot can never reference
+    // dead server ids.
+    bool indexes_parked = false;
+    std::vector<std::pair<std::string, std::uint32_t>> parked_by_tag;
+    std::vector<std::uint64_t> parked_handles;
+    std::uint32_t parked_active = 0;
+    std::string   parked_bag_stem;
+    // Server-canonical bag path of the last wire OpenIndex (empty
+    // until the first one; the production auto-open counts). Seeds
+    // parked_bag_stem at CloseAll so the reopen match compares the
+    // bag actually bound, not a reopen spelling.
+    std::string   last_open_bag;
     // Deferred order switch (WAN chattiness: SetOrder+GotoTop/Bottom
     // per tag rotation). SetOrder never moves the cursor, so the frame
     // waits here until a nav absorbs it (fused SetOrder+Goto, one

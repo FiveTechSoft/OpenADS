@@ -736,6 +736,34 @@ UNSIGNED32 remote_flush_order(openads::network::RemoteTable* rt) {
 
 UNSIGNED32 remote_flush_teardown(openads::network::RemoteTable* rt);
 UNSIGNED32 remote_flush_sets(openads::network::RemoteTable* rt);
+// Send a real CloseAllIndexes frame and forget every binding (live
+// maps + parked snapshot): the server dropped them all, so any
+// client reference would be a dead id (SetOrder 5000 on next use).
+UNSIGNED32 remote_emit_close_all(openads::network::RemoteTable* rt) {
+    if (rt == nullptr || rt->conn == nullptr) return ok();
+    if (auto r = rt->conn->close_all_indexes(rt->id); !r) {
+        return fail(r.error());
+    }
+    rt->close_all_indexes_pending = false;
+    rt->indexes_parked = false;
+    rt->parked_by_tag.clear();
+    rt->parked_handles.clear();
+    rt->index_by_tag.clear();
+    rt->index_handles.clear();
+    rt->active_index_id = 0;
+    rt->last_nav = 0;
+    return ok();
+}
+// Parked-index truth enforcement (see the nav entries): order-dependent
+// table-handle navs must resolve a parked snapshot with a real close
+// first, or they would walk the stale server order while the client
+// accounts natural rows.
+UNSIGNED32 remote_close_parked_indexes(openads::network::RemoteTable* rt) {
+    if (rt == nullptr || rt->conn == nullptr || !rt->indexes_parked) {
+        return ok();
+    }
+    return remote_emit_close_all(rt);
+}
 UNSIGNED32 remote_flush_pending(openads::network::RemoteTable* rt) {
     if (UNSIGNED32 orc = remote_flush_order(rt); orc != 0) return orc;
     if (UNSIGNED32 rc = remote_flush_sets(rt); rc != 0) return rc;
@@ -800,6 +828,22 @@ UNSIGNED32 remote_flush_teardown(openads::network::RemoteTable* rt) {
     // handler before dropping bindings. One RTT instead of two for
     // rddads' flush→closeall teardown pair. Only against servers that
     // advertise kCapFlushInCloseAll; old servers keep both frames.
+    // Parked exception (below): the park keeps server bindings open,
+    // so a real CloseAll would destroy what the park preserves — the
+    // close is adopted unsent when no flush is owed. With a flush
+    // owed, the merged CloseAll wins instead (one frame that flushes
+    // server-side; the park is moot once a frame is owed anyway).
+    if (rt->close_all_indexes_pending && rt->indexes_parked) {
+        if (rt->flush_file_pending) {
+            if (UNSIGNED32 frc = remote_emit_close_all(rt); frc != 0) {
+                return frc;
+            }
+            rt->flush_file_pending = false;
+            return ok();
+        }
+        rt->close_all_indexes_pending = false;
+        return ok();
+    }
     if (rt->flush_file_pending && rt->close_all_indexes_pending &&
         rt->conn->server_flush_in_closeall()) {
         if (auto r = rt->conn->close_all_indexes(rt->id); !r) {
@@ -816,10 +860,14 @@ UNSIGNED32 remote_flush_teardown(openads::network::RemoteTable* rt) {
         rt->flush_file_pending = false;
     }
     if (rt->close_all_indexes_pending) {
-        if (auto r = rt->conn->close_all_indexes(rt->id); !r) {
-            return fail(r.error());
+        if (rt->indexes_parked) {
+            // Adopt: the park kept the server bindings open, so the
+            // pending close is already satisfied — nothing to send.
+            // (A flush owed alongside was emitted above on its own.)
+            rt->close_all_indexes_pending = false;
+        } else if (UNSIGNED32 frc = remote_emit_close_all(rt); frc != 0) {
+            return frc;
         }
-        rt->close_all_indexes_pending = false;
     }
     return ok();
 }
@@ -7110,6 +7158,23 @@ void remote_table_forget(openads::network::RemoteTable* rt) {
     remote_table_store().erase(rt);
 }
 
+// Drop parked index snapshots on every live table of rc (file
+// erase/rename can pull a bag out from under parked bindings).
+// Drops the snapshot but keeps the pending flag, so the next flush
+// sends a real close — files change rarely, correctness first.
+// Pooled tables are real-closed by remote_flush_pools alongside.
+void remote_invalidate_index_parks(openads::network::RemoteConnection* rc) {
+    if (rc == nullptr) return;
+    for (auto& kv : remote_table_store()) {
+        auto* rt = kv.first;
+        if (rt == nullptr || rt->conn != rc) continue;
+        if (!rt->indexes_parked) continue;
+        rt->indexes_parked = false;
+        rt->parked_by_tag.clear();
+        rt->parked_handles.clear();
+    }
+}
+
 // Pool key: connection-implied (pools are per-connection), normalized
 // name + alias + raw open mode. Slashes folded; case preserved (Linux
 // filesystems are case-sensitive -- a miss is always safe).
@@ -7196,6 +7261,24 @@ void remote_close_table_live(ADSHANDLE hTable,
     }
     if (fire != nullptr) fire->disconnect();
 }
+
+// (remote_emit_close_all / remote_close_parked_indexes /
+// remote_invalidate_index_parks live with the flush funnel above,
+// ahead of first use.)
+
+// Parked-index truth enforcement: while indexes_parked holds, the
+// server still runs the pre-CloseAll order but the client belief is
+// natural (active_index_id 0). Order-dependent table-handle navs
+// (top/bottom/skip/goto-record walks the server order) must resolve
+// the divergence with a real close first — adoption would walk the
+// stale order while the client accounts natural rows. Fires only
+// when a nav lands inside a CloseAll→OpenIndex window (the rotation
+// itself never does: Clear→Add is adjacent), so the normal flow pays
+// nothing. Index-handle navs and seeks carry their own order context
+// and adopt safely without this.
+// (remote_emit_close_all / remote_close_parked_indexes /
+// remote_invalidate_index_parks live with the flush funnel above,
+// ahead of first use.)
 
 // Real-close every parked table on rc (drop/create/erase/rename and
 // exclusive opens change what paths mean on disk; a parked server
@@ -7546,6 +7629,15 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
             // close_counted stays true (never decremented at park time),
             // so no re-increment here.
             lk.unlock();
+            // A parked index snapshot does not survive adoption: the
+            // warm GotoTop below must walk the natural order, not the
+            // pre-park one (same divergence as a nav inside the
+            // CloseAll→OpenIndex window). Rare (pool + park combined);
+            // one frame when it fires.
+            if (UNSIGNED32 frc = remote_close_parked_indexes(adopted.get());
+                frc != 0) {
+                return frc;
+            }
             auto r = adopted->conn->goto_top(adopted.get());
             if (!r) {
                 // Server lost it (only when the session itself is gone —
@@ -9700,6 +9792,9 @@ UNSIGNED32 ENTRYPOINT AdsGotoRecord(ADSHANDLE hTable, UNSIGNED32 ulRecord) {
         cli_trace_tbl(rt, "AdsGotoRecord", "want=%u row_valid=%d",
                       ulRecord, (int)rt->row_valid);
         if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
+        if (UNSIGNED32 frc = remote_close_parked_indexes(rt); frc != 0) {
+            return frc;
+        }
         rt->found_cached = true; rt->current_found = false;  // M12.21: GoTo clears Found()
         remote_clear_nav_boundaries(rt);
         // M12.29 -- preserve keyno_valid when navigating to the same record.
@@ -9821,6 +9916,7 @@ UNSIGNED32 ENTRYPOINT AdsDeleteFile(ADSHANDLE hConn, UNSIGNED8* pucName) {
     auto ctx = resolve_fs_conn(hConn);
     if (ctx.remote) {
         remote_flush_pools(ctx.remote);
+        remote_invalidate_index_parks(ctx.remote);
         auto r = ctx.remote->file_erase(name);
         if (!r) return fail(r.error());
         return ok();
@@ -9843,6 +9939,7 @@ UNSIGNED32 ENTRYPOINT AdsRenameFile(ADSHANDLE hConn, UNSIGNED8* pucOld,
     auto ctx = resolve_fs_conn(hConn);
     if (ctx.remote) {
         remote_flush_pools(ctx.remote);
+        remote_invalidate_index_parks(ctx.remote);
         auto r = ctx.remote->file_rename(o, n);
         if (!r) return fail(r.error());
         return ok();
@@ -10324,8 +10421,10 @@ UNSIGNED32 ENTRYPOINT AdsCloseTable(ADSHANDLE hTable) {
         // Real close: absorb deferred teardown (never emitted). The
         // server close flushes data via its shadow handle and purges
         // the table's index bindings, so these frames would be waste.
+        // A parked index snapshot dies with the handle (same purge).
         rt->flush_file_pending = false;
         rt->close_all_indexes_pending = false;
+        rt->indexes_parked = false;
         remote_close_table_live(hTable, rt);
         return ok();
     }
@@ -10436,6 +10535,12 @@ UNSIGNED32 ENTRYPOINT AdsGotoTop(ADSHANDLE hTable) {
         // into the nav below (fused frame) instead of going out alone.
         if (UNSIGNED32 frc = remote_flush_sets(rt); frc != 0) return frc;
         if (UNSIGNED32 frc = remote_flush_teardown(rt); frc != 0) return frc;
+        // A parked index snapshot leaves the server on the pre-CloseAll
+        // order while this handle believes natural: resolve before the
+        // nav walks the stale order (see remote_close_parked_indexes).
+        if (UNSIGNED32 frc = remote_close_parked_indexes(rt); frc != 0) {
+            return frc;
+        }
         // M12.18 -- rt-aware overload parses the row trailer in the
         // same RTT, so AdsGetField immediately after GoTop hits
         // the cache.
@@ -10556,6 +10661,9 @@ UNSIGNED32 ENTRYPOINT AdsGotoBottom(ADSHANDLE hTable) {
         // into the nav below (fused frame) instead of going out alone.
         if (UNSIGNED32 frc = remote_flush_sets(rt); frc != 0) return frc;
         if (UNSIGNED32 frc = remote_flush_teardown(rt); frc != 0) return frc;
+        if (UNSIGNED32 frc = remote_close_parked_indexes(rt); frc != 0) {
+            return frc;
+        }
         rt->found_cached = true; rt->current_found = false;  // M12.21: GoBottom clears Found()
         if (rt->pending_order) {
             if (rt->conn != nullptr &&
@@ -10631,6 +10739,9 @@ UNSIGNED32 ENTRYPOINT AdsSkip(ADSHANDLE hTable, SIGNED32 lRows) {
     }
     if (auto* rt = get_remote_table(hTable)) {
         if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
+        if (UNSIGNED32 frc = remote_close_parked_indexes(rt); frc != 0) {
+            return frc;
+        }
         rt->found_cached = true; rt->current_found = false;  // M12.21: Skip clears Found()
         const std::uint32_t rec_before =
             rt->row_valid ? rt->current_recno : 0u;
@@ -14024,6 +14135,20 @@ std::string normalize_index_path(std::string path) {
     return path;
 }
 
+// Lowercased file stem (no directory, no extension): "C:\d\VO_ATDFN.z01"
+// and "vo_atdfn.cdx" name the same production bag for rotation matching.
+std::string bag_stem_ci(const std::string& p) {
+    std::string b = p;
+    auto sep = b.find_last_of("/\\");
+    if (sep != std::string::npos) b = b.substr(sep + 1);
+    auto dot = b.find_last_of('.');
+    if (dot != std::string::npos) b = b.substr(0, dot);
+    for (auto& c : b)
+        c = static_cast<char>(std::tolower(
+                static_cast<unsigned char>(c)));
+    return b;
+}
+
 // Harbour INDEX ON TO cIdxFile passes a client-absolute bag
 // ("C:/Creative.RAM/T.Z01"). Table opens remount that spelling under
 // --data when --legacy-paths is on; the bag must follow or the .z01
@@ -14201,10 +14326,46 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
     }
     if (auto* rt = get_remote_table(hTable)) {
         std::string path = openads::abi::to_internal(pucName, 0);
-        // Deferred teardown (CloseAll/FlushFileBuffers) must land before
-        // any index-state change: the server still holds the old
-        // bindings until it does.
+        // Distributed flush (WAN chattiness): a deferred order switch
+        // or teardown absorbed here must not interleave with the parked
+        // restore below — flush first, then decide.
         if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
+        // Parked-index reuse (per-tag rotation): CloseAll parked the
+        // live maps with the server bindings still open. A same-bag
+        // reopen restores them and serves the handles with zero
+        // frames. A different (or unknown) bag needs a real close
+        // first so the server does not accumulate bags behind the
+        // client's back.
+        if (rt->indexes_parked) {
+            if (!rt->parked_by_tag.empty() && !bag_stem_ci(path).empty() &&
+                bag_stem_ci(path) == rt->parked_bag_stem &&
+                rt->parked_by_tag.size() == rt->parked_handles.size()) {
+                rt->index_by_tag = std::move(rt->parked_by_tag);
+                rt->index_handles = std::move(rt->parked_handles);
+                rt->active_index_id = rt->parked_active;
+                rt->indexes_parked = false;
+                rt->close_all_indexes_pending = false;
+                auto& s = state();
+                std::lock_guard<std::recursive_mutex> lk(s.mu);
+                const std::uint16_t cap =
+                    (pu16ArrayLen != nullptr) ? *pu16ArrayLen : 0;
+                std::uint16_t count = 0;
+                for (std::size_t i = 0; i < rt->index_by_tag.size(); ++i) {
+                    if (count < cap) {
+                        ahIndex[count] = to_ads_handle(static_cast<Handle>(
+                            rt->index_handles[i]));
+                    }
+                    ++count;
+                }
+                if (rt->active_index_id == 0)
+                    rt->active_index_id = rt->index_by_tag.front().second;
+                if (pu16ArrayLen != nullptr) *pu16ArrayLen = count;
+                return ok();
+            }
+            if (auto r = remote_emit_close_all(rt); r != 0) {
+                return r;
+            }
+        }
         // Zero-RTT dedup (RDD-only apps, no app change possible): the
         // production bag is already bound on this handle by the OpenTable
         // auto-open, but rddads issues an explicit AdsOpenIndex for the
@@ -14215,23 +14376,12 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
         // equivalent production spellings. Temp bags (different stem)
         // always go to the wire — another session may have added tags.
         {
-            auto stem_of = [](const std::string& p) {
-                std::string b = p;
-                auto sep = b.find_last_of("/\\");
-                if (sep != std::string::npos) b = b.substr(sep + 1);
-                auto dot = b.find_last_of('.');
-                if (dot != std::string::npos) b = b.substr(0, dot);
-                for (auto& c : b)
-                    c = static_cast<char>(std::tolower(
-                            static_cast<unsigned char>(c)));
-                return b;
-            };
             auto& s = state();
             std::lock_guard<std::recursive_mutex> lk(s.mu);
             if (!rt->index_by_tag.empty() && !rt->prod_bag_path.empty() &&
                 rt->index_by_tag.size() == rt->index_handles.size() &&
-                !stem_of(path).empty() &&
-                stem_of(path) == stem_of(rt->prod_bag_path)) {
+                !bag_stem_ci(path).empty() &&
+                bag_stem_ci(path) == bag_stem_ci(rt->prod_bag_path)) {
                 const std::uint16_t cap =
                     (pu16ArrayLen != nullptr) ? *pu16ArrayLen : 0;
                 std::uint16_t count = 0;
@@ -14303,6 +14453,11 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
         if (!entries.empty() && !entries[0].bag_path.empty() &&
             rt->prod_bag_path.empty()) {
             rt->prod_bag_path = entries[0].bag_path;
+        }
+        // Server-canonical bag of this open (seeds the CloseAll park
+        // match — the bag actually bound, not a reopen spelling).
+        if (!entries.empty() && !entries[0].bag_path.empty()) {
+            rt->last_open_bag = entries[0].bag_path;
         }
         if (pu16ArrayLen != nullptr) *pu16ArrayLen = count;
         return ok();
@@ -14726,18 +14881,25 @@ UNSIGNED32 ENTRYPOINT AdsCloseAllIndexes(ADSHANDLE hTable) {
         // index-observing wire op intervenes, remote_flush_pending
         // emits it ahead of that op. The client cache drops NOW so
         // reads in the window answer post-close semantics.
-        // Drop the client-side index cache too: the server hands out fresh
-        // wire index ids on the next open_index, so the stale tag->id map
-        // would otherwise make the reopen dedup keep dead ids (SetOrder
-        // 5000) and leave index_handles empty (DbSetOrder fails, seek
-        // raises ADSCDX/301 "Workarea not indexed" -- Pritpal's
-        // TestIndexes() repro: INDEX ON x3 + ordListClear + ordListAdd).
+        // Parked, not dropped: the live tag->id maps move to the
+        // parked snapshot (server bindings stay open — no frame), so
+        // a same-bag OpenIndex restores them with zero frames and any
+        // op that only needs live bindings adopts the park. Getters in
+        // the window still see empty maps (post-close answers), exactly
+        // as when the maps were cleared outright.
+        rt->parked_by_tag = std::move(rt->index_by_tag);
+        rt->parked_handles = std::move(rt->index_handles);
+        rt->parked_active = rt->active_index_id;
+        rt->parked_bag_stem = bag_stem_ci(rt->last_open_bag.empty() ?
+                                          rt->prod_bag_path :
+                                          rt->last_open_bag);
         rt->index_by_tag.clear();
         rt->index_handles.clear();
         rt->active_index_id = 0;
         // Order belief changed with no frame: expire the nav stamp so a
         // subsequent GotoTop cannot dedupe against the old binding.
         rt->last_nav = 0;
+        rt->indexes_parked = true;
         rt->close_all_indexes_pending = true;
         return ok();
     }
@@ -15054,6 +15216,13 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
             rt->index_handles = std::move(keep_handles);
         }
         if (rt->active_index_id == 0) rt->active_index_id = r.value();
+        // Structural change: the bag gained a tag, so a parked snapshot
+        // predates it — drop the park (the maps above were rebuilt fresh
+        // from the server). The pending flag stays: the next flush sends
+        // a real close, since parked validity no longer holds.
+        rt->indexes_parked = false;
+        rt->parked_by_tag.clear();
+        rt->parked_handles.clear();
         return ok();
     }
     Table* t = get_table(hTable);
