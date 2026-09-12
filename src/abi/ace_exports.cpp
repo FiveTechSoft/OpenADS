@@ -734,6 +734,12 @@ UNSIGNED32 remote_flush_order(openads::network::RemoteTable* rt) {
     rt->server_order_id = oid;
     rt->row_valid = false;
     rt->invalidate_prefetch();
+    // The ack certifies the new order's count: seed slot + map.
+    if (r.value().counted) {
+        rt->cached_key_count = r.value().key_count;
+        rt->key_count_cached = true;
+        rt->key_counts[oid] = r.value().key_count;
+    }
     return ok();
 }
 

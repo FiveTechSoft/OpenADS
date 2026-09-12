@@ -107,6 +107,28 @@ Su chunk mostró el hueco restante: probes AtBOF post-EOF a wire.
 
 ---
 
+## 2026-09-12 - Switch certifies its count (v1.09.45 field: 63 s)
+
+### Field result v1.09.45 (both sides 1.09.45)
+
+v.1.09.45 1:02.736 == 63 secs (-7 s: RecNo 147-5, counts partial).
+Remaining 1273: repositions/navs (709, necessary singles),
+KeyCount 87 (first-touches after plain switches), RefreshRecord
+64, opens/metadata (~150).
+
+### Shipped (v1.09.46)
+
+- **Key-count piggyback on plain switch acks.** Fused navs
+  already certify; plain SetOrder/SetOrderByName acks now
+  append [u32] too. Client stores into the per-order map (+
+  slot). Switch-adjacent counts (the rotation shape) go local.
+- **RefreshRecord carries its row** (from .45 work, verified
+  here): trailer + bound tail; same-record restores and
+  skip-settles lose follow-ups.
+- **Tests.** Switch-certified counts (plain + fused), updated
+  wire-count expectations to zero.
+- Estimate: ~80 frames = **4 s** -> ~59 s next field run.
+
 ## 2026-09-12 - Counts ride every nav (v1.09.44 field: 70 s)
 
 ### Field result v1.09.44 (both sides 1.09.44)

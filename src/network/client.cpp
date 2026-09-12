@@ -2297,8 +2297,9 @@ util::Result<void> RemoteConnection::dd_grant_permission(
     return {};
 }
 
-util::Result<void> RemoteConnection::set_order(std::uint32_t table_id,
-                                                std::uint32_t index_id) {
+util::Result<RemoteConnection::SetOrderOutcome>
+RemoteConnection::set_order(std::uint32_t table_id,
+                            std::uint32_t index_id) {
     note_nav_frame();
     Frame req; req.opcode = Opcode::SetOrder;
     write_u32_le(table_id, req.payload);
@@ -2312,10 +2313,17 @@ util::Result<void> RemoteConnection::set_order(std::uint32_t table_id,
                 read_u32_le(rep.value().payload.data()));
         return util::Error{code, 0, "SetOrder: server error", ""};
     }
-    return {};
+    // Certified key count travels after the (empty) ack body,
+    // length-gated; old servers send nothing.
+    SetOrderOutcome o;
+    if (rep.value().payload.size() >= 4) {
+        o.counted    = true;
+        o.key_count  = read_u32_le(rep.value().payload.data());
+    }
+    return o;
 }
 
-util::Result<void>
+util::Result<RemoteConnection::SetOrderOutcome>
 RemoteConnection::set_order_by_name(std::uint32_t table_id,
                                      const std::string& tag) {
     note_nav_frame();
@@ -2331,7 +2339,12 @@ RemoteConnection::set_order_by_name(std::uint32_t table_id,
                 read_u32_le(rep.value().payload.data()));
         return util::Error{code, 0, "SetOrderByName: server error", tag};
     }
-    return {};
+    SetOrderOutcome o;
+    if (rep.value().payload.size() >= 4) {
+        o.counted    = true;
+        o.key_count  = read_u32_le(rep.value().payload.data());
+    }
+    return o;
 }
 
 namespace {

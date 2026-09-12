@@ -49,6 +49,14 @@ util::Result<void> remote_activate_index(RemoteIndex* ri) {
     if (!r) return r.error();
     ri->parent->server_order_id = ri->id;
     ri->parent->active_index_id = ri->id;
+    // The ack certifies the just-installed order's count: seed both
+    // the slot and the per-order map (fresher than any invalidation
+    // could have left them).
+    if (r.value().counted) {
+        ri->parent->cached_key_count = r.value().key_count;
+        ri->parent->key_count_cached = true;
+        ri->parent->key_counts[ri->id] = r.value().key_count;
+    }
     // Any deferred switch is superseded by this explicit install.
     ri->parent->pending_order = false;
     // The controlling order just changed on the server — anything queued was

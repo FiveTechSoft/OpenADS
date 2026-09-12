@@ -539,7 +539,8 @@ TEST_CASE("Nav batching: non-nav op flushes a deferred switch plainly") {
     REQUIRE(hOrd != 0);
 
     // A key count needs the binding: the deferred switch goes out
-    // plainly first, then the count.
+    // plainly first, and its ack certifies the count — zero
+    // GetKeyCount frames either time.
     const std::uint64_t so0 = nb_op(kOpSetOrder);
     const std::uint64_t kc0 = nb_op(kOpKeyCount);
     REQUIRE(AdsSetIndexOrderByHandle(hTable, hOrd) == AE_SUCCESS);
@@ -548,11 +549,11 @@ TEST_CASE("Nav batching: non-nav op flushes a deferred switch plainly") {
     REQUIRE(AdsGetKeyCount(hOrd, 0, &kc) == AE_SUCCESS);
     CHECK(kc == 3u);
     CHECK(nb_op(kOpSetOrder) == so0 + 1);
-    CHECK(nb_op(kOpKeyCount) == kc0 + 1);
+    CHECK(nb_op(kOpKeyCount) == kc0);
     // And again, cached this time.
     REQUIRE(AdsGetKeyCount(hOrd, 0, &kc) == AE_SUCCESS);
     CHECK(kc == 3u);
-    CHECK(nb_op(kOpKeyCount) == kc0 + 1);
+    CHECK(nb_op(kOpKeyCount) == kc0);
 
     REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
     REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);

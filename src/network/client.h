@@ -307,10 +307,19 @@ public:
                                                      const std::string& grantee,
                                                      std::uint32_t permissions);
 
-    util::Result<void>          set_order(std::uint32_t table_id,
-                                          std::uint32_t index_id);
-    util::Result<void>          set_order_by_name(std::uint32_t table_id,
-                                                   const std::string& tag);
+    // SetOrder ack outcome: the server appends the just-installed
+    // order's key count (trailing [u32] after the empty ack body),
+    // length-gated. Lets the scrollbar setup that always follows a
+    // switch serve locally instead of paying a GetKeyCount frame.
+    // Absent on old servers (counted=false).
+    struct SetOrderOutcome {
+        bool          counted    = false;
+        std::uint32_t key_count  = 0;
+    };
+    util::Result<SetOrderOutcome> set_order(std::uint32_t table_id,
+                                            std::uint32_t index_id);
+    util::Result<SetOrderOutcome> set_order_by_name(std::uint32_t table_id,
+                                                    const std::string& tag);
     struct SeekOutcome {
         std::uint8_t  hit  = 0;     // 1 = exact, 0 = soft / not found
         std::uint32_t recno = 0;

@@ -3301,6 +3301,27 @@ DispatchResult Session::dispatch(const Frame& f) {
                 break;
             }
             reply.opcode = Opcode::SetOrderAck;
+            // The scrollbar setup almost always asks this order's key
+            // count next: certify it here ([u32], length-gated) instead
+            // of paying a GetKeyCount frame for it.
+            {
+                UNSIGNED32 sokc = 0;
+                if (ordered_tables_.count(tid) != 0) {
+                    if (ADSHANDLE soh = ensure_abi_handle(tid); soh != 0) {
+                        (void)AdsGetKeyCount(soh, 0, &sokc);
+                    }
+                } else if (auto seit = tbls_.find(tid);
+                           seit != tbls_.end() && sess_conn_ != nullptr) {
+                    if (auto* stbl = sess_conn_->lookup_table(seit->second);
+                        stbl != nullptr) {
+                        sokc = stbl->record_count();
+                    }
+                }
+                reply.payload.push_back(static_cast<std::uint8_t>( sokc        & 0xFFu));
+                reply.payload.push_back(static_cast<std::uint8_t>((sokc >>  8) & 0xFFu));
+                reply.payload.push_back(static_cast<std::uint8_t>((sokc >> 16) & 0xFFu));
+                reply.payload.push_back(static_cast<std::uint8_t>((sokc >> 24) & 0xFFu));
+            }
             break;
         }
         case Opcode::SetOrderByName: {
@@ -3320,6 +3341,23 @@ DispatchResult Session::dispatch(const Frame& f) {
             else             ordered_tables_.insert(tid);
             sync_engine_cursor(tid);
             reply.opcode = Opcode::SetOrderByNameAck;
+            // Certify the installed order's key count (see SetOrder).
+            {
+                UNSIGNED32 sokc = 0;
+                if (!tag.empty()) {
+                    (void)AdsGetKeyCount(ht, 0, &sokc);
+                } else if (auto seit = tbls_.find(tid);
+                           seit != tbls_.end() && sess_conn_ != nullptr) {
+                    if (auto* stbl = sess_conn_->lookup_table(seit->second);
+                        stbl != nullptr) {
+                        sokc = stbl->record_count();
+                    }
+                }
+                reply.payload.push_back(static_cast<std::uint8_t>( sokc        & 0xFFu));
+                reply.payload.push_back(static_cast<std::uint8_t>((sokc >>  8) & 0xFFu));
+                reply.payload.push_back(static_cast<std::uint8_t>((sokc >> 16) & 0xFFu));
+                reply.payload.push_back(static_cast<std::uint8_t>((sokc >> 24) & 0xFFu));
+            }
             break;
         }
         case Opcode::Seek:
