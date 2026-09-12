@@ -796,6 +796,15 @@ struct RemoteTable {
     // never parked (a park performs no server close to absorb into).
     bool flush_file_pending      = false;
     bool close_all_indexes_pending = false;
+    // True once this handle wrote (buffered sets, append, delete,
+    // recall) without a durability flush since. Gates AdsFlushFileBuffers:
+    // a flush on a clean table (the RDD calls it blindly around every
+    // rotation) sets no flag, so teardown stays fully deferred and the
+    // index park survives. Cleared when a flush frame goes out or a
+    // real close absorbs it. Over-flagging only sends flushes (safe);
+    // the flag never gates data visibility (buffered sets flush via
+    // pending_sets independently).
+    bool write_dirty = false;
     // Parked index bindings (WAN chattiness: per-tag CloseAll→OpenIndex
     // rotation — 166 + 125 frames/startup). CloseAll snapshots the live
     // maps here instead of dropping them; the server bindings stay open

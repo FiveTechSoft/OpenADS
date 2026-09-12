@@ -107,6 +107,29 @@ Su chunk mostró el hueco restante: probes AtBOF post-EOF a wire.
 
 ---
 
+## 2026-09-11 — RDD rules from source (CacheRDD + rddads)
+
+User provided CacheRDD client source (`C:/tmp/cacherdd`, outside
+the repo) plus rddads at `C:/harbour-git/contrib/rddads`. Decisive
+reads, replacing three releases of trace-guessing:
+
+- **Boundary state is RDD-owned.** CacheRDD derives BOF/EOF/TOP/
+  BOTTOM/FOUND purely from cached `WA_RECNO` after each op — zero
+  server calls. rddads mirrors it: `adsBof/adsEof` return
+  `fBof/fEof` locally; every nav ends in `hb_adsUpdateAreaFlags`
+  (`AdsAtBOF + AdsAtEOF + AdsIsFound` on the table handle) — that
+  refresh, not Harbour paint code, is our 801+801 poll source.
+- **Order ops are set-oriented.** CacheRDD: Clear = local list
+  reset (no wire!); Add = one fetch-all-tags call, no-op when
+  present; Focus = skipped when same, else one server call.
+- **Rotation shape (rddads).** `adsOrderListAdd` = `AdsOpenIndex`
+  + (if no current order) set + **`SELF_GOTOP` inside the Add**;
+  `adsOrderListClear` = unconditional `AdsFlushFileBuffers` +
+  `AdsCloseAllIndexes` + `hOrdCurrent = 0`. `adsGoTo` calls
+  `AdsGetRecordNum` BEFORE `AdsGotoRecord` (2001 workaround).
+- Consequence for the park: uneeded `Flush` (clean tables) must
+  set no flag, or every rotation poisons it.
+
 ## 2026-09-11 — Park that never fires (v1.09.39 field: 94 s)
 
 ### Field result v1.09.39

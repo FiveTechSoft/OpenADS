@@ -667,6 +667,7 @@ UNSIGNED32 remote_buffered_set(openads::network::RemoteTable* rt,
     if (rt == nullptr || rt->conn == nullptr) {
         return fail(openads::AE_INTERNAL_ERROR, "");
     }
+    rt->write_dirty = true;
     remote_settle_cursor(rt);
     rt->row_valid = false;                      // M12.17 cache invalidation
     if (rt->pending_sets.empty()) {
@@ -764,9 +765,16 @@ UNSIGNED32 remote_close_parked_indexes(openads::network::RemoteTable* rt) {
     }
     // A nav carrying its own order context converges the server
     // explicitly (fused install / pending switch / active belief
-    // already acked), so adoption is safe. Only a truly natural nav
-    // (no context) would walk the stale parked order: close for real.
+    // already acked), so adoption is safe. A truly natural nav is
+    // safe too when the server never left natural (no order ever
+    // acked): there is no stale order to walk. Only a natural nav
+    // against a stale server order needs the real close.
     if (rt->pending_order || rt->active_index_id != 0) return ok();
+    if (rt->server_order_id == 0 ||
+        rt->server_order_id ==
+            openads::network::RemoteTable::kOrderUnknown) {
+        return ok();
+    }
     return remote_emit_close_all(rt);
 }
 UNSIGNED32 remote_flush_pending(openads::network::RemoteTable* rt) {
@@ -835,16 +843,15 @@ UNSIGNED32 remote_flush_teardown(openads::network::RemoteTable* rt) {
     // advertise kCapFlushInCloseAll; old servers keep both frames.
     // Parked exception (below): the park keeps server bindings open,
     // so a real CloseAll would destroy what the park preserves — the
-    // close is adopted unsent when no flush is owed. With a flush
-    // owed, the merged CloseAll wins instead (one frame that flushes
-    // server-side; the park is moot once a frame is owed anyway).
+    // close is adopted unsent, and a flush owed alongside travels
+    // alone (the merge below only applies when a real close goes out).
     if (rt->close_all_indexes_pending && rt->indexes_parked) {
         if (rt->flush_file_pending) {
-            if (UNSIGNED32 frc = remote_emit_close_all(rt); frc != 0) {
-                return frc;
+            if (auto r = rt->conn->flush_file_buffers(rt->id); !r) {
+                return fail(r.error());
             }
             rt->flush_file_pending = false;
-            return ok();
+            rt->write_dirty = false;
         }
         rt->close_all_indexes_pending = false;
         return ok();
@@ -856,6 +863,7 @@ UNSIGNED32 remote_flush_teardown(openads::network::RemoteTable* rt) {
         }
         rt->flush_file_pending = false;
         rt->close_all_indexes_pending = false;
+        rt->write_dirty = false;
         return ok();
     }
     if (rt->flush_file_pending) {
@@ -863,14 +871,12 @@ UNSIGNED32 remote_flush_teardown(openads::network::RemoteTable* rt) {
             return fail(r.error());
         }
         rt->flush_file_pending = false;
+        rt->write_dirty = false;
     }
     if (rt->close_all_indexes_pending) {
-        if (rt->indexes_parked) {
-            // Adopt: the park kept the server bindings open, so the
-            // pending close is already satisfied — nothing to send.
-            // (A flush owed alongside was emitted above on its own.)
-            rt->close_all_indexes_pending = false;
-        } else if (UNSIGNED32 frc = remote_emit_close_all(rt); frc != 0) {
+        // Parked closes were adopted above; what reaches here is
+        // unparked and needs the real frame.
+        if (UNSIGNED32 frc = remote_emit_close_all(rt); frc != 0) {
             return frc;
         }
     }
@@ -7303,6 +7309,7 @@ void remote_flush_pools(openads::network::RemoteConnection* rc) {
         // same way a close does — never emit it first.
         e->flush_file_pending = false;
         e->close_all_indexes_pending = false;
+        e->write_dirty = false;
         remote_close_table_live(0, e.get());
     }
 }
@@ -10430,6 +10437,7 @@ UNSIGNED32 ENTRYPOINT AdsCloseTable(ADSHANDLE hTable) {
         rt->flush_file_pending = false;
         rt->close_all_indexes_pending = false;
         rt->indexes_parked = false;
+        rt->write_dirty = false;
         remote_close_table_live(hTable, rt);
         return ok();
     }
@@ -12294,6 +12302,7 @@ UNSIGNED32 ENTRYPOINT AdsAppendRecord(ADSHANDLE hTable) {
         // Fresh appends auto-lock (non-exclusive tables): pooled reuse
         // must not resurrect a locked handle.
         rt->ever_locked = true;
+        rt->write_dirty = true;
         return ok();
     }
 #if defined(OPENADS_WITH_FIREBIRD)
@@ -12427,6 +12436,7 @@ UNSIGNED32 ENTRYPOINT AdsWriteRecord(ADSHANDLE hTable) {
         rt->invalidate_prefetch();
         auto r = rt->conn->flush_table(rt->id);
         if (!r) return fail(r.error());
+        rt->write_dirty = true;
         return ok();
     }
 #if defined(OPENADS_WITH_FIREBIRD)
@@ -12626,6 +12636,7 @@ UNSIGNED32 ENTRYPOINT AdsDeleteRecord(ADSHANDLE hTable) {
         rt->invalidate_prefetch();
         auto r = rt->conn->delete_record(rt->id);
         if (!r) return fail(r.error());
+        rt->write_dirty = true;
         return ok();
     }
 #if defined(OPENADS_WITH_FIREBIRD)
@@ -12794,6 +12805,7 @@ UNSIGNED32 ENTRYPOINT AdsRecallRecord(ADSHANDLE hTable) {
         rt->invalidate_prefetch();
         auto r = rt->conn->recall_record(rt->id);
         if (!r) return fail(r.error());
+        rt->write_dirty = true;
         return ok();
     }
     Table* t = get_table(hTable);
@@ -13840,6 +13852,11 @@ UNSIGNED32 ENTRYPOINT AdsFlushFileBuffers(ADSHANDLE hTable) {
         // Deferred: a CloseTable is expected to absorb this (the server
         // close flushes via its shadow handle). If any other wire op
         // intervenes, remote_flush_pending emits it ahead of that op.
+        // Clean tables (the RDD calls this blindly around every
+        // rotation) owe nothing: no flag, so teardown stays fully
+        // deferred and the index park survives. Buffered sets always
+        // mark dirty at buffer time, so this never skips real data.
+        if (rt->pending_sets.empty() && !rt->write_dirty) return ok();
         rt->flush_file_pending = true;
         return ok();
     }

@@ -138,7 +138,7 @@ TEST_CASE("Teardown batching: flush+closeall absorb into close") {
     srv.stop();
 }
 
-TEST_CASE("Teardown batching: intervening op flushes teardown first") {
+TEST_CASE("Teardown batching: clean triple costs nothing") {
     tb_wipe();
     auto dir = tb_tmp_dir();
     tb_seed(dir);
@@ -150,12 +150,81 @@ TEST_CASE("Teardown batching: intervening op flushes teardown first") {
 
     const std::uint64_t fl0 = tb_op(kOpFlushFile);
     const std::uint64_t ca0 = tb_op(kOpCloseAllIdx);
+    const std::uint64_t top0 = tb_op(kOpGotoTop);
 
-    // CloseAll, then a real nav: the deferred teardown goes out ahead
-    // of it — merged into a single CloseAllIndexes frame (the server
-    // flushes inside that handler).
+    // Nothing was written, so the blind Flush sets no flag, the
+    // CloseAll parks (bindings stay live), and the natural nav finds
+    // a pristine server: the whole teardown triple costs nothing.
     REQUIRE(AdsFlushFileBuffers(hTable) == AE_SUCCESS);
     REQUIRE(AdsCloseAllIndexes(hTable) == AE_SUCCESS);
+    REQUIRE(AdsGotoTop(hTable) == AE_SUCCESS);
+    CHECK(tb_op(kOpFlushFile) == fl0);
+    CHECK(tb_op(kOpCloseAllIdx) == ca0);
+    CHECK(tb_op(kOpGotoTop) == top0 + 1);
+
+    REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
+    REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
+    srv.stop();
+}
+
+TEST_CASE("Teardown batching: dirty flush travels alone under a park") {
+    tb_wipe();
+    auto dir = tb_tmp_dir();
+    tb_seed(dir);
+
+    openads::network::Server srv;
+    REQUIRE(srv.start("127.0.0.1", 0).has_value());
+    ADSHANDLE hConn = tb_connect_remote(dir, srv.port());
+    ADSHANDLE hTable = tb_open(hConn);
+
+    // A buffered write makes the table dirty: the Flush flag sticks,
+    // but the parked close is still adopted — one flush frame, no
+    // close frame, then the nav.
+    UNSIGNED8 fld[] = "ID";
+    REQUIRE(AdsAppendRecord(hTable) == AE_SUCCESS);
+    REQUIRE(AdsSetDouble(hTable, fld, 60.0) == AE_SUCCESS);
+    const std::uint64_t fl0 = tb_op(kOpFlushFile);
+    const std::uint64_t ca0 = tb_op(kOpCloseAllIdx);
+    const std::uint64_t top0 = tb_op(kOpGotoTop);
+    REQUIRE(AdsFlushFileBuffers(hTable) == AE_SUCCESS);
+    REQUIRE(AdsCloseAllIndexes(hTable) == AE_SUCCESS);
+    REQUIRE(AdsGotoTop(hTable) == AE_SUCCESS);
+    CHECK(tb_op(kOpFlushFile) == fl0 + 1);
+    CHECK(tb_op(kOpCloseAllIdx) == ca0);
+    CHECK(tb_op(kOpGotoTop) == top0 + 1);
+
+    REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
+    REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
+    srv.stop();
+}
+
+TEST_CASE("Teardown batching: merged flush survives for unparked closes") {
+    tb_wipe();
+    auto dir = tb_tmp_dir();
+    tb_seed(dir);
+
+    openads::network::Server srv;
+    REQUIRE(srv.start("127.0.0.1", 0).has_value());
+    ADSHANDLE hConn = tb_connect_remote(dir, srv.port());
+    ADSHANDLE hTable = tb_open(hConn);
+
+    // Dirty table, CloseAll parked, then a structural change drops
+    // the park with the flags still owed: the next op merges
+    // flush-into-close (one CloseAll frame, zero flush frames).
+    UNSIGNED8 fld[] = "ID";
+    REQUIRE(AdsAppendRecord(hTable) == AE_SUCCESS);
+    REQUIRE(AdsSetDouble(hTable, fld, 60.0) == AE_SUCCESS);
+    REQUIRE(AdsWriteRecord(hTable) == AE_SUCCESS);
+    REQUIRE(AdsFlushFileBuffers(hTable) == AE_SUCCESS);
+    REQUIRE(AdsCloseAllIndexes(hTable) == AE_SUCCESS);
+    ADSHANDLE hI = 0;
+    UNSIGNED8 bag[] = "TB.CDX";
+    UNSIGNED8 tag[] = "BYID9";
+    UNSIGNED8 exp[] = "ID";
+    REQUIRE(AdsCreateIndex61(hTable, bag, tag, exp, nullptr, nullptr,
+                             ADS_COMPOUND, 512, &hI) == AE_SUCCESS);
+    const std::uint64_t fl0 = tb_op(kOpFlushFile);
+    const std::uint64_t ca0 = tb_op(kOpCloseAllIdx);
     REQUIRE(AdsGotoTop(hTable) == AE_SUCCESS);
     CHECK(tb_op(kOpFlushFile) == fl0);
     CHECK(tb_op(kOpCloseAllIdx) == ca0 + 1);
@@ -450,8 +519,8 @@ TEST_CASE("Index park: full rotation without reopen costs one frame") {
     REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
     srv.stop();
 }
-
-TEST_CASE("Index park: table nav inside the window forces a real close") {    tb_wipe();
+TEST_CASE("Index park: table nav inside the window forces a real close") {
+    tb_wipe();
     auto dir = tb_tmp_dir();
     tb_seed(dir);
 
@@ -460,9 +529,16 @@ TEST_CASE("Index park: table nav inside the window forces a real close") {    tb
     ADSHANDLE hConn = tb_connect_remote(dir, srv.port());
     ADSHANDLE hTable = tb_open(hConn);
 
-    // A nav between CloseAll and OpenIndex must walk the natural
-    // order (client belief), not the parked server order: one real
-    // close, then the nav. Values prove it (natural top, recno 1).
+    // Install a server order first (fused switch, acked), then park:
+    // the server still runs it while the client believes natural. A
+    // contextless table nav must resolve the divergence with a real
+    // close — adoption would walk the stale order while the client
+    // accounts natural rows.
+    ADSHANDLE hOrd = 0;
+    UNSIGNED8 want[] = "BYID";
+    REQUIRE(AdsGetIndexHandle(hTable, want, &hOrd) == AE_SUCCESS);
+    REQUIRE(AdsSetIndexOrderByHandle(hTable, hOrd) == AE_SUCCESS);
+    REQUIRE(AdsGotoTop(hTable) == AE_SUCCESS);
     const std::uint64_t ca0 = tb_op(kOpCloseAllIdx);
     const std::uint64_t top0 = tb_op(kOpGotoTop);
     REQUIRE(AdsCloseAllIndexes(hTable) == AE_SUCCESS);
