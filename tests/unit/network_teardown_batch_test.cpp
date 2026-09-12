@@ -330,7 +330,7 @@ TEST_CASE("Teardown batching: order key counts ride the parent cache") {    tb_w
     CHECK(kc == 5u);
     REQUIRE(AdsGetKeyCount(hOrd, 0, &kc) == AE_SUCCESS);
     CHECK(kc == 5u);
-    CHECK(tb_op(kOpKeyCount) == kc0);
+    CHECK(tb_op(kOpKeyCount) == kc0 + 1);
 
     REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
     REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
@@ -649,22 +649,22 @@ TEST_CASE("KeyCount: rotation revisits ride the per-order map") {
     UNSIGNED8 want2[] = "BYID2";
     REQUIRE(AdsGetIndexHandle(hTable, want2, &hOrd2) == AE_SUCCESS);
 
-    // Each switch certifies its order's count in the ack (or the
-    // per-order map serves revisits): no GetKeyCount frame anywhere.
+    // First visit to each order pays; revisits serve from the map
+    // (order switches do not change any order count).
     const std::uint64_t kc0 = tb_op(kOpKeyCount);
     UNSIGNED32 kc = 0;
     REQUIRE(AdsSetIndexOrderByHandle(hTable, hOrd1) == AE_SUCCESS);
     REQUIRE(AdsGetKeyCount(hOrd1, 0, &kc) == AE_SUCCESS);
     CHECK(kc == 5u);
-    CHECK(tb_op(kOpKeyCount) == kc0);
+    CHECK(tb_op(kOpKeyCount) == kc0 + 1);
     REQUIRE(AdsSetIndexOrderByHandle(hTable, hOrd2) == AE_SUCCESS);
     REQUIRE(AdsGetKeyCount(hOrd2, 0, &kc) == AE_SUCCESS);
     CHECK(kc == 5u);
-    CHECK(tb_op(kOpKeyCount) == kc0);
+    CHECK(tb_op(kOpKeyCount) == kc0 + 2);
     REQUIRE(AdsSetIndexOrderByHandle(hTable, hOrd1) == AE_SUCCESS);
     REQUIRE(AdsGetKeyCount(hOrd1, 0, &kc) == AE_SUCCESS);
     CHECK(kc == 5u);
-    CHECK(tb_op(kOpKeyCount) == kc0);
+    CHECK(tb_op(kOpKeyCount) == kc0 + 2);
 
     REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
     REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);

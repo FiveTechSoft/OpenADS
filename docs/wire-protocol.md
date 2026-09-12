@@ -411,8 +411,9 @@ password must match a configured account or the server returns `AE_LOGIN_FAILED`
   client's count cache; the wire `GetRecordCount` keeps its
   refresh). Fused order-switch navs append one more `[u32]`: the
   just-installed order's key count (14-byte tails). Plain
-  `SetOrder`/`SetOrderByName` acks carry a trailing `[u32]` key
-  count the same way. `RefreshRecordAck` carries a row trailer
+  `SetOrder`/`SetOrderByName` acks carry no tail (a count walk per
+  switch convoys under append storms — tried in v1.09.46,
+  reverted in v1.09.47). `RefreshRecordAck` carries a row trailer
   plus the bound tail (the re-read row rides back). Trailing section,
   length-gated, no capability bit (same convention as the row trailer
   and the twin flag): old clients parse the trailer and ignore the

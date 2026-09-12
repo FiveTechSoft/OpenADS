@@ -107,6 +107,28 @@ Su chunk mostró el hueco restante: probes AtBOF post-EOF a wire.
 
 ---
 
+## 2026-09-12 - Storm revert: switch count withdrawn (loopback B_BIG 0.283 s -> 8.2 s)
+
+### Regression (bisected by field: fast through .45, slow on .46)
+
+Bulk append on loopback (1 instance x 10 threads x 10 records)
+convoyed 29x. The .46 delta is small and the only hot-path
+change is the key-count piggyback on plain switch acks: every
+SetOrder now pays commit_dirty_record + a count walk on the twin
+under the append storm lock. Fused-only traffic (.45) never
+showed it (browses, not appends).
+
+### Shipped (v1.09.47)
+
+- **Reverted.** Plain SetOrder/SetOrderByName acks are empty
+  again (exactly .45 behavior, proven 0.283 s). Fused navs keep
+  their count piggyback (browse-shaped only). Client outcome
+  parsing stays length-gated (inert, forward-compatible).
+- Tests revert to wire-count expectations; per-order map,
+  phantom derivation, refresh and reposition work untouched.
+- Field KeyCount returns to ~87 (cost accepted for storm
+  safety); next field run should read ~64 s + a fast B_BIG.
+
 ## 2026-09-12 - Switch certifies its count (v1.09.45 field: 63 s)
 
 ### Field result v1.09.45 (both sides 1.09.45)
