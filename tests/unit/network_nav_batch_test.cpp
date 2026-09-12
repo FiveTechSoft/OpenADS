@@ -37,6 +37,7 @@ constexpr std::uint8_t kOpSetOrder   = 0x8C;
 constexpr std::uint8_t kOpSeek       = 0x90;
 constexpr std::uint8_t kOpKeyCount   = 0xB0;
 constexpr std::uint8_t kOpCloseTable = 0x22;
+constexpr std::uint8_t kOpGetRecordCount = 0x46;
 
 fs::path nb_tmp_dir() {
     return fs::temp_directory_path() / "openads_navbatch_test";
@@ -381,8 +382,7 @@ TEST_CASE("Nav batching: skip-established limits answer locally") {
     s.stop();
 }
 
-TEST_CASE("Reposition truth: top/bottom/skip certify bounds and recno") {
-    nb_wipe();
+TEST_CASE("Reposition truth: top/bottom/skip certify bounds and recno") {    nb_wipe();
     auto dir = nb_tmp_dir();
     nb_seed(dir, "tbs.dbf", 3);
 
@@ -700,6 +700,66 @@ TEST_CASE("Reposition truth: Seek miss certifies EOF locally") {
     CHECK(nb_op(kOpAtEOF) == eof0);
 
     REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
+    REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
+    s.stop();
+}
+
+UNSIGNED32 nb_reccount(ADSHANDLE hTable) {
+    UNSIGNED32 v = 0;
+    REQUIRE(AdsGetRecordCount(hTable, 0, &v) == AE_SUCCESS);
+    return v;
+}
+
+TEST_CASE("Count truth: nav ack certifies the record count") {
+    nb_wipe();
+    auto dir = nb_tmp_dir();
+    nb_seed(dir, "cnt.dbf", 3);
+
+    openads::network::Server s;
+    REQUIRE(s.start("127.0.0.1", 0).has_value());
+    ADSHANDLE hConn = nb_connect_remote(dir, s.port());
+    ADSHANDLE hTable = nb_open(hConn, "cnt.dbf");
+
+    // The USE flow (open, position, count) pays no count frame: the
+    // nav ack certified it. (Bottom, not top: the open's implicit
+    // GoTop dedupes a repeat top with no ack and no tail.)
+    const std::uint64_t rc0 = nb_op(kOpGetRecordCount);
+    REQUIRE(AdsGotoBottom(hTable) == AE_SUCCESS);
+    CHECK(nb_reccount(hTable) == 3u);
+    CHECK(nb_reccount(hTable) == 3u);
+    CHECK(nb_op(kOpGetRecordCount) == rc0);
+
+    REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
+    REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
+    s.stop();
+}
+
+TEST_CASE("Phantom RecNo derives from flags plus cached count") {
+    nb_wipe();
+    auto dir = nb_tmp_dir();
+    nb_seed(dir, "ph1.dbf", 3);
+    nb_seed(dir, "ph2.dbf", 3);
+
+    openads::network::Server s;
+    REQUIRE(s.start("127.0.0.1", 0).has_value());
+    ADSHANDLE hConn = nb_connect_remote(dir, s.port());
+    ADSHANDLE hA = nb_open(hConn, "ph1.dbf");
+    ADSHANDLE hB = nb_open(hConn, "ph2.dbf");
+
+    // Park A at its EOF phantom (certified), cache its count, then
+    // navigate B: the cross-table frame evicts A's seq-gated caches,
+    // but the phantom recno re-derives (EOF + count) with no frame.
+    REQUIRE(AdsGotoBottom(hA) == AE_SUCCESS);
+    REQUIRE(AdsSkip(hA, 1) == AE_SUCCESS);
+    CHECK(nb_reccount(hA) == 3u);
+    const std::uint64_t rn0 = nb_op(kOpGetRecordNum);
+    REQUIRE(AdsGotoTop(hB) == AE_SUCCESS);
+    CHECK(nb_recno(hA) == 4u);
+    CHECK(nb_recno(hA) == 4u);
+    CHECK(nb_op(kOpGetRecordNum) == rn0);
+
+    REQUIRE(AdsCloseTable(hA) == AE_SUCCESS);
+    REQUIRE(AdsCloseTable(hB) == AE_SUCCESS);
     REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
     s.stop();
 }

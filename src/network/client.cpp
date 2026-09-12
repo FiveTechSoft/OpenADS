@@ -600,12 +600,14 @@ util::Result<void> RemoteConnection::close_table(std::uint32_t id) {
 }
 
 // Reposition-bound truth: the server appended [u8 bof][u8 eof][u32 recno]
-// after the row trailer because it just positioned explicitly and knows
-// all three exactly. Applies them as certified state so the poll burst
-// that always follows a reposition (AtBOF/AtEOF/RecNo per paint row)
-// is served locally. Length-gated by the caller: absent on old servers.
+// (+ optional [u32 reccount]) after the row trailer because it just
+// positioned explicitly and knows them exactly. Applies them as certified
+// state so the poll burst that always follows a reposition
+// (AtBOF/AtEOF/RecNo/RecCount per paint row) is served locally.
+// Length-gated by the caller: absent on old servers.
 static void apply_bound_trailer(RemoteTable* rt, bool bof, bool eof,
-                                std::uint32_t recno) {
+                                std::uint32_t recno, std::uint32_t reccount,
+                                bool has_count) {
     if (rt == nullptr || rt->conn == nullptr) return;
     rt->nav_at_bof  = bof;
     rt->nav_at_eof  = eof;
@@ -623,6 +625,26 @@ static void apply_bound_trailer(RemoteTable* rt, bool bof, bool eof,
     rt->recno_bound     = recno;
     rt->recno_bound_ok  = true;
     rt->recno_bound_seq = seq;
+    if (has_count) {
+        rt->count_bound     = reccount;
+        rt->count_bound_ok  = true;
+        rt->count_bound_seq = seq;
+    }
+}
+
+// Read a bound tail at [tend, ...): 6 bytes (bof/eof/recno), plus an
+// optional 4-byte reccount. Returns false when no tail is present
+// (old server) — caller falls back to the wire polls as before.
+static bool apply_bound_tail(RemoteTable* rt,
+                             const std::vector<std::uint8_t>& pl,
+                             std::size_t tend) {
+    if (pl.size() < tend + 6) return false;
+    const bool has_count = pl.size() >= tend + 10;
+    apply_bound_trailer(rt, pl[tend] != 0, pl[tend + 1] != 0,
+                        read_u32_le(pl.data() + tend + 2),
+                        has_count ? read_u32_le(pl.data() + tend + 6) : 0u,
+                        has_count);
+    return true;
 }
 
 util::Result<void> RemoteConnection::goto_top(std::uint32_t id) {
@@ -671,11 +693,7 @@ util::Result<void> RemoteConnection::goto_top(RemoteTable* rt) {
         parse_row_trailer_into(rt, rep.value().payload, 0);
     // Reposition-bound piggyback (see goto_record): trailing
     // [u8 bof][u8 eof][u32 recno], length-gated.
-    const auto& pl = rep.value().payload;
-    if (pl.size() >= tend + 6) {
-        apply_bound_trailer(rt, pl[tend] != 0, pl[tend + 1] != 0,
-                            read_u32_le(pl.data() + tend + 2));
-    }
+    apply_bound_tail(rt, rep.value().payload, tend);
     return {};
 }
 
@@ -734,11 +752,7 @@ util::Result<void> RemoteConnection::skip(RemoteTable* rt,
         parse_row_trailer_into(rt, rep.value().payload, 0, bdir);
     // Reposition-bound piggyback (see goto_record): trailing
     // [u8 bof][u8 eof][u32 recno], length-gated.
-    const auto& pl = rep.value().payload;
-    if (pl.size() >= tend + 6) {
-        apply_bound_trailer(rt, pl[tend] != 0, pl[tend + 1] != 0,
-                            read_u32_le(pl.data() + tend + 2));
-    }
+    apply_bound_tail(rt, rep.value().payload, tend);
     return {};
 }
 
@@ -1051,11 +1065,7 @@ util::Result<void> RemoteConnection::goto_record(RemoteTable* rt,
     // Reposition-bound piggyback: trailing [u8 bof][u8 eof][u32 recno]
     // (length-gated; old servers send no tail). Certifies the boundary
     // + recno answers so the post-reposition poll burst costs nothing.
-    const auto& pl = rep.value().payload;
-    if (pl.size() >= tend + 6) {
-        apply_bound_trailer(rt, pl[tend] != 0, pl[tend + 1] != 0,
-                            read_u32_le(pl.data() + tend + 2));
-    }
+    apply_bound_tail(rt, rep.value().payload, tend);
     return {};
 }
 
@@ -1073,11 +1083,7 @@ util::Result<void> RemoteConnection::goto_bottom(RemoteTable* rt) {
         parse_row_trailer_into(rt, rep.value().payload, 0);
     // Reposition-bound piggyback (see goto_record): trailing
     // [u8 bof][u8 eof][u32 recno], length-gated.
-    const auto& pl = rep.value().payload;
-    if (pl.size() >= tend + 6) {
-        apply_bound_trailer(rt, pl[tend] != 0, pl[tend + 1] != 0,
-                            read_u32_le(pl.data() + tend + 2));
-    }
+    apply_bound_tail(rt, rep.value().payload, tend);
     return {};
 }
 
@@ -1106,11 +1112,7 @@ util::Result<void> RemoteConnection::goto_top_fused(RemoteTable* rt,
         parse_row_trailer_into(rt, rep.value().payload, 0);
     // Reposition-bound piggyback (see goto_record): trailing
     // [u8 bof][u8 eof][u32 recno], length-gated.
-    const auto& pl = rep.value().payload;
-    if (pl.size() >= tend + 6) {
-        apply_bound_trailer(rt, pl[tend] != 0, pl[tend + 1] != 0,
-                            read_u32_le(pl.data() + tend + 2));
-    }
+    apply_bound_tail(rt, rep.value().payload, tend);
     return {};
 }
 
@@ -1131,11 +1133,7 @@ util::Result<void> RemoteConnection::goto_bottom_fused(RemoteTable* rt,
         parse_row_trailer_into(rt, rep.value().payload, 0);
     // Reposition-bound piggyback (see goto_record): trailing
     // [u8 bof][u8 eof][u32 recno], length-gated.
-    const auto& pl = rep.value().payload;
-    if (pl.size() >= tend + 6) {
-        apply_bound_trailer(rt, pl[tend] != 0, pl[tend + 1] != 0,
-                            read_u32_le(pl.data() + tend + 2));
-    }
+    apply_bound_tail(rt, rep.value().payload, tend);
     return {};
 }
 
@@ -2804,12 +2802,8 @@ RemoteConnection::seek(std::uint32_t index_id,
         const std::size_t tend = parse_row_trailer_into(
             parent, rep.value().payload, 5);
         // Reposition-bound piggyback (see goto_record): trailing
-        // [u8 bof][u8 eof][u32 recno], length-gated.
-        const auto& pl = rep.value().payload;
-        if (pl.size() >= tend + 6) {
-            apply_bound_trailer(parent, pl[tend] != 0, pl[tend + 1] != 0,
-                                read_u32_le(pl.data() + tend + 2));
-        }
+        // [u8 bof][u8 eof][u32 recno](+[u32 reccount]), length-gated.
+        apply_bound_tail(parent, rep.value().payload, tend);
     }
     return o;
 }

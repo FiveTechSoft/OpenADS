@@ -683,6 +683,8 @@ UNSIGNED32 remote_buffered_set(openads::network::RemoteTable* rt,
         // The probe applies server-side at once: a conditional-order
         // row may just have entered/left the key set.
         rt->key_count_cached = false;
+        rt->key_counts.clear();
+        rt->key_counts.clear();
     }
     rt->pending_sets.emplace_back(fname, val);
     return ok();
@@ -1572,9 +1574,16 @@ std::uint32_t remote_ensure_key_count(openads::network::RemoteTable* rt) {
         return rt->rec_count_cached ? rt->cached_rec_count : 0u;
     }
     if (!rt->key_count_cached) {
-        if (auto r = rt->conn->key_count(rt->id)) {
+        // Second-chance: rotation revisits orders whose counts were
+        // fetched before (order switches don't change counts).
+        auto hit = rt->key_counts.find(rt->active_index_id);
+        if (hit != rt->key_counts.end()) {
+            rt->cached_key_count = hit->second;
+            rt->key_count_cached = true;
+        } else if (auto r = rt->conn->key_count(rt->id)) {
             rt->cached_key_count = r.value();
             rt->key_count_cached = true;
+            rt->key_counts[rt->active_index_id] = r.value();
         }
     }
     return rt->key_count_cached ? rt->cached_key_count : 0u;
@@ -7629,6 +7638,8 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
             adopted->row_valid = false;
             adopted->rec_count_cached = false;
             adopted->key_count_cached = false;
+            adopted->key_counts.clear();
+            adopted->key_counts.clear();
             adopted->keyno_valid = false;
             adopted->found_cached = false;
             adopted->nav_at_bof = adopted->nav_at_eof = false;
@@ -9753,6 +9764,8 @@ UNSIGNED32 ENTRYPOINT AdsRefreshRecord(ADSHANDLE hTable) {
         rt->row_valid = false;                      // M12.17 cache invalidation
         rt->rec_count_cached = false;
         rt->key_count_cached = false;               // force fresh record count from server
+        rt->key_counts.clear();
+        rt->key_counts.clear();
         auto r = rt->conn->refresh_record(rt->id);
         if (!r) return fail(r.error());
         return ok();
@@ -11632,6 +11645,21 @@ UNSIGNED32 ENTRYPOINT AdsGetRecordNum(ADSHANDLE hTable, UNSIGNED16 /*bFilterOpti
             *pulRecordNum = rt->recno_bound;
             return ok();
         }
+        // Phantom derivation (no frame, no currency): at the EOF
+        // phantom the recno is LastRec+1 by Clipper convention — a
+        // pure function of the certified EOF flag plus the cached
+        // count. Restricted to certain semantics: natural order,
+        // no filter/AOF/scope (scoped/conditional walks may end
+        // elsewhere — those keep the wire path), and a cached count
+        // to derive from. Immune to cross-table eviction by
+        // construction (nothing is stored).
+        if (!rt->row_valid && rt->nav_at_eof &&
+            rt->active_index_id == 0 && rt->filter_expr.empty() &&
+            rt->aof_expr.empty() && !rt->scope_touched &&
+            rt->rec_count_cached) {
+            *pulRecordNum = rt->cached_rec_count + 1;
+            return ok();
+        }
         auto r = rt->conn->get_record_num(rt->id);
         if (!r) return fail(r.error());
         *pulRecordNum = r.value();
@@ -11693,6 +11721,16 @@ UNSIGNED32 ENTRYPOINT AdsGetRecordCount(ADSHANDLE hTable, UNSIGNED16 bFilterOpti
         // call from cache. Each cache hit saves one wire RTT.
         if (rt->rec_count_cached) {
             *pulRecordCount = rt->cached_rec_count;
+            return ok();
+        }
+        // Certified count from the last nav ack tail (same trust as
+        // the cache above — in-memory server count). Covers the
+        // open→goto→count USE flow with zero extra frames.
+        if (rt->count_bound_ok &&
+            rt->count_bound_seq == rt->conn->nav_seq()) {
+            *pulRecordCount = rt->count_bound;
+            rt->cached_rec_count = rt->count_bound;
+            rt->rec_count_cached = true;
             return ok();
         }
         auto r = rt->conn->record_count(rt->id);
@@ -12321,6 +12359,8 @@ UNSIGNED32 ENTRYPOINT AdsAppendRecord(ADSHANDLE hTable) {
         rt->row_valid        = false;               // M12.17
         rt->rec_count_cached = false;
         rt->key_count_cached = false;               // M12.19
+        rt->key_counts.clear();
+        rt->key_counts.clear();
         // Cursor moves onto a new blank; any prior keyno is for a different
         // row. Leaving keyno_valid set made AdsGetKeyNum/GetRelKeyPos report
         // the pre-append position until the next nav invalidation -- wrong
@@ -12459,6 +12499,8 @@ UNSIGNED32 ENTRYPOINT AdsWriteRecord(ADSHANDLE hTable) {
         // A write can move the row in/out of a conditional order or
         // scope: the cached key count may have changed with it.
         rt->key_count_cached = false;
+        rt->key_counts.clear();
+        rt->key_counts.clear();
         // Key fields may have moved the row in the active order (or this is
         // the flush of a fresh append). Drop the key position so the next
         // AdsGetKeyNum / AdsGetRelKeyPos re-seeds via server GetKeyNum (O(1))
@@ -12662,6 +12704,8 @@ UNSIGNED32 ENTRYPOINT AdsDeleteRecord(ADSHANDLE hTable) {
         rt->row_valid        = false;               // M12.17
         rt->rec_count_cached = false;
         rt->key_count_cached = false;               // M12.19 (Pack drops the row)
+        rt->key_counts.clear();
+        rt->key_counts.clear();
         rt->keyno_valid      = false;               // order position may shift
         remote_clear_nav_boundaries(rt);
         rt->invalidate_prefetch();
@@ -12831,6 +12875,8 @@ UNSIGNED32 ENTRYPOINT AdsRecallRecord(ADSHANDLE hTable) {
         rt->row_valid        = false;               // M12.17
         rt->rec_count_cached = false;
         rt->key_count_cached = false;               // M12.19
+        rt->key_counts.clear();
+        rt->key_counts.clear();
         rt->keyno_valid      = false;               // order position may shift
         remote_clear_nav_boundaries(rt);
         rt->invalidate_prefetch();
@@ -19896,6 +19942,7 @@ UNSIGNED32 ENTRYPOINT AdsSetScope(ADSHANDLE hIndex, UNSIGNED16 usScope,
         // pooling (server index state is no longer fresh-open shaped).
         if (ri->parent != nullptr) {
             ri->parent->key_count_cached = false;
+            ri->parent->key_counts.clear();
             ri->parent->keyno_valid      = false;
             ri->parent->invalidate_prefetch();
             ri->parent->scope_touched    = true;
@@ -20000,6 +20047,7 @@ UNSIGNED32 ENTRYPOINT AdsClearScope(ADSHANDLE hIndex, UNSIGNED16 usScope) {
         if (!r) return fail(r.error());
         if (ri->parent != nullptr) {
             ri->parent->key_count_cached = false;
+            ri->parent->key_counts.clear();
             ri->parent->keyno_valid      = false;
             ri->parent->invalidate_prefetch();
             // Widening can un-empty the cursor: expire the nav stamp
@@ -20050,6 +20098,8 @@ UNSIGNED32 ENTRYPOINT AdsPackTable(ADSHANDLE hTable) {
         rt->row_valid        = false;               // M12.17/19
         rt->rec_count_cached = false;
         rt->key_count_cached = false;
+        rt->key_counts.clear();
+        rt->key_counts.clear();
         rt->nav_not_bof = false;  // row removal can empty the cursor
         rt->nav_not_eof = false;
         auto r = rt->conn->pack_table(rt->id);
@@ -20080,6 +20130,8 @@ UNSIGNED32 ENTRYPOINT AdsZapTable(ADSHANDLE hTable) {
         rt->row_valid        = false;               // M12.17/19
         rt->rec_count_cached = false;
         rt->key_count_cached = false;
+        rt->key_counts.clear();
+        rt->key_counts.clear();
         rt->nav_not_bof = false;  // row removal can empty the cursor
         rt->nav_not_eof = false;
         auto r = rt->conn->zap_table(rt->id);
@@ -37392,6 +37444,8 @@ UNSIGNED32 ENTRYPOINT AdsSetRecord(ADSHANDLE hTable, UNSIGNED8* pucRecord,
         remote_settle_cursor(rt);
         rt->row_valid = false;
         rt->key_count_cached = false;  // full-record write: conditional
+        rt->key_counts.clear();
+        rt->key_counts.clear();
                                        // membership may have changed
         rt->prefetch_queue.clear();
         auto r = rt->conn->set_record(rt->id, pucRecord,
@@ -37593,6 +37647,8 @@ UNSIGNED32 ENTRYPOINT AdsShowDeleted(UNSIGNED16 us) {
             // Which keys are visible just changed, so the scoped key
             // count and any cached keyno are stale too.
             rt->key_count_cached = false;
+            rt->key_counts.clear();
+            rt->key_counts.clear();
             rt->keyno_valid      = false;
         });
     }

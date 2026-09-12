@@ -624,3 +624,49 @@ TEST_CASE("Teardown batching: open bags answer existence locally") {
     REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
     srv.stop();
 }
+
+TEST_CASE("KeyCount: rotation revisits ride the per-order map") {
+    tb_wipe();
+    auto dir = tb_tmp_dir();
+    tb_seed(dir);
+
+    openads::network::Server srv;
+    REQUIRE(srv.start("127.0.0.1", 0).has_value());
+    ADSHANDLE hConn = tb_connect_remote(dir, srv.port());
+    ADSHANDLE hTable = tb_open(hConn);
+
+    // Second tag on the same bag for the revisit.
+    ADSHANDLE hI = 0;
+    UNSIGNED8 bag[] = "TB.CDX";
+    UNSIGNED8 tag2[] = "BYID2";
+    UNSIGNED8 exp[] = "ID";
+    REQUIRE(AdsCreateIndex61(hTable, bag, tag2, exp, nullptr, nullptr,
+                             ADS_COMPOUND, 512, &hI) == AE_SUCCESS);
+    ADSHANDLE hOrd1 = 0;
+    UNSIGNED8 want1[] = "BYID";
+    REQUIRE(AdsGetIndexHandle(hTable, want1, &hOrd1) == AE_SUCCESS);
+    ADSHANDLE hOrd2 = 0;
+    UNSIGNED8 want2[] = "BYID2";
+    REQUIRE(AdsGetIndexHandle(hTable, want2, &hOrd2) == AE_SUCCESS);
+
+    // First visit to each order pays; revisits serve from the map
+    // (order switches do not change any order count).
+    const std::uint64_t kc0 = tb_op(kOpKeyCount);
+    UNSIGNED32 kc = 0;
+    REQUIRE(AdsSetIndexOrderByHandle(hTable, hOrd1) == AE_SUCCESS);
+    REQUIRE(AdsGetKeyCount(hOrd1, 0, &kc) == AE_SUCCESS);
+    CHECK(kc == 5u);
+    CHECK(tb_op(kOpKeyCount) == kc0 + 1);
+    REQUIRE(AdsSetIndexOrderByHandle(hTable, hOrd2) == AE_SUCCESS);
+    REQUIRE(AdsGetKeyCount(hOrd2, 0, &kc) == AE_SUCCESS);
+    CHECK(kc == 5u);
+    CHECK(tb_op(kOpKeyCount) == kc0 + 2);
+    REQUIRE(AdsSetIndexOrderByHandle(hTable, hOrd1) == AE_SUCCESS);
+    REQUIRE(AdsGetKeyCount(hOrd1, 0, &kc) == AE_SUCCESS);
+    CHECK(kc == 5u);
+    CHECK(tb_op(kOpKeyCount) == kc0 + 2);
+
+    REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
+    REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
+    srv.stop();
+}

@@ -1081,18 +1081,29 @@ void Session::pack_bound_trailer(Frame& reply, std::uint32_t id) {
     // cursor. The caller just repositioned explicitly, so both are
     // freshly placed (no rescue moves here — this must stay a pure
     // read; both-true genuinely means an empty cursor).
+    // Layout: [u8 bof][u8 eof][u32 recno] + optional [u32 reccount].
+    // The count rides only when the engine table resolved (in-memory
+    // record_count, no disk refresh — same trust as the client's
+    // rec_count cache; the wire GetRecordCount keeps its refresh for
+    // callers that need multiuser-fresh). Length-gated on the client.
     UNSIGNED16 b = 1, e = 1;
     UNSIGNED32 rn = 0;
+    openads::engine::Table* eng = nullptr;
     if (ordered_tables_.count(id) != 0) {
         if (ADSHANDLE h = ensure_abi_handle(id); h != 0) {
             AdsAtBOF(h, &b);
             AdsAtEOF(h, &e);
             AdsGetRecordNum(h, 0, &rn);
         }
+        if (auto eit = tbls_.find(id);
+            eit != tbls_.end() && sess_conn_ != nullptr) {
+            eng = sess_conn_->lookup_table(eit->second);
+        }
     } else if (auto eit = tbls_.find(id);
                eit != tbls_.end() && sess_conn_ != nullptr) {
         if (auto* tbl = sess_conn_->lookup_table(eit->second);
             tbl != nullptr) {
+            eng = tbl;
             b  = tbl->bof() ? 1 : 0;
             e  = tbl->eof() ? 1 : 0;
             rn = tbl->recno();
@@ -1104,6 +1115,13 @@ void Session::pack_bound_trailer(Frame& reply, std::uint32_t id) {
     reply.payload.push_back(static_cast<std::uint8_t>((rn >>  8) & 0xFFu));
     reply.payload.push_back(static_cast<std::uint8_t>((rn >> 16) & 0xFFu));
     reply.payload.push_back(static_cast<std::uint8_t>((rn >> 24) & 0xFFu));
+    if (eng != nullptr) {
+        const std::uint32_t n = eng->record_count();
+        reply.payload.push_back(static_cast<std::uint8_t>( n        & 0xFFu));
+        reply.payload.push_back(static_cast<std::uint8_t>((n >>  8) & 0xFFu));
+        reply.payload.push_back(static_cast<std::uint8_t>((n >> 16) & 0xFFu));
+        reply.payload.push_back(static_cast<std::uint8_t>((n >> 24) & 0xFFu));
+    }
 }
 
 // M12.22/M12.23 — read-ahead depth for one forward Skip.

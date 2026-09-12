@@ -16,6 +16,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace openads::network {
@@ -648,6 +649,14 @@ struct RemoteTable {
     std::uint32_t            recno_bound    = 0;
     bool                     recno_bound_ok = false;
     std::uint64_t            recno_bound_seq = 0;
+    // Certified record count from the last nav ack tail (optional
+    // [u32 reccount] after the bound bytes), with the seq at answer
+    // time. Same trust as rec_count_cached (in-memory server count,
+    // no disk refresh — the wire GetRecordCount keeps its refresh
+    // for callers that need multiuser-fresh).
+    std::uint32_t            count_bound    = 0;
+    bool                     count_bound_ok = false;
+    std::uint64_t            count_bound_seq = 0;
     // Last wire nav op on this table (0 = none/other, 1 = GotoTop,
     // 2 = GotoBottom), whether it produced a row, and the connection
     // nav_seq_ at the time. Serves two WAN-chattiness kills with one
@@ -680,6 +689,14 @@ struct RemoteTable {
     // and every write that invalidates rec_count_cached.
     std::uint32_t            cached_key_count   = 0;
     bool                     key_count_cached   = false;
+    // Per-order key counts: an order switch does not change any
+    // order's count, so rotation revisits serve from here while the
+    // single slot above still bounces per switch. Second-chance
+    // cache only: every site that clears the slot for a WRITE (or
+    // adopt/refresh) clears this too; order-switch clears leave it
+    // intact. Counts are order-scoped server values, keyed by the
+    // wire index id (0 = natural order).
+    std::unordered_map<std::uint32_t, std::uint32_t> key_counts;
     // M12.21 — sequential prefetch queue. SkipAck (when step==1)
     // returns the row at +1 plus up to N lookahead rows; the
     // bridge pops one entry per Skip(1) call so a 20-row PgDn

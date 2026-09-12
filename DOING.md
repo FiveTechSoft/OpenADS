@@ -107,6 +107,32 @@ Su chunk mostró el hueco restante: probes AtBOF post-EOF a wire.
 
 ---
 
+## 2026-09-11 — Counts without frames (v1.09.42 field: 75 s)
+
+### Field result v1.09.42
+
+`v.1.09.42 1.15.442 == 75 secs` (−3 s: RecNo 219→147, FileExists
+76→39). Remaining: repositions/navs (709, necessary single
+frames), counts (172), RecNo residue (147), RefreshRecord (64).
+
+### Shipped (v1.09.43)
+
+- **Record-count piggyback.** Nav acks append `[u32 reccount]`
+  (in-memory, no disk refresh — same trust as the count cache;
+  the wire count keeps its refresh). Client serves while
+  seq-fresh and promotes into the sticky cache.
+- **Phantom RecNo derivation.** EOF phantom in natural order
+  without filters: `cached_count + 1`, no frame, no currency
+  (immune to cross-table eviction by construction). Scoped and
+  ordered phantoms keep the wire path.
+- **Per-order key-count map.** Order switches don't change any
+  order's count: rotation revisits serve from the map. True
+  invalidations (writes, scope/filter — the scope gap the
+  suite caught on the way, adopt, refresh, pack/zap) clear it.
+- **Tests:** count certification, cross-table phantom
+  derivation, per-order revisit. Suite 1566/1567.
+- Estimate: ~250 frames ≈ **12 s** → ~63 s next field run.
+
 ## 2026-09-11 — Bound truth on every nav (v1.09.41 field: 78 s)
 
 ### Field result v1.09.41

@@ -405,7 +405,11 @@ password must match a configured account or the server returns `AE_LOGIN_FAILED`
   follows a reposition (AtBOF/AtEOF/RecNo per paint row) locally —
   one frame per reposition instead of 3–4. The same tail rides on
   `GotoTopAck` / `GotoBottomAck` / `SkipAck` (read post-lookahead,
-  so it describes the final cursor). Trailing section,
+  so it describes the final cursor). A further optional
+  `[u32 reccount]` follows the recno wherever the engine table
+  resolved (in-memory count, no disk refresh — same trust as the
+  client's count cache; the wire `GetRecordCount` keeps its
+  refresh). Trailing section,
   length-gated, no capability bit (same convention as the row trailer
   and the twin flag): old clients parse the trailer and ignore the
   tail; new clients against old servers see no tail and fall back to

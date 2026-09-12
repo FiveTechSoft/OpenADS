@@ -162,10 +162,23 @@ util::Result<std::uint32_t> remote_index_key_count(RemoteIndex* ri) {
         ri->parent->key_count_cached) {
         return ri->parent->cached_key_count;
     }
+    // Second-chance per-order map: rotation revisits served here even
+    // when the single slot bounced on an order switch.
+    {
+        auto hit = ri->parent->key_counts.find(ri->id);
+        if (hit != ri->parent->key_counts.end()) {
+            if (ri->parent->active_index_id == ri->id) {
+                ri->parent->cached_key_count = hit->second;
+                ri->parent->key_count_cached = true;
+            }
+            return hit->second;
+        }
+    }
     auto act = remote_activate_index(ri);
     if (!act) return act.error();
     auto r = ri->conn->key_count(ri->parent->id);
     if (!r) return r.error();
+    ri->parent->key_counts[ri->id] = r.value();
     if (ri->parent->active_index_id == ri->id) {
         ri->parent->cached_key_count = r.value();
         ri->parent->key_count_cached = true;
