@@ -585,3 +585,42 @@ TEST_CASE("Index park: CreateIndex invalidates the snapshot") {
     REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
     srv.stop();
 }
+
+TEST_CASE("Teardown batching: open bags answer existence locally") {
+    tb_wipe();
+    auto dir = tb_tmp_dir();
+    tb_seed(dir);
+
+    openads::network::Server srv;
+    REQUIRE(srv.start("127.0.0.1", 0).has_value());
+    srv.set_enable_file_func(true);
+    ADSHANDLE hConn = tb_connect_remote(dir, srv.port());
+    ADSHANDLE hTable = tb_open(hConn);
+
+    // The production bag is bound by this open table: existence is
+    // trivially true (any spelling that stems the same, including
+    // the .z01 production alias) with zero frames.
+    const std::uint64_t fe0 = tb_op(kOpFileExists);
+    UNSIGNED16 ex = 0;
+    UNSIGNED8 bag1[] = "TB.CDX";
+    REQUIRE(AdsCheckExistence(hConn, bag1, &ex) == AE_SUCCESS);
+    CHECK(ex == 1u);
+    UNSIGNED8 bag2[] = "tb.cdx";
+    REQUIRE(AdsCheckExistence(hConn, bag2, &ex) == AE_SUCCESS);
+    CHECK(ex == 1u);
+    UNSIGNED8 bag3[] = "TB.z01";
+    REQUIRE(AdsCheckExistence(hConn, bag3, &ex) == AE_SUCCESS);
+    CHECK(ex == 1u);
+    CHECK(tb_op(kOpFileExists) == fe0);
+
+    // A genuinely missing file still goes to the wire (negatives are
+    // never cached: the file may appear at any time).
+    UNSIGNED8 missing[] = "NOPE.CDX";
+    REQUIRE(AdsCheckExistence(hConn, missing, &ex) == AE_SUCCESS);
+    CHECK(ex == 0u);
+    CHECK(tb_op(kOpFileExists) == fe0 + 1);
+
+    REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
+    REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
+    srv.stop();
+}

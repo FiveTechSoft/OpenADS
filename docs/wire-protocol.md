@@ -401,9 +401,11 @@ password must match a configured account or the server returns `AE_LOGIN_FAILED`
   `SeekLastAck` append `[u8 bof][u8 eof][u32 recno]` *after* the row
   trailer. The server just positioned explicitly, so it knows all three
   exactly; the client certifies its boundary flags, bound cache and
-  phantom-recno cache from them and serves the poll burst that always
+  phantom recno from them and serves the poll burst that always
   follows a reposition (AtBOF/AtEOF/RecNo per paint row) locally —
-  one frame per reposition instead of 3–4. Trailing section,
+  one frame per reposition instead of 3–4. The same tail rides on
+  `GotoTopAck` / `GotoBottomAck` / `SkipAck` (read post-lookahead,
+  so it describes the final cursor). Trailing section,
   length-gated, no capability bit (same convention as the row trailer
   and the twin flag): old clients parse the trailer and ignore the
   tail; new clients against old servers see no tail and fall back to

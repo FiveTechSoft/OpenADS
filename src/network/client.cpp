@@ -599,6 +599,32 @@ util::Result<void> RemoteConnection::close_table(std::uint32_t id) {
     return {};
 }
 
+// Reposition-bound truth: the server appended [u8 bof][u8 eof][u32 recno]
+// after the row trailer because it just positioned explicitly and knows
+// all three exactly. Applies them as certified state so the poll burst
+// that always follows a reposition (AtBOF/AtEOF/RecNo per paint row)
+// is served locally. Length-gated by the caller: absent on old servers.
+static void apply_bound_trailer(RemoteTable* rt, bool bof, bool eof,
+                                std::uint32_t recno) {
+    if (rt == nullptr || rt->conn == nullptr) return;
+    rt->nav_at_bof  = bof;
+    rt->nav_at_eof  = eof;
+    // xBase truth table (mirrors the proven-false stickies): a defined
+    // position that is not a limit is provably not that limit; an
+    // empty cursor proves neither.
+    rt->nav_not_bof = !bof;
+    rt->nav_not_eof = !eof;
+    const std::uint64_t seq = rt->conn->nav_seq();
+    rt->bound_bof_ok = true;
+    rt->bound_bof    = bof;
+    rt->bound_eof_ok = true;
+    rt->bound_eof    = eof;
+    rt->bound_seq    = seq;
+    rt->recno_bound     = recno;
+    rt->recno_bound_ok  = true;
+    rt->recno_bound_seq = seq;
+}
+
 util::Result<void> RemoteConnection::goto_top(std::uint32_t id) {
     note_nav_frame();
     Frame req;
@@ -641,7 +667,15 @@ util::Result<void> RemoteConnection::goto_top(RemoteTable* rt) {
     if (rep.value().opcode != Opcode::GotoTopAck) {
         return util::Error{5000, 0, "GotoTop: server error", ""};
     }
-    parse_row_trailer_into(rt, rep.value().payload, 0);
+    const std::size_t tend =
+        parse_row_trailer_into(rt, rep.value().payload, 0);
+    // Reposition-bound piggyback (see goto_record): trailing
+    // [u8 bof][u8 eof][u32 recno], length-gated.
+    const auto& pl = rep.value().payload;
+    if (pl.size() >= tend + 6) {
+        apply_bound_trailer(rt, pl[tend] != 0, pl[tend + 1] != 0,
+                            read_u32_le(pl.data() + tend + 2));
+    }
     return {};
 }
 
@@ -696,7 +730,15 @@ util::Result<void> RemoteConnection::skip(RemoteTable* rt,
     // The block (if any) was walked by the server in the direction of eff, not
     // of the user's step — see parse_row_trailer_into. eff == 0 sends no block.
     const std::int8_t bdir = (eff > 0) ? 1 : (eff < 0) ? -1 : 1;
-    parse_row_trailer_into(rt, rep.value().payload, 0, bdir);
+    const std::size_t tend =
+        parse_row_trailer_into(rt, rep.value().payload, 0, bdir);
+    // Reposition-bound piggyback (see goto_record): trailing
+    // [u8 bof][u8 eof][u32 recno], length-gated.
+    const auto& pl = rep.value().payload;
+    if (pl.size() >= tend + 6) {
+        apply_bound_trailer(rt, pl[tend] != 0, pl[tend + 1] != 0,
+                            read_u32_le(pl.data() + tend + 2));
+    }
     return {};
 }
 
@@ -992,32 +1034,6 @@ util::Result<void> RemoteConnection::goto_record(std::uint32_t id,
     return {};
 }
 
-// Reposition-bound truth: the server appended [u8 bof][u8 eof][u32 recno]
-// after the row trailer because it just positioned explicitly and knows
-// all three exactly. Applies them as certified state so the poll burst
-// that always follows a reposition (AtBOF/AtEOF/RecNo per paint row)
-// is served locally. Length-gated by the caller: absent on old servers.
-static void apply_bound_trailer(RemoteTable* rt, bool bof, bool eof,
-                                std::uint32_t recno) {
-    if (rt == nullptr || rt->conn == nullptr) return;
-    rt->nav_at_bof  = bof;
-    rt->nav_at_eof  = eof;
-    // xBase truth table (mirrors the proven-false stickies): a defined
-    // position that is not a limit is provably not that limit; an
-    // empty cursor proves neither.
-    rt->nav_not_bof = !bof;
-    rt->nav_not_eof = !eof;
-    const std::uint64_t seq = rt->conn->nav_seq();
-    rt->bound_bof_ok = true;
-    rt->bound_bof    = bof;
-    rt->bound_eof_ok = true;
-    rt->bound_eof    = eof;
-    rt->bound_seq    = seq;
-    rt->recno_bound     = recno;
-    rt->recno_bound_ok  = true;
-    rt->recno_bound_seq = seq;
-}
-
 util::Result<void> RemoteConnection::goto_record(RemoteTable* rt,
                                                    std::uint32_t recno) {
     note_nav_frame();
@@ -1053,7 +1069,15 @@ util::Result<void> RemoteConnection::goto_bottom(RemoteTable* rt) {
     if (rep.value().opcode != Opcode::GotoBottomAck) {
         return util::Error{5000, 0, "GotoBottom: server error", ""};
     }
-    parse_row_trailer_into(rt, rep.value().payload, 0);
+    const std::size_t tend =
+        parse_row_trailer_into(rt, rep.value().payload, 0);
+    // Reposition-bound piggyback (see goto_record): trailing
+    // [u8 bof][u8 eof][u32 recno], length-gated.
+    const auto& pl = rep.value().payload;
+    if (pl.size() >= tend + 6) {
+        apply_bound_trailer(rt, pl[tend] != 0, pl[tend + 1] != 0,
+                            read_u32_le(pl.data() + tend + 2));
+    }
     return {};
 }
 
@@ -1078,7 +1102,15 @@ util::Result<void> RemoteConnection::goto_top_fused(RemoteTable* rt,
     if (rep.value().opcode != Opcode::GotoTopAck) {
         return util::Error{5000, 0, "GotoTop: server error", ""};
     }
-    parse_row_trailer_into(rt, rep.value().payload, 0);
+    const std::size_t tend =
+        parse_row_trailer_into(rt, rep.value().payload, 0);
+    // Reposition-bound piggyback (see goto_record): trailing
+    // [u8 bof][u8 eof][u32 recno], length-gated.
+    const auto& pl = rep.value().payload;
+    if (pl.size() >= tend + 6) {
+        apply_bound_trailer(rt, pl[tend] != 0, pl[tend + 1] != 0,
+                            read_u32_le(pl.data() + tend + 2));
+    }
     return {};
 }
 
@@ -1095,7 +1127,15 @@ util::Result<void> RemoteConnection::goto_bottom_fused(RemoteTable* rt,
     if (rep.value().opcode != Opcode::GotoBottomAck) {
         return util::Error{5000, 0, "GotoBottom: server error", ""};
     }
-    parse_row_trailer_into(rt, rep.value().payload, 0);
+    const std::size_t tend =
+        parse_row_trailer_into(rt, rep.value().payload, 0);
+    // Reposition-bound piggyback (see goto_record): trailing
+    // [u8 bof][u8 eof][u32 recno], length-gated.
+    const auto& pl = rep.value().payload;
+    if (pl.size() >= tend + 6) {
+        apply_bound_trailer(rt, pl[tend] != 0, pl[tend + 1] != 0,
+                            read_u32_le(pl.data() + tend + 2));
+    }
     return {};
 }
 

@@ -114,6 +114,12 @@ UNSIGNED16 nb_eof(ADSHANDLE hTable) {
     return v;
 }
 
+UNSIGNED32 nb_recno(ADSHANDLE hTable) {
+    UNSIGNED32 v = 0;
+    REQUIRE(AdsGetRecordNum(hTable, 0, &v) == AE_SUCCESS);
+    return v;
+}
+
 // Ordered fixture: physical IDs 30/10/20, tag BYID on ID.
 // Natural top is rec 1, ordered top is rec 2.
 void nb_seed_ord(const fs::path& dir) {
@@ -358,9 +364,8 @@ TEST_CASE("Nav batching: skip-established limits answer locally") {
     CHECK(nb_op(kOpAtBOF) == bof0);
     CHECK(nb_op(kOpAtEOF) == eof0);
 
-    // Back to the top limit: BOF flags locally; the EOF side has no
-    // row to reason from (overshoot jumps prove nothing), so one EOF
-    // frame goes out — the twin then covers its pair.
+    // Back to the top limit: BOF flags locally, and the Skip ack's
+    // bound piggyback certifies EOF too — zero frames either side.
     REQUIRE(AdsSkip(hTable, -10) == AE_SUCCESS);
     const std::uint64_t bof1 = nb_op(kOpAtBOF);
     const std::uint64_t eof1 = nb_op(kOpAtEOF);
@@ -369,15 +374,61 @@ TEST_CASE("Nav batching: skip-established limits answer locally") {
     CHECK(nb_bof(hTable) == 1);
     CHECK(nb_eof(hTable) == 0);
     CHECK(nb_op(kOpAtBOF) == bof1);
-    CHECK(nb_op(kOpAtEOF) == eof1 + 1);
+    CHECK(nb_op(kOpAtEOF) == eof1);
 
     REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
     REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
     s.stop();
 }
 
-TEST_CASE("Nav batching: deferred SetOrder fuses into GotoTop") {
+TEST_CASE("Reposition truth: top/bottom/skip certify bounds and recno") {
     nb_wipe();
+    auto dir = nb_tmp_dir();
+    nb_seed(dir, "tbs.dbf", 3);
+
+    openads::network::Server s;
+    REQUIRE(s.start("127.0.0.1", 0).has_value());
+    ADSHANDLE hConn = nb_connect_remote(dir, s.port());
+    ADSHANDLE hTable = nb_open(hConn, "tbs.dbf");
+
+    const std::uint64_t bof0 = nb_op(kOpAtBOF);
+    const std::uint64_t eof0 = nb_op(kOpAtEOF);
+    const std::uint64_t rn0 = nb_op(kOpGetRecordNum);
+
+    // Top lands on row 1: positioned (not BOF — BOF means *before*
+    // first), not EOF, recno certified — the paint burst is local.
+    REQUIRE(AdsGotoTop(hTable) == AE_SUCCESS);
+    CHECK(nb_bof(hTable) == 0);
+    CHECK(nb_eof(hTable) == 0);
+    CHECK(nb_recno(hTable) == 1u);
+    CHECK(nb_op(kOpAtBOF) == bof0);
+    CHECK(nb_op(kOpAtEOF) == eof0);
+    CHECK(nb_op(kOpGetRecordNum) == rn0);
+
+    // Bottom lands on the last row: same, mirrored.
+    REQUIRE(AdsGotoBottom(hTable) == AE_SUCCESS);
+    CHECK(nb_bof(hTable) == 0);
+    CHECK(nb_eof(hTable) == 0);
+    CHECK(nb_recno(hTable) == 3u);
+    CHECK(nb_op(kOpAtBOF) == bof0);
+    CHECK(nb_op(kOpAtEOF) == eof0);
+    CHECK(nb_op(kOpGetRecordNum) == rn0);
+
+    // Skip past the end: EOF phantom with recno n+1, still certified.
+    REQUIRE(AdsSkip(hTable, 1) == AE_SUCCESS);
+    CHECK(nb_bof(hTable) == 0);
+    CHECK(nb_eof(hTable) == 1);
+    CHECK(nb_recno(hTable) == 4u);
+    CHECK(nb_op(kOpAtBOF) == bof0);
+    CHECK(nb_op(kOpAtEOF) == eof0);
+    CHECK(nb_op(kOpGetRecordNum) == rn0);
+
+    REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
+    REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
+    s.stop();
+}
+
+TEST_CASE("Nav batching: deferred SetOrder fuses into GotoTop") {    nb_wipe();
     auto dir = nb_tmp_dir();
     nb_seed_ord(dir);
 
@@ -485,12 +536,6 @@ TEST_CASE("Nav batching: non-nav op flushes a deferred switch plainly") {
 // after the row trailer of GotoRecordAck/SeekAck, so the whole
 // post-reposition burst is served locally. Trailing section,
 // length-gated: old servers send no tail (M12.24 convention, no caps bit).
-
-UNSIGNED32 nb_recno(ADSHANDLE hTable) {
-    UNSIGNED32 v = 0;
-    REQUIRE(AdsGetRecordNum(hTable, 0, &v) == AE_SUCCESS);
-    return v;
-}
 
 TEST_CASE("Reposition truth: GotoRecord certifies bounds and recno") {
     nb_wipe();

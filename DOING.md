@@ -107,6 +107,31 @@ Su chunk mostró el hueco restante: probes AtBOF post-EOF a wire.
 
 ---
 
+## 2026-09-11 — Bound truth on every nav (v1.09.41 field: 78 s)
+
+### Field result v1.09.41
+
+`v.1.09.41 1:17.618 == 78 secs` (−16 s: CloseAll 166→0, OpenIndex
+125→41, SetOrder 121→42; 84 parks + 84 unparks). Remaining 1590
+frames: repositions (GotoRecord 266 + Seek 174, necessary) and
+their poll residue (RecNo 219, rotation navs 253, counts 172).
+
+### Shipped (v1.09.42)
+
+- **Bound+recno piggyback on GotoTop/Bottom/Skip acks**
+  (server appends after the row trailer; client parses
+  length-gated — same convention, no caps). Every nav now
+  certifies bounds+recno, not just repositions; covers table-
+  and index-handle navs (both ride the rt overloads) and the
+  fused order-switch variants.
+- **FileExists short-circuit for open bags.** Per-USE
+  existence probes on a bound bag answer locally (stem match;
+  false positives safe, false negatives impossible).
+- **Tests:** top/bottom/skip certification, open-bag
+  existence (+ negatives still wire). One outdated bound
+  expectation updated (skip-overshoot EOF now certified too).
+- Estimate: ~250 frames ≈ **12 s** → ~66 s next field run.
+
 ## 2026-09-11 — RDD rules from source (CacheRDD + rddads)
 
 User provided CacheRDD client source (`C:/tmp/cacherdd`, outside

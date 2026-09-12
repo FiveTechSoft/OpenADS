@@ -2061,6 +2061,8 @@ DispatchResult Session::dispatch(const Frame& f) {
                     (static_cast<std::uint16_t>(f.payload[5]) << 8));
             }
             pack_row_trailer(reply, id, next_lookahead(id, gt_hint));
+            // Reposition truth rides after the trailer (see GotoRecord).
+            pack_bound_trailer(reply, id);
             // Sync AFTER packing — pack_row_trailer walks the ABI cursor
             // through the block and restores it, so the engine cursor has to be
             // anchored to where the ABI cursor finally lands (same reason as
@@ -2132,6 +2134,7 @@ DispatchResult Session::dispatch(const Frame& f) {
                   WTRACE("[wire] Skip twin hord bof=%u eof=%u\n", (unsigned)_b, (unsigned)_e); }
                 reply.opcode = Opcode::SkipAck;
                 pack_row_trailer(reply, id, lookahead, dir);
+                pack_bound_trailer(reply, id);
                 // RCB 07/14/2026: sync AFTER packing, not before (this call
                 // used to sit above the pack). pack_row_trailer walks the ABI
                 // cursor through the lookahead block and then restores it, so
@@ -2146,6 +2149,7 @@ DispatchResult Session::dispatch(const Frame& f) {
             (void)tbl->skip(step);
             reply.opcode = Opcode::SkipAck;
             pack_row_trailer(reply, id, lookahead, dir);
+            pack_bound_trailer(reply, id);
             break;
         }
         case Opcode::GetField: {
@@ -2549,6 +2553,7 @@ DispatchResult Session::dispatch(const Frame& f) {
             }
             reply.opcode = Opcode::GotoBottomAck;
             pack_row_trailer(reply, id);
+            pack_bound_trailer(reply, id);
             break;
         }
         // M12.15 — info / lock / maintenance / AOF.

@@ -9907,6 +9907,37 @@ UNSIGNED32 ENTRYPOINT AdsCheckExistence(ADSHANDLE hConn, UNSIGNED8* pucName,
     auto name = openads::abi::to_internal(pucName, 0);
     auto ctx = resolve_fs_conn(hConn);
     if (ctx.remote) {
+        // Open-bag short-circuit (per-USE VouExistIndex probes): a bag
+        // bound by any live table on this connection trivially exists
+        // — the app is reading through it. Matched by lowercased stem
+        // (no directory, no extension; .cdx/.z01 are equivalent
+        // production spellings). False positives are safe (a real
+        // open follows and errors properly); false negatives never
+        // happen here.
+        auto stem_of = [](const std::string& p) {
+            std::string b = p;
+            auto sep = b.find_last_of("/\\");
+            if (sep != std::string::npos) b = b.substr(sep + 1);
+            auto dot = b.find_last_of('.');
+            if (dot != std::string::npos) b = b.substr(0, dot);
+            for (auto& c : b)
+                c = static_cast<char>(std::tolower(
+                        static_cast<unsigned char>(c)));
+            return b;
+        };
+        const std::string want = stem_of(name);
+        if (!want.empty()) {
+            for (auto& kv : remote_table_store()) {
+                auto* rt = kv.first;
+                if (rt == nullptr || rt->conn != ctx.remote) continue;
+                if (stem_of(rt->prod_bag_path) == want ||
+                    (!rt->last_open_bag.empty() &&
+                     stem_of(rt->last_open_bag) == want)) {
+                    *pbExists = 1;
+                    return ok();
+                }
+            }
+        }
         auto r = ctx.remote->file_exists(name);
         if (!r) return fail(r.error());
         *pbExists = r.value() ? 1 : 0;
