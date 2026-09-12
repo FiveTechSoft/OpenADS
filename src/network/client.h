@@ -191,6 +191,10 @@ public:
     // M12.15 — remote info / lock / maintenance / AOF.
     util::Result<bool>          is_found(std::uint32_t id);
     util::Result<void>          refresh_record(std::uint32_t id);
+    // Table-aware overload: parses the row trailer + bound tail the
+    // server appends, so the refreshed row, bounds and recno serve
+    // locally instead of costing follow-up frames.
+    util::Result<void>          refresh_record(RemoteTable* rt);
     util::Result<std::uint16_t> get_table_type(std::uint32_t id);
     util::Result<std::uint32_t> get_record_length(std::uint32_t id);
     util::Result<std::uint16_t> get_num_indexes(std::uint32_t id);

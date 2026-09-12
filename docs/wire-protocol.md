@@ -409,7 +409,10 @@ password must match a configured account or the server returns `AE_LOGIN_FAILED`
   `[u32 reccount]` follows the recno wherever the engine table
   resolved (in-memory count, no disk refresh — same trust as the
   client's count cache; the wire `GetRecordCount` keeps its
-  refresh). Trailing section,
+  refresh). Fused order-switch navs append one more `[u32]`: the
+  just-installed order's key count (14-byte tails). `RefreshRecordAck`
+  carries a row trailer plus the bound tail (the re-read row rides
+  back). Trailing section,
   length-gated, no capability bit (same convention as the row trailer
   and the twin flag): old clients parse the trailer and ignore the
   tail; new clients against old servers see no tail and fall back to

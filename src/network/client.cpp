@@ -1111,8 +1111,17 @@ util::Result<void> RemoteConnection::goto_top_fused(RemoteTable* rt,
     const std::size_t tend =
         parse_row_trailer_into(rt, rep.value().payload, 0);
     // Reposition-bound piggyback (see goto_record): trailing
-    // [u8 bof][u8 eof][u32 recno], length-gated.
+    // [u8 bof][u8 eof][u32 recno](+[u32 reccount]), length-gated.
     apply_bound_tail(rt, rep.value().payload, tend);
+    // Fused switch only: the server certified the new order's key
+    // count past the bound tail ([u32]). Rotation visits ask it
+    // next; serve from the per-order map instead of a frame.
+    {
+        const auto& pl = rep.value().payload;
+        if (pl.size() >= tend + 14) {
+            rt->key_counts[order_id] = read_u32_le(pl.data() + tend + 10);
+        }
+    }
     return {};
 }
 
@@ -1132,8 +1141,15 @@ util::Result<void> RemoteConnection::goto_bottom_fused(RemoteTable* rt,
     const std::size_t tend =
         parse_row_trailer_into(rt, rep.value().payload, 0);
     // Reposition-bound piggyback (see goto_record): trailing
-    // [u8 bof][u8 eof][u32 recno], length-gated.
+    // [u8 bof][u8 eof][u32 recno](+[u32 reccount]), length-gated.
     apply_bound_tail(rt, rep.value().payload, tend);
+    // Fused switch only: certified key count past the bound tail.
+    {
+        const auto& pl = rep.value().payload;
+        if (pl.size() >= tend + 14) {
+            rt->key_counts[order_id] = read_u32_le(pl.data() + tend + 10);
+        }
+    }
     return {};
 }
 
@@ -1513,6 +1529,26 @@ util::Result<void> RemoteConnection::refresh_record(std::uint32_t id) {
     if (rep.value().opcode != Opcode::RefreshRecordAck) {
         return util::Error{5000, 0, "RefreshRecord: server error", ""};
     }
+    return {};
+}
+
+util::Result<void> RemoteConnection::refresh_record(RemoteTable* rt) {
+    if (rt == nullptr) {
+        return util::Error{5000, 0, "RefreshRecord: null table", ""};
+    }
+    // No note_nav_frame: a refresh re-reads the same position, it
+    // never moves the cursor (matches the id overload below).
+    Frame req; req.opcode = Opcode::RefreshRecord;
+    write_u32_le(rt->id, req.payload);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::RefreshRecordAck) {
+        return util::Error{5000, 0, "RefreshRecord: server error", ""};
+    }
+    const std::size_t tend =
+        parse_row_trailer_into(rt, rep.value().payload, 0);
+    // Refreshed row + bounds + recno ride back (length-gated).
+    apply_bound_tail(rt, rep.value().payload, tend);
     return {};
 }
 

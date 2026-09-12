@@ -467,6 +467,35 @@ TEST_CASE("Nav batching: deferred SetOrder fuses into GotoTop") {    nb_wipe();
     s.stop();
 }
 
+TEST_CASE("Nav batching: fused nav certifies the new order key count") {
+    nb_wipe();
+    auto dir = nb_tmp_dir();
+    nb_seed_ord(dir);
+
+    openads::network::Server s;
+    REQUIRE(s.start("127.0.0.1", 0).has_value());
+    ADSHANDLE hConn = nb_connect_remote(dir, s.port());
+    ADSHANDLE hTable = nb_open(hConn, "ord.dbf");
+
+    ADSHANDLE hOrd = 0;
+    REQUIRE(AdsGetIndexHandleByOrder(hTable, 1, &hOrd) == AE_SUCCESS);
+    REQUIRE(hOrd != 0);
+
+    // The fused frame installs the order AND certifies its key
+    // count: the scrollbar setup that always follows costs nothing.
+    const std::uint64_t kc0 = nb_op(kOpKeyCount);
+    REQUIRE(AdsSetIndexOrderByHandle(hTable, hOrd) == AE_SUCCESS);
+    REQUIRE(AdsGotoTop(hOrd) == AE_SUCCESS);
+    UNSIGNED32 kc = 0;
+    REQUIRE(AdsGetKeyCount(hOrd, 0, &kc) == AE_SUCCESS);
+    CHECK(kc == 3u);
+    CHECK(nb_op(kOpKeyCount) == kc0);
+
+    REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
+    REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
+    s.stop();
+}
+
 TEST_CASE("Nav batching: close absorbs a deferred switch") {
     nb_wipe();
     auto dir = nb_tmp_dir();

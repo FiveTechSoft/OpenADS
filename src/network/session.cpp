@@ -2029,10 +2029,12 @@ DispatchResult Session::dispatch(const Frame& f) {
             // navigating, collapsing SetOrder+GotoTop into one frame.
             // Length-gated (old clients stop at byte 6); cursor tables
             // above ignore it (their orders are query-fixed).
+            bool fused_order = false;
             if (f.payload.size() >= 11 && f.payload[6] == 0x01) {
                 std::uint32_t oiid = read_u32_le(f.payload.data() + 7);
                 UNSIGNED32 oorc = install_table_order(id, oiid);
                 if (oorc != 0) { reply = err("SetOrder", oorc); break; }
+                fused_order = true;
             }
             auto it = tbls_.find(id);
             if (it == tbls_.end() || !sess_conn_) {
@@ -2081,6 +2083,22 @@ DispatchResult Session::dispatch(const Frame& f) {
             pack_row_trailer(reply, id, next_lookahead(id, gt_hint));
             // Reposition truth rides after the trailer (see GotoRecord).
             pack_bound_trailer(reply, id);
+            // Fused switch only: the app almost always asks this
+            // order's key count next (scrollbar setup), so certify it
+            // now ([u32] after the bound tail) instead of paying a
+            // frame for it. Order-scoped, like the wire GetKeyCount.
+            if (fused_order) {
+                UNSIGNED32 fkc = 0;
+                if (hord != 0) {
+                    (void)AdsGetKeyCount(hord, 0, &fkc);
+                } else if (tbl != nullptr) {
+                    fkc = tbl->record_count();
+                }
+                reply.payload.push_back(static_cast<std::uint8_t>( fkc        & 0xFFu));
+                reply.payload.push_back(static_cast<std::uint8_t>((fkc >>  8) & 0xFFu));
+                reply.payload.push_back(static_cast<std::uint8_t>((fkc >> 16) & 0xFFu));
+                reply.payload.push_back(static_cast<std::uint8_t>((fkc >> 24) & 0xFFu));
+            }
             // Sync AFTER packing — pack_row_trailer walks the ABI cursor
             // through the block and restores it, so the engine cursor has to be
             // anchored to where the ABI cursor finally lands (same reason as
@@ -2546,10 +2564,12 @@ DispatchResult Session::dispatch(const Frame& f) {
             // Fused nav+order: trailing [u8 0x01][u32 order_id].
             // (GotoBottom carries no depth hint, so the section starts
             // at byte 4.)
+            bool fused_order = false;
             if (f.payload.size() >= 9 && f.payload[4] == 0x01) {
                 std::uint32_t oiid = read_u32_le(f.payload.data() + 5);
                 UNSIGNED32 oorc = install_table_order(id, oiid);
                 if (oorc != 0) { reply = err("SetOrder", oorc); break; }
+                fused_order = true;
             }
             auto it = tbls_.find(id);
             if (it == tbls_.end() || !sess_conn_) {
@@ -2572,6 +2592,20 @@ DispatchResult Session::dispatch(const Frame& f) {
             reply.opcode = Opcode::GotoBottomAck;
             pack_row_trailer(reply, id);
             pack_bound_trailer(reply, id);
+            // Fused switch only: certify the new order's key count
+            // (see GotoTop).
+            if (fused_order) {
+                UNSIGNED32 fkc = 0;
+                if (hord != 0) {
+                    (void)AdsGetKeyCount(hord, 0, &fkc);
+                } else if (tbl != nullptr) {
+                    fkc = tbl->record_count();
+                }
+                reply.payload.push_back(static_cast<std::uint8_t>( fkc        & 0xFFu));
+                reply.payload.push_back(static_cast<std::uint8_t>((fkc >>  8) & 0xFFu));
+                reply.payload.push_back(static_cast<std::uint8_t>((fkc >> 16) & 0xFFu));
+                reply.payload.push_back(static_cast<std::uint8_t>((fkc >> 24) & 0xFFu));
+            }
             break;
         }
         // M12.15 — info / lock / maintenance / AOF.
@@ -2623,6 +2657,11 @@ DispatchResult Session::dispatch(const Frame& f) {
             auto rb = tbl->goto_record(tbl->recno());
             if (!rb) { reply = err("RefreshRecord: " + rb.error().message); break; }
             reply.opcode = Opcode::RefreshRecordAck;
+            // The re-read row rides back with the ack (row trailer),
+            // plus position truth (bound tail), so the caller's
+            // follow-up reads serve locally. Length-gated as usual.
+            pack_row_trailer(reply, id);
+            pack_bound_trailer(reply, id);
             break;
         }
         case Opcode::GetTableType: {

@@ -9765,8 +9765,11 @@ UNSIGNED32 ENTRYPOINT AdsRefreshRecord(ADSHANDLE hTable) {
         rt->rec_count_cached = false;
         rt->key_count_cached = false;               // force fresh record count from server
         rt->key_counts.clear();
-        rt->key_counts.clear();
-        auto r = rt->conn->refresh_record(rt->id);
+        // Table-aware overload: the re-read row + bounds + recno ride
+        // back in the ack and repopulate the caches below (row_valid
+        // restored by the trailer on new servers; the pre-clear above
+        // is the old-server fallback).
+        auto r = rt->conn->refresh_record(rt);
         if (!r) return fail(r.error());
         return ok();
     }
@@ -11648,15 +11651,16 @@ UNSIGNED32 ENTRYPOINT AdsGetRecordNum(ADSHANDLE hTable, UNSIGNED16 /*bFilterOpti
         // Phantom derivation (no frame, no currency): at the EOF
         // phantom the recno is LastRec+1 by Clipper convention — a
         // pure function of the certified EOF flag plus the cached
-        // count. Restricted to certain semantics: natural order,
-        // no filter/AOF/scope (scoped/conditional walks may end
-        // elsewhere — those keep the wire path), and a cached count
-        // to derive from. Immune to cross-table eviction by
-        // construction (nothing is stored).
+        // count. Applies in natural AND ordered walks (the twin
+        // reports physical n+1 past the last key, same engine rule).
+        // Restricted to certain semantics: no filter/AOF/scope
+        // (scoped/conditional walks may end elsewhere — those keep
+        // the wire path), and a cached count to derive from.
+        // Immune to cross-table eviction by construction (nothing
+        // is stored).
         if (!rt->row_valid && rt->nav_at_eof &&
-            rt->active_index_id == 0 && rt->filter_expr.empty() &&
-            rt->aof_expr.empty() && !rt->scope_touched &&
-            rt->rec_count_cached) {
+            rt->filter_expr.empty() && rt->aof_expr.empty() &&
+            !rt->scope_touched && rt->rec_count_cached) {
             *pulRecordNum = rt->cached_rec_count + 1;
             return ok();
         }

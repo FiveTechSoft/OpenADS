@@ -107,6 +107,33 @@ Su chunk mostró el hueco restante: probes AtBOF post-EOF a wire.
 
 ---
 
+## 2026-09-12 - Counts ride every nav (v1.09.44 field: 70 s)
+
+### Field result v1.09.44 (both sides 1.09.44)
+
+`v.1.09.44 1:10.122 == 70 secs` (-5 s: RecCount 85-28 via the
+piggyback; RecNo/KeyCount unmoved - the app lives in orders,
+both derivations assumed natural).
+
+### Shipped (v1.09.45)
+
+- **Ordered-phantom RecNo derivation.** The twin reports
+  physical n+1 past the last key (same engine rule), so the
+  EOF derivation drops its natural-order restriction (filter /
+  AOF / scope exclusions stay).
+- **RefreshRecord carries its row.** Trailer + bound tail on
+  the ack; table-aware client overload repopulates row, bounds,
+  recno, count. Same-record goto (RecNo+Goto+Refresh) and the
+  skip-settle triple (Skip(0)+Refresh+flags) lose their
+  follow-up frames. No seq bump (refresh never moves).
+- **Key-count piggyback on fused navs only.** The server
+  certifies the just-installed order's count past the bound
+  tail (14-byte tails, length-gated); client stores into the
+  per-order map. Plain navs pay no extra server work.
+- **Tests.** Ordered-phantom values, fused-count zero-frame,
+  refresh row+truth. Suite 1567/1568.
+- Estimate: ~200 frames = **9 s** -> ~61 s next field run.
+
 ## 2026-09-11 — Counts without frames (v1.09.42 field: 75 s)
 
 ### Field result v1.09.42
