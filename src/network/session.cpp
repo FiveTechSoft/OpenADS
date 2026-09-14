@@ -481,6 +481,14 @@ bool Session::handle_readable() {
 }
 
 void Session::cleanup() {
+    // Login-gate audit: a session that held record locks is going away
+    // and every one of them evaporates HERE. If a duplicate login slips
+    // through right after this line, the holder's session died first
+    // (restart, WAN drop, app close) — not an exclusion failure.
+    WTRACE("[wire] session end user=%s conn=%u tables=%u\n",
+           session_user_.empty() ? "(anonymous)" : session_user_.c_str(),
+           (unsigned)(srv_ ? srv_->conn_no_for_session(sid_) : 0),
+           (unsigned)tbls_.size());
     // 0) Distributed mutexes first: free locks held by this session and
     //    reap names it created, so a vanished process leaves neither a
     //    stale lock (peers would block until server restart) nor a stale
@@ -2860,9 +2868,12 @@ DispatchResult Session::dispatch(const Frame& f) {
                     }
                     reply = err("Lock: failed", rrc); break;
                 }
-                WTRACE("[wire] %s id=%u recno=%u ok\n",
+                WTRACE("[wire] %s id=%u recno=%u ok user=%s conn=%u table=%s\n",
                        f.opcode == Opcode::LockRecord ? "LockRecord" : "UnlockRecord",
-                       id, (unsigned)rn);
+                       id, (unsigned)rn,
+                       session_user_.empty() ? "(anonymous)" : session_user_.c_str(),
+                       (unsigned)srv_->conn_no_for_session(sid_),
+                       tbl_open_paths_.count(id) ? tbl_open_paths_[id].c_str() : "?");
             } else if (f.opcode == Opcode::LockRecord) {
                 // Fail FAST on contention — a single attempt. Retrying
                 // here blocked the session thread for the whole lock
@@ -2877,14 +2888,20 @@ DispatchResult Session::dispatch(const Frame& f) {
                         openads::AE_LOCKED);
                     break;
                 }
-                WTRACE("[wire] LockRecord id=%u recno=%u ok (engine)\n",
-                       id, (unsigned)rn);
+                WTRACE("[wire] LockRecord id=%u recno=%u ok (engine) user=%s conn=%u table=%s\n",
+                       id, (unsigned)rn,
+                       session_user_.empty() ? "(anonymous)" : session_user_.c_str(),
+                       (unsigned)srv_->conn_no_for_session(sid_),
+                       tbl_open_paths_.count(id) ? tbl_open_paths_[id].c_str() : "?");
             } else {
                 auto r = tbl->unlock_record(rn);
                 if (!r) { reply = err("UnlockRecord: failed",
                     static_cast<UNSIGNED32>(r.error().code)); break; }
-                WTRACE("[wire] UnlockRecord id=%u recno=%u ok (engine)\n",
-                       id, (unsigned)rn);
+                WTRACE("[wire] UnlockRecord id=%u recno=%u ok (engine) user=%s conn=%u table=%s\n",
+                       id, (unsigned)rn,
+                       session_user_.empty() ? "(anonymous)" : session_user_.c_str(),
+                       (unsigned)srv_->conn_no_for_session(sid_),
+                       tbl_open_paths_.count(id) ? tbl_open_paths_[id].c_str() : "?");
             }
             reply.opcode = (f.opcode == Opcode::LockRecord)
                 ? Opcode::LockRecordAck
