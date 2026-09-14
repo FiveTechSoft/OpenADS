@@ -1,11 +1,16 @@
 #include "network/mutex_manager.h"
 
+#include <vector>
+
 namespace openads::network {
 
-bool MutexManager::create(const std::string& name) {
+bool MutexManager::create(const std::string& name,
+                         const std::string& creator) {
     std::lock_guard<std::mutex> lk(mu_);
     if (mutexes_.count(name)) return false;
-    mutexes_[name] = std::make_shared<MutexState>();
+    auto ms = std::make_shared<MutexState>();
+    ms->creator = creator;
+    mutexes_[name] = std::move(ms);
     return true;
 }
 
@@ -113,6 +118,36 @@ void MutexManager::release_all(const std::string& owner) {
             ms->owner.clear();
             ms->cv.notify_one();
         }
+    }
+}
+
+void MutexManager::release_session(const std::string& owner) {
+    if (owner.empty()) return;
+    std::vector<std::string> drop;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        for (auto& [name, ms] : mutexes_) {
+            std::lock_guard<std::mutex> mlk(ms->mu);
+            // 1) Free locks held by the dying session so peers waiting
+            //    on them (finite or infinite timeout) wake promptly.
+            if (ms->locked && ms->owner == owner) {
+                ms->locked = false;
+                ms->owner.clear();
+                ms->cv.notify_all();
+            }
+            // 2) Reap names the dying session created. A live peer
+            //    holding the lock keeps it: creation transfers to the
+            //    holder so the name still dies with its last user.
+            if (ms->creator == owner) {
+                if (ms->locked && !ms->owner.empty() && ms->owner != owner) {
+                    ms->creator = ms->owner;
+                } else {
+                    ms->cv.notify_all();
+                    drop.push_back(name);
+                }
+            }
+        }
+        for (auto& name : drop) mutexes_.erase(name);
     }
 }
 

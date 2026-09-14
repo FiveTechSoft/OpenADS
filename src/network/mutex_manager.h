@@ -15,7 +15,12 @@ namespace openads::network {
 class MutexManager {
 public:
     // Create a named mutex. Returns false if it already exists.
-    bool create(const std::string& name);
+    // `creator` is the owning session's serial (see
+    // Session::conn_serial): the mutex is destroyed automatically when
+    // the creator session ends, so a dead process can never wedge a
+    // name forever (field: OAds_MutexCreate failing until server
+    // restart). Empty creator = no auto-destroy (tests / tools).
+    bool create(const std::string& name, const std::string& creator = {});
 
     // Lock a named mutex. Blocks until acquired or timeout expires.
     // timeout_ms = 0 means wait forever. Returns true if acquired.
@@ -45,10 +50,20 @@ public:
     // Cleanup all mutexes owned by a session (called on disconnect).
     void release_all(const std::string& owner);
 
+    // Session teardown: unlock everything held by `owner`, then destroy
+    // every mutex created by `owner` — unless a DIFFERENT live session
+    // currently holds it, in which case creation transfers to that
+    // holder instead of destroying under it. Called from
+    // Session::cleanup, which runs on Disconnect, peer-close and
+    // exception paths alike, so a vanished process leaves neither a
+    // stale lock nor a stale name behind.
+    void release_session(const std::string& owner);
+
 private:
     struct MutexState {
         bool        locked = false;
-        std::string owner;
+        std::string owner;    // current lock holder (session serial)
+        std::string creator;  // session serial that created the name
         std::mutex  mu;
         std::condition_variable cv;
     };

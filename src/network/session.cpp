@@ -481,6 +481,17 @@ bool Session::handle_readable() {
 }
 
 void Session::cleanup() {
+    // 0) Distributed mutexes first: free locks held by this session and
+    //    reap names it created, so a vanished process leaves neither a
+    //    stale lock (peers would block until server restart) nor a stale
+    //    name (every later MutexCreate would fail "exists"). Runs before
+    //    the table teardown below so woken peers proceed while we close.
+    //    Covers Disconnect, peer-close and exception paths alike — all
+    //    funnel through here (destructor included).
+    if (srv_ != nullptr) {
+        srv_->mutex_manager().release_session(conn_serial());
+    }
+
     // Tear-down order matters for OS file handles on Windows (no
     // FILE_SHARE_DELETE): indexes first, then shadow ABI tables, then
     // engine tables, then low-level FsFile slots, then the ABI connection.
@@ -5272,7 +5283,10 @@ DispatchResult Session::dispatch(const Frame& f) {
             auto& mm = srv_->mutex_manager();
             switch (static_cast<MutexOp>(sub_op)) {
                 case MutexOp::Create: {
-                    bool ok = mm.create(name);
+                    // Record the creating session so its death reaps the
+                    // name (release_session in cleanup) instead of wedging
+                    // every later MutexCreate until server restart.
+                    bool ok = mm.create(name, owner);
                     reply.opcode = Opcode::Mutex;
                     reply.payload = { sub_op, static_cast<std::uint8_t>(ok ? 1 : 0) };
                     break;

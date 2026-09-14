@@ -6,6 +6,18 @@
 
 ---
 
+## 2026-09-14 — Mutex leak fix (v1.09.49, field blocker)
+
+Field (v1.09.48, loopback + WAN, multi-user): `OAds_MutexCreate`
+failed after the creating process died — server restart required.
+Root cause: `Session::cleanup` never touched `MutexManager`
+(`release_all` dead code, unlock-only anyway). Fix: create records
+the creator session; cleanup runs `release_session` first (unlock
++ destroy-by-creator, handover transfer to a live holder).
+New `network_mutex_release_test` (both shapes); verified it fails
+pre-fix exactly as reported. Suite 1569/1570 (only the
+pre-existing MinGW CDX case). Released v1.09.49.
+
 ## 2026-09-14 — Session pool: WAN thread-lanes (unreleased)
 
 Vouch is MT and a second thread joins at the last leg — but one
