@@ -3,8 +3,10 @@
 // USE cycle — open + setorder + gotop×2 + bof/eof pairs + bottom×2 +
 // keycount + close — must cost a bounded number of server frames, with
 // zero boundary-probe frames (sticky/twin) and zero duplicate navs:
-//   Hello + Connect + OpenTable + CloseTable + GotoTop + GotoBottom
-//   + SetOrder + KeyCount×2 = 10 frames total.
+//   OpenTable + CloseTable + GotoTop + GotoBottom + SetOrder +
+//   KeyCount×2 = 9 frames (session setup excluded: the Hello/Connect
+//   handshake and the session-pool lanes are established once per
+//   logical connection and amortised over every USE).
 #include "doctest.h"
 #include "mgmt/mg_stats.h"
 #include "network/server.h"
@@ -61,10 +63,6 @@ TEST_CASE("Nav batching: full USE cycle stays within wire budget") {
     openads::network::Server s;
     REQUIRE(s.start("127.0.0.1", 0).has_value());
 
-    std::map<std::uint8_t, std::uint64_t> before;
-    for (int o = 0; o < 256; ++o)
-        before[static_cast<std::uint8_t>(o)] = ub_op((std::uint8_t)o);
-
     char uri[512]{};
     std::snprintf(uri, sizeof(uri), "tcp://127.0.0.1:%u/%s",
                   static_cast<unsigned>(s.port()), dir.string().c_str());
@@ -73,6 +71,15 @@ TEST_CASE("Nav batching: full USE cycle stays within wire budget") {
     ADSHANDLE hC = 0;
     REQUIRE(AdsConnect60(sb, ADS_REMOTE_SERVER, nullptr, nullptr, 0, &hC)
             == AE_SUCCESS);
+
+    // Snapshot AFTER connect: the session pool (one Connect per lane,
+    // OPENADS_POOL_SIZE) is established once per logical connection and
+    // amortised over every USE — the budget below guards the per-USE
+    // cycle (open + setorder + gotop x2 + bof/eof + bottom x2 + keycount
+    // + close), not session setup.
+    std::map<std::uint8_t, std::uint64_t> before;
+    for (int o = 0; o < 256; ++o)
+        before[static_cast<std::uint8_t>(o)] = ub_op((std::uint8_t)o);
     UNSIGNED8 tn[] = "UB.DBF";
     ADSHANDLE hT = 0;
     REQUIRE(AdsOpenTable(hC, tn, nullptr, ADS_CDX, 0, 0, 0, 0, &hT) == AE_SUCCESS);

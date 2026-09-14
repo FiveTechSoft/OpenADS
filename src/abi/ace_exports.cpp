@@ -6539,6 +6539,121 @@ extern "C++" {
 std::uint16_t& server_type_mask();
 }  // extern "C++"
 
+// --- Remote session pool (WAN thread-lanes) -------------------------------
+// One RemoteConnection serialises all its frames on mu_ (see
+// RemoteConnection::request): every thread of an MT app queues behind a
+// single TCP session. The pool opens N sessions per logical connect
+// (same host/port/dir/creds) and pins each calling thread to a lane, so
+// threads proceed in parallel while each table stays on the session that
+// opened it (rt->conn never migrates — cursor/order bindings are
+// per-session server-side). Single-threaded callers always land on lane
+// 0 (the primary): behaviour identical to before.
+// Size: OPENADS_POOL_SIZE env / pool_size ini key, default 4, clamp 1..16.
+// Lifetime matches the existing remote_conns policy: lane objects are
+// never unregistered (disconnect() only closes the socket).
+// Lives here (C++ linkage, ahead of first use) because the file's later
+// anonymous namespaces nest — a declaration outside and a definition
+// inside would be distinct entities.
+struct RemoteLanePool {
+    std::mutex mu;  // guards affinity/next only; lanes fixed after grow
+    std::vector<openads::network::RemoteConnection*> lanes;  // [0] = primary
+    std::map<std::thread::id, std::size_t> affinity;
+    std::size_t next = 0;
+};
+static std::vector<std::unique_ptr<RemoteLanePool>>& remote_lane_pool_store() {
+    static std::vector<std::unique_ptr<RemoteLanePool>> v;
+    return v;
+}
+// Raw connection -> pool (entries never removed; written once at connect).
+static std::unordered_map<openads::network::RemoteConnection*,
+    RemoteLanePool*>& remote_lane_pool_of() {
+    static std::unordered_map<openads::network::RemoteConnection*,
+        RemoteLanePool*> m;
+    return m;
+}
+// Internal connection handle -> pool (written once at connect, under s.mu).
+static std::unordered_map<Handle, RemoteLanePool*>&
+remote_lane_pool_by_handle() {
+    static std::unordered_map<Handle, RemoteLanePool*> m;
+    return m;
+}
+static unsigned remote_pool_size_cfg() {
+    unsigned n = 4;
+    try {
+        std::string v = openads::util::client_setting(
+            "OPENADS_POOL_SIZE", "pool_size");
+        if (!v.empty()) n = static_cast<unsigned>(std::stoul(v));
+    } catch (...) {}
+    if (n < 1) n = 1;
+    if (n > 16) n = 16;
+    return n;
+}
+// Must be called with s.mu held, right after the primary is registered.
+static RemoteLanePool* remote_lane_pool_create(
+    openads::network::RemoteConnection* primary, Handle primary_h) {
+    auto p = std::make_unique<RemoteLanePool>();
+    p->lanes.push_back(primary);
+    RemoteLanePool* raw = p.get();
+    remote_lane_pool_store().push_back(std::move(p));
+    remote_lane_pool_of()[primary] = raw;
+    remote_lane_pool_by_handle()[primary_h] = raw;
+    return raw;
+}
+static void remote_lane_pool_add_lane(RemoteLanePool* pool,
+    openads::network::RemoteConnection* lane, Handle lane_h) {
+    if (pool == nullptr || lane == nullptr) return;
+    pool->lanes.push_back(lane);
+    remote_lane_pool_of()[lane] = pool;
+    remote_lane_pool_by_handle()[lane_h] = pool;
+}
+// Thread-affine lane for the pool owning h (primary or lane handle).
+// First-touch threads deal round-robin; a thread sticks to its lane
+// afterwards (park hits, order bindings, no cross-thread cursor sharing).
+// Dead lanes are skipped (failover); unpooled handles return directly.
+// s.mu must be held.
+static openads::network::RemoteConnection* remote_pool_lane_conn(Handle h) {
+    auto& s = state();
+    RemoteLanePool* pool = nullptr;
+    auto ith = remote_lane_pool_by_handle().find(h);
+    if (ith != remote_lane_pool_by_handle().end()) pool = ith->second;
+    auto* direct = s.registry.lookup<openads::network::RemoteConnection>(
+        h, HandleKind::RemoteConnection);
+    if (pool == nullptr) return direct;
+    std::size_t idx = 0;
+    {
+        std::lock_guard<std::mutex> lk(pool->mu);
+        auto tid = std::this_thread::get_id();
+        auto ita = pool->affinity.find(tid);
+        if (ita != pool->affinity.end())
+            idx = ita->second % pool->lanes.size();
+        else {
+            idx = pool->next++ % pool->lanes.size();
+            pool->affinity[tid] = idx;
+        }
+    }
+    if (idx < pool->lanes.size()) {
+        if (auto* rc = pool->lanes[idx]; rc != nullptr && rc->valid())
+            return rc;
+    }
+    for (auto* rc : pool->lanes) {
+        if (rc != nullptr && rc->valid()) return rc;
+    }
+    return direct;
+}
+// All lanes of rc's pool (or just rc when unpooled). The lanes vector is
+// fixed after grow; entries are never removed, so lock-free reads here
+// match the existing registry posture (cf. resolve_remote_conn_handle).
+static std::vector<openads::network::RemoteConnection*>
+remote_pool_lanes_of(openads::network::RemoteConnection* rc) {
+    if (rc == nullptr) return {};
+    auto it = remote_lane_pool_of().find(rc);
+    if (it == remote_lane_pool_of().end()) return {rc};
+    RemoteLanePool* pool = it->second;
+    if (pool == nullptr) return {rc};
+    std::lock_guard<std::mutex> lk(pool->mu);
+    return pool->lanes;
+}
+
 extern "C" {
 
 
@@ -6646,6 +6761,29 @@ UNSIGNED32 ENTRYPOINT AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 usServerType
                 std::unique_ptr<openads::network::RemoteConnection>>
                 remote_tls_conns;
             remote_tls_conns.emplace(h, std::move(rc));
+            // Session pool (WAN thread-lanes): extra sessions for the same
+            // logical connection. Best-effort: failures degrade lane count.
+            {
+                RemoteLanePool* pool = remote_lane_pool_create(
+                    remote_tls_conns[h].get(), h);
+                static std::unordered_map<Handle,
+                    std::unique_ptr<openads::network::RemoteConnection>>
+                    remote_tls_pool_conns;
+                const unsigned want = remote_pool_size_cfg();
+                for (unsigned i = 1; i < want; ++i) {
+                    auto tt2 = openads::network::connect_tls(thost, tport, cfg);
+                    if (!tt2) break;
+                    auto lane = std::make_unique<
+                        openads::network::RemoteConnection>();
+                    if (auto r = lane->connect_with_transport(
+                            std::move(tt2).value(), tdir, user, pw); !r)
+                        break;
+                    Handle lh = s.registry.register_object(
+                        HandleKind::RemoteConnection, lane.get());
+                    remote_lane_pool_add_lane(pool, lane.get(), lh);
+                    remote_tls_pool_conns.emplace(lh, std::move(lane));
+                }
+            }
             *phConnect = to_ads_handle(h);
             // Harbour rddads stores the last AdsConnect handle for
             // AdsCreateTable / AdsBeginTransaction(0) etc.
@@ -6680,6 +6818,27 @@ UNSIGNED32 ENTRYPOINT AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 usServerType
                 std::unique_ptr<openads::network::RemoteConnection>>
                 remote_conns;
             remote_conns.emplace(h, std::move(rc));
+            // Session pool (WAN thread-lanes): extra sessions for the same
+            // logical connection so MT callers proceed in parallel.
+            // Best-effort: a failed lane connect degrades to fewer lanes.
+            {
+                RemoteLanePool* pool = remote_lane_pool_create(
+                    remote_conns[h].get(), h);
+                static std::unordered_map<Handle,
+                    std::unique_ptr<openads::network::RemoteConnection>>
+                    remote_pool_conns;
+                const unsigned want = remote_pool_size_cfg();
+                for (unsigned i = 1; i < want; ++i) {
+                    auto lane = std::make_unique<
+                        openads::network::RemoteConnection>();
+                    if (auto r = lane->connect(host, port, dir, user, pw); !r)
+                        break;
+                    Handle lh = s.registry.register_object(
+                        HandleKind::RemoteConnection, lane.get());
+                    remote_lane_pool_add_lane(pool, lane.get(), lh);
+                    remote_pool_conns.emplace(lh, std::move(lane));
+                }
+            }
             *phConnect = to_ads_handle(h);
             // Harbour rddads stores the last AdsConnect handle for
             // AdsCreateTable / AdsBeginTransaction(0) etc.
@@ -7191,9 +7350,17 @@ void remote_table_forget(openads::network::RemoteTable* rt) {
 // Pooled tables are real-closed by remote_flush_pools alongside.
 void remote_invalidate_index_parks(openads::network::RemoteConnection* rc) {
     if (rc == nullptr) return;
+    // Pool-wide: a bag pulled on one lane invalidates parked bindings on
+    // every lane of the same logical connection.
+    auto lanes = remote_pool_lanes_of(rc);
+    auto lane_match = [&](openads::network::RemoteConnection* c) {
+        for (auto* l : lanes)
+            if (c == l) return true;
+        return false;
+    };
     for (auto& kv : remote_table_store()) {
         auto* rt = kv.first;
-        if (rt == nullptr || rt->conn != rc) continue;
+        if (rt == nullptr || !lane_match(rt->conn)) continue;
         if (!rt->indexes_parked) continue;
         rt->indexes_parked = false;
         rt->parked_by_tag.clear();
@@ -7312,7 +7479,7 @@ void remote_close_table_live(ADSHANDLE hTable,
 // small pool is cheaper than path-matching subtleties. Wire closes run
 // without s.mu held (in-process server re-enters it) — callers must
 // arrange that (disconnect/open paths unlock first).
-void remote_flush_pools(openads::network::RemoteConnection* rc) {
+static void remote_flush_pools_one(openads::network::RemoteConnection* rc) {
     if (rc == nullptr) return;
     // File lifecycle changed meaning on disk: drop the existence
     // cache alongside the parked handles.
@@ -7329,12 +7496,24 @@ void remote_flush_pools(openads::network::RemoteConnection* rc) {
     }
 }
 
+void remote_flush_pools(openads::network::RemoteConnection* rc) {
+    if (rc == nullptr) return;
+    // Pool-wide fan-out: a drop/create/erase/rename on one lane changes
+    // what paths mean for every lane (parks pin server handles by path,
+    // existence caches are per-lane). Drops are rare; flushing all small
+    // lane pools is cheaper than path-matching subtleties.
+    for (auto* lane : remote_pool_lanes_of(rc)) {
+        if (lane == nullptr) continue;
+        remote_flush_pools_one(lane);
+    }
+}
+
 } // extern "C++" (lazy-close pool helpers end; ABI exports resume in C)
 
 UNSIGNED32 ENTRYPOINT AdsDisconnect(ADSHANDLE hConnect) {
     arc2_trace("AdsDisconnect");
     arc2_trace("AdsDisconnect");
-    openads::network::RemoteConnection* pending_remote_disconnect = nullptr;
+    std::vector<openads::network::RemoteConnection*> pending_remote_disconnects;
     bool deferred_close = false;
     {
         auto& s_local = state();
@@ -7429,14 +7608,23 @@ UNSIGNED32 ENTRYPOINT AdsDisconnect(ADSHANDLE hConnect) {
             return ok();
         }
 #endif
-        if (auto* rc = s_local.registry.lookup<openads::network::RemoteConnection>(
+        if (auto* rc0 = s_local.registry.lookup<openads::network::RemoteConnection>(
                 hConnect, HandleKind::RemoteConnection)) {
+            // Pool-wide teardown: every lane of the logical connection.
+            // Deferred accounting stays per-lane (each lane's last close
+            // disconnects that lane); the logical disconnect defers while
+            // ANY lane still has open tables.
+            auto lanes = remote_pool_lanes_of(rc0);
+            if (lanes.empty()) lanes.push_back(rc0);
             // Null out rt->conn on any open SQL cursors that reference this
             // connection so AdsCloseTable can detect the dangling case and
             // skip the wire op rather than crashing with a use-after-free.
-            for (auto& kv : remote_sql_cursors_map()) {
-                if (kv.second && kv.second->conn == rc)
-                    kv.second->conn = nullptr;
+            for (auto* rc : lanes) {
+                if (rc == nullptr) continue;
+                for (auto& kv : remote_sql_cursors_map()) {
+                    if (kv.second && kv.second->conn == rc)
+                        kv.second->conn = nullptr;
+                }
             }
             // Drain parked tables first: they count as open
             // (deferred_open_tables) and would otherwise pin a deferred
@@ -7445,30 +7633,38 @@ UNSIGNED32 ENTRYPOINT AdsDisconnect(ADSHANDLE hConnect) {
             // re-enters it); accounting re-locks inside.
             {
                 std::vector<std::unique_ptr<openads::network::RemoteTable>> parked;
-                rc->parked_flush(parked);
+                for (auto* rc : lanes) {
+                    if (rc == nullptr) continue;
+                    rc->parked_flush(parked);
+                }
                 lk_local.unlock();
                 for (auto& e : parked) remote_close_table_live(0, e.get());
                 lk_local.lock();
             }
-            if (rc->deferred_open_tables > 0 && rc->valid()) {
-                // Tables opened through this connection are still in use
-                // (MT apps sharing one connection across threads): killing
-                // the socket now would turn their next op into an error.
-                // The last AdsCloseTable performs the real disconnect.
-                rc->close_pending = true;
-                deferred_close    = true;
-            } else {
-                // Disconnect OUTSIDE s.mu: RemoteConnection::disconnect()
-                // serialises with in-flight requests on the connection
-                // mutex, and a request's server handler (in-process
-                // server) re-enters the ABI and takes s.mu -- holding both
-                // here could deadlock.
-                pending_remote_disconnect = rc;
+            for (auto* rc : lanes) {
+                if (rc == nullptr) continue;
+                if (rc->deferred_open_tables > 0 && rc->valid()) {
+                    // Tables opened through this connection are still in use
+                    // (MT apps sharing one connection across threads): killing
+                    // the socket now would turn their next op into an error.
+                    // The last AdsCloseTable performs the real disconnect.
+                    rc->close_pending = true;
+                    deferred_close    = true;
+                } else {
+                    // Disconnect OUTSIDE s.mu: RemoteConnection::disconnect()
+                    // serialises with in-flight requests on the connection
+                    // mutex, and a request's server handler (in-process
+                    // server) re-enters the ABI and takes s.mu -- holding both
+                    // here could deadlock.
+                    pending_remote_disconnects.push_back(rc);
+                }
             }
         }
     }
-    if (pending_remote_disconnect != nullptr) {
-        pending_remote_disconnect->disconnect();
+    if (!pending_remote_disconnects.empty()) {
+        for (auto* rc : pending_remote_disconnects) {
+            if (rc != nullptr) rc->disconnect();
+        }
         if (hConnect == rddads_default_connection())
             rddads_default_connection() = 0;
         return ok();
@@ -7591,8 +7787,15 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
                    hConnect, HandleKind::Connection) == nullptr) {
         rem_h = resolve_remote_conn_handle(hConnect);
     }
-    if (auto* rc = s.registry.lookup<openads::network::RemoteConnection>(
+    if (auto* rc0 = s.registry.lookup<openads::network::RemoteConnection>(
             rem_h, HandleKind::RemoteConnection)) {
+        // MT lane: this thread's session for the logical connection.
+        // Each table pins to its lane via rt->conn below (cursor/order
+        // bindings are per-session server-side); single-threaded callers
+        // always get the primary (lane 0) — behaviour unchanged.
+        openads::network::RemoteConnection* rc =
+            remote_pool_lane_conn(static_cast<Handle>(rem_h));
+        if (rc == nullptr) rc = rc0;
         auto name = openads::abi::to_internal(pucName, 0);
         // M12.33 â€” strip tcp:// URI prefix that legacy Delphi TAdsTable
         // components embed in the table name (e.g.

@@ -6,6 +6,28 @@
 
 ---
 
+## 2026-09-14 — Session pool: WAN thread-lanes (unreleased)
+
+Vouch is MT and a second thread joins at the last leg — but one
+`RemoteConnection` serialises ALL its frames on `mu_`
+(`RemoteConnection::request`), so every thread queues behind a single
+TCP session. Shipped: pool of N sessions per logical `AdsConnect60`
+(same host/port/dir/creds, TCP + TLS), thread-affine lane pinning
+(first-touch round-robin, then sticky — parks, order bindings and
+cursors stay session-local; single-threaded callers always land on
+lane 0, behaviour identical). Each table pins to its lane via
+`rt->conn`; disconnect/park/existence teardown fan out pool-wide;
+dead lanes fail over. Size via `OPENADS_POOL_SIZE` env / `pool_size`
+ini (default 4, clamp 1..16). No protocol change.
+
+Tests: new `network_pool_mt_test` (4 threads x 2 tables, sentinel
+values — any cursor cross-talk fails; Connect delta == 4 proves 4
+sessions). `network_use_budget_test` now snapshots after connect
+(pool setup is once-per-connection, amortised — not per-USE).
+Suite 1568/1569 (only the pre-existing MinGW-only CDX alloc-tail
+case). Field ask: `OPENADS_OPDUMP=1` census + `cli_trace.log` on the
+MT leg — do the two threads still serialise, or go parallel?
+
 ## 2026-09-09 — USE-teardown batching (segundo cuello: 406 SetOrders, 183 flushes, 169 exists)
 
 ### Evidencia (`ace_calls.log`, 9925 llamadas)
