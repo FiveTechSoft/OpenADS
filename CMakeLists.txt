@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 project(OpenADS
-    VERSION 1.09.52
+    VERSION 1.09.53
     LANGUAGES C CXX
     DESCRIPTION "Open-source ADS-compatible engine"
 )
@@ -162,8 +162,6 @@ if(OPENADS_WITH_HARBOUR_UDF)
         message(FATAL_ERROR "OPENADS_WITH_HARBOUR_UDF=ON but Harbour GT driver '${_hb_gt}' not found (set HARBOUR_LIB_DIR)")
     endif()
     list(APPEND HARBOUR_LIBRARIES ${HARBOUR_LIB_gt})
-        list(APPEND HARBOUR_LIBRARIES ${HARBOUR_LIB_gtwin})
-    endif()
     # Harbour archives reference each other in cycles (hbrtl<->hbvm,
     # GT back-refs) while GNU ld resolves single-pass — group them so
     # every static reference settles. (MSVC iterates archives itself;

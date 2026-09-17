@@ -6,6 +6,14 @@
 
 ---
 
+## 2026-09-17 — v1.09.52 never shipped: CMake parse fix (v1.09.53)
+
+v1.09.52's gate worked — all legs failed Configure in ~1 s, publish
+blocked, nothing shipped. Cause: stray duplicate lines (gtwin
+append + endif) in the Harbour block. Verified clean configures
+flag OFF and ON locally this time. No product-code change; HRB
+loading ships here. Released v1.09.53.
+
 ## 2026-09-17 — Server-side HRB UDFs (v1.09.52, field request)
 
 Vouch tag UDFs beyond builtins: serverd embeds hbvm and loads a
