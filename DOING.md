@@ -6,6 +6,15 @@
 
 ---
 
+## 2026-09-17 — clang-18 vs version-gated pragma (v1.09.56)
+
+v1.09.55 reached the Linux build: CI clang 18 errors on the
+unknown pragma -Wc2y-extensions itself under -Werror. Fix:
+-Wunknown-warning-option shield first, clang/GCC blocks split
+properly. No product-code change. x86 leg failed an unrelated
+timing-sensitive teardown test (pre-existing flake pattern, legs
+hop between runs) — watching. Released v1.09.56.
+
 ## 2026-09-17 — Linux link: Unix GT is TRM, not STD (v1.09.55)
 
 v1.09.54 configured and built Harbour, then failed the OpenADS

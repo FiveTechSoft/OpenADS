@@ -20,21 +20,30 @@
 #include <cstring>
 #include <mutex>
 
-// Harbour headers warn under clang's -Wall -Wextra -Werror set;
-// third-party code, silence locally. (MinGW-GCC builds carry no
-// strict flags; MSVC gets push,0 below.)
-#if defined(__GNUC__)
+// Harbour headers warn under strict sets; third-party code, silence
+// locally. Clang first (__clang__ also defines __GNUC__): the
+// -Wunknown-warning-option shield must come first so version-specific
+// groups (unknown to older Clangs, e.g. 18) degrade to silence
+// instead of erroring. (MinGW-GCC builds carry no strict flags;
+// MSVC gets push,0 below.)
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunknown-warning-option"
+#pragma clang diagnostic ignored "-Wconversion"
+#pragma clang diagnostic ignored "-Wsign-conversion"
+#pragma clang diagnostic ignored "-Wpedantic"
+#pragma clang diagnostic ignored "-Wshadow"
+#pragma clang diagnostic ignored "-Wunused-parameter"
+#pragma clang diagnostic ignored "-Wzero-as-null-pointer-constant"
+#pragma clang diagnostic ignored "-Wc2y-extensions"
+#pragma clang diagnostic ignored "-Wlanguage-extension-token"
+#elif defined(__GNUC__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wconversion"
 #pragma GCC diagnostic ignored "-Wsign-conversion"
 #pragma GCC diagnostic ignored "-Wpedantic"
 #pragma GCC diagnostic ignored "-Wshadow"
 #pragma GCC diagnostic ignored "-Wunused-parameter"
-#pragma GCC diagnostic ignored "-Wzero-as-null-pointer-constant"
-#if defined(__clang__)
-#pragma clang diagnostic ignored "-Wc2y-extensions"
-#pragma clang diagnostic ignored "-Wlanguage-extension-token"
-#endif
 #endif
 #if defined(_MSC_VER)
 #pragma warning(push, 0)
@@ -49,7 +58,9 @@
 #if defined(_MSC_VER)
 #pragma warning(pop)
 #endif
-#if defined(__GNUC__)
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#elif defined(__GNUC__)
 #pragma GCC diagnostic pop
 #endif
 
