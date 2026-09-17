@@ -373,7 +373,7 @@ TEST_CASE("Login gate: simultaneous racers, exactly one holder") {
     std::atomic<bool> go{false};
     std::vector<std::thread> th;
     for (int t = 0; t < N; ++t) {
-        th.emplace_back([&, t] {
+        th.emplace_back([&] {
             ADSHANDLE hB = 0;
             g_connect(s, dir, hB);
             ADSHANDLE tB = 0;

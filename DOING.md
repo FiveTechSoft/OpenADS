@@ -6,6 +6,14 @@
 
 ---
 
+## 2026-09-17 — Linux/macOS legs back (v1.09.51, release fix)
+
+v1.09.50 published 3 of 4 assets: the Linux (ninja-clang) and macOS
+builds failed on an unused lambda capture in the new login-gate
+stress test — clang -Werror only, MSVC/MinGW silent. One-line fix
+([&, t] -> [&], index genuinely unused); full v1.09.50 C++ delta
+re-checked clang-clean. Released v1.09.51.
+
 ## 2026-09-17 — REVERSE() index builtin (v1.09.50, field blocker)
 
 Field (Vouch, remote ADSCDX): UDF-based tags (`… + Reverse(…)`)
