@@ -38,6 +38,7 @@ add_library(openads_core STATIC
     engine/order.cpp
     engine/index_expr.cpp
     engine/index_expr_sql.cpp
+    engine/hrb_udf.cpp
     engine/aggregate.cpp
     engine/aof_expr.cpp
     engine/aof_eval.cpp
@@ -218,6 +219,19 @@ if(OPENADS_WITH_TLS)
     target_compile_definitions(openads_core PUBLIC OPENADS_WITH_TLS=1)
     target_link_libraries(openads_core PRIVATE
         MbedTLS::mbedtls MbedTLS::mbedx509 MbedTLS::mbedcrypto)
+endif()
+
+if(OPENADS_WITH_HARBOUR_UDF)
+    # Harbour backend for server-side UDFs (provider implementation).
+    # Linked into consumers that register it (serverd, unit tests) —
+    # see tools/serverd and tests. Core itself gains no Harbour
+    # dependency: hrb_udf.cpp is backend-agnostic and hrb_harbour.o
+    # is only pulled from the archive by targets that reference
+    # HarbourBackend, so the ACE DLL never embeds hbvm (a Harbour
+    # client process has its own VM — two VMs must never share it).
+    target_sources(openads_core PRIVATE engine/hrb_harbour.cpp)
+    target_include_directories(openads_core PRIVATE ${HARBOUR_INCLUDE_DIR})
+    target_compile_definitions(openads_core PUBLIC OPENADS_WITH_HARBOUR_UDF=1)
 endif()
 
 if(OPENADS_WITH_SQLITE)

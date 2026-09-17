@@ -59,6 +59,12 @@ struct IniConfig {
     // server instance. Keys: legacy_paths / legacy-paths (0/1/true/false).
     bool          has_legacy_paths = false;
     bool          legacy_paths     = false;
+    // Server-side Harbour UDF module (.hrb, LetoDB letoudf.hrb pattern):
+    // path to the module whose functions index expressions may call.
+    // Key: udf_module (alias: udfmodule). Empty = only the default
+    // probe (openads_udf.hrb next to the server binary) applies.
+    bool          has_udf_module = false;
+    std::string   udf_module;
     // SAP-style error log settings (ads_err.dbf): directory and max size
     // in kilobytes. Accepted keys: error_log_path (alias:
     // error_assert_logs, SAP's registry/ini name) and error_log_max.
@@ -81,6 +87,7 @@ struct IniConfig {
 //   Server::set_data_dir / platform::split_data_roots),
 //   http_user (value is user:password, repeatable),
 //   auth_user (value is user:password, repeatable; required by TCP clients),
+//   udf_module (path to a server-side Harbour .hrb UDF module),
 //   [port:NNNN] sections with data= key (extra listeners).
 bool parse_ini(const std::string& text, IniConfig& out, std::string& error);
 

@@ -100,6 +100,18 @@ data = .
 # legacy_paths = 0
 
 # ------------------------------------------------------------------
+# udf_module — server-side Harbour UDF module (.hrb)
+# Default: openads_udf.hrb next to the server binary, loaded when
+# present (LetoDB letoudf.hrb pattern — canonical upstream is
+# Kresin's LetoDB). CLI --udf_module.
+# ------------------------------------------------------------------
+# Functions in the module become available to index expressions
+# (and FOR conditions) evaluated on the server. Needs an
+# OPENADS_WITH_HARBOUR_UDF=ON build; a named-but-broken module
+# fails startup rather than building wrong indexes.
+# udf_module = openads_udf.hrb
+
+# ------------------------------------------------------------------
 # error_log_path — directory for the SAP-style error log (ads_err.dbf)
 # Default: C:\ on Windows, /var/log/advantage on Linux (falls back to a
 # writable location if not writable). CLI --error_log_path; env

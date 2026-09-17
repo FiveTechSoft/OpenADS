@@ -6,6 +6,18 @@
 
 ---
 
+## 2026-09-17 — Server-side HRB UDFs (v1.09.52, field request)
+
+Vouch tag UDFs beyond builtins: serverd embeds hbvm and loads a
+developer .hrb (LetoDB pattern, Kresin's upstream canonical).
+Provider split keeps core/ace DLL Harbour-free; bridge via
+hb_vmTryEval (error-contained), per-thread attach, init-symbol
+table for HB_HRB* (Harbour never registers them statically).
+Module STATICs don't resolve across calls — UDFs must be
+stateless (documented). Local 32-bit proof green incl. end-to-end
+TESTREV tag; Linux CI leg builds a pinned Harbour SDK. Released
+v1.09.52.
+
 ## 2026-09-17 — Linux/macOS legs back (v1.09.51, release fix)
 
 v1.09.50 published 3 of 4 assets: the Linux (ninja-clang) and macOS

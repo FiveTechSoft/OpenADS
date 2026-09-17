@@ -17,7 +17,9 @@ jobs:
   build:
     name: ${{ matrix.os }} / ${{ matrix.arch }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    # 90: a cold Harbour SDK build (Linux leg) plus the full tree can
+    # exceed the old 60-minute cap; cached runs finish far sooner.
+    timeout-minutes: 90
     # The macOS runners can stall in the test step (>60 min);
     # don't let them block the release while that's investigated.
     continue-on-error: ${{ startsWith(matrix.os, 'macos') }}
@@ -68,13 +70,52 @@ jobs:
         if: runner.os != 'Windows'
         uses: seanmiddleditch/gha-setup-ninja@v6
 
+      # Server-side Harbour UDFs (.hrb): the Linux leg embeds hbvm,
+      # so it needs a Harbour SDK. Built from source once, then cached
+      # (mirrors tools/scripts/bootstrap_harbour_ci.ps1 on Windows).
+      - name: Cache Harbour SDK (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/harbour-udf
+          key: harbour-udf-linux-4ec2e154ed92757418bc30af571ab90240ab3209-v1
+
+      - name: Provision Harbour SDK (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          HARBOUR_REF: 4ec2e154ed92757418bc30af571ab90240ab3209
+        run: |
+          set -e
+          HB="$RUNNER_TEMP/harbour-udf"
+          echo "HB_ROOT=$HB/install" >> "$GITHUB_ENV"
+          if [ -f "$HB/install/include/hbvm.h" ] && \
+             [ -n "$(find "$HB/install" -name 'libhbvmmt.a' 2>/dev/null | head -1)" ] && \
+             [ -n "$(find "$HB/install" -name harbour -type f 2>/dev/null | head -1)" ]; then
+            echo "Harbour SDK cached at $HB/install"
+            exit 0
+          fi
+          sudo apt-get update
+          sudo apt-get install -y build-essential libncurses-dev libx11-dev
+          rm -rf "$HB"
+          mkdir -p "$HB"
+          git clone --depth 1 --branch master https://github.com/harbour/core.git "$HB/src"
+          git -C "$HB/src" fetch --depth 1 origin "$HARBOUR_REF"
+          git -C "$HB/src" checkout "$HARBOUR_REF"
+          cd "$HB/src"
+          make -j"$(nproc)" install HB_INSTALL_PREFIX="$HB/install" HB_BUILD_3RDEXT=no
+          test -f "$HB/install/include/hbvm.h"
+          test -n "$(find "$HB/install" -name 'libhbvmmt.a' | head -1)"
+          find "$HB/install" -name harbour -type f -exec {} -v \;
+
       - name: Configure
         shell: bash
         run: |
           cmake --preset ${{ matrix.preset }} \
                 -DOPENADS_WITH_TLS=ON \
                 -DOPENADS_WITH_HTTP=ON \
-                ${{ matrix.cmake_extra }}
+                ${{ matrix.cmake_extra }} \
+                ${{ runner.os == 'Linux' && '-DOPENADS_WITH_HARBOUR_UDF=ON' || '' }}
 
       - name: Build
         run: cmake --build build/${{ matrix.preset }} --config Release

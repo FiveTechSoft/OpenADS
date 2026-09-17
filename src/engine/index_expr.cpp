@@ -1,5 +1,6 @@
 #include "engine/index_expr.h"
 
+#include "engine/hrb_udf.h"
 #include "engine/oem_collation.h"
 #include "engine/table.h"
 
@@ -11,6 +12,7 @@
 #include <cstring>
 #include <unordered_map>
 #include <variant>
+#include <vector>
 
 namespace openads::engine {
 
@@ -427,6 +429,36 @@ Value apply_scalar_fn(const std::string& fn, const std::vector<Value>& args) {
         std::string s = args[0].s;
         std::reverse(s.begin(), s.end());
         v.s = std::move(s);
+    } else if (hrb_udf::available()) {
+        // Server-side Harbour UDF (loaded .hrb module, v1.09.52):
+        // names unknown to the native builtins fall through to the
+        // bridge. Byte-exact, no codepage translation — the module
+        // computes the same bytes the client would. Still unknown
+        // after the bridge: empty string (degrade, as before).
+        std::vector<hrb_udf::Scalar> in;
+        in.reserve(args.size());
+        for (const auto& a : args) {
+            hrb_udf::Scalar s;
+            if (a.is_number) {
+                s.kind = hrb_udf::Scalar::Kind::Number;
+                s.n = a.n;
+            } else {
+                s.kind = hrb_udf::Scalar::Kind::String;
+                s.s = a.s;
+            }
+            in.push_back(s);
+        }
+        hrb_udf::Scalar out;
+        std::string err;
+        if (hrb_udf::call(fn, in.data(), in.size(), out, err)) {
+            if (out.kind == hrb_udf::Scalar::Kind::Number) {
+                v.is_number = true;
+                v.n = out.n;
+            } else {
+                v.is_number = false;
+                v.s = std::move(out.s);
+            }
+        }
     } else {
         // Unknown function — empty string (FoxPro/ADS would error; we degrade).
     }

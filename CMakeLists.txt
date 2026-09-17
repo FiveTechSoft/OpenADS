@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 project(OpenADS
-    VERSION 1.09.51
+    VERSION 1.09.52
     LANGUAGES C CXX
     DESCRIPTION "Open-source ADS-compatible engine"
 )
@@ -112,6 +112,79 @@ option(OPENADS_WITH_FIREBIRD "Enable the native Firebird-backed table driver (li
 # Bridges harbour hbnetio virtual file system and RPC capabilities
 # with OpenADS network transport layer.
 option(OPENADS_WITH_HBNETIO_BRIDGE "Build the hbnetio VFS/RPC bridge for OpenADS" OFF)
+# Server-side Harbour UDFs: embed hbvm and load a developer .hrb
+# module whose functions become available to index expressions
+# (LetoDB letoudf.hrb pattern — canonical upstream is Kresin's
+# LetoDB, see docs/server-udf-hrb-design.md). OFF by default:
+# needs a Harbour SDK (headers + hbvm/hbrtl libs). Core stays free
+# of Harbour symbols by design (provider interface in
+# engine/hrb_udf.*); the Harbour backend links into openads_serverd
+# and unit tests only.
+option(OPENADS_WITH_HARBOUR_UDF "Embed hbvm and load a developer .hrb module for server-side index-expression UDFs" OFF)
+set(HARBOUR_INCLUDE_DIR "" CACHE PATH "Harbour include dir (hbvm.h) for HRB UDF support")
+set(HARBOUR_LIB_DIR "" CACHE PATH "Harbour library dir for HRB UDF support")
+set(OPENADS_HARBOUR_LIBS "hbvmmt;hbrtl;hbmacro;hbpcre;hblang;hbcpage;hbzlib;hbrdd;rddfpt;rddntx;hbsix;hbcommon" CACHE STRING "Harbour libraries to link (in order) for HRB UDF support")
+if(OPENADS_WITH_HARBOUR_UDF)
+    if(NOT HARBOUR_INCLUDE_DIR)
+        find_path(HARBOUR_INCLUDE_DIR NAMES hbvm.h
+            HINTS $ENV{HB_ROOT}/include C:/harbour-git/include C:/harbour/include
+            PATH_SUFFIXES harbour)
+    endif()
+    if(NOT HARBOUR_INCLUDE_DIR)
+        message(FATAL_ERROR "OPENADS_WITH_HARBOUR_UDF=ON but hbvm.h not found (set HARBOUR_INCLUDE_DIR)")
+    endif()
+    set(HARBOUR_LIBRARIES "")
+    foreach(_hb ${OPENADS_HARBOUR_LIBS})
+        # NOTE: the if() below must name the variable INDIRECTLY
+        # (if(NOT ${_hb_var})); testing the expanded path value
+        # instead is always true in CMake and would FATAL every time.
+        set(_hb_var "HARBOUR_LIB_${_hb}")
+        find_library(${_hb_var} NAMES ${_hb}
+            HINTS ${HARBOUR_LIB_DIR} $ENV{HB_ROOT}/lib
+            PATH_SUFFIXES linux/gcc)
+        if(NOT ${_hb_var})
+            message(FATAL_ERROR "OPENADS_WITH_HARBOUR_UDF=ON but Harbour lib '${_hb}' not found (set HARBOUR_LIB_DIR)")
+        endif()
+        list(APPEND HARBOUR_LIBRARIES ${${_hb_var}})
+    endforeach()
+    if(WIN32)
+        # hbrtl's GT system references the default GT driver, and
+        # hbcommon's date code needs winmm (timeGetTime, linked
+        # separately below — never inside a group).
+        set(_hb_gt gtwin)
+    else()
+        set(_hb_gt gtstd)
+    endif()
+    find_library(HARBOUR_LIB_gt NAMES ${_hb_gt}
+        HINTS ${HARBOUR_LIB_DIR} $ENV{HB_ROOT}/lib
+        PATH_SUFFIXES linux/gcc)
+    if(NOT HARBOUR_LIB_gt)
+        message(FATAL_ERROR "OPENADS_WITH_HARBOUR_UDF=ON but Harbour GT driver '${_hb_gt}' not found (set HARBOUR_LIB_DIR)")
+    endif()
+    list(APPEND HARBOUR_LIBRARIES ${HARBOUR_LIB_gt})
+        list(APPEND HARBOUR_LIBRARIES ${HARBOUR_LIB_gtwin})
+    endif()
+    # Harbour archives reference each other in cycles (hbrtl<->hbvm,
+    # GT back-refs) while GNU ld resolves single-pass — group them so
+    # every static reference settles. (MSVC iterates archives itself;
+    # Apple ld accepts no groups.) Deliberately NOT whole-archive:
+    # runtime-resolved Harbour names are covered explicitly instead
+    # (our own init table publishes HB_HRB*, see hrb_harbour.cpp;
+    # UDF names self-register from the loaded .hrb), keeping the
+    # binary and its static-init surface minimal.
+    set(HARBOUR_LINK_LIBRARIES "")
+    if(NOT MSVC AND NOT APPLE)
+        list(APPEND HARBOUR_LINK_LIBRARIES "-Wl,--start-group")
+    endif()
+    list(APPEND HARBOUR_LINK_LIBRARIES ${HARBOUR_LIBRARIES})
+    if(NOT MSVC AND NOT APPLE)
+        list(APPEND HARBOUR_LINK_LIBRARIES "-Wl,--end-group")
+    endif()
+    if(WIN32)
+        list(APPEND HARBOUR_LINK_LIBRARIES winmm iphlpapi)
+    endif()
+    message(STATUS "OpenADS: Harbour UDF backend (${HARBOUR_LIBRARIES})")
+endif()
 
 # Static ACE library (libopenace32.a / libopenace64.a) for Harbour +
 # MinGW: an hbmk2 -comp=mingw[64] app links the whole ACE client+engine

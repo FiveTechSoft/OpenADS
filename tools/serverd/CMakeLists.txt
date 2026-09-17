@@ -4,6 +4,13 @@ target_include_directories(openads_serverd PRIVATE
     ${CMAKE_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/src)
 
+if(OPENADS_WITH_HARBOUR_UDF)
+    # Harbour libs for the UDF backend (registered in main.cpp).
+    # PRIVATE: the backend object is pulled from openads_core by the
+    # explicit reference below; the ACE DLL never takes this path.
+    target_link_libraries(openads_serverd PRIVATE ${HARBOUR_LINK_LIBRARIES})
+endif()
+
 if(OPENADS_WITH_HTTP)
     target_sources(openads_serverd PRIVATE http_server.cpp)
     target_compile_definitions(openads_serverd PRIVATE OPENADS_WITH_HTTP=1)

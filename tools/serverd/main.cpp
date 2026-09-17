@@ -16,6 +16,10 @@
 #include "mgmt/mg_stats.h"
 #include "network/server.h"
 #include "platform/dll.h"
+#include "engine/hrb_udf.h"
+#if defined(OPENADS_WITH_HARBOUR_UDF)
+#include "engine/hrb_harbour.h"
+#endif
 #include "openads_version.h"  // OPENADS_VERSION_STR (CMake-generated)
 #include "platform/path.h"
 #include "tools/serverd/config_ini.h"
@@ -84,6 +88,12 @@ void usage(const char* argv0) {
         "               their sources; files land under --data. URI stays\n"
         "               logical (tcp://host:6262/C:/). Default OFF.\n"
         "               See cookbook/docs/local-and-remote.md\n"
+        "  --udf_module PATH   server-side Harbour UDF module (.hrb,\n"
+        "               LetoDB letoudf.hrb pattern) whose functions index\n"
+        "               expressions may call. Default: openads_udf.hrb next\n"
+        "               to the server binary, loaded when present.\n"
+        "               ini: udf_module. Needs an OPENADS_WITH_HARBOUR_UDF\n"
+        "               build; missing/unloadable module fails startup.\n"
         "  --error_log_path DIR  directory for ads_err.dbf (SAP-style\n"
         "               error log). Env OPENADS_ERROR_LOG_PATH also works.\n"
         "               ini: error_log_path / error_assert_logs\n"
@@ -120,6 +130,12 @@ struct Args {
     std::string   data_dir    = ".";
     bool          enable_file_func = false;
     bool          legacy_paths     = false;
+    // Server-side Harbour UDF module (.hrb). Empty = probe the
+    // default (openads_udf.hrb next to the server binary).
+    std::string   udf_module;
+    // Directory holding this executable (for the default UDF probe).
+    // Filled from argv[0] in main()/svc_main().
+    std::string   exe_dir;
     // ads_err.dbf error log overrides; empty/0 keeps mgmt::ErrorLog's
     // defaults (OPENADS_ERROR_LOG_PATH env, then the SAP default paths).
     std::string   error_log_path;
@@ -159,6 +175,8 @@ bool parse_args(int argc, char** argv, Args& out) {
         else if (flag_eq(a, "enable_file_func")) out.enable_file_func = true;
         else if (flag_eq(a, "disable_file_func")) out.enable_file_func = false;
         else if (flag_eq(a, "legacy_paths")) out.legacy_paths = true;
+        else if (flag_eq(a, "udf_module") && i + 1 < argc)
+            out.udf_module = argv[++i];
         else if (flag_eq(a, "disable_legacy_paths")) out.legacy_paths = false;
         else if (flag_eq(a, "listen") && i + 1 < argc) {
             // --listen PORT:DIR  (e.g. --listen 6263:C:/app1)
@@ -234,6 +252,7 @@ void apply_ini(const openads::serverd::IniConfig& cfg, Args& out) {
     if (cfg.has_data)      out.data_dir  = cfg.data_dir;
     if (cfg.has_enable_file_func) out.enable_file_func = cfg.enable_file_func;
     if (cfg.has_legacy_paths)     out.legacy_paths     = cfg.legacy_paths;
+    if (cfg.has_udf_module)       out.udf_module       = cfg.udf_module;
     if (cfg.has_error_log_path) out.error_log_path   = cfg.error_log_path;
     if (cfg.has_error_log_max)  out.error_log_max_kb = cfg.error_log_max_kb;
     for (const auto& u : cfg.http_users) out.http_users.push_back(u);
@@ -279,6 +298,16 @@ std::string current_exe_path(const char* argv0) {
     if (char* r = realpath(argv0, buf)) return std::string(r);
 #endif
     return argv0 ? std::string(argv0) : std::string("openads_serverd");
+}
+
+// Directory part of an executable path (for the default UDF-module
+// probe next to the server binary). Empty when unresolvable.
+std::string exe_dir_of(const char* argv0) {
+    std::string p = current_exe_path(argv0);
+    auto pos = p.find_last_of("/\\");
+    if (pos == std::string::npos) return std::string();
+    if (pos == 0) return p.substr(0, 1);
+    return p.substr(0, pos);
 }
 
 // Probe the local ACE DLL landscape and print a one-line report.
@@ -339,6 +368,47 @@ int run_server(const Args& args, bool console) {
     if (args.error_log_max_kb != 0)
         openads::mgmt::ErrorLog::instance().set_max_kbytes(
             args.error_log_max_kb);
+
+    // Server-side Harbour UDFs (.hrb module, LetoDB pattern):
+    // explicit --udf_module/ini path wins, else probe the default
+    // (openads_udf.hrb next to the server binary). A named-but-broken
+    // module fails startup — silently building wrong indexes would
+    // be worse.
+    std::string udf_path = args.udf_module;
+    if (udf_path.empty()) {
+        const std::string def = args.exe_dir.empty()
+            ? std::string("openads_udf.hrb")
+            : args.exe_dir + "/openads_udf.hrb";
+        if (std::FILE* probe = std::fopen(def.c_str(), "rb")) {
+            std::fclose(probe);
+            udf_path = def;
+        }
+    }
+    if (!udf_path.empty()) {
+#if defined(OPENADS_WITH_HARBOUR_UDF)
+        openads::engine::hrb_udf::set_backend(
+            openads::engine::hrb_udf::make_harbour_backend());
+        std::string udf_err;
+        if (!openads::engine::hrb_udf::load(udf_path, udf_err)) {
+            std::fprintf(stderr, "UDF module failed: %s\n",
+                         udf_err.c_str());
+            return 1;
+        }
+        if (console) {
+            std::printf("UDF module: %s\n", udf_path.c_str());
+            for (const auto& fn :
+                 openads::engine::hrb_udf::functions())
+                std::printf("  udf: %s\n", fn.c_str());
+            std::fflush(stdout);
+        }
+#else
+        std::fprintf(stderr,
+            "UDF module '%s' requested but this build lacks "
+            "OPENADS_WITH_HARBOUR_UDF=ON\n",
+            udf_path.c_str());
+        return 1;
+#endif
+    }
 
     openads::network::Server srv;
     if (!args.data_dir.empty() && args.data_dir != ".")
@@ -592,6 +662,7 @@ VOID WINAPI svc_main(DWORD /*argc*/, LPSTR* /*argv*/) {
         SetServiceStatus(g_svc_handle, &g_svc_status);
         return;
     }
+    if (g_svc_argc > 0) args.exe_dir = exe_dir_of(g_svc_argv[0]);
 
     g_svc_status.dwCurrentState     = SERVICE_RUNNING;
     g_svc_status.dwControlsAccepted =
@@ -781,6 +852,7 @@ int main(int argc, char** argv) {
         usage(argv[0]);
         return 2;
     }
+    if (argc > 0) args.exe_dir = exe_dir_of(argv[0]);
 
     std::signal(SIGINT,  on_signal);
     std::signal(SIGTERM, on_signal);

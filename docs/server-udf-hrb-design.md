@@ -97,8 +97,37 @@ LetoDB; our threading design stands on its own.)
 ## Open questions
 
 - Default module name/location (`openads_udf.hrb` vs
-  `letoudf.hrb` alias).
-- Reload via signal vs. admin wire op.
+  `letoudf.hrb` alias). → v1.09.52: `openads_udf.hrb` next to the
+  binary, overridable via `--udf_module`/ini.
+- Reload via signal vs. admin wire op. → deferred: restart to refresh.
 - Allowed value types across the bridge (memo? datetime?).
+  → v1.09.52: strings byte-exact, numbers, logicals as T/F,
+  dates as YYYYMMDD.
 - Whether shape-A functions may open other tables (LetoDB UDF
   areas allow it; index purity says no — decide per shape).
+  → v1.09.52: full RDD linked (parity), purity stays contractual.
+
+## v1.09.52 implementation notes (embedded-host lessons)
+
+- Harbour never registers `HB_HRB*` for static links (no init
+  table anywhere upstream) — our backend publishes them with its
+  own `HB_INIT_SYMBOLS_BEGIN` block, which also pulls `runner.o`
+  deterministically. No whole-archive needed.
+- Dispatch via public `hb_vmTryEval` (protected call maintained
+  upstream) + explicit `hb_vmThreadInit` per thread; hand-rolled
+  `xvmSeq` discipline corrupts the stack — do not reinvent it.
+- `hb_vmInit` exactly once per process (second init corrupts the
+  VM; observed as AV in module `_INITSTATICS`).
+- Modules link STRICT (no LAZY): externs must resolve in the bare
+  host (RT table + our init table). Exotic statements (e.g.
+  `RELEASE` → unregistered `__MVXRELEASE`) fail the load naming
+  the symbol — surface it, do not degrade.
+- Module `STATICs` do not resolve when functions run outside
+  `hb_hrbDo` module context (writes land in an implicit memvar,
+  later reads fail "Variable does not exist"). Index UDFs must be
+  stateless; lifecycle proof via return values/`PUBLIC`, not statics.
+- Link set (MinGW, whole set required): hbvmmt hbrtl hbmacro hbpcre
+  hblang hbcpage hbzlib hbrdd rddfpt rddntx hbsix hbcommon + gt
+  driver + winmm/iphlpapi; GNU needs `--start-group` for the
+  `hbrtl↔hbvm` cycles. Local SDKs are often 32-bit-only — CI
+  builds Harbour from source (pinned commit, cached).

@@ -444,6 +444,32 @@ if(OPENADS_WITH_SQLITE)
     target_link_libraries(openads_unit_tests PRIVATE openads_sqlite3)
 endif()
 
+if(OPENADS_WITH_HARBOUR_UDF)
+    # Harbour libs for the UDF backend under test (registered by the
+    # hrb_udf test itself — core stays Harbour-free, see src/CMakeLists).
+    target_link_libraries(openads_unit_tests PRIVATE ${HARBOUR_LINK_LIBRARIES})
+    # The test .hrb module is compiled from PRG at build time so the
+    # source of truth stays readable. Needs the Harbour compiler.
+    find_program(HARBOUR_COMPILER NAMES harbour
+        HINTS $ENV{HB_ROOT}/bin C:/harbour-git/bin/win/mingw-550S C:/harbour/bin
+        PATH_SUFFIXES linux/gcc)
+    if(NOT HARBOUR_COMPILER)
+        message(FATAL_ERROR "OPENADS_WITH_HARBOUR_UDF=ON but no 'harbour' compiler found (set HARBOUR_COMPILER)")
+    endif()
+    file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/hrb)
+    add_custom_command(
+        OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/hrb/udf_test.hrb
+        COMMAND ${HARBOUR_COMPILER} ${CMAKE_CURRENT_SOURCE_DIR}/hrb/udf_test.prg -gh "-o${CMAKE_CURRENT_BINARY_DIR}/hrb/udf_test.hrb"
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/hrb/udf_test.prg
+        COMMENT "Compiling HRB UDF test module")
+    add_custom_target(openads_udf_test_hrb ALL
+        DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/hrb/udf_test.hrb)
+    add_dependencies(openads_unit_tests openads_udf_test_hrb)
+    target_sources(openads_unit_tests PRIVATE unit/hrb_udf_test.cpp)
+    target_compile_definitions(openads_unit_tests PRIVATE
+        OPENADS_TEST_HRB_PATH="${CMAKE_CURRENT_BINARY_DIR}/hrb/udf_test.hrb")
+endif()
+
 # Default CI/fast tier: skip stress tests tagged [slow].
 # Note: no embedded quotes around the filter value. The previous form
 # produced mangled args like -e="*[slow]*" on Windows under ctest,
