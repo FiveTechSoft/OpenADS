@@ -284,6 +284,35 @@ TEST_CASE("index_expr: PADR/PADL/PADC fit a value to an exact width") {
 }
 
 
+TEST_CASE("index_expr: REVERSE byte-reverses a string (Vouch tag UDF)") {
+    // Vouch builds tags like ACNBR + Reverse(DATESTR) and seeks with
+    // s + Reverse(d). The server evaluator had no REVERSE, so the tag
+    // degraded to all-empty keys and every ordered seek missed.
+    auto dir = fs::temp_directory_path() / "openads_idx_expr_rev";
+    auto p = stage_dbf(dir);
+    {
+    auto tbl = open_table(p);
+
+    // NAME C(10) holds "ALPHA     " (full declared width).
+    auto k = evaluate_index_expr(tbl, "REVERSE(NAME)", 10);
+    REQUIRE(k.has_value());
+    CHECK(k.value() == "     AHPLA");
+    CHECK(k.value().size() == 10);
+
+    // Lowercase name keeps working through composition.
+    auto comp = evaluate_index_expr(tbl, "REVERSE(UPPER(NAME))", 10);
+    REQUIRE(comp.has_value());
+    CHECK(comp.value() == "     AHPLA");
+
+    // Literal: byte reversal including blanks.
+    auto lit = evaluate_index_expr(tbl, "REVERSE('AB  ')", 4);
+    REQUIRE(lit.has_value());
+    CHECK(lit.value() == "  BA");
+    }
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+};
+
 TEST_CASE("fox_numeric_key is 8 bytes and order-preserving (FoxPro DBL2ORD)") {
     using openads::engine::fox_numeric_key;
     // Ascending values spanning negatives, zero, fractions and large

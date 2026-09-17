@@ -6,6 +6,18 @@
 
 ---
 
+## 2026-09-17 — REVERSE() index builtin (v1.09.50, field blocker)
+
+Field (Vouch, remote ADSCDX): UDF-based tags (`… + Reverse(…)`)
+built empty — the server key evaluator had no REVERSE, so every
+key degraded to "" and ordered seeks/COPY…WHILE missed, while
+loopback against a pre-existing good .cdx kept working. Fix: native
+REVERSE builtin (byte-reverse, exact for single-byte data) shared
+by build, maintenance and FOR evaluation. New regression test;
+suite 1574/1575 (only the pre-existing MinGW CDX case, verified on
+the clean tree). Field must rebuild the tag remotely (drop/recreate
+or REINDEX). Released v1.09.50.
+
 ## 2026-09-14 — Mutex leak fix (v1.09.49, field blocker)
 
 Field (v1.09.48, loopback + WAN, multi-user): `OAds_MutexCreate`

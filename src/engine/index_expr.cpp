@@ -417,6 +417,16 @@ Value apply_scalar_fn(const std::string& fn, const std::vector<Value>& args) {
                 pos = p + 1;
             }
         }
+    } else if (fn == "REVERSE" && args.size() >= 1) {
+        // REVERSE(cString) -> byte-reversed string. Clipper-era UDFs
+        // implement this as a byte loop (SubStr(cIn, i, 1) from LEN
+        // down to 1), so a byte reverse reproduces the client-computed
+        // key exactly for single-byte (OEM/ANSI) data. Used in tags
+        // like ACNBR + Reverse(DATESTR) with client seeks built as
+        // s + Reverse(d) (Vouch seekSD).
+        std::string s = args[0].s;
+        std::reverse(s.begin(), s.end());
+        v.s = std::move(s);
     } else {
         // Unknown function — empty string (FoxPro/ADS would error; we degrade).
     }
