@@ -5,14 +5,20 @@
 Let app functions (index-key UDFs like `Reverse()`, plus server-side
 routines such as backups) execute **inside `openads_serverd`**,
 loaded from a developer-supplied Harbour `.hrb` placed next to the
-server. Precedent: LetoDB's `letoudf.hrb` (elchs/LetoDBf,
-`source/server/server.prg`, `letofunc.c`).
+server. Precedent: Kresin’s original LetoDB `letoudf.hrb`
+(SourceForge `p/letodb`, `source/server/server.prg`) — verified in
+source. (The elch LetoDBf fork carries the same loading shape, but
+per project guidance it is NOT the reference: it forked to fill
+the MT gap and never succeeded. Canonical upstream is Kresin’s
+LetoDB; our threading design stands on its own.)
 
-## How LetoDB does it (verified in source)
+## How LetoDB does it (verified in Kresin’s source)
 
 - **File convention**: `letoudf.hrb` in the server base dir
-  (`s_cDirBase + "letoudf.hrb"`), alternate name accepted through
-  the reload command.
+  (`cDirBase + "letoudf.hrb"`). The original additionally lets its
+  Planner load further `.hrb` task modules
+  (`pPlan["hrb"] := hb_hrbLoad(...)`); the fork also accepts an
+  alternate name through the reload command.
 - **Gate flag**: server option `UDFEnabled`; with it off, remote
   functions are refused (`"UDF Error: using remote functions is
   disabled."`). Missing file without debug is silent — functions
