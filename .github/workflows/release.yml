@@ -271,21 +271,51 @@ jobs:
           fi
           echo "path=$F" >> "$GITHUB_OUTPUT"
 
-      - name: Verify required Windows release assets
+      # All-or-nothing release: every leg must be green AND every
+      # canonical asset present, otherwise fail loudly instead of
+      # shipping a partial kit (v1.09.50 went out without the Linux
+      # tarball because publish ran on 3 of 4 legs). macOS keeps its
+      # stall-tolerant test step, but a real macOS build break still
+      # blocks here via the job conclusion.
+      - name: Require all legs green and all assets present
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           V="${{ steps.ver.outputs.version }}"
           missing=0
           for asset in \
             "openads-${V}-windows-x64.zip" \
-            "openads-${V}-windows-x86.zip"; do
+            "openads-${V}-windows-x86.zip" \
+            "openads-${V}-linux-x64.tar.gz" \
+            "openads-${V}-macos-universal.tar.gz"; do
             if [ ! -f "out/${asset}" ]; then
-              echo "::warning::Not in CI artifacts: ${asset} (may be uploaded manually)"
+              echo "::error::Missing required release asset: ${asset}"
+              missing=1
             else
               echo "Found: ${asset}"
             fi
           done
-          echo "Windows asset check complete."
+          JOBS_URL="repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=20"
+          echo "Leg conclusions:"
+          gh api "$JOBS_URL" --jq '.jobs[] | "\(.name): \(.conclusion)"'
+          for leg in \
+            "windows-2022 / x64" \
+            "windows-2022 / x86" \
+            "ubuntu-24.04 / x64" \
+            "macos-14 / universal"; do
+            concl=$(gh api "$JOBS_URL" --jq \
+              ".jobs[] | select(.name == \"$leg\") | .conclusion")
+            if [ "$concl" != "success" ]; then
+              echo "::error::Leg '$leg' conclusion is '${concl:-missing}' — blocking publish."
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::Refusing partial release."
+            exit 1
+          fi
+          echo "All legs green, all assets present."
 
       # The short *-win-x64.zip / *-win-x86.zip names are forbidden.
       # They were a manual FiveTechSoft kit that sat next to the CI
