@@ -104,9 +104,25 @@ jobs:
           git -C "$HB/src" checkout "$HARBOUR_REF"
           cd "$HB/src"
           make -j"$(nproc)" install HB_INSTALL_PREFIX="$HB/install" HB_BUILD_3RDEXT=no
-          test -f "$HB/install/include/hbvm.h"
-          test -n "$(find "$HB/install" -name 'libhbvmmt.a' | head -1)"
-          find "$HB/install" -name harbour -type f -exec {} -v \;
+          # Resolve exact SDK paths (no layout guessing in CMake):
+          # headers, MT VM archive, compiler binary.
+          HB_INC="$(dirname "$(find "$HB/install" -name hbvm.h | head -1)")"
+          HB_LIBDIR="$(dirname "$(find "$HB/install" -name 'libhbvmmt.a' | head -1)")"
+          HB_CC="$(find "$HB/install" -name harbour -type f -executable | head -1)"
+          echo "Harbour SDK layout:"
+          echo "  include: ${HB_INC:-MISSING}"
+          echo "  libdir:  ${HB_LIBDIR:-MISSING}"
+          echo "  compiler:${HB_CC:-MISSING}"
+          if [ -z "$HB_INC" ] || [ -z "$HB_LIBDIR" ] || [ -z "$HB_CC" ]; then
+            echo "::error::Harbour SDK layout unexpected — full listing:"
+            find "$HB/install" -maxdepth 4 | sort | head -80
+            exit 1
+          fi
+          {
+            echo "HARBOUR_INCLUDE_DIR=$HB_INC"
+            echo "HARBOUR_LIB_DIR=$HB_LIBDIR"
+            echo "HARBOUR_COMPILER=$HB_CC"
+          } >> "$GITHUB_ENV"
 
       - name: Configure
         shell: bash
@@ -115,7 +131,7 @@ jobs:
                 -DOPENADS_WITH_TLS=ON \
                 -DOPENADS_WITH_HTTP=ON \
                 ${{ matrix.cmake_extra }} \
-                ${{ runner.os == 'Linux' && '-DOPENADS_WITH_HARBOUR_UDF=ON' || '' }}
+                ${{ runner.os == 'Linux' && format('-DOPENADS_WITH_HARBOUR_UDF=ON -DHARBOUR_INCLUDE_DIR={0} -DHARBOUR_LIB_DIR={1} -DHARBOUR_COMPILER={2}', env.HARBOUR_INCLUDE_DIR, env.HARBOUR_LIB_DIR, env.HARBOUR_COMPILER) || '' }}
 
       - name: Build
         run: cmake --build build/${{ matrix.preset }} --config Release

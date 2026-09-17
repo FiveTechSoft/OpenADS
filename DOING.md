@@ -6,6 +6,15 @@
 
 ---
 
+## 2026-09-17 — Linux detection hardened, transient x86 (v1.09.54)
+
+v1.09.53 published nothing (gate held): Linux Configure failed on
+guessed Harbour install-layout paths, x86 failed with zero repo
+changes (transient). Fix: CI resolves exact SDK paths (headers,
+libhbvmmt.a, compiler) via find and passes explicit -D, with a
+loud layout dump on mismatch. No product-code change. Released
+v1.09.54.
+
 ## 2026-09-17 — v1.09.52 never shipped: CMake parse fix (v1.09.53)
 
 v1.09.52's gate worked — all legs failed Configure in ~1 s, publish
