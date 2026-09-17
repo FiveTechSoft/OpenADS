@@ -6,6 +6,13 @@
 
 ---
 
+## 2026-09-17 — Linux link: Unix GT is TRM, not STD (v1.09.55)
+
+v1.09.54 configured and built Harbour, then failed the OpenADS
+link: Harbour rtl/gtsys.c requests HB_GT_TRM on Unix, we linked
+gtstd. GT selection is now platform-conditional (gtwin/gttrm +
+ncurses). No product-code change. Released v1.09.55.
+
 ## 2026-09-17 — Linux detection hardened, transient x86 (v1.09.54)
 
 v1.09.53 published nothing (gate held): Linux Configure failed on

@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 project(OpenADS
-    VERSION 1.09.54
+    VERSION 1.09.55
     LANGUAGES C CXX
     DESCRIPTION "Open-source ADS-compatible engine"
 )
@@ -148,12 +148,12 @@ if(OPENADS_WITH_HARBOUR_UDF)
         list(APPEND HARBOUR_LIBRARIES ${${_hb_var}})
     endforeach()
     if(WIN32)
-        # hbrtl's GT system references the default GT driver, and
-        # hbcommon's date code needs winmm (timeGetTime, linked
-        # separately below — never inside a group).
+        # hbrtl's GT system references the platform default GT driver
+        # (see Harbour rtl/gtsys.c HB_GT_REQUEST: WIN on Windows, TRM
+        # on Unix) — link exactly that one.
         set(_hb_gt gtwin)
     else()
-        set(_hb_gt gtstd)
+        set(_hb_gt gttrm)
     endif()
     find_library(HARBOUR_LIB_gt NAMES ${_hb_gt}
         HINTS ${HARBOUR_LIB_DIR} $ENV{HB_ROOT}/lib
@@ -180,6 +180,9 @@ if(OPENADS_WITH_HARBOUR_UDF)
     endif()
     if(WIN32)
         list(APPEND HARBOUR_LINK_LIBRARIES winmm iphlpapi)
+    else()
+        # gttrm rides on ncurses (libncurses pulls libtinfo).
+        list(APPEND HARBOUR_LINK_LIBRARIES ncurses)
     endif()
     message(STATUS "OpenADS: Harbour UDF backend (${HARBOUR_LIBRARIES})")
 endif()
