@@ -475,12 +475,15 @@ endif()
 # runners: connection storms, lock races, teardown parks — see
 # docs/known-issues.md). Both tiers still run everywhere else
 # (local dev, explicit runs); the release gate depends on this tier.
-# Note: no embedded quotes around the filter value. The previous form
-# produced mangled args like -e="*[slow]*" on Windows under ctest,
-# causing the target to receive a bad filter, run the wrong tests,
-# hit hard failures in remote/DD tests, and report as ***Failed.
-add_test(NAME openads_unit_tests COMMAND openads_unit_tests -e=*[slow]* -e=*flaky*)
-add_test(NAME openads_unit_tests_slow COMMAND openads_unit_tests -tc=*[slow]* -e=*flaky*)
+# NOTE: the short flag MUST be -tce (test-case-exclude). Bare -e is
+# silently ignored by doctest 2.4.11, and repeated -tce occurrences
+# do NOT accumulate (parseOption takes one) — so slow+flaky share a
+# single comma-separated -tce. The old -e=*[slow]* excluded nothing:
+# every tier always ran the 240 s storm cases, which also explains
+# past 30-minute Test timeouts on loaded runners. No embedded quotes
+# around the filter value (they mangle args on Windows under ctest).
+add_test(NAME openads_unit_tests COMMAND openads_unit_tests -tce=*[slow]*,*flaky*)
+add_test(NAME openads_unit_tests_slow COMMAND openads_unit_tests -tc=*[slow]* -tce=*flaky*)
 
 # SQL URI backend smoke (sqlite://): runs a focused doctest subset in CI.
 if(OPENADS_WITH_POSTGRESQL)

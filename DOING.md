@@ -6,6 +6,15 @@
 
 ---
 
+## 2026-09-18 — Exclusions silently never worked (v1.09.58)
+
+v1.09.57 still ran quarantined tests and win-x64 timed out at 30
+min. Root cause in doctest 2.4.11 source: exclude flag is -tce,
+not -e (bare -e silently ignored), and repeats don't accumulate —
+so -e=*[slow]* never excluded anything, every tier always ran the
+240 s storm cases. Single comma-separated -tce now; tiers verified
+(1571/4). No product-code change. Released v1.09.58.
+
 ## 2026-09-18 — Quarantine load-flaky timing tests (v1.09.57)
 
 v1.09.56 failed on two DIFFERENT timing cases across identical
