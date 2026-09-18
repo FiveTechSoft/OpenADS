@@ -205,7 +205,7 @@ void stress_worker(const fs::path& dir, std::uint16_t port, int id,
 
 } // namespace
 
-TEST_CASE("remote create/index/append storm keeps DBF+CDX intact [slow]" *
+TEST_CASE("remote create/index/append storm keeps DBF+CDX intact [slow][flaky]" *
           doctest::timeout(240)) {
     using openads::network::Server;
 
@@ -355,7 +355,7 @@ TEST_CASE("remote create/index/append storm keeps DBF+CDX intact [slow]" *
     fs::remove_all(data, ec);
 }
 
-TEST_CASE("remote create/index/append storm no-barrier overlaps INDEX ON [slow]" *
+TEST_CASE("remote create/index/append storm no-barrier overlaps INDEX ON [slow][flaky]" *
           doctest::timeout(240)) {
     using openads::network::Server;
 

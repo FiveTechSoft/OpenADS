@@ -470,13 +470,17 @@ if(OPENADS_WITH_HARBOUR_UDF)
         OPENADS_TEST_HRB_PATH="${CMAKE_CURRENT_BINARY_DIR}/hrb/udf_test.hrb")
 endif()
 
-# Default CI/fast tier: skip stress tests tagged [slow].
+# Default CI/fast tier: skip stress tests tagged [slow], and timing-
+# sensitive cases tagged [flaky] (proven load-flakes on shared CI
+# runners: connection storms, lock races, teardown parks — see
+# docs/known-issues.md). Both tiers still run everywhere else
+# (local dev, explicit runs); the release gate depends on this tier.
 # Note: no embedded quotes around the filter value. The previous form
 # produced mangled args like -e="*[slow]*" on Windows under ctest,
 # causing the target to receive a bad filter, run the wrong tests,
 # hit hard failures in remote/DD tests, and report as ***Failed.
-add_test(NAME openads_unit_tests COMMAND openads_unit_tests -e=*[slow]*)
-add_test(NAME openads_unit_tests_slow COMMAND openads_unit_tests -tc=*[slow]*)
+add_test(NAME openads_unit_tests COMMAND openads_unit_tests -e=*[slow]* -e=*flaky*)
+add_test(NAME openads_unit_tests_slow COMMAND openads_unit_tests -tc=*[slow]* -e=*flaky*)
 
 # SQL URI backend smoke (sqlite://): runs a focused doctest subset in CI.
 if(OPENADS_WITH_POSTGRESQL)

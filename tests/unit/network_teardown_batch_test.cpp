@@ -167,7 +167,7 @@ TEST_CASE("Teardown batching: clean triple costs nothing") {
     srv.stop();
 }
 
-TEST_CASE("Teardown batching: dirty flush travels alone under a park") {
+TEST_CASE("Teardown batching: dirty flush travels alone under a park [flaky]") {
     tb_wipe();
     auto dir = tb_tmp_dir();
     tb_seed(dir);

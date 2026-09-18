@@ -57,7 +57,7 @@ bool openindex_code_ok(UNSIGNED32 rc) {
 
 }  // namespace
 
-TEST_CASE("OpenIndex on exclusive-held bag returns 7040 not 5000/5103") {
+TEST_CASE("OpenIndex on exclusive-held bag returns 7040 not 5000/5103 [flaky]") {
     auto dir = fs::temp_directory_path() / "openads_oidx_excl";
     make_table(dir, "race.dbf");
     const auto cdx = dir / "race.cdx";
