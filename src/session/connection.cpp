@@ -1,5 +1,4 @@
 #include "session/connection.h"
-
 #include "engine/pbkdf2.h"
 
 #include "drivers/adm/adm_memo.h"
@@ -10,6 +9,7 @@
 #include "platform/dll.h"
 #include "platform/fs_sandbox.h"
 #include "platform/path.h"
+#include "platform/time.h"
 #include "util/log.h"
 
 #include <cstring>
@@ -1077,6 +1077,227 @@ bool Connection::owns_table_ptr(const engine::Table* t) const {
         if (holder.get() == t) return true;
     }
     return false;
+}
+
+// ---- Server-side ZIP/UNZIP (OAds_Zip/OAds_UnZip) --------------------
+//
+// All client paths resolve through the fs jail (resolve_fs_path over
+// the connection's data roots); archives land in <owning-root>/backup
+// as <zipname>_YYYYMMDD.zip. Table matching uses fs::equivalent
+// (same file whatever the spelling) with a normalized string compare
+// as fallback.
+
+namespace {
+
+namespace fs = std::filesystem;
+
+// Separator-normalized form for string fallback compares.
+std::string zip_norm_path(const std::string& p) {
+    std::string o = p;
+    for (char& c : o) {
+        if (c == '\\') c = '/';
+#if defined(_WIN32)
+        c = static_cast<char>(
+            std::tolower(static_cast<unsigned char>(c)));
+#endif
+    }
+    return o;
+}
+
+bool zip_same_file(const std::string& a, const std::string& b) {
+    std::error_code ec;
+    if (fs::exists(a, ec) && fs::exists(b, ec) && !ec) {
+        bool eq = fs::equivalent(a, b, ec);
+        if (!ec) return eq;
+    }
+    return zip_norm_path(a) == zip_norm_path(b);
+}
+
+}  // namespace
+
+util::Result<Connection::ZipArchiveResult> Connection::zip_archive(
+    const std::string& dir, const std::vector<std::string>& files,
+    const std::string& zip_name, int level, bool overwrite,
+    const std::string& password, const std::vector<std::string>& exclude,
+    bool with_path) {
+    if (files.empty())
+        return util::Error{5000, 0, "zip: empty file list", ""};
+    if (level < 0 || level > 9)
+        return util::Error{5000, 0, "zip: level must be 0..9", ""};
+    if (zip_name.empty() || zip_name.find_first_of("/\\") !=
+                                std::string::npos ||
+        zip_name.find(':') != std::string::npos ||
+        zip_name == "." || zip_name == "..")
+        return util::Error{5000, 0, "zip: bad archive name", ""};
+    const auto roots = platform::split_data_roots(data_dir_);
+    if (roots.empty())
+        return util::Error{5000, 0, "zip: no data directory", ""};
+    auto src = platform::resolve_fs_path(roots, dir);
+    if (!src)
+        return util::Error{7079, 0, "zip: path outside data directory",
+                           dir};
+    std::error_code ec;
+    if (!fs::is_directory(*src, ec) || ec)
+        return util::Error{5018, 0, "zip: source dir not found", dir};
+    // Owning root = the root the source resolved under (backup/
+    // lives next to the data, not next to the caller).
+    std::string root;
+    for (const auto& r : roots) {
+        const std::string rn = zip_norm_path(r);
+        const std::string sn = zip_norm_path(*src);
+        if (sn.size() > rn.size() && sn.compare(0, rn.size(), rn) == 0 &&
+            sn[rn.size()] == '/') {
+            root = r;
+            break;
+        }
+        if (sn == rn) {
+            root = r;
+            break;
+        }
+    }
+    if (root.empty()) root = roots.front();
+    // Dated repository name, minted server-side (single rule).
+    std::string base = zip_name;
+    if (base.size() > 4) {
+        std::string ext = base.substr(base.size() - 4);
+        for (char& c : ext)
+            c = static_cast<char>(std::tolower(
+                static_cast<unsigned char>(c)));
+        if (ext == ".zip") base.erase(base.size() - 4);
+    }
+    std::string ymd = platform::now_local().date;
+    ymd.erase(std::remove(ymd.begin(), ymd.end(), '-'), ymd.end());
+    const std::string arc_name = base + "_" + ymd + ".zip";
+    const std::string backup_dir =
+        (fs::path(root) / "backup").string();
+    fs::create_directories(backup_dir, ec);
+    if (ec)
+        return util::Error{5000, 0, "zip: cannot create backup dir",
+                           backup_dir};
+    const std::string archive =
+        (fs::path(backup_dir) / arc_name).string();
+    // Resolve every source under the source dir (same jail).
+    std::vector<std::string> abs;
+    abs.reserve(files.size());
+    for (const auto& f : files) {
+        auto r = platform::resolve_fs_path(*src, f);
+        if (!r)
+            return util::Error{7079, 0,
+                               "zip: path outside data directory", f};
+        abs.push_back(std::move(*r));
+    }
+    // Flush-and-go: settle open tables covering the sources so the
+    // archive captures buffered writes. Open tables are included,
+    // never skipped.
+    for (auto& [_, holder] : tables_) {
+        if (!holder) continue;
+        const std::string tp = holder->path();
+        for (const auto& a : abs) {
+            if (zip_same_file(tp, a)) {
+                if (auto fl = holder->flush(); !fl)
+                    return fl.error();
+                break;
+            }
+        }
+    }
+    engine::zip_arch::ZipOptions opt;
+    opt.level = level;
+    opt.overwrite = overwrite;
+    opt.password = password;
+    opt.with_path = with_path;
+    opt.exclude = exclude;
+    auto zr =
+        engine::zip_arch::zip_files(abs, *src, archive, opt);
+    if (!zr) return zr.error();
+    ZipArchiveResult out;
+    out.stats = zr.value();
+    // Report the archive relative to the owning root (stable,
+    // re-resolvable spelling for the matching unzip call).
+    std::string rel;
+    {
+        const std::string rn = zip_norm_path(root);
+        const std::string an = zip_norm_path(archive);
+        if (an.size() > rn.size() && an.compare(0, rn.size(), rn) == 0 &&
+            an[rn.size()] == '/')
+            rel = archive.substr(rn.size() + 1);
+        else
+            rel = arc_name;
+    }
+    // Keep client-visible separators portable.
+    for (char& c : rel)
+        if (c == '\\') c = '/';
+    out.archive_rel = std::move(rel);
+    return out;
+}
+
+util::Result<engine::zip_arch::Stats> Connection::unzip_archive(
+    const std::string& dir, const std::string& zip,
+    const std::string& password, bool overwrite, bool with_path) {
+    const auto roots = platform::split_data_roots(data_dir_);
+    if (roots.empty())
+        return util::Error{5000, 0, "unzip: no data directory", ""};
+    auto dest = platform::resolve_fs_path(roots, dir);
+    if (!dest)
+        return util::Error{7079, 0, "unzip: path outside data directory",
+                           dir};
+    // Bare archive names resolve under the destination root's backup/
+    // (the roundtrip spelling zip_archive reports); anything else
+    // resolves under the jail directly.
+    std::string archive;
+    if (zip.find_first_of("/\\:") == std::string::npos) {
+        std::string root;
+        for (const auto& r : roots) {
+            const std::string rn = zip_norm_path(r);
+            const std::string sn = zip_norm_path(*dest);
+            if ((sn.size() > rn.size() &&
+                 sn.compare(0, rn.size(), rn) == 0 &&
+                 sn[rn.size()] == '/') ||
+                sn == rn) {
+                root = r;
+                break;
+            }
+        }
+        if (root.empty()) root = roots.front();
+        const std::string cand =
+            (fs::path(root) / "backup" / zip).string();
+        std::error_code ec;
+        if (fs::is_regular_file(cand, ec) && !ec)
+            archive = cand;
+    }
+    if (archive.empty()) {
+        auto r = platform::resolve_fs_path(roots, zip);
+        if (!r)
+            return util::Error{7079, 0,
+                               "unzip: path outside data directory", zip};
+        archive = std::move(*r);
+    }
+    // Fail-if-open: enumerate targets first; any extraction target
+    // open on this connection fails loud (AE_FILE_IN_USE) instead of
+    // pulling the file out from under a live handle.
+    auto entries = engine::zip_arch::list_entries(archive);
+    if (!entries) return entries.error();
+    for (const auto& e : entries.value()) {
+        std::string rel = e;
+        if (!with_path) {
+            while (!rel.empty() && rel.back() == '/') rel.pop_back();
+            const std::size_t n = rel.find_last_of('/');
+            rel = (n == std::string::npos) ? rel : rel.substr(n + 1);
+            if (rel.empty() || rel == "." || rel == "..") continue;
+        }
+        const std::string target =
+            (fs::path(*dest) / rel).string();
+        for (auto& [_, holder] : tables_) {
+            if (!holder) continue;
+            if (zip_same_file(holder->path(), target))
+                return util::Error{7040, 0,
+                                   "unzip: target open: " + rel, ""};
+        }
+    }
+    engine::zip_arch::UnzipOptions opt;
+    opt.overwrite = overwrite;
+    opt.password = password;
+    opt.with_path = with_path;
+    return engine::zip_arch::unzip_files(archive, *dest, opt);
 }
 
 void Connection::set_encryption_password(const std::string& password) {

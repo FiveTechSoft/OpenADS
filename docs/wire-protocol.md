@@ -818,6 +818,25 @@ shape the way plain property get/set does:
 With phase 2, every `AdsDD*` function works identically over local and
 remote connections except the permanently-stubbed `SetIndexProperty`.
 
+### 5.27 ZipArchive / UnzipArchive (server-side backup archiving)
+
+Connection-level ops (no table id) for `OAds_Zip`/`OAds_UnZip`
+(`AdsZipFiles`/`AdsUnzipFiles`). Paths stay under the session data
+jail; archives land in `<owning-root>/backup/<name>_YYYYMMDD.zip`.
+NOT gated by `EnableFileFunc` (database ops, like `FindTables`).
+File lists ride as one `0x1F`-joined blob (`0x1F` cannot occur in a
+file name on any OS); `u32` lengths where a file set can exceed
+64 KiB of names.
+
+- `ZipArchive`: `[u16 dirLen][dir][u32 filesLen][0x1F files]`
+  `[u16 zipNameLen][zipName][u16 level][u8 overwrite][u8 withPath]`
+  `[u32 exclLen][0x1F excludes][u16 pwdLen][password]`
+- `ZipArchiveAck`:
+  `[u32 files][u64 bytes][u64 archiveBytes][u16 arcLen][archiveRel]`
+- `UnzipArchive`: `[u16 dirLen][dir][u16 zipLen][zip]`
+  `[u16 pwdLen][password][u8 overwrite][u8 withPath]`
+- `UnzipArchiveAck`: `[u32 files][u64 bytes][u64 archiveBytes]`
+
 ## 6. Versioning
 
 - This spec covers OpenADS **v1.4.0**. Bumps append new

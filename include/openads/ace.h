@@ -119,6 +119,26 @@ UNSIGNED32 ENTRYPOINT AdsDirExist      (ADSHANDLE  hConnect, UNSIGNED8* pucPath,
                               UNSIGNED16* pbExists);
 UNSIGNED32 ENTRYPOINT AdsDirMake       (ADSHANDLE  hConnect, UNSIGNED8* pucPath);
 UNSIGNED32 ENTRYPOINT AdsDirRemove     (ADSHANDLE  hConnect, UNSIGNED8* pucPath);
+// Server-side backup archiving (OAds_Zip/OAds_UnZip): files stay on
+// the server under --data; zips land in <root>/backup/<name>_YYYYMMDD.zip.
+// pucFiles/pucExclude are 0x1F-separated lists. The archive path comes
+// back via pucArchive (*pusArchiveLen capacity in, actual length out;
+// AE_INSUFFICIENT_BUFFER when short — the archive itself is created
+// regardless, so pass a generous buffer, e.g. 512).
+UNSIGNED32 ENTRYPOINT AdsZipFiles      (ADSHANDLE  hConnect,
+                              UNSIGNED8* pucDir, UNSIGNED8* pucFiles,
+                              UNSIGNED8* pucZipName, UNSIGNED16 usLevel,
+                              UNSIGNED16 usOverwrite, UNSIGNED8* pucPassword,
+                              UNSIGNED8* pucExclude, UNSIGNED16 usWithPath,
+                              UNSIGNED8* pucArchive, UNSIGNED16* pusArchiveLen,
+                              UNSIGNED32* pulFiles, UNSIGNED64* pullBytes,
+                              UNSIGNED64* pullArchiveBytes);
+UNSIGNED32 ENTRYPOINT AdsUnzipFiles    (ADSHANDLE  hConnect,
+                              UNSIGNED8* pucDir, UNSIGNED8* pucZip,
+                              UNSIGNED8* pucPassword, UNSIGNED16 usOverwrite,
+                              UNSIGNED16 usWithPath,
+                              UNSIGNED32* pulFiles, UNSIGNED64* pullBytes,
+                              UNSIGNED64* pullArchiveBytes);
 UNSIGNED32 ENTRYPOINT AdsFOpen         (ADSHANDLE  hConnect, UNSIGNED8* pucName,
                               UNSIGNED16 usMode, ADSHANDLE* phFile);
 UNSIGNED32 ENTRYPOINT AdsFCreate       (ADSHANDLE  hConnect, UNSIGNED8* pucName,

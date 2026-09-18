@@ -6,6 +6,16 @@
 
 ---
 
+## 2026-09-18 — Server-side ZIP/UNZIP (v1.09.59, field request)
+
+Vouch backup archiving as built-ins: OAds_Zip/OAds_UnZip over
+AdsZipFiles/AdsUnzipFiles + wire ops, files stay under --data,
+dated backup/ repository, flush-and-go on zip, fail-if-open on
+unzip, ZipCrypto passwords, Zip-Slip guarded. Vendored zlib 1.3.1
++ minizip (read-decrypt re-enabled). 10/10 new tests green incl.
+remote wire roundtrip; full suite 1588/1589 (only pre-existing
+MinGW case). Released v1.09.59.
+
 ## 2026-09-18 — Exclusions silently never worked (v1.09.58)
 
 v1.09.57 still ran quarantined tests and win-x64 timed out at 30

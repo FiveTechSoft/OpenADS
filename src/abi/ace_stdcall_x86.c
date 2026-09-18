@@ -1296,6 +1296,30 @@ __declspec(dllexport) UNSIGNED32 __stdcall AdsDirRemove(ADSHANDLE a0, UNSIGNED8*
     return rc;
 }
 
+/* ---- AdsZipFiles ---- */
+#define AdsZipFiles oadsimpl_AdsZipFiles
+extern UNSIGNED32 ENTRYPOINT AdsZipFiles(ADSHANDLE hConnect, UNSIGNED8* pucDir, UNSIGNED8* pucFiles, UNSIGNED8* pucZipName, UNSIGNED16 usLevel, UNSIGNED16 usOverwrite, UNSIGNED8* pucPassword, UNSIGNED8* pucExclude, UNSIGNED16 usWithPath, UNSIGNED8* pucArchive, UNSIGNED16* pusArchiveLen, UNSIGNED32* pulFiles, UNSIGNED64* pullBytes, UNSIGNED64* pullArchiveBytes);
+#undef AdsZipFiles
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsZipFiles=_AdsZipFiles")
+#pragma comment(linker, "/export:AdsZipFiles=_AdsZipFiles")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsZipFiles(ADSHANDLE a0, UNSIGNED8* a1, UNSIGNED8* a2, UNSIGNED8* a3, UNSIGNED16 a4, UNSIGNED16 a5, UNSIGNED8* a6, UNSIGNED8* a7, UNSIGNED16 a8, UNSIGNED8* a9, UNSIGNED16* a10, UNSIGNED32* a11, UNSIGNED64* a12, UNSIGNED64* a13) {
+    UNSIGNED32 rc = oadsimpl_AdsZipFiles(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13);
+    arc_log_rc("AdsZipFiles", rc, 14, (uintptr_t)a0, (uintptr_t)a1, (uintptr_t)a2, (uintptr_t)a3, (uintptr_t)a4, (uintptr_t)a5, (uintptr_t)a6, (uintptr_t)a7, (uintptr_t)a8, (uintptr_t)a9, (uintptr_t)a10, (uintptr_t)a11, (uintptr_t)a12, (uintptr_t)a13);
+    return rc;
+}
+
+/* ---- AdsUnzipFiles ---- */
+#define AdsUnzipFiles oadsimpl_AdsUnzipFiles
+extern UNSIGNED32 ENTRYPOINT AdsUnzipFiles(ADSHANDLE hConnect, UNSIGNED8* pucDir, UNSIGNED8* pucZip, UNSIGNED8* pucPassword, UNSIGNED16 usOverwrite, UNSIGNED16 usWithPath, UNSIGNED32* pulFiles, UNSIGNED64* pullBytes, UNSIGNED64* pullArchiveBytes);
+#undef AdsUnzipFiles
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsUnzipFiles=_AdsUnzipFiles")
+#pragma comment(linker, "/export:AdsUnzipFiles=_AdsUnzipFiles")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsUnzipFiles(ADSHANDLE a0, UNSIGNED8* a1, UNSIGNED8* a2, UNSIGNED8* a3, UNSIGNED16 a4, UNSIGNED16 a5, UNSIGNED32* a6, UNSIGNED64* a7, UNSIGNED64* a8) {
+    UNSIGNED32 rc = oadsimpl_AdsUnzipFiles(a0, a1, a2, a3, a4, a5, a6, a7, a8);
+    arc_log_rc("AdsUnzipFiles", rc, 9, (uintptr_t)a0, (uintptr_t)a1, (uintptr_t)a2, (uintptr_t)a3, (uintptr_t)a4, (uintptr_t)a5, (uintptr_t)a6, (uintptr_t)a7, (uintptr_t)a8);
+    return rc;
+}
+
 /* ---- AdsDirectory ---- */
 #define AdsDirectory oadsimpl_AdsDirectory
 extern UNSIGNED32 ENTRYPOINT AdsDirectory(ADSHANDLE hConnect, UNSIGNED8* pucMask, UNSIGNED16 usAttr, UNSIGNED8* pucBuffer, UNSIGNED32* pulBufLen);

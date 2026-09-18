@@ -7,6 +7,7 @@
 #include "engine/table.h"
 #include "engine/tx.h"
 #include "engine/tx_log.h"
+#include "engine/zip_arch.h"
 #include "platform/dll.h"
 #include "session/handle_registry.h"
 #include "util/result.h"
@@ -234,6 +235,28 @@ public:
     std::string resolve_table_file(const std::string& relative_path,
                                    engine::TableType&  type,
                                    bool                for_create = false);
+
+    // Server-side ZIP/UNZIP for backup archiving (OAds_Zip/OAds_UnZip
+    // via AdsZipFiles/AdsUnzipFiles, local or wire). Every path stays
+    // under this connection's data roots (resolve_fs_path jail);
+    // archives land in <owning-root>/backup/<name>_YYYYMMDD.zip.
+    // zip_archive flushes open tables covering the sources first
+    // (flush-and-go; open tables are included, never skipped).
+    // unzip_archive refuses when any extraction target is open on
+    // this connection (AE_FILE_IN_USE) — overwriting live files is
+    // not flush-and-go territory.
+    struct ZipArchiveResult {
+        engine::zip_arch::Stats stats;
+        std::string             archive_rel;  // relative to owning root
+    };
+    util::Result<ZipArchiveResult> zip_archive(
+        const std::string& dir, const std::vector<std::string>& files,
+        const std::string& zip_name, int level, bool overwrite,
+        const std::string& password,
+        const std::vector<std::string>& exclude, bool with_path);
+    util::Result<engine::zip_arch::Stats> unzip_archive(
+        const std::string& dir, const std::string& zip,
+        const std::string& password, bool overwrite, bool with_path);
 
 private:
     util::Result<void> recover_orphan_tx_();

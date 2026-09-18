@@ -3905,6 +3905,117 @@ DispatchResult Session::dispatch(const Frame& f) {
             }
             break;
         }
+        case Opcode::ZipArchive:
+        case Opcode::UnzipArchive: {
+            // Server-side backup archiving (OAds_Zip/OAds_UnZip).
+            // Database ops — NOT gated by EnableFileFunc. Paths stay
+            // under the session data jail inside Connection.
+            if (!sess_conn_) {
+                reply = err("zip: not connected",
+                            openads::AE_NO_CONNECTION);
+                break;
+            }
+            auto read_blob32 = [&](std::size_t& pos,
+                                   std::string& out) -> bool {
+                if (pos + 4 > f.payload.size()) return false;
+                std::uint32_t n = read_u32_le(f.payload.data() + pos);
+                pos += 4;
+                if (pos + n > f.payload.size()) return false;
+                out.assign(reinterpret_cast<const char*>(
+                               f.payload.data() + pos),
+                           n);
+                pos += n;
+                return true;
+            };
+            auto split_1f = [](const std::string& blob) {
+                std::vector<std::string> v;
+                std::string cur;
+                for (char c : blob) {
+                    if (c == '\x1F') {
+                        if (!cur.empty()) v.push_back(std::move(cur));
+                        cur.clear();
+                    } else {
+                        cur.push_back(c);
+                    }
+                }
+                if (!cur.empty()) v.push_back(std::move(cur));
+                return v;
+            };
+            auto write_u64 = [](std::uint64_t v,
+                                std::vector<std::uint8_t>& o) {
+                for (int i = 0; i < 8; ++i)
+                    o.push_back(static_cast<std::uint8_t>((v >> (8 * i)) &
+                                                          0xFF));
+            };
+            if (f.opcode == Opcode::ZipArchive) {
+                // Layout: [u16 dir][u32 files][u16 zipName][u16 level]
+                //           [u8 ov][u8 wp][u32 excl][u16 pwd].
+                std::size_t pos = 0;
+                std::string d2, fb2, zn2, eb2, pw2;
+                std::uint16_t lv = 0;
+                std::uint8_t ov = 0, wp = 0;
+                bool ok = read_lstr16(f.payload, pos, d2) &&
+                          read_blob32(pos, fb2) &&
+                          read_lstr16(f.payload, pos, zn2) &&
+                          pos + 4 <= f.payload.size();
+                if (ok) {
+                    lv = read_u16_le(f.payload.data() + pos);
+                    pos += 2;
+                    ov = f.payload[pos++];
+                    wp = f.payload[pos++];
+                    ok = read_blob32(pos, eb2) &&
+                         read_lstr16(f.payload, pos, pw2) &&
+                         pos == f.payload.size();
+                }
+                if (!ok) {
+                    reply = err("ZipArchive: bad payload");
+                    break;
+                }
+                auto r = sess_conn_->zip_archive(
+                    d2, split_1f(fb2), zn2, static_cast<int>(lv),
+                    ov != 0, pw2, split_1f(eb2), wp != 0);
+                if (!r) {
+                    reply = err("ZipArchive",
+                                static_cast<UNSIGNED32>(
+                                    r.error().code));
+                    break;
+                }
+                reply.opcode = Opcode::ZipArchiveAck;
+                write_u32_le(r.value().stats.files, reply.payload);
+                write_u64(r.value().stats.bytes, reply.payload);
+                write_u64(r.value().stats.archive_bytes, reply.payload);
+                write_lstr16(r.value().archive_rel, reply.payload);
+            } else {
+                std::size_t pos = 0;
+                std::string dir, zip, pwd;
+                if (!read_lstr16(f.payload, pos, dir) ||
+                    !read_lstr16(f.payload, pos, zip) ||
+                    !read_lstr16(f.payload, pos, pwd) ||
+                    pos + 2 > f.payload.size()) {
+                    reply = err("UnzipArchive: bad payload");
+                    break;
+                }
+                const bool ov = f.payload[pos++] != 0;
+                const bool wp = f.payload[pos++] != 0;
+                if (pos != f.payload.size()) {
+                    reply = err("UnzipArchive: bad payload");
+                    break;
+                }
+                auto r = sess_conn_->unzip_archive(dir, zip, pwd, ov,
+                                                   wp);
+                if (!r) {
+                    reply = err("UnzipArchive",
+                                static_cast<UNSIGNED32>(
+                                    r.error().code));
+                    break;
+                }
+                reply.opcode = Opcode::UnzipArchiveAck;
+                write_u32_le(r.value().files, reply.payload);
+                write_u64(r.value().bytes, reply.payload);
+                write_u64(r.value().archive_bytes, reply.payload);
+            }
+            break;
+        }
         case Opcode::SkipUnique: {
             if (f.payload.size() < 8) { reply = err("SkipUnique: bad payload"); break; }
             std::uint32_t iid = read_u32_le(f.payload.data());

@@ -374,6 +374,35 @@ public:
     // M12.33 — remote table enumeration (not gated by EnableFileFunc).
     util::Result<std::vector<std::string>>
                                 find_tables(const std::string& mask);
+    // Server-side backup archiving (OAds_Zip/OAds_UnZip — not gated
+    // by EnableFileFunc; database ops). The file/exclude lists ride
+    // 0x1F-joined on the wire; stats + archive path come back.
+    struct ZipArchiveOutcome {
+        std::uint32_t files         = 0;
+        std::uint64_t bytes         = 0;
+        std::uint64_t archive_bytes = 0;
+        std::string   archive;  // relative to owning data root
+    };
+    util::Result<ZipArchiveOutcome>
+                                zip_archive(const std::string& dir,
+                                            const std::vector<std::string>& files,
+                                            const std::string& zip_name,
+                                            std::uint16_t level,
+                                            bool overwrite,
+                                            const std::string& password,
+                                            const std::vector<std::string>& exclude,
+                                            bool with_path);
+    struct UnzipArchiveOutcome {
+        std::uint32_t files         = 0;
+        std::uint64_t bytes         = 0;
+        std::uint64_t archive_bytes = 0;
+    };
+    util::Result<UnzipArchiveOutcome>
+                                unzip_archive(const std::string& dir,
+                                              const std::string& zip,
+                                              const std::string& password,
+                                              bool overwrite,
+                                              bool with_path);
     util::Result<bool>          dir_exist(const std::string& path);
     util::Result<void>          dir_make(const std::string& path);
     util::Result<void>          dir_remove(const std::string& path);

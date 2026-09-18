@@ -748,3 +748,210 @@ HB_FUNC( OADS_SERVERVERSION )
     else
         hb_retclen( szVer, usCap - 1 );
 }
+
+/* AdsZipFiles / AdsUnzipFiles are OpenADS extensions (v1.09.59+).
+   Declared here as well so this file still compiles against an older
+   ace.h; identical redeclarations are legal C with the new ace.h. */
+extern UNSIGNED32 ENTRYPOINT AdsZipFiles( ADSHANDLE   hConnect,
+                                          UNSIGNED8 * pucDir,
+                                          UNSIGNED8 * pucFiles,
+                                          UNSIGNED8 * pucZipName,
+                                          UNSIGNED16  usLevel,
+                                          UNSIGNED16  usOverwrite,
+                                          UNSIGNED8 * pucPassword,
+                                          UNSIGNED8 * pucExclude,
+                                          UNSIGNED16  usWithPath,
+                                          UNSIGNED8 * pucArchive,
+                                          UNSIGNED16 *pusArchiveLen,
+                                          UNSIGNED32 *pulFiles,
+                                          UNSIGNED64 *pullBytes,
+                                          UNSIGNED64 *pullArchiveBytes );
+extern UNSIGNED32 ENTRYPOINT AdsUnzipFiles( ADSHANDLE   hConnect,
+                                            UNSIGNED8 * pucDir,
+                                            UNSIGNED8 * pucZip,
+                                            UNSIGNED8 * pucPassword,
+                                            UNSIGNED16  usOverwrite,
+                                            UNSIGNED16  usWithPath,
+                                            UNSIGNED32 *pulFiles,
+                                            UNSIGNED64 *pullBytes,
+                                            UNSIGNED64 *pullArchiveBytes );
+
+/* Join a Harbour array of strings with 0x1F separators (0x1F cannot
+   occur in a file name on any OS). Returns NULL on non-array input;
+   the caller frees with hb_xfree(). Empty arrays join to "". */
+static char *oads_join_1f( PHB_ITEM pArray, HB_SIZE *pnOut )
+{
+    HB_ULONG ulLen, i;
+    char *buf, *p;
+
+    if( pArray == NULL || ! HB_IS_ARRAY( pArray ) )
+        return NULL;
+    ulLen = hb_arrayLen( pArray );
+    buf = ( char * ) hb_xgrab( 1 );
+    buf[ 0 ] = '\0';
+    for( i = 1; i <= ulLen; ++i )
+    {
+        HB_SIZE nLen = hb_arrayGetCLen( pArray, i );
+        const char *sz = hb_arrayGetCPtr( pArray, i );
+        size_t cur;
+        if( sz == NULL )
+            continue;
+        cur = strlen( buf );
+        buf = ( char * ) hb_xrealloc( buf, cur + ( size_t ) nLen + 2 );
+        p = buf + cur;
+        if( p != buf )
+            *p++ = '\x1F';
+        memcpy( p, sz, nLen );
+        p += nLen;
+        *p = '\0';
+    }
+    if( pnOut )
+        *pnOut = ( HB_SIZE ) strlen( buf );
+    return buf;
+}
+
+/* ------------------------------------------------------------------ */
+/*  OAds_Zip( [hConn,] cDirName, aFiles, cZipFileName [, nLevel        */
+/*            [, lOverwrite [, cPassword [, aExclude [, lWithPath ]]]]] ) */
+/*    -> { nFiles, nBytes, nArchiveBytes, cArchive }, NIL on failure   */
+/*  Server-side backup archiving: files stay on the server under       */
+/*  --data; the archive lands in <root>/backup/<name>_YYYYMMDD.zip.    */
+/* ------------------------------------------------------------------ */
+HB_FUNC( OADS_ZIP )
+{
+    ADSHANDLE   hConn;
+    const char *szDir, *szZipName, *szPassword;
+    PHB_ITEM    pFiles, pExclude;
+    int         nLevel, base;
+    UNSIGNED16  usOverwrite, usWithPath;
+    char       *szFiles, *szExclude;
+    char        szArchive[ 512 ];
+    UNSIGNED16  usArcLen = ( UNSIGNED16 ) sizeof( szArchive );
+    UNSIGNED32  ulFiles = 0;
+    UNSIGNED64  ullBytes = 0, ullArcBytes = 0;
+    UNSIGNED32  ulRc;
+    PHB_ITEM    pRet;
+
+    if( hb_pcount() >= 9 )
+    {
+        hConn = ( ADSHANDLE ) hb_parnint( 1 );
+        base  = 1;
+    }
+    else
+    {
+        AdsGetDefaultConnection( &hConn );
+        base = 0;
+    }
+    if( hb_pcount() < base + 3 )
+    {
+        hb_ret();
+        return;
+    }
+    szDir     = hb_parc( base + 1 );
+    pFiles    = hb_param( base + 2, HB_IT_ARRAY );
+    szZipName = hb_parc( base + 3 );
+    nLevel    = hb_parni( base + 4 );
+    if( hb_pcount() < base + 4 || nLevel < 0 || nLevel > 9 )
+        nLevel = 6;
+    usOverwrite = ( UNSIGNED16 ) ( hb_parl( base + 5 ) ? 1 : 0 );
+    szPassword  = hb_parc( base + 6 );
+    pExclude    = hb_param( base + 7, HB_IT_ARRAY );
+    usWithPath  = ( UNSIGNED16 ) ( hb_parl( base + 8 ) ? 1 : 0 );
+
+    if( szDir == NULL || pFiles == NULL || szZipName == NULL )
+    {
+        hb_ret();
+        return;
+    }
+    szFiles   = oads_join_1f( pFiles, NULL );
+    szExclude = oads_join_1f( pExclude, NULL );
+    if( szFiles == NULL )
+    {
+        hb_ret();
+        return;
+    }
+    ulRc = AdsZipFiles( hConn, ( UNSIGNED8 * ) szDir,
+                        ( UNSIGNED8 * ) szFiles,
+                        ( UNSIGNED8 * ) szZipName,
+                        ( UNSIGNED16 ) nLevel, usOverwrite,
+                        ( UNSIGNED8 * ) ( szPassword ? szPassword : "" ),
+                        ( UNSIGNED8 * ) ( szExclude ? szExclude : "" ),
+                        usWithPath,
+                        ( UNSIGNED8 * ) szArchive, &usArcLen,
+                        &ulFiles, &ullBytes, &ullArcBytes );
+    hb_xfree( szFiles );
+    if( szExclude )
+        hb_xfree( szExclude );
+    if( ulRc != 0 )
+    {
+        hb_ret();
+        return;
+    }
+    szArchive[ sizeof( szArchive ) - 1 ] = '\0';
+    pRet = hb_itemArrayNew( 4 );
+    hb_arraySetNL( pRet, 1, ulFiles );
+    hb_arraySetND( pRet, 2, ( double ) ullBytes );
+    hb_arraySetND( pRet, 3, ( double ) ullArcBytes );
+    hb_arraySetC( pRet, 4, szArchive );
+    hb_itemReturnRelease( pRet );
+}
+
+/* ------------------------------------------------------------------ */
+/*  OAds_UnZip( [hConn,] cDirName, cZip [, cPassword [, lOverwrite      */
+/*              [, lWithPath ]]] )                                     */
+/*    -> { nFiles, nBytes, nArchiveBytes }, NIL on failure             */
+/*  Extract a server-side archive (bare names resolve under backup/).  */
+/* ------------------------------------------------------------------ */
+HB_FUNC( OADS_UNZIP )
+{
+    ADSHANDLE   hConn;
+    const char *szDir, *szZip, *szPassword;
+    UNSIGNED16  usOverwrite, usWithPath;
+    int         base;
+    UNSIGNED32  ulFiles = 0;
+    UNSIGNED64  ullBytes = 0, ullArcBytes = 0;
+    UNSIGNED32  ulRc;
+    PHB_ITEM    pRet;
+
+    if( hb_pcount() >= 6 )
+    {
+        hConn = ( ADSHANDLE ) hb_parnint( 1 );
+        base  = 1;
+    }
+    else
+    {
+        AdsGetDefaultConnection( &hConn );
+        base = 0;
+    }
+    if( hb_pcount() < base + 2 )
+    {
+        hb_ret();
+        return;
+    }
+    szDir       = hb_parc( base + 1 );
+    szZip       = hb_parc( base + 2 );
+    szPassword  = hb_parc( base + 3 );
+    usOverwrite = ( UNSIGNED16 ) ( hb_parl( base + 4 ) ? 1 : 0 );
+    usWithPath  = ( UNSIGNED16 ) ( hb_parl( base + 5 ) ? 1 : 0 );
+
+    if( szDir == NULL || szZip == NULL )
+    {
+        hb_ret();
+        return;
+    }
+    ulRc = AdsUnzipFiles( hConn, ( UNSIGNED8 * ) szDir,
+                          ( UNSIGNED8 * ) szZip,
+                          ( UNSIGNED8 * ) ( szPassword ? szPassword : "" ),
+                          usOverwrite, usWithPath,
+                          &ulFiles, &ullBytes, &ullArcBytes );
+    if( ulRc != 0 )
+    {
+        hb_ret();
+        return;
+    }
+    pRet = hb_itemArrayNew( 3 );
+    hb_arraySetNL( pRet, 1, ulFiles );
+    hb_arraySetND( pRet, 2, ( double ) ullBytes );
+    hb_arraySetND( pRet, 3, ( double ) ullArcBytes );
+    hb_itemReturnRelease( pRet );
+}

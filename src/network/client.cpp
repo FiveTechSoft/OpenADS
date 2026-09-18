@@ -2589,6 +2589,97 @@ RemoteConnection::find_tables(const std::string& mask) {
     return out;
 }
 
+namespace {
+
+// u64 LE + u32-length blob + 0x1F-joined lists for the archive ops.
+inline void push_lstr32(const std::string& s,
+                        std::vector<std::uint8_t>& out) {
+    write_u32_le(static_cast<std::uint32_t>(s.size()), out);
+    out.insert(out.end(), s.begin(), s.end());
+}
+
+inline std::string join_0x1f(const std::vector<std::string>& v) {
+    std::string o;
+    for (std::size_t i = 0; i < v.size(); ++i) {
+        if (i != 0) o.push_back('\x1F');
+        o += v[i];
+    }
+    return o;
+}
+
+inline std::uint64_t read_u64_at(const std::vector<std::uint8_t>& pl,
+                                 std::size_t off) {
+    std::uint64_t v = 0;
+    for (int i = 0; i < 8; ++i)
+        v |= static_cast<std::uint64_t>(
+                 pl[off + static_cast<std::size_t>(i)])
+             << (8 * i);
+    return v;
+}
+
+}  // namespace
+
+util::Result<RemoteConnection::ZipArchiveOutcome>
+RemoteConnection::zip_archive(const std::string& dir,
+                              const std::vector<std::string>& files,
+                              const std::string& zip_name,
+                              std::uint16_t level, bool overwrite,
+                              const std::string& password,
+                              const std::vector<std::string>& exclude,
+                              bool with_path) {
+    Frame req;
+    req.opcode = Opcode::ZipArchive;
+    push_lp_str(req.payload, dir);
+    push_lstr32(join_0x1f(files), req.payload);
+    push_lp_str(req.payload, zip_name);
+    write_u16_le(level, req.payload);
+    req.payload.push_back(overwrite ? 1 : 0);
+    req.payload.push_back(with_path ? 1 : 0);
+    push_lstr32(join_0x1f(exclude), req.payload);
+    push_lp_str(req.payload, password);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    // [u32 files][u64 bytes][u64 archiveBytes][u16 arcLen][archiveRel]
+    if (rep.value().opcode != Opcode::ZipArchiveAck ||
+        rep.value().payload.size() < 22)
+        return fs_wire_err(rep.value(), "ZipArchive");
+    const auto& pl = rep.value().payload;
+    ZipArchiveOutcome o;
+    o.files = read_u32_le(pl.data());
+    o.bytes = read_u64_at(pl, 4);
+    o.archive_bytes = read_u64_at(pl, 12);
+    std::size_t off = 20;
+    if (!read_lstr16(pl, off, o.archive))
+        return fs_wire_err(rep.value(), "ZipArchive");
+    return o;
+}
+
+util::Result<RemoteConnection::UnzipArchiveOutcome>
+RemoteConnection::unzip_archive(const std::string& dir,
+                                const std::string& zip,
+                                const std::string& password,
+                                bool overwrite, bool with_path) {
+    Frame req;
+    req.opcode = Opcode::UnzipArchive;
+    push_lp_str(req.payload, dir);
+    push_lp_str(req.payload, zip);
+    push_lp_str(req.payload, password);
+    req.payload.push_back(overwrite ? 1 : 0);
+    req.payload.push_back(with_path ? 1 : 0);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    // [u32 files][u64 bytes][u64 archiveBytes]
+    if (rep.value().opcode != Opcode::UnzipArchiveAck ||
+        rep.value().payload.size() < 20)
+        return fs_wire_err(rep.value(), "UnzipArchive");
+    const auto& pl = rep.value().payload;
+    UnzipArchiveOutcome o;
+    o.files = read_u32_le(pl.data());
+    o.bytes = read_u64_at(pl, 4);
+    o.archive_bytes = read_u64_at(pl, 12);
+    return o;
+}
+
 util::Result<bool>
 RemoteConnection::dir_exist(const std::string& path) {
     Frame req;

@@ -100,9 +100,8 @@ enum class Opcode : std::uint8_t {
     ClearAOFRemoteAck  = 0x85,
     GetAOFOptLevel     = 0x86,
     GetAOFOptLevelAck  = 0x87,
-    // M12.16 — remote index handle subsystem.
-    OpenIndex          = 0x88,
-    OpenIndexAck       = 0x89,
+        // M12.16 — remote index handle subsystem.
+    OpenIndex          = 0x88,    OpenIndexAck       = 0x89,
     CloseIndex         = 0x8A,
     CloseIndexAck      = 0x8B,
     SetOrder           = 0x8C,
@@ -282,6 +281,29 @@ enum class Opcode : std::uint8_t {
     // Reply:    [u32 recno] (0 = not found)
     FindRecord          = 0x0D,
     FindRecordAck       = 0x0E,
+
+    // Server-side backup archiving (OAds_Zip/OAds_UnZip). Connection-
+    // level ops (no table id); paths stay under the session data jail
+    // and archives land in <owning-root>/backup/<name>_YYYYMMDD.zip.
+    // NOT gated by EnableFileFunc (database ops, like FindTables).
+    // File lists ride as one 0x1F-joined blob (0x1F cannot occur in
+    // a file name on any OS); u32 lengths where a file set can exceed
+    // 64 KiB of names.
+    // Request ZipArchive:
+    //   [u16 dirLen][dir][u32 filesLen][0x1F files]
+    //   [u16 zipNameLen][zipName][u16 level][u8 overwrite][u8 withPath]
+    //   [u32 exclLen][0x1F excludes][u16 pwdLen][password]
+    // Reply ZipArchiveAck:
+    //   [u32 files][u64 bytes][u64 archiveBytes][u16 arcLen][archiveRel]
+    ZipArchive          = 0x17,
+    ZipArchiveAck       = 0x18,
+    // Request UnzipArchive:
+    //   [u16 dirLen][dir][u16 zipLen][zip][u16 pwdLen][password]
+    //   [u8 overwrite][u8 withPath]
+    // Reply UnzipArchiveAck:
+    //   [u32 files][u64 bytes][u64 archiveBytes]
+    UnzipArchive        = 0x19,
+    UnzipArchiveAck     = 0x1A,
 
     // M12.29 — AdsDD* Data Dictionary property API, phase 1. Previously
     // every AdsDD* getter/setter silently returned empty/no-op over a

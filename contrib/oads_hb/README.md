@@ -81,6 +81,8 @@ default connection set with `OADS_SetConnection()` is used.
 | `OAds_MutexTryLock( [ hConn ], cName )` | non-blocking | lLocked |
 | `OAds_MutexUnlock( [ hConn ], cName )` | owner only | lOk |
 | `OAds_MutexDestroy( [ hConn ], cName )` | mutex name | lOk |
+| `OAds_Zip( [ hConn ], cDir, aFiles, cZipName [, nLevel [, lOverwrite [, cPassword [, aExclude [, lWithPath ]]]]] )` | dir, files, archive base name, level 0-9 (def 6), overwrite, password, excludes, with-path | `{ nFiles, nBytes, nArchiveBytes, cArchive }`, NIL on failure |
+| `OAds_UnZip( [ hConn ], cDir, cZip [, cPassword [, lOverwrite [, lWithPath ]]] )` | dir, archive (bare = `backup/`), password, overwrite, with-path | `{ nFiles, nBytes, nArchiveBytes }`, NIL on failure |
 
 ```harbour
 hConn := AdsConnect( "tcp://192.168.18.184:6262//Users/anto/OpenADS/data" )

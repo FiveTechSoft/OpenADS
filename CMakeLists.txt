@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 project(OpenADS
-    VERSION 1.09.58
+    VERSION 1.09.59
     LANGUAGES C CXX
     DESCRIPTION "Open-source ADS-compatible engine"
 )
@@ -260,6 +260,51 @@ if(OPENADS_WITH_HTTP)
     FetchContent_MakeAvailable(cpp_httplib nlohmann_json)
     message(STATUS "OpenADS: HTTP web console enabled (cpp-httplib + nlohmann/json)")
 endif()
+
+# Server-side ZIP/UNZIP (backup/restore archiving under --data):
+# zlib + classic minizip (ZipCrypto-compatible, what xBase zip tools
+# read). Unconditional — small, needed on every leg. Vendored under
+# third_party/zlib/ when present (offline builds); else fetched.
+# Upstream C, so warnings are off for these TUs (same treatment as
+# the SQLite amalgamation below).
+set(_openads_zlib_dir "${CMAKE_SOURCE_DIR}/third_party/zlib")
+if(NOT EXISTS "${_openads_zlib_dir}/zlib.h")
+    include(FetchContent)
+    FetchContent_Declare(
+        zlib_src
+        URL https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    )
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+    set(SKIP_INSTALL_ALL ON CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(zlib_src)
+    set(_openads_zlib_dir "${zlib_src_SOURCE_DIR}")
+    set(_openads_zlib_bin "${zlib_src_BINARY_DIR}")
+    set(_openads_zlib_target zlibstatic)
+else()
+    # Offline layout: build the vendored tree into a fixed binary dir
+    # (zconf.h is generated there by zlib's own CMake).
+    set(_openads_zlib_bin "${CMAKE_BINARY_DIR}/_deps/zlib-build")
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+    set(SKIP_INSTALL_ALL ON CACHE BOOL "" FORCE)
+    add_subdirectory("${_openads_zlib_dir}" "${_openads_zlib_bin}")
+    set(_openads_zlib_target zlibstatic)
+endif()
+add_library(openads_minizip STATIC
+    "${CMAKE_SOURCE_DIR}/third_party/minizip/zip.c"
+    "${CMAKE_SOURCE_DIR}/third_party/minizip/unzip.c"
+    "${CMAKE_SOURCE_DIR}/third_party/minizip/ioapi.c")
+target_include_directories(openads_minizip SYSTEM PUBLIC
+    "${CMAKE_SOURCE_DIR}/third_party/minizip"
+    "${_openads_zlib_dir}"
+    "${_openads_zlib_bin}")
+if(MSVC)
+    target_compile_options(openads_minizip PRIVATE /w)
+else()
+    target_compile_options(openads_minizip PRIVATE -w)
+endif()
+target_link_libraries(openads_minizip PUBLIC ${_openads_zlib_target})
+message(STATUS "OpenADS: server-side ZIP support (zlib + minizip)")
 
 if(OPENADS_WITH_SQLITE)
     if(OPENADS_WITH_SQLCIPHER)

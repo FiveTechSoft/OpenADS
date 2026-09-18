@@ -126,6 +126,8 @@ EXPORTS
     AdsDirExist
     AdsDirMake
     AdsDirRemove
+    AdsZipFiles
+    AdsUnzipFiles
     AdsFOpen
     AdsFCreate
     AdsFClose

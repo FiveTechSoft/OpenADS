@@ -10197,6 +10197,142 @@ UNSIGNED32 ENTRYPOINT AdsDeleteFile(ADSHANDLE hConn, UNSIGNED8* pucName) {
     return ok();
 }
 
+// ---- Server-side backup archiving (OAds_Zip/OAds_UnZip) -------------
+// 0x1F-separated lists in, stats + archive path out. Local and remote
+// share Connection::zip_archive/unzip_archive; the wire only carries
+// names and numbers (archives never cross it).
+//
+// NOTE: this file is inside a file-scope extern "C" block (ACE ABI);
+// the helper below needs C++ linkage like the FsConnCtx block above.
+extern "C++" {
+namespace {
+
+std::vector<std::string> split_1f_list(const std::string& blob) {
+    std::vector<std::string> v;
+    std::string cur;
+    for (char c : blob) {
+        if (c == '\x1F') {
+            if (!cur.empty()) v.push_back(std::move(cur));
+            cur.clear();
+        } else {
+            cur.push_back(c);
+        }
+    }
+    if (!cur.empty()) v.push_back(std::move(cur));
+    return v;
+}
+
+}  // namespace
+}  // extern "C++" (helper ends; ABI exports resume in C)
+
+UNSIGNED32 ENTRYPOINT AdsZipFiles(ADSHANDLE hConnect,
+                        UNSIGNED8* pucDir, UNSIGNED8* pucFiles,
+                        UNSIGNED8* pucZipName, UNSIGNED16 usLevel,
+                        UNSIGNED16 usOverwrite, UNSIGNED8* pucPassword,
+                        UNSIGNED8* pucExclude, UNSIGNED16 usWithPath,
+                        UNSIGNED8* pucArchive, UNSIGNED16* pusArchiveLen,
+                        UNSIGNED32* pulFiles, UNSIGNED64* pullBytes,
+                        UNSIGNED64* pullArchiveBytes) {
+    arc2_trace("AdsZipFiles");
+    if (!pucDir || !pucFiles || !pucZipName || !pusArchiveLen ||
+        !pulFiles || !pullBytes || !pullArchiveBytes)
+        return fail(openads::AE_INTERNAL_ERROR, "null arg");
+    if (usLevel > 9)
+        return fail(openads::AE_INTERNAL_ERROR, "level must be 0..9");
+    const std::string dir = openads::abi::to_internal(pucDir, 0);
+    const std::vector<std::string> files =
+        split_1f_list(openads::abi::to_internal(pucFiles, 0));
+    const std::string zip_name = openads::abi::to_internal(pucZipName, 0);
+    const std::string password =
+        pucPassword ? openads::abi::to_internal(pucPassword, 0)
+                    : std::string();
+    const std::vector<std::string> exclude =
+        pucExclude ? split_1f_list(openads::abi::to_internal(pucExclude, 0))
+                   : std::vector<std::string>{};
+    auto ctx = resolve_fs_conn(hConnect);
+    std::uint32_t n = 0;
+    std::uint64_t nb = 0, ab = 0;
+    std::string archive;
+    if (ctx.remote) {
+        auto r = ctx.remote->zip_archive(
+            dir, files, zip_name, usLevel, usOverwrite != 0, password,
+            exclude, usWithPath != 0);
+        if (!r) return fail(r.error());
+        n = r.value().files;
+        nb = r.value().bytes;
+        ab = r.value().archive_bytes;
+        archive = std::move(r.value().archive);
+    } else {
+        if (!ctx.local)
+            return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
+        auto r = ctx.local->zip_archive(
+            dir, files, zip_name, static_cast<int>(usLevel),
+            usOverwrite != 0, password, exclude, usWithPath != 0);
+        if (!r) return fail(r.error());
+        n = r.value().stats.files;
+        nb = r.value().stats.bytes;
+        ab = r.value().stats.archive_bytes;
+        archive = std::move(r.value().archive_rel);
+    }
+    const UNSIGNED16 cap = *pusArchiveLen;
+    if (pucArchive != nullptr && cap > 0) {
+        const std::size_t need =
+            archive.size() < cap ? archive.size() : cap;
+        if (need > 0)
+            std::memcpy(pucArchive, archive.data(), need);
+        if (need < static_cast<std::size_t>(cap)) pucArchive[need] = '\0';
+    }
+    *pusArchiveLen = static_cast<UNSIGNED16>(archive.size());
+    *pulFiles = n;
+    *pullBytes = nb;
+    *pullArchiveBytes = ab;
+    if (archive.size() > cap)
+        return fail(openads::AE_INSUFFICIENT_BUFFER, "archive path");
+    return ok();
+}
+
+UNSIGNED32 ENTRYPOINT AdsUnzipFiles(ADSHANDLE hConnect,
+                          UNSIGNED8* pucDir, UNSIGNED8* pucZip,
+                          UNSIGNED8* pucPassword, UNSIGNED16 usOverwrite,
+                          UNSIGNED16 usWithPath,
+                          UNSIGNED32* pulFiles, UNSIGNED64* pullBytes,
+                          UNSIGNED64* pullArchiveBytes) {
+    arc2_trace("AdsUnzipFiles");
+    if (!pucDir || !pucZip || !pulFiles || !pullBytes || !pullArchiveBytes)
+        return fail(openads::AE_INTERNAL_ERROR, "null arg");
+    const std::string dir = openads::abi::to_internal(pucDir, 0);
+    const std::string zip = openads::abi::to_internal(pucZip, 0);
+    const std::string password =
+        pucPassword ? openads::abi::to_internal(pucPassword, 0)
+                    : std::string();
+    auto ctx = resolve_fs_conn(hConnect);
+    std::uint32_t n = 0;
+    std::uint64_t nb = 0, ab = 0;
+    if (ctx.remote) {
+        auto r = ctx.remote->unzip_archive(dir, zip, password,
+                                           usOverwrite != 0,
+                                           usWithPath != 0);
+        if (!r) return fail(r.error());
+        n = r.value().files;
+        nb = r.value().bytes;
+        ab = r.value().archive_bytes;
+    } else {
+        if (!ctx.local)
+            return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
+        auto r = ctx.local->unzip_archive(dir, zip, password,
+                                          usOverwrite != 0,
+                                          usWithPath != 0);
+        if (!r) return fail(r.error());
+        n = r.value().files;
+        nb = r.value().bytes;
+        ab = r.value().archive_bytes;
+    }
+    *pulFiles = n;
+    *pullBytes = nb;
+    *pullArchiveBytes = ab;
+    return ok();
+}
+
 UNSIGNED32 ENTRYPOINT AdsRenameFile(ADSHANDLE hConn, UNSIGNED8* pucOld,
                                     UNSIGNED8* pucNew) {
     arc2_trace("AdsRenameFile");

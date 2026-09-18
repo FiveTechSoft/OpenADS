@@ -39,6 +39,7 @@ add_library(openads_core STATIC
     engine/index_expr.cpp
     engine/index_expr_sql.cpp
     engine/hrb_udf.cpp
+    engine/zip_arch.cpp
     engine/aggregate.cpp
     engine/aof_expr.cpp
     engine/aof_eval.cpp
@@ -220,6 +221,11 @@ if(OPENADS_WITH_TLS)
     target_link_libraries(openads_core PRIVATE
         MbedTLS::mbedtls MbedTLS::mbedx509 MbedTLS::mbedcrypto)
 endif()
+
+# Server-side ZIP (backup archiving): tiny static minizip+zlib, no
+# runtime/shared deps and no symbol hazards (unlike hbvm), so PUBLIC
+# is safe and every consumer links without extra plumbing.
+target_link_libraries(openads_core PUBLIC openads_minizip)
 
 if(OPENADS_WITH_HARBOUR_UDF)
     # Harbour backend for server-side UDFs (provider implementation).

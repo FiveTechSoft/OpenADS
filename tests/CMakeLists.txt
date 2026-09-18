@@ -99,6 +99,8 @@ add_executable(openads_unit_tests
     unit/lsn_map_test.cpp
     unit/index_expr_test.cpp
     unit/index_expr_sql_test.cpp
+    unit/zip_arch_test.cpp
+    unit/zip_files_abi_test.cpp
     unit/abi_m92_real_test.cpp
     unit/abi_create_table_test.cpp
     unit/abi_adt_dat_extension_test.cpp
