@@ -36,6 +36,12 @@ jobs:
             tls: true
     steps:
       - uses: actions/checkout@v5
+        with:
+          # Version string comes from `git describe --tags`: without
+          # tag refs a main-branch checkout reports a bare SHA (no
+          # dots) and network_version_test fails everywhere. Releases
+          # check out the tag itself so they never hit this.
+          fetch-tags: true
 
       - name: Install Ninja (Linux / macOS)
         if: runner.os != 'Windows'
