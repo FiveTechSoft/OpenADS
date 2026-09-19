@@ -6,6 +6,16 @@
 
 ---
 
+## 2026-09-19 — Zip dest = table-path doctrine (v1.09.66)
+
+Field rule: every path maps to the remote root like `.dbf` files,
+Vouch unchanged. Zip destinations now fold (default) and remount
+root-prefixed spellings under `--legacy-paths`, mirroring
+`resolve_table_file`; canonical verdict kept purely as the jail
+check, lexical spelling for build/report. Legacy-remount case
+added to the verbatim suite, 12/12 green locally both archs.
+Released v1.09.66.
+
 ## 2026-09-19 — Absolute zip dirs + MinGW DLL link (v1.09.65)
 
 Field (Vouch backup flow): fully-qualified `cZipDir`

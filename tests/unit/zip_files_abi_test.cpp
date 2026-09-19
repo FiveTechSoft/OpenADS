@@ -193,6 +193,28 @@ TEST_CASE("zip: explicit subdir takes the filename verbatim") {
     CHECK(bad2.rc != 0);
 }
 
+namespace openads::abi {
+void set_connection_legacy_paths(ADSHANDLE hConnect, bool on);
+}
+
+TEST_CASE("zip: legacy_paths strips the root prefix off the dest dir") {
+    // Same doctrine as table paths (resolve_table_file): under
+    // --legacy-paths a client spelling that repeats the owning
+    // root's own path must strip it, not double it.
+    LocalDb db("openads_zip_legacy");
+    db.make_table("s.dbf", 1);
+    openads::abi::set_connection_legacy_paths(db.hConn, true);
+
+    // Fully-qualified spelling built from the root itself: must land
+    // as BACKUP/nightly directly under it.
+    std::string abs_spelling =
+        (db.dir / "BACKUP" / "nightly").string();
+    ZipOut z = do_zip(db.hConn, ".", "s.dbf", abs_spelling.c_str());
+    REQUIRE_MESSAGE(z.rc == 0, z.rc);
+    CHECK(z.archive == "BACKUP/nightly");
+    CHECK(fs::is_regular_file(db.dir / "BACKUP" / "nightly"));
+}
+
 TEST_CASE("zip: jail, overwrite and level rules are loud") {
     LocalDb db("openads_zip_rules");
     db.make_table("a.dbf", 1);

@@ -1191,37 +1191,79 @@ util::Result<Connection::ZipArchiveResult> Connection::zip_archive(
         archive = (fs::path(backup_dir) / arc_name).string();
         arc_fallback = arc_name;
     } else {
-        // Explicit subdir: join lexically under the owning root and
-        // verify containment on the normalized spelling — do NOT pass
-        // through resolve_fs_path here. Its weakly_canonical output
-        // drifts textually from `root` (8.3/junction expansion), which
-        // breaks the archive_rel prefix computation below and reports
-        // a bare filename (v1.09.63 Windows legs). lexically_normal
-        // keeps the shared prefix exact while still collapsing `.`
-        // and interior `..`; the prefix check then owns the jail.
+        // Explicit subdir: map it exactly like table paths
+        // (resolve_table_file doctrine) — Vouch sends fully-qualified
+        // local spellings and must never change. Steps, all lexical
+        // except the jail verdict:
+        //  1. legacy ERP remount: when the client repeats the owning
+        //     root's own path ("C:\data\bkp" under --data C:\data),
+        //     strip that prefix (case-insensitively on Windows);
+        //     otherwise the remainder below would double it;
+        //  2. fold drives/root slashes ("C:\bkp" -> "bkp"), same rule
+        //     as source dirs;
+        //  3. canonical jail verdict via resolve_fs_path (catches ..
+        //     above the root AND symlink escapes — lexical checks
+        //     alone cannot see those);
+        //  4. build + report from fs::path(root)/remainder lexically
+        //     so the archive_rel prefix below stays exact (canonical
+        //     spellings drift: 8.3/junction expansion).
+        std::string remainder = zip_dir;
+        if (legacy_paths_) {
+            // Strip separators, a drive-letter prefix and leading root
+            // slashes, preserving the original casing (compare happens
+            // on zip_norm_path copies; lowering changes no lengths, so
+            // slice indices transfer back to the original case).
+            auto strip_ds = [](const std::string& p) {
+                std::string s = p;
+                for (char& ch : s)
+                    if (ch == '\\') ch = '/';
+                if (s.size() >= 2 && s[1] == ':' &&
+                    ((s[0] >= 'A' && s[0] <= 'Z') ||
+                     (s[0] >= 'a' && s[0] <= 'z')))
+                    s.erase(0, 2);
+                const std::size_t b = s.find_first_not_of('/');
+                return (b == std::string::npos) ? std::string()
+                                                : s.substr(b);
+            };
+            const std::string w = strip_ds(zip_dir);
+            std::string r = strip_ds(root);
+            while (!r.empty() && r.back() == '/') r.pop_back();
+            const std::string wn = zip_norm_path(w);
+            const std::string rn = zip_norm_path(r);
+            if (wn == rn) {
+                remainder.clear();  // the root itself: file lands in it
+            } else if (!rn.empty() && wn.size() > rn.size() &&
+                       wn.compare(0, rn.size(), rn) == 0 &&
+                       wn[rn.size()] == '/') {
+                remainder = w.substr(rn.size() + 1);
+            }
+        }
         // Absolute and drive-letter spellings are folded to a
         // root-relative remainder first (same rule as source dirs:
         // "C:\bkp" -> "bkp"), so fully-qualified client paths land
-        // under the owning root instead of erroring. `..` above the
-        // root is still caught by the containment check below.
-        zip_dir = platform::fold_absolute_to_relative(zip_dir);
-        if (zip_dir.empty())
-            return util::Error{5000, 0, "zip: bad archive name", ""};
-        const std::string rns = [&] {
-            std::string r = zip_norm_path(root);
-            while (!r.empty() && r.back() == '/') r.pop_back();
-            return r;
-        }();
-        const fs::path dd =
-            (fs::path(root) / zip_dir).lexically_normal();
-        const std::string dns = zip_norm_path(dd.generic_string());
-        if (dns != rns &&
-            (rns.empty() || dns.size() <= rns.size() ||
-             dns.compare(0, rns.size(), rns) != 0 ||
-             dns[rns.size()] != '/'))
+        // under the owning root instead of erroring. An empty
+        // remainder here means the client named the root itself:
+        // the file lands directly in it.
+        fs::path dd;
+        if (remainder.empty()) {
+            dd = fs::path(root);
+        } else {
+            remainder = platform::fold_absolute_to_relative(remainder);
+            if (remainder.empty())
+                return util::Error{5000, 0, "zip: bad archive name", ""};
+            dd = (fs::path(root) / remainder).lexically_normal();
+        }
+        // Canonical jail verdict (catches .. above the root AND
+        // symlink escapes — lexical checks alone cannot see those).
+        // The verdict's spelling is discarded; building lexically
+        // below keeps the archive_rel prefix exact.
+        if (!platform::resolve_fs_path(
+                root, remainder.empty() ? "." : remainder))
             return util::Error{7079, 0,
                                "zip: path outside data directory",
-                               zip_dir};
+                               remainder};
+        // dd derives lexically from the raw root string (only . / ..
+        // collapsed), so the archive_rel prefix below matches exactly.
         fs::create_directories(dd, ec);
         if (ec)
             return util::Error{5000, 0, "zip: cannot create archive dir",
