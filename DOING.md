@@ -19,6 +19,13 @@ loud (NIL). Same release: `OADS_DIRECTORY()` now returns
 `Directory()`-shaped `{cName,nSize,dDate,cTime,cAttr}` instead of
 the raw packed buffer. Released v1.09.61.
 
+Follow-up: v1.09.61 tag failed everywhere at the Build step — the
+subdir refactor scoped `arc_name` into the legacy branch while the
+`archive_rel` fallback below still used it (hard error on all
+compilers, caught locally with `g++ -fsyntax-only`). Fixed with an
+`arc_fallback` set in both branches; both touched TUs re-checked
+clean the same way.
+
 ## 2026-09-18 — Stale MinGW import libs (v1.09.60)
 
 v1.09.59 DLLs exported AdsZipFiles/UnzipFiles but the prebuilt

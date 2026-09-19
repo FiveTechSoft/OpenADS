@@ -1169,6 +1169,7 @@ util::Result<Connection::ZipArchiveResult> Connection::zip_archive(
     }
     if (root.empty()) root = roots.front();
     std::string archive;
+    std::string arc_fallback;  // filename-only fallback for archive_rel
     if (zip_dir.empty()) {
         // Dated repository name, minted server-side (single rule).
         std::string base = zip_base;
@@ -1189,6 +1190,7 @@ util::Result<Connection::ZipArchiveResult> Connection::zip_archive(
             return util::Error{5000, 0, "zip: cannot create backup dir",
                                backup_dir};
         archive = (fs::path(backup_dir) / arc_name).string();
+        arc_fallback = arc_name;
     } else {
         // Explicit subdir: jailed resolve (.. escape rejected),
         // created on demand; the filename is used exactly as given.
@@ -1202,6 +1204,7 @@ util::Result<Connection::ZipArchiveResult> Connection::zip_archive(
             return util::Error{5000, 0, "zip: cannot create archive dir",
                                *dd};
         archive = (fs::path(*dd) / zip_base).string();
+        arc_fallback = zip_base;
     }
     // Resolve every source under the source dir (same jail).
     std::vector<std::string> abs;
@@ -1248,7 +1251,7 @@ util::Result<Connection::ZipArchiveResult> Connection::zip_archive(
             an[rn.size()] == '/')
             rel = archive.substr(rn.size() + 1);
         else
-            rel = arc_name;
+            rel = arc_fallback;
     }
     // Keep client-visible separators portable.
     for (char& c : rel)
