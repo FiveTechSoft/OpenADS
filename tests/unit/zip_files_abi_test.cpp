@@ -161,6 +161,13 @@ TEST_CASE("zip: explicit subdir takes the filename verbatim") {
     CHECK(zn.archive == "deep/n1/n2arc.zip");
     CHECK(fs::is_regular_file(db.dir / zn.archive));
 
+    // Fully-qualified client spellings fold under the owning root
+    // (same rule as source dirs; host-independent).
+    ZipOut za = do_zip(db.hConn, ".", "s.txt", "C:/absbkp/nightly2");
+    REQUIRE_MESSAGE(za.rc == 0, za.rc);
+    CHECK(za.archive == "absbkp/nightly2");
+    CHECK(fs::is_regular_file(db.dir / za.archive));
+
     // Re-zip without overwrite refuses; with overwrite succeeds.
     ZipOut z2 = do_zip(db.hConn, ".", files.c_str(), "myback/nightly");
     CHECK(z2.rc != 0);

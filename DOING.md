@@ -6,6 +6,17 @@
 
 ---
 
+## 2026-09-19 — Absolute zip dirs + MinGW DLL link (v1.09.65)
+
+Field (Vouch backup flow): fully-qualified `cZipDir`
+(`c:\creative.bkp\`) died on the colon check. Destinations now
+fold like source dirs (drive stripped, jailed under the owning
+root); drive-spelling case added to the verbatim suite, green
+locally. Same release: MinGW shared DLL links again (stdcall TU
+gated to MSVC per documented intent, plain cdecl def for GNU ld).
+v1.09.64 published cleanly in the meantime (all 4 assets).
+Released v1.09.65.
+
 ## 2026-09-19 — Zip spelling fix + MT quarantine (v1.09.64)
 
 v1.09.63's gate held on two things: (1) explicit-subdir archives

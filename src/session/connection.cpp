@@ -1138,8 +1138,7 @@ util::Result<Connection::ZipArchiveResult> Connection::zip_archive(
         zip_base = zip_name.substr(zsep + 1);
     }
     if (zip_base.empty() || zip_base == "." || zip_base == ".." ||
-        zip_base.find(':') != std::string::npos ||
-        zip_dir.find(':') != std::string::npos)
+        zip_base.find(':') != std::string::npos)
         return util::Error{5000, 0, "zip: bad archive name", ""};
     const auto roots = platform::split_data_roots(data_dir_);
     if (roots.empty())
@@ -1200,10 +1199,13 @@ util::Result<Connection::ZipArchiveResult> Connection::zip_archive(
         // a bare filename (v1.09.63 Windows legs). lexically_normal
         // keeps the shared prefix exact while still collapsing `.`
         // and interior `..`; the prefix check then owns the jail.
-        // Absolute and drive-letter spellings are rejected outright
-        // (fs::path::operator/ would otherwise discard the root).
-        if (zip_dir.find(':') != std::string::npos ||
-            fs::path(zip_dir).is_absolute())
+        // Absolute and drive-letter spellings are folded to a
+        // root-relative remainder first (same rule as source dirs:
+        // "C:\bkp" -> "bkp"), so fully-qualified client paths land
+        // under the owning root instead of erroring. `..` above the
+        // root is still caught by the containment check below.
+        zip_dir = platform::fold_absolute_to_relative(zip_dir);
+        if (zip_dir.empty())
             return util::Error{5000, 0, "zip: bad archive name", ""};
         const std::string rns = [&] {
             std::string r = zip_norm_path(root);

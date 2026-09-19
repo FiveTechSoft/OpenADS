@@ -316,14 +316,19 @@ add_library(openads_ace SHARED
     abi/legacy_crt_shims.cpp
 )
 
-if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 4)
-    # x86-only: __stdcall aliases (AdsXxx@N) so 32-bit Harbour rddads.lib /
-    # FiveWin apps built for SAP ACE's stdcall ABI can link AND load
-    # (ace32.dll must export the decorated names; without them every
-    # 32-bit rddads app died with 0xC0000139 at startup).
+if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 4 AND NOT MINGW)
+    # x86-only, MSVC-only: __stdcall aliases (AdsXxx@N) so 32-bit Harbour
+    # rddads.lib / FiveWin apps built for SAP ACE's stdcall ABI can link
+    # AND load (ace32.dll must export the decorated names; without them
+    # every 32-bit rddads app died with 0xC0000139 at startup).
     # The same file also /export-aliases each entry point under its plain
     # undecorated name (AdsXxx) for cdecl callers (MinGW-built rddads)
     # and GetProcAddress probes (serverd's dll_probe_ace).
+    # Excluded under MinGW: the aliasing rides on
+    # `#pragma comment(linker, "/alternatename:…")`, which GNU ld
+    # silently ignores, leaving oadsimpl_* undefined at DLL link.
+    # MinGW consumers link cdecl names, which the plain .def below
+    # exports directly (same spelling the aliases provided).
     target_sources(openads_ace PRIVATE abi/ace_stdcall_x86.c)
 endif()
 
@@ -337,12 +342,16 @@ if(WIN32)
     # user is replacing â€” generate it once per-machine with
     # tools/scripts/sap_ordinals_to_def.py and pass it in via
     # -DOPENADS_ACE_DEF=<path> at configure time.
-    if(CMAKE_SIZEOF_VOID_P EQUAL 4)
-        # 32-bit: the DLL must export the __stdcall-decorated (_AdsXxx@N)
-        # names 32-bit rddads.lib imports - with a plain-name def every
-        # 32-bit rddads app dies with 0xC0000139 at startup. The decorated
-        # exports come from the dllexport wrappers in abi/ace_stdcall_x86.c;
-        # this def adds the oads_* C API and the legacy-CRT shims.
+    if(CMAKE_SIZEOF_VOID_P EQUAL 4 AND NOT MINGW)
+        # 32-bit MSVC: the DLL must export the __stdcall-decorated
+        # (_AdsXxx@N) names 32-bit rddads.lib imports - with a plain-name
+        # def every 32-bit rddads app dies with 0xC0000139 at startup. The
+        # decorated exports come from the dllexport wrappers in
+        # abi/ace_stdcall_x86.c (MSVC-only, see above); this def adds the
+        # oads_* C API and the legacy-CRT shims.
+        # MinGW x86 falls through to the plain cdecl def: without the
+        # stdcall TU there are no decorated symbols to export, and GNU
+        # ld rejects undecorated names listed with @N decorations.
         set(_ace_def_default "${CMAKE_CURRENT_SOURCE_DIR}/openads_ace_x86_stdcall.def")
     else()
         set(_ace_def_default "${CMAKE_CURRENT_SOURCE_DIR}/openads_ace.def")
