@@ -268,6 +268,12 @@ endif()
 # Upstream C, so warnings are off for these TUs (same treatment as
 # the SQLite amalgamation below).
 set(_openads_zlib_dir "${CMAKE_SOURCE_DIR}/third_party/zlib")
+# zlib 1.3.1 registers example/example64 ctest tests (test/example.c).
+# CI builds only --target dbf_cdx_bench openads_unit_tests, so those
+# binaries are never built and ctest reports "Not Run" -> exit 8/1 on
+# every leg (v1.09.60 CI red, release green because it builds all).
+# We never ship the examples: keep them out of the tree entirely.
+set(ZLIB_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 if(NOT EXISTS "${_openads_zlib_dir}/zlib.h")
     include(FetchContent)
     FetchContent_Declare(
