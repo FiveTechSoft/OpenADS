@@ -6,6 +6,17 @@
 
 ---
 
+## 2026-09-19 — MinGW provisioning without -Syuu (v1.09.63)
+
+v1.09.62's gate held for a different reason: both Windows legs die
+in the MSYS2 setup step itself (deterministic, twice) while MSVC
+build+test and Ubuntu stay green — no repo diff can influence that
+step and upstream setup-msys2 code is unchanged since June, so it's
+mirror/db-sync rot against the full `pacman -Syuu` upgrade path.
+Release now uses the image's preinstalled MSYS2 (`release: false`)
+and installs only the toolchain (`update: false`). Same product
+content as .62. Released v1.09.63.
+
 ## 2026-09-19 — Re-release as v1.09.62 (v1.09.61 tag never shipped)
 
 v1.09.61 failed at the Build step on every leg (arc_name scoping,

@@ -155,7 +155,16 @@ jobs:
         uses: msys2/setup-msys2@v2
         with:
           msystem: ${{ matrix.arch == 'x64' && 'MINGW64' || 'MINGW32' }}
-          update: true
+          # v1.09.62 postmortem: update:true + upstream base (June) died
+          # deterministically on both Windows legs at this step (MSYS2
+          # mirror PGP/db-sync rot hits the full -Syuu upgrade path;
+          # our diff cannot influence this step). Use the runner image's
+          # preinstalled MSYS2 (days old, not months) and install only
+          # the toolchain — no system upgrade. If this still fails, the
+          # step-9 log lines (not just the exit code) are required
+          # before further workflow surgery.
+          release: false
+          update: false
           install: >-
             ${{ matrix.arch == 'x64' && 'mingw-w64-x86_64-toolchain mingw-w64-x86_64-cmake' || 'mingw-w64-i686-toolchain mingw-w64-i686-cmake' }}
 
