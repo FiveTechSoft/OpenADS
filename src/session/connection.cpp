@@ -1124,10 +1124,22 @@ util::Result<Connection::ZipArchiveResult> Connection::zip_archive(
         return util::Error{5000, 0, "zip: empty file list", ""};
     if (level < 0 || level > 9)
         return util::Error{5000, 0, "zip: level must be 0..9", ""};
-    if (zip_name.empty() || zip_name.find_first_of("/\\") !=
-                                std::string::npos ||
-        zip_name.find(':') != std::string::npos ||
-        zip_name == "." || zip_name == "..")
+    if (zip_name.empty() || zip_name == "." || zip_name == "..")
+        return util::Error{5000, 0, "zip: bad archive name", ""};
+    // The archive spelling may carry a server-relative subdir
+    // ("backups/nightly"): split it off. An explicit subdir takes
+    // the filename verbatim — application-dependent, no date or
+    // extension munging. A bare name keeps the legacy dated
+    // backup/ repository below.
+    std::string zip_dir, zip_base = zip_name;
+    const std::size_t zsep = zip_name.find_last_of("/\\");
+    if (zsep != std::string::npos) {
+        zip_dir = zip_name.substr(0, zsep);
+        zip_base = zip_name.substr(zsep + 1);
+    }
+    if (zip_base.empty() || zip_base == "." || zip_base == ".." ||
+        zip_base.find(':') != std::string::npos ||
+        zip_dir.find(':') != std::string::npos)
         return util::Error{5000, 0, "zip: bad archive name", ""};
     const auto roots = platform::split_data_roots(data_dir_);
     if (roots.empty())
@@ -1156,26 +1168,41 @@ util::Result<Connection::ZipArchiveResult> Connection::zip_archive(
         }
     }
     if (root.empty()) root = roots.front();
-    // Dated repository name, minted server-side (single rule).
-    std::string base = zip_name;
-    if (base.size() > 4) {
-        std::string ext = base.substr(base.size() - 4);
-        for (char& c : ext)
-            c = static_cast<char>(std::tolower(
-                static_cast<unsigned char>(c)));
-        if (ext == ".zip") base.erase(base.size() - 4);
+    std::string archive;
+    if (zip_dir.empty()) {
+        // Dated repository name, minted server-side (single rule).
+        std::string base = zip_base;
+        if (base.size() > 4) {
+            std::string ext = base.substr(base.size() - 4);
+            for (char& c : ext)
+                c = static_cast<char>(std::tolower(
+                    static_cast<unsigned char>(c)));
+            if (ext == ".zip") base.erase(base.size() - 4);
+        }
+        std::string ymd = platform::now_local().date;
+        ymd.erase(std::remove(ymd.begin(), ymd.end(), '-'), ymd.end());
+        const std::string arc_name = base + "_" + ymd + ".zip";
+        const std::string backup_dir =
+            (fs::path(root) / "backup").string();
+        fs::create_directories(backup_dir, ec);
+        if (ec)
+            return util::Error{5000, 0, "zip: cannot create backup dir",
+                               backup_dir};
+        archive = (fs::path(backup_dir) / arc_name).string();
+    } else {
+        // Explicit subdir: jailed resolve (.. escape rejected),
+        // created on demand; the filename is used exactly as given.
+        auto dd = platform::resolve_fs_path(root, zip_dir);
+        if (!dd)
+            return util::Error{7079, 0,
+                               "zip: path outside data directory",
+                               zip_dir};
+        fs::create_directories(*dd, ec);
+        if (ec)
+            return util::Error{5000, 0, "zip: cannot create archive dir",
+                               *dd};
+        archive = (fs::path(*dd) / zip_base).string();
     }
-    std::string ymd = platform::now_local().date;
-    ymd.erase(std::remove(ymd.begin(), ymd.end(), '-'), ymd.end());
-    const std::string arc_name = base + "_" + ymd + ".zip";
-    const std::string backup_dir =
-        (fs::path(root) / "backup").string();
-    fs::create_directories(backup_dir, ec);
-    if (ec)
-        return util::Error{5000, 0, "zip: cannot create backup dir",
-                           backup_dir};
-    const std::string archive =
-        (fs::path(backup_dir) / arc_name).string();
     // Resolve every source under the source dir (same jail).
     std::vector<std::string> abs;
     abs.reserve(files.size());

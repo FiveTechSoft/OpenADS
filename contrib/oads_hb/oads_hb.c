@@ -39,6 +39,7 @@
 
 #include "hbapi.h"
 #include "hbapiitm.h"
+#include "hbdate.h"
 #include "ace.h"
 #include <string.h>
 
@@ -470,8 +471,12 @@ HB_FUNC( OADS_DIREXIST )
 }
 
 /* ------------------------------------------------------------------ */
-/*  OADS_Directory( hConn, cMask, nAttr ) -> cBuf                     */
-/*  OADS_Directory( cMask, nAttr )          -> cBuf (default conn)    */
+/*  OADS_Directory( hConn, cMask, nAttr ) -> aDir                   */
+/*  OADS_Directory( cMask, nAttr )          -> aDir (default conn)  */
+/*  Harbour Directory() shape: { {cName,nSize,dDate,cTime,cAttr}..} */
+/*  cAttr carries "D" (directory) and/or "R" (readonly) — the only  */
+/*  bits the engine reports; "" for a plain file. Empty array when */
+/*  nothing matches or on error.                                   */
 /* ------------------------------------------------------------------ */
 HB_FUNC( OADS_DIRECTORY )
 {
@@ -481,6 +486,8 @@ HB_FUNC( OADS_DIRECTORY )
     UNSIGNED32 ulLen   = 0;
     unsigned char *buf;
     UNSIGNED32 ulRc;
+    UNSIGNED32 off;
+    PHB_ITEM pArray;
 
     if( hb_pcount() >= 3 )
     {
@@ -495,12 +502,14 @@ HB_FUNC( OADS_DIRECTORY )
         usAttr = ( UNSIGNED16 ) hb_parni( 2 );
     }
 
+    pArray = hb_itemArrayNew( 0 );
+
     if( szMask )
         oads_Directory( hConn, ( UNSIGNED8 * ) szMask, usAttr, NULL, &ulLen );
 
     if( ulLen == 0 || ulLen > 1024 * 1024 )
     {
-        hb_retc( "" );
+        hb_itemReturnRelease( pArray );
         return;
     }
 
@@ -508,10 +517,69 @@ HB_FUNC( OADS_DIRECTORY )
     ulRc = oads_Directory( hConn, ( UNSIGNED8 * ) szMask, usAttr,
                            buf, &ulLen );
     if( ulRc == 0 )
-        hb_retclen( ( char * ) buf, ulLen );
-    else
-        hb_retc( "" );
+    {
+        /* Packed wire layout, little-endian (see pack_dir_entry in   */
+        /* src/engine/server_fs.cpp): u16 namelen, name, u64 size,    */
+        /* u16 year, mon, day, hh, mm, ss, u32 attr.                  */
+        off = 0;
+        while( off + 2 <= ulLen )
+        {
+            UNSIGNED16 n;
+            double dSize;
+            UNSIGNED16 year;
+            unsigned mon, day, hh, mm, ss;
+            UNSIGNED32 attr;
+            char szTime[ 9 ];
+            char szAttr[ 3 ];
+            PHB_ITEM pEntry;
+            int i;
+
+            n = ( UNSIGNED16 ) ( buf[ off ] | ( buf[ off + 1 ] << 8 ) );
+            off += 2;
+            if( off + ( UNSIGNED32 ) n + 8 + 2 + 5 + 4 > ulLen )
+                break;  /* truncated tail — stop, keep what we have */
+
+            pEntry = hb_itemArrayNew( 5 );
+            hb_arraySetCL( pEntry, 1, ( char * ) buf + off, n );
+            off += n;
+
+            dSize = 0.0;
+            for( i = 7; i >= 0; --i )
+                dSize = dSize * 256.0 + ( double ) buf[ off + i ];
+            hb_arraySetND( pEntry, 2, dSize );
+            off += 8;
+
+            year = ( UNSIGNED16 ) ( buf[ off ] | ( buf[ off + 1 ] << 8 ) );
+            off += 2;
+            mon = buf[ off++ ];
+            day = buf[ off++ ];
+            hh  = buf[ off++ ];
+            mm  = buf[ off++ ];
+            ss  = buf[ off++ ];
+            hb_arraySetDL( pEntry, 3,
+                             hb_dateEncode( year, mon, day ) );
+            hb_snprintf( szTime, sizeof( szTime ), "%02u:%02u:%02u",
+                         hh, mm, ss );
+            hb_arraySetC( pEntry, 4, szTime );
+
+            attr = ( UNSIGNED32 ) buf[ off ] |
+                   ( ( UNSIGNED32 ) buf[ off + 1 ] << 8 ) |
+                   ( ( UNSIGNED32 ) buf[ off + 2 ] << 16 ) |
+                   ( ( UNSIGNED32 ) buf[ off + 3 ] << 24 );
+            off += 4;
+            szAttr[ 0 ] = '\0';
+            if( attr & 0x10 )
+                strcat( szAttr, "D" );
+            if( attr & 0x01 )
+                strcat( szAttr, "R" );
+            hb_arraySetC( pEntry, 5, szAttr );
+
+            hb_arrayAddForward( pArray, pEntry );
+            hb_itemRelease( pEntry );
+        }
+    }
     hb_xfree( buf );
+    hb_itemReturnRelease( pArray );
 }
 
 /* ------------------------------------------------------------------ */
@@ -811,20 +879,30 @@ static char *oads_join_1f( PHB_ITEM pArray, HB_SIZE *pnOut )
 }
 
 /* ------------------------------------------------------------------ */
-/*  OAds_Zip( [hConn,] cDirName, aFiles, cZipFileName [, nLevel        */
-/*            [, lOverwrite [, cPassword [, aExclude [, lWithPath ]]]]] ) */
-/*    -> { nFiles, nBytes, nArchiveBytes, cArchive }, NIL on failure   */
-/*  Server-side backup archiving: files stay on the server under       */
-/*  --data; the archive lands in <root>/backup/<name>_YYYYMMDD.zip.    */
+/*  OAds_Zip( [hConn,] cSrcDir, aSrcFiles, cZipDir, cZipName          */
+/*            [, nLevel [, lOverwrite [, cPassword [, aExclude        */
+/*            [, lWithPath ]]]]] )                                   */
+/*    -> { nFiles, nBytes, nArchiveBytes, cArchive }, NIL on failure  */
+/*  Server-side backup archiving: files stay on the server under      */
+/*  --data. cSrcDir/aSrcFiles/cZipDir/cZipName are mandatory; the     */
+/*  rest default (6, .F., "", {}, .F.). An empty cZipDir keeps the    */
+/*  legacy dated repository (<root>/backup/<name>_YYYYMMDD.zip);      */
+/*  otherwise the archive is written verbatim to                      */
+/*  <root>/<cZipDir>/<cZipName> — the filename is                     */
+/*  application-dependent, no date or extension is added.             */
+/*  NOTE: v1.09.59 form (cDir, aFiles, cZipName) is NOT accepted —    */
+/*  the 4th positional is now cZipDir, so old calls fail loud (NIL)   */
+/*  instead of misfiling archives.                                   */
 /* ------------------------------------------------------------------ */
 HB_FUNC( OADS_ZIP )
 {
     ADSHANDLE   hConn;
-    const char *szDir, *szZipName, *szPassword;
+    const char *szDir, *szZipDir, *szZipName, *szPassword;
     PHB_ITEM    pFiles, pExclude;
     int         nLevel, base;
     UNSIGNED16  usOverwrite, usWithPath;
     char       *szFiles, *szExclude;
+    char        szZipArg[ 1024 ];
     char        szArchive[ 512 ];
     UNSIGNED16  usArcLen = ( UNSIGNED16 ) sizeof( szArchive );
     UNSIGNED32  ulFiles = 0;
@@ -832,7 +910,9 @@ HB_FUNC( OADS_ZIP )
     UNSIGNED32  ulRc;
     PHB_ITEM    pRet;
 
-    if( hb_pcount() >= 9 )
+    /* hConn is optional but the arities overlap (4..9 without, 5..10
+       with), so sniff the first param: numeric -> explicit handle. */
+    if( hb_pcount() >= 5 && hb_param( 1, HB_IT_NUMERIC ) != NULL )
     {
         hConn = ( ADSHANDLE ) hb_parnint( 1 );
         base  = 1;
@@ -842,27 +922,36 @@ HB_FUNC( OADS_ZIP )
         AdsGetDefaultConnection( &hConn );
         base = 0;
     }
-    if( hb_pcount() < base + 3 )
+    if( hb_pcount() < base + 4 )
     {
         hb_ret();
         return;
     }
     szDir     = hb_parc( base + 1 );
     pFiles    = hb_param( base + 2, HB_IT_ARRAY );
-    szZipName = hb_parc( base + 3 );
-    nLevel    = hb_parni( base + 4 );
-    if( hb_pcount() < base + 4 || nLevel < 0 || nLevel > 9 )
+    szZipDir  = hb_parc( base + 3 );
+    szZipName = hb_parc( base + 4 );
+    nLevel    = hb_parni( base + 5 );
+    if( hb_pcount() < base + 5 || nLevel < 0 || nLevel > 9 )
         nLevel = 6;
-    usOverwrite = ( UNSIGNED16 ) ( hb_parl( base + 5 ) ? 1 : 0 );
-    szPassword  = hb_parc( base + 6 );
-    pExclude    = hb_param( base + 7, HB_IT_ARRAY );
-    usWithPath  = ( UNSIGNED16 ) ( hb_parl( base + 8 ) ? 1 : 0 );
+    usOverwrite = ( UNSIGNED16 ) ( hb_parl( base + 6 ) ? 1 : 0 );
+    szPassword  = hb_parc( base + 7 );
+    pExclude    = hb_param( base + 8, HB_IT_ARRAY );
+    usWithPath  = ( UNSIGNED16 ) ( hb_parl( base + 9 ) ? 1 : 0 );
 
-    if( szDir == NULL || pFiles == NULL || szZipName == NULL )
+    if( szDir == NULL || pFiles == NULL ||
+        szZipDir == NULL || szZipName == NULL )
     {
         hb_ret();
         return;
     }
+    /* Fold dir+name into the single engine spelling; empty dir keeps
+       the legacy dated backup/ repository server-side. */
+    if( szZipDir[ 0 ] != '\0' )
+        hb_snprintf( szZipArg, sizeof( szZipArg ), "%s/%s",
+                     szZipDir, szZipName );
+    else
+        hb_snprintf( szZipArg, sizeof( szZipArg ), "%s", szZipName );
     szFiles   = oads_join_1f( pFiles, NULL );
     szExclude = oads_join_1f( pExclude, NULL );
     if( szFiles == NULL )
@@ -872,7 +961,7 @@ HB_FUNC( OADS_ZIP )
     }
     ulRc = AdsZipFiles( hConn, ( UNSIGNED8 * ) szDir,
                         ( UNSIGNED8 * ) szFiles,
-                        ( UNSIGNED8 * ) szZipName,
+                        ( UNSIGNED8 * ) szZipArg,
                         ( UNSIGNED16 ) nLevel, usOverwrite,
                         ( UNSIGNED8 * ) ( szPassword ? szPassword : "" ),
                         ( UNSIGNED8 * ) ( szExclude ? szExclude : "" ),

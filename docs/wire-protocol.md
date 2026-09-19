@@ -822,7 +822,10 @@ remote connections except the permanently-stubbed `SetIndexProperty`.
 
 Connection-level ops (no table id) for `OAds_Zip`/`OAds_UnZip`
 (`AdsZipFiles`/`AdsUnzipFiles`). Paths stay under the session data
-jail; archives land in `<owning-root>/backup/<name>_YYYYMMDD.zip`.
+jail. A bare zip name lands in
+`<owning-root>/backup/<name>_YYYYMMDD.zip` (dated, server-minted);
+a name carrying a server-relative subdir (`backups/nightly`) is
+written verbatim to `<owning-root>/<subdir>/<file>`.
 NOT gated by `EnableFileFunc` (database ops, like `FindTables`).
 File lists ride as one `0x1F`-joined blob (`0x1F` cannot occur in a
 file name on any OS); `u32` lengths where a file set can exceed

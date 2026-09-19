@@ -238,8 +238,11 @@ public:
 
     // Server-side ZIP/UNZIP for backup archiving (OAds_Zip/OAds_UnZip
     // via AdsZipFiles/AdsUnzipFiles, local or wire). Every path stays
-    // under this connection's data roots (resolve_fs_path jail);
-    // archives land in <owning-root>/backup/<name>_YYYYMMDD.zip.
+    // under this connection's data roots (resolve_fs_path jail).
+    // A bare archive name lands in
+    // <owning-root>/backup/<name>_YYYYMMDD.zip (dated, server-minted);
+    // a name carrying a server-relative subdir ("backups/nightly")
+    // is written verbatim to <owning-root>/<subdir>/<file>.
     // zip_archive flushes open tables covering the sources first
     // (flush-and-go; open tables are included, never skipped).
     // unzip_archive refuses when any extraction target is open on

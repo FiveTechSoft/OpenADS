@@ -6,6 +6,19 @@
 
 ---
 
+## 2026-09-19 — OAds_Zip explicit dirs + Directory() array (v1.09.61)
+
+Field (Vouch backup flow): `OAds_Zip` needed a separate archive
+dir and an app-chosen filename. New form `OAds_Zip( [hConn,]
+cSrcDir, aSrcFiles, cZipDir, cZipName [, ...] )`: empty `cZipDir`
+keeps the dated `backup/` repository, otherwise the archive lands
+verbatim at `<root>/<cZipDir>/<cZipName>` (no date/extension
+munging), jailed + created on demand, local and wire, no ABI or
+wire break (v1.09.60 import libs stay valid). Old 3-arg form fails
+loud (NIL). Same release: `OADS_DIRECTORY()` now returns
+`Directory()`-shaped `{cName,nSize,dDate,cTime,cAttr}` instead of
+the raw packed buffer. Released v1.09.61.
+
 ## 2026-09-18 — Stale MinGW import libs (v1.09.60)
 
 v1.09.59 DLLs exported AdsZipFiles/UnzipFiles but the prebuilt

@@ -120,7 +120,12 @@ UNSIGNED32 ENTRYPOINT AdsDirExist      (ADSHANDLE  hConnect, UNSIGNED8* pucPath,
 UNSIGNED32 ENTRYPOINT AdsDirMake       (ADSHANDLE  hConnect, UNSIGNED8* pucPath);
 UNSIGNED32 ENTRYPOINT AdsDirRemove     (ADSHANDLE  hConnect, UNSIGNED8* pucPath);
 // Server-side backup archiving (OAds_Zip/OAds_UnZip): files stay on
-// the server under --data; zips land in <root>/backup/<name>_YYYYMMDD.zip.
+// the server under --data. A bare pucZipName lands in
+// <root>/backup/<name>_YYYYMMDD.zip (dated, server-minted); a name
+// carrying a server-relative subdir ("backups/nightly") is written
+// verbatim to <root>/<subdir>/<file> — application-dependent, no
+// date or extension munging. Use "" for pucZipDir-equivalent legacy
+// behaviour, "backup" to pin the file inside backup/ verbatim.
 // pucFiles/pucExclude are 0x1F-separated lists. The archive path comes
 // back via pucArchive (*pusArchiveLen capacity in, actual length out;
 // AE_INSUFFICIENT_BUFFER when short — the archive itself is created

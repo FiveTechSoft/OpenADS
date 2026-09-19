@@ -1,5 +1,6 @@
 // Server-side backup archiving (OAds_Zip/OAds_UnZip) through the ACE
-// surface, local and over the wire: dated backup/ placement, stats,
+// surface, local and over the wire: dated backup/ placement, explicit
+// subdir archives with verbatim application-chosen filenames, stats,
 // jail rejection, overwrite rules, flush-and-go on open tables, and
 // fail-if-open on unzip targets.
 
@@ -135,6 +136,54 @@ TEST_CASE("zip: local dated backup, stats, restore roundtrip") {
     CHECK(db.read_file(db.dir / "restored" / "acc.dbf") ==
           db.read_file(db.dir / "acc.dbf"));
     CHECK(db.read_file(db.dir / "restored" / "note.txt") == "hello");
+}
+
+TEST_CASE("zip: explicit subdir takes the filename verbatim") {
+    LocalDb db("openads_zip_subdir");
+    db.make_table("s.dbf", 2);
+    {
+        std::ofstream(db.dir / "s.txt") << "hi";
+    }
+
+    std::string files = std::string("s.dbf") + '\x1F' + "s.txt";
+    // No date stamp, no forced extension: exactly what was asked.
+    ZipOut z = do_zip(db.hConn, ".", files.c_str(), "myback/nightly");
+    REQUIRE_MESSAGE(z.rc == 0, z.rc);
+    CHECK(z.files == 2u);
+    CHECK(z.archive == "myback/nightly");
+    CHECK(fs::is_regular_file(db.dir / "myback" / "nightly"));
+    // The explicit form never touches the legacy backup/ repository.
+    CHECK(!fs::exists(db.dir / "backup"));
+
+    // Nested subdirs are created on demand.
+    ZipOut zn = do_zip(db.hConn, ".", "s.txt", "deep/n1/n2arc.zip");
+    REQUIRE_MESSAGE(zn.rc == 0, zn.rc);
+    CHECK(zn.archive == "deep/n1/n2arc.zip");
+    CHECK(fs::is_regular_file(db.dir / zn.archive));
+
+    // Re-zip without overwrite refuses; with overwrite succeeds.
+    ZipOut z2 = do_zip(db.hConn, ".", files.c_str(), "myback/nightly");
+    CHECK(z2.rc != 0);
+    ZipOut z3 =
+        do_zip(db.hConn, ".", files.c_str(), "myback/nightly", 6, true);
+    CHECK(z3.rc == 0);
+    CHECK(z3.archive == "myback/nightly");
+
+    // Roundtrip via the reported spelling.
+    fs::create_directories(db.dir / "out");
+    UNSIGNED32 n = 0;
+    UNSIGNED64 nb = 0, ab = 0;
+    REQUIRE(AdsUnzipFiles(db.hConn, (UNSIGNED8*)"out",
+                          (UNSIGNED8*)z.archive.c_str(),
+                          (UNSIGNED8*)"", 1, 0, &n, &nb, &ab) == 0);
+    CHECK(n == 2u);
+    CHECK(db.read_file(db.dir / "out" / "s.txt") == "hi");
+
+    // Traversal in the archive spelling is loud, not jailed-silent.
+    ZipOut bad = do_zip(db.hConn, ".", "s.dbf", "../evil");
+    CHECK(bad.rc != 0);
+    ZipOut bad2 = do_zip(db.hConn, ".", "s.dbf", "myback/");
+    CHECK(bad2.rc != 0);
 }
 
 TEST_CASE("zip: jail, overwrite and level rules are loud") {
