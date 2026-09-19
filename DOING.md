@@ -6,6 +6,12 @@
 
 ---
 
+## 2026-09-19 — Re-release as v1.09.62 (v1.09.61 tag never shipped)
+
+v1.09.61 failed at the Build step on every leg (arc_name scoping,
+fixed + verified) and the publish gate refused it — zero assets.
+Re-cut identical content as v1.09.62. Released v1.09.62.
+
 ## 2026-09-19 — OAds_Zip explicit dirs + Directory() array (v1.09.61)
 
 Field (Vouch backup flow): `OAds_Zip` needed a separate archive
