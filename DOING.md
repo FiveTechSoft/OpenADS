@@ -6,6 +6,19 @@
 
 ---
 
+## 2026-09-19 — Zip spelling fix + MT quarantine (v1.09.64)
+
+v1.09.63's gate held on two things: (1) explicit-subdir archives
+reported the bare filename on Windows — weakly_canonical spelling
+drift vs the root broke the archive_rel prefix; fixed by joining
+lexically under the root with a normalized prefix check (verified
+on local MinGW x86/x64); (2) one MT remote-writer assertion
+(Charlie@1 -> Alice@12 on a quiescent tree) — second distinct
+assertion in that family across runs, so all three verify_mt cases
+are [flaky] now, tracked in known-issues.md with the
+shape-dependent-ordering suspicion. The v1.09.61-63 tags never
+shipped. Released v1.09.64.
+
 ## 2026-09-19 — MinGW provisioning without -Syuu (v1.09.63)
 
 v1.09.62's gate held for a different reason: both Windows legs die

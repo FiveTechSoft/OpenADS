@@ -1192,18 +1192,41 @@ util::Result<Connection::ZipArchiveResult> Connection::zip_archive(
         archive = (fs::path(backup_dir) / arc_name).string();
         arc_fallback = arc_name;
     } else {
-        // Explicit subdir: jailed resolve (.. escape rejected),
-        // created on demand; the filename is used exactly as given.
-        auto dd = platform::resolve_fs_path(root, zip_dir);
-        if (!dd)
+        // Explicit subdir: join lexically under the owning root and
+        // verify containment on the normalized spelling — do NOT pass
+        // through resolve_fs_path here. Its weakly_canonical output
+        // drifts textually from `root` (8.3/junction expansion), which
+        // breaks the archive_rel prefix computation below and reports
+        // a bare filename (v1.09.63 Windows legs). lexically_normal
+        // keeps the shared prefix exact while still collapsing `.`
+        // and interior `..`; the prefix check then owns the jail.
+        // Absolute and drive-letter spellings are rejected outright
+        // (fs::path::operator/ would otherwise discard the root).
+        if (zip_dir.find(':') != std::string::npos ||
+            fs::path(zip_dir).is_absolute())
+            return util::Error{5000, 0, "zip: bad archive name", ""};
+        const std::string rns = [&] {
+            std::string r = zip_norm_path(root);
+            while (!r.empty() && r.back() == '/') r.pop_back();
+            return r;
+        }();
+        const fs::path dd =
+            (fs::path(root) / zip_dir).lexically_normal();
+        const std::string dns = zip_norm_path(dd.generic_string());
+        if (dns != rns &&
+            (rns.empty() || dns.size() <= rns.size() ||
+             dns.compare(0, rns.size(), rns) != 0 ||
+             dns[rns.size()] != '/'))
             return util::Error{7079, 0,
                                "zip: path outside data directory",
                                zip_dir};
-        fs::create_directories(*dd, ec);
+        fs::create_directories(dd, ec);
         if (ec)
             return util::Error{5000, 0, "zip: cannot create archive dir",
-                               *dd};
-        archive = (fs::path(*dd) / zip_base).string();
+                               dd.string()};
+        // Filename used exactly as given (application-dependent);
+        // dd is already normalized so archive_rel below prefixes cleanly.
+        archive = (dd / zip_base).string();
         arc_fallback = zip_base;
     }
     // Resolve every source under the source dir (same jail).

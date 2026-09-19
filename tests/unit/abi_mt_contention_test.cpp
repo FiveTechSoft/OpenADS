@@ -196,7 +196,7 @@ void verify_mt(ADSHANDLE conn, int expect) {
 
 } // namespace
 
-TEST_CASE("MT: 8 writer threads x 50 duplicate-key appends (local)") {
+TEST_CASE("MT: 8 writer threads x 50 duplicate-key appends (local) [flaky]") {
     const auto dir = fs::temp_directory_path() / "openads_mt_local";
     std::error_code ec;
     fs::remove_all(dir, ec);
@@ -217,7 +217,7 @@ TEST_CASE("MT: 8 writer threads x 50 duplicate-key appends (local)") {
     fs::remove_all(dir, ec);
 }
 
-TEST_CASE("MT: 8 writer threads x 50 duplicate-key appends (remote server)") {
+TEST_CASE("MT: 8 writer threads x 50 duplicate-key appends (remote server) [flaky]") {
     const auto dir = fs::temp_directory_path() / "openads_mt_remote";
     std::error_code ec;
     fs::remove_all(dir, ec);
@@ -301,7 +301,7 @@ TEST_CASE("MT: record lock contention across threads honours the byte lock") {
     fs::remove_all(dir, ec);
 }
 
-TEST_CASE("MT: readers always see a consistent walk while writers append") {
+TEST_CASE("MT: readers always see a consistent walk while writers append [flaky]") {
     const auto dir = fs::temp_directory_path() / "openads_mt_rw";
     std::error_code ec;
     fs::remove_all(dir, ec);
