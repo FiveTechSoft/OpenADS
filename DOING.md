@@ -6,6 +6,15 @@
 
 ---
 
+## 2026-09-18 — Stale MinGW import libs (v1.09.60)
+
+v1.09.59 DLLs exported AdsZipFiles/UnzipFiles but the prebuilt
+dist/import-libs ended at v1.09.28 exports — Vouch compiled (fresh
+oads_hb.c) yet failed to link. Merged dlltool-built deltas into
+x86+x64 MinGW libs (decorations @56/@36 verified vs ground truth,
+stub-link proven). MSVC via shipped .def (self-service). No
+product-code change. Released v1.09.60.
+
 ## 2026-09-18 — Server-side ZIP/UNZIP (v1.09.59, field request)
 
 Vouch backup archiving as built-ins: OAds_Zip/OAds_UnZip over
