@@ -16,6 +16,10 @@ check, lexical spelling for build/report. Legacy-remount case
 added to the verbatim suite, 12/12 green locally both archs.
 Released v1.09.66.
 
+Field confirmation (loopback): v1.09.66 backup works as designed —
+fully-qualified source/dest shapes produce the verbatim-named
+archive under the data root.
+
 ## 2026-09-19 — Absolute zip dirs + MinGW DLL link (v1.09.65)
 
 Field (Vouch backup flow): fully-qualified `cZipDir`
