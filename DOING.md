@@ -18,7 +18,8 @@ Released v1.09.66.
 
 Field confirmation (loopback): v1.09.66 backup works as designed —
 fully-qualified source/dest shapes produce the verbatim-named
-archive under the data root.
+archive under the data root. Confirmed on remote as well:
+`OAds_Zip()` behaves properly end-to-end over the wire.
 
 ## 2026-09-19 — Absolute zip dirs + MinGW DLL link (v1.09.65)
 
