@@ -6,6 +6,7 @@
 #include "network/wire.h"
 #include "engine/aggregate.h"
 #include "engine/server_fs.h"
+#include "engine/zip_arch.h"
 #include "util/result.h"
 
 #include <atomic>
@@ -403,6 +404,14 @@ public:
                                               const std::string& password,
                                               bool overwrite,
                                               bool with_path);
+    // Central-directory listing (OAds_ZipFileCount/OAds_ZipFileList —
+    // not gated by EnableFileFunc; database ops). The archive spelling
+    // follows the unzip rule (bare names under backup/).
+    struct ZipListOutcome {
+        std::vector<openads::engine::zip_arch::ZipEntry> entries;
+    };
+    util::Result<ZipListOutcome>
+                                zip_list(const std::string& zip);
     util::Result<bool>          dir_exist(const std::string& path);
     util::Result<void>          dir_make(const std::string& path);
     util::Result<void>          dir_remove(const std::string& path);

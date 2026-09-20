@@ -6,6 +6,17 @@
 
 ---
 
+## 2026-09-20 — Zip listing (hbZipArc parity, v1.09.67)
+
+Field request: inspect server-side archives without extracting.
+New `OAds_ZipFileCount` (n/0-on-error) + `OAds_ZipFileList`
+(names, or hb-ordered 11-field verbose rows), backed by
+`AdsZipListFiles` + `ZipList`/`ZipListAck` (`0x1B`/`0x1C`), local
+and remote, backup/ resolution like UnZip. MinGW import libs
+refreshed via dlltool deltas (`@20` stdcall verified by stub
+link). Verbose mapping proven against a fixture zip over a static
+Harbour link. Released v1.09.67.
+
 ## 2026-09-19 — Zip dest = table-path doctrine (v1.09.66)
 
 Field rule: every path maps to the remote root like `.dbf` files,

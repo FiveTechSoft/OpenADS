@@ -6,7 +6,8 @@
  * OADS_FSEEK(), OADS_CHECKEXISTENCE(), OADS_DELETEFILE(),
  * OADS_RENAMEFILE(), OADS_GETFILESIZE(), OADS_GETFILEDATE(),
  * OADS_GETFILETIME(), OADS_DIRMAKE(), OADS_DIRREMOVE(),
- * OADS_DIREXIST(), OADS_DIRECTORY(), OADS_FEXIST(), and the
+ * OADS_DIREXIST(), OADS_DIRECTORY(), OADS_FEXIST(), OADS_ZIP(),
+ * OADS_UNZIP(), OADS_ZIPFILECOUNT(), OADS_ZIPFILELIST(), and the
  * server-side distributed mutex functions OADS_MUTEXCREATE(),
  * OADS_MUTEXLOCK(), OADS_MUTEXTRYLOCK(), OADS_MUTEXUNLOCK(),
  * OADS_MUTEXDESTROY() callable from Harbour PRG code, plus the
@@ -844,6 +845,14 @@ extern UNSIGNED32 ENTRYPOINT AdsUnzipFiles( ADSHANDLE   hConnect,
                                             UNSIGNED64 *pullBytes,
                                             UNSIGNED64 *pullArchiveBytes );
 
+/* AdsZipListFiles is an OpenADS extension (v1.09.67+). Declared
+   here as well so this file still compiles against an older ace.h;
+   an identical redeclaration is legal C when the new ace.h is used. */
+extern UNSIGNED32 ENTRYPOINT AdsZipListFiles( ADSHANDLE   hConnect,
+                                              UNSIGNED8 * pucZip,
+                                              UNSIGNED8 * pucBuffer,
+                                              UNSIGNED32 *pulBufLen,
+                                              UNSIGNED32 *pulCount );
 /* Join a Harbour array of strings with 0x1F separators (0x1F cannot
    occur in a file name on any OS). Returns NULL on non-array input;
    the caller frees with hb_xfree(). Empty arrays join to "". */
@@ -1043,4 +1052,224 @@ HB_FUNC( OADS_UNZIP )
     hb_arraySetND( pRet, 2, ( double ) ullBytes );
     hb_arraySetND( pRet, 3, ( double ) ullArcBytes );
     hb_itemReturnRelease( pRet );
+}
+
+/* ------------------------------------------------------------------ */
+/*  OAds_ZipFileCount( hConn, cZip ) -> nFiles (0 on error)            */
+/*  OAds_ZipFileCount( cZip )          -> nFiles (default conn)        */
+/*  Harbour hb_GetFileCount() parity for server-side archives.        */
+/* ------------------------------------------------------------------ */
+HB_FUNC( OADS_ZIPFILECOUNT )
+{
+    ADSHANDLE   hConn;
+    const char *szZip;
+    UNSIGNED32  ulLen = 0, ulCount = 0;
+
+    if( hb_pcount() >= 2 )
+    {
+        hConn = ( ADSHANDLE ) hb_parnint( 1 );
+        szZip = hb_parc( 2 );
+    }
+    else
+    {
+        AdsGetDefaultConnection( &hConn );
+        szZip = hb_parc( 1 );
+    }
+
+    if( szZip )
+        AdsZipListFiles( hConn, ( UNSIGNED8 * ) szZip,
+                         NULL, &ulLen, &ulCount );
+    hb_retnint( ( HB_MAXINT ) ulCount );
+}
+
+/* Little-endian readers for the packed ZipEntry layout (must match
+   engine pack_zip_entry; the buffer always comes from our own
+   AdsZipListFiles call sized above, but parse defensively). */
+static UNSIGNED16 oads_ziplist_u16( const unsigned char *buf,
+                                    UNSIGNED32 *pOff, UNSIGNED32 ulLen,
+                                    int *pOk )
+{
+    UNSIGNED16 v;
+    if( *pOff + 2 > ulLen )
+    {
+        *pOk = 0;
+        return 0;
+    }
+    v = ( UNSIGNED16 ) ( buf[ *pOff ] | ( buf[ *pOff + 1 ] << 8 ) );
+    *pOff += 2;
+    return v;
+}
+
+static UNSIGNED32 oads_ziplist_u32( const unsigned char *buf,
+                                    UNSIGNED32 *pOff, UNSIGNED32 ulLen,
+                                    int *pOk )
+{
+    UNSIGNED32 v;
+    if( *pOff + 4 > ulLen )
+    {
+        *pOk = 0;
+        return 0;
+    }
+    v = ( UNSIGNED32 ) buf[ *pOff ] |
+        ( ( UNSIGNED32 ) buf[ *pOff + 1 ] << 8 ) |
+        ( ( UNSIGNED32 ) buf[ *pOff + 2 ] << 16 ) |
+        ( ( UNSIGNED32 ) buf[ *pOff + 3 ] << 24 );
+    *pOff += 4;
+    return v;
+}
+
+static double oads_ziplist_u64( const unsigned char *buf,
+                                UNSIGNED32 *pOff, UNSIGNED32 ulLen,
+                                int *pOk )
+{
+    double v = 0.0;
+    int i;
+    if( *pOff + 8 > ulLen )
+    {
+        *pOk = 0;
+        return 0.0;
+    }
+    for( i = 7; i >= 0; --i )
+        v = v * 256.0 + ( double ) buf[ *pOff + i ];
+    *pOff += 8;
+    return v;
+}
+
+/* ------------------------------------------------------------------ */
+/*  OAds_ZipFileList( hConn, cZip [, lVerbose ] ) -> aFiles            */
+/*  OAds_ZipFileList( cZip [, lVerbose ] )          -> aFiles          */
+/*  Harbour hb_GetFilesInZip() parity: plain form returns file names; */
+/*  verbose form returns {cName,nSize,nMethod,nCompSize,nRatio,dDate,  */
+/*  cTime,cCRC,nInternalAttr,lCrypted,cComment} rows. Empty array on   */
+/*  error. Bare archive names resolve under backup/ like UnZip.       */
+/* ------------------------------------------------------------------ */
+HB_FUNC( OADS_ZIPFILELIST )
+{
+    ADSHANDLE   hConn;
+    const char *szZip;
+    int         lVerbose, base;
+    UNSIGNED32  ulLen = 0, ulCount = 0, off = 0;
+    unsigned char *buf;
+    UNSIGNED32  ulRc;
+    PHB_ITEM    pArray;
+    UNSIGNED32  i;
+    int         ok;
+
+    if( hb_pcount() >= 2 && hb_param( 1, HB_IT_NUMERIC ) != NULL )
+    {
+        hConn = ( ADSHANDLE ) hb_parnint( 1 );
+        base  = 1;
+    }
+    else
+    {
+        AdsGetDefaultConnection( &hConn );
+        base = 0;
+    }
+    if( hb_pcount() < base + 1 )
+    {
+        hb_ret();
+        return;
+    }
+    szZip    = hb_parc( base + 1 );
+    lVerbose = hb_parl( base + 2 ) ? 1 : 0;
+
+    pArray = hb_itemArrayNew( 0 );
+
+    if( szZip )
+        AdsZipListFiles( hConn, ( UNSIGNED8 * ) szZip,
+                         NULL, &ulLen, &ulCount );
+
+    if( ulLen == 0 || ulLen > 16 * 1024 * 1024 )
+    {
+        hb_itemReturnRelease( pArray );
+        return;
+    }
+
+    buf = ( unsigned char * ) hb_xgrab( ulLen );
+    ulRc = AdsZipListFiles( hConn, ( UNSIGNED8 * ) szZip,
+                            buf, &ulLen, &ulCount );
+    if( ulRc == 0 )
+    {
+        /* Packed layout (little-endian, see engine pack_zip_entry):
+           u16 namelen, name, u64 size, u64 comp, u16 method, u32 crc,
+           u16 year, mon, day, hh, mm, ss, u16 internal, u32 external,
+           u8 encrypted, u16 commentlen, comment. */
+        off = 0;
+        ok  = 1;
+        for( i = 0; i < ulCount && ok; ++i )
+        {
+            UNSIGNED16 n, m, y, ia, cl;
+            double dSize, dComp;
+            UNSIGNED32 crc, ea;
+            unsigned mon, day, hh, mm, ss, enc;
+            const char *szName, *szComment;
+            PHB_ITEM pEntry;
+
+            n = oads_ziplist_u16( buf, &off, ulLen, &ok );
+            if( ! ok || off + n > ulLen )
+                break;
+            szName = ( const char * ) buf + off;
+            off += n;
+            dSize = oads_ziplist_u64( buf, &off, ulLen, &ok );
+            dComp = oads_ziplist_u64( buf, &off, ulLen, &ok );
+            m     = oads_ziplist_u16( buf, &off, ulLen, &ok );
+            crc   = oads_ziplist_u32( buf, &off, ulLen, &ok );
+            y     = oads_ziplist_u16( buf, &off, ulLen, &ok );
+            if( ! ok || off + 5 > ulLen )
+                break;
+            mon = buf[ off++ ];
+            day = buf[ off++ ];
+            hh  = buf[ off++ ];
+            mm  = buf[ off++ ];
+            ss  = buf[ off++ ];
+            ia  = oads_ziplist_u16( buf, &off, ulLen, &ok );
+            ea  = oads_ziplist_u32( buf, &off, ulLen, &ok );
+            (void) ea;  /* external attrs: kept on the wire for future use */
+            if( ! ok || off + 1 > ulLen )
+                break;
+            enc = buf[ off++ ] ? 1 : 0;
+            cl  = oads_ziplist_u16( buf, &off, ulLen, &ok );
+            if( ! ok || off + cl > ulLen )
+                break;
+            szComment = ( const char * ) buf + off;
+            off += cl;
+
+            if( ! lVerbose )
+            {
+                PHB_ITEM pName = hb_itemPutCL( NULL, szName, n );
+                hb_arrayAddForward( pArray, pName );
+                hb_itemRelease( pName );
+            }
+            else
+            {
+                char szTime[ 9 ];
+                char szCrc[ 9 ];
+                int nRatio = 0;
+                pEntry = hb_itemArrayNew( 11 );
+                hb_arraySetCL( pEntry, 1, szName, n );
+                hb_arraySetND( pEntry, 2, dSize );
+                hb_arraySetNI( pEntry, 3, m );
+                hb_arraySetND( pEntry, 4, dComp );
+                if( dSize > 0.0 )
+                    nRatio = ( int ) ( dComp * 100.0 / dSize + 0.5 );
+                hb_arraySetNI( pEntry, 5, nRatio );
+                hb_arraySetDL( pEntry, 6,
+                               y >= 1980 ? hb_dateEncode( y, mon, day )
+                                         : 0 );
+                hb_snprintf( szTime, sizeof( szTime ), "%02u:%02u:%02u",
+                             hh, mm, ss );
+                hb_arraySetC( pEntry, 7, szTime );
+                hb_snprintf( szCrc, sizeof( szCrc ), "%08X",
+                             ( unsigned ) crc );
+                hb_arraySetC( pEntry, 8, szCrc );
+                hb_arraySetNI( pEntry, 9, ia );
+                hb_arraySetL( pEntry, 10, enc ? HB_TRUE : HB_FALSE );
+                hb_arraySetCL( pEntry, 11, szComment, cl );
+                hb_arrayAddForward( pArray, pEntry );
+                hb_itemRelease( pEntry );
+            }
+        }
+    }
+    hb_xfree( buf );
+    hb_itemReturnRelease( pArray );
 }

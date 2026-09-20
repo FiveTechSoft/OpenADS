@@ -2680,6 +2680,35 @@ RemoteConnection::unzip_archive(const std::string& dir,
     return o;
 }
 
+util::Result<RemoteConnection::ZipListOutcome>
+RemoteConnection::zip_list(const std::string& zip) {
+    Frame req;
+    req.opcode = Opcode::ZipList;
+    push_lp_str(req.payload, zip);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    // [u32 count][packed ZipEntry records]
+    if (rep.value().opcode != Opcode::ZipListAck ||
+        rep.value().payload.size() < 4)
+        return fs_wire_err(rep.value(), "ZipList");
+    const auto& pl = rep.value().payload;
+    const std::uint32_t count = read_u32_le(pl.data());
+    if (count > (1u << 20))
+        return fs_wire_err(rep.value(), "ZipList");
+    ZipListOutcome o;
+    o.entries.reserve(count);
+    std::size_t off = 4;
+    for (std::uint32_t i = 0; i < count; ++i) {
+        openads::engine::zip_arch::ZipEntry e;
+        if (!openads::engine::zip_arch::unpack_zip_entry(pl, off, e))
+            return fs_wire_err(rep.value(), "ZipList");
+        o.entries.push_back(std::move(e));
+    }
+    if (off != pl.size())
+        return fs_wire_err(rep.value(), "ZipList");
+    return o;
+}
+
 util::Result<bool>
 RemoteConnection::dir_exist(const std::string& path) {
     Frame req;

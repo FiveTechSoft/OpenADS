@@ -839,6 +839,14 @@ file name on any OS); `u32` lengths where a file set can exceed
 - `UnzipArchive`: `[u16 dirLen][dir][u16 zipLen][zip]`
   `[u16 pwdLen][password][u8 overwrite][u8 withPath]`
 - `UnzipArchiveAck`: `[u32 files][u64 bytes][u64 archiveBytes]`
+- `ZipList` (central-directory listing, `OAds_ZipFileCount` /
+  `OAds_ZipFileList`): `[u16 zipLen][zip]` (archive spelling follows
+  the unzip rule); needs no password.
+- `ZipListAck`: `[u32 count]` + packed entries, one per file:
+  `[u16 nameLen][name][u64 size][u64 compSize][u16 method][u32 crc]`
+  `[u16 year][u8 mon][u8 day][u8 hh][u8 mm][u8 ss][u16 internalAttr]`
+  `[u32 externalAttr][u8 encrypted][u16 cmtLen][comment]`
+  (length-gated parse; same layout as the `AdsZipListFiles` buffer).
 
 ## 6. Versioning
 

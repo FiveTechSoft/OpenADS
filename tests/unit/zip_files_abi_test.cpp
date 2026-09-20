@@ -6,6 +6,7 @@
 
 #include "doctest.h"
 #include "openads/ace.h"
+#include "engine/zip_arch.h"
 #include "network/server.h"
 
 #include <cctype>
@@ -13,6 +14,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <set>
 #include <string>
 
 namespace fs = std::filesystem;
@@ -363,6 +365,179 @@ TEST_CASE("zip: remote roundtrip over the wire") {
                           (UNSIGNED8*)"", 0, 0, &n, &nb, &ab) == 0);
     CHECK(n == 1u);
     CHECK(fs::is_regular_file(dir / "back" / "w.dbf"));
+
+    REQUIRE(AdsDisconnect(hConn) == 0);
+    srv.stop();
+    fs::remove_all(dir, ec);
+}
+
+struct ZipListOut {
+    std::vector<openads::engine::zip_arch::ZipEntry> entries;
+    UNSIGNED32 count = 0;
+    UNSIGNED32 rc   = 1;
+};
+
+ZipListOut do_list(ADSHANDLE hConn, const char* zip) {
+    ZipListOut o;
+    std::string z = zip ? zip : "";
+    std::vector<UNSIGNED8> zb(z.begin(), z.end());
+    zb.push_back(0);
+    UNSIGNED32 len = 0;
+    // Two-pass like the Harbour wrapper: size probe, then fetch.
+    // (A valid but empty archive probes len 0 with rc 0 on refetch.)
+    AdsZipListFiles(hConn, zb.data(), nullptr, &len, &o.count);
+    std::vector<std::uint8_t> buf(len);
+    o.rc = AdsZipListFiles(hConn, zb.data(), buf.data(), &len, &o.count);
+    if (o.rc != 0) {
+        o.count = 0;
+        return o;
+    }
+    std::size_t off = 0;
+    while (off < buf.size()) {
+        openads::engine::zip_arch::ZipEntry e;
+        if (!openads::engine::zip_arch::unpack_zip_entry(buf, off, e)) {
+            o.rc = 1;
+            o.count = 0;
+            o.entries.clear();
+            return o;
+        }
+        o.entries.push_back(std::move(e));
+    }
+    return o;
+}
+
+TEST_CASE("zip: list count + names (local)") {
+    LocalDb db("openads_zip_list");
+    db.make_table("acc.dbf", 3);
+    {
+        std::ofstream(db.dir / "note.txt") << "hello";
+    }
+
+    std::string files = std::string("acc.dbf") + '\x1F' + "note.txt";
+    ZipOut z = do_zip(db.hConn, ".", files.c_str(), "LST");
+    REQUIRE_MESSAGE(z.rc == 0, z.rc);
+
+    ZipListOut l = do_list(db.hConn, z.archive.c_str());
+    REQUIRE_MESSAGE(l.rc == 0, l.rc);
+    CHECK(l.count == 2u);
+    REQUIRE(l.entries.size() == 2u);
+    std::set<std::string> names;
+    for (const auto& e : l.entries) names.insert(e.name);
+    CHECK(names.count("acc.dbf") == 1u);
+    CHECK(names.count("note.txt") == 1u);
+}
+
+TEST_CASE("zip: list verbose fields (local)") {
+    LocalDb db("openads_zip_verbose");
+    db.make_table("v.dbf", 2);
+    // Compressible payload: deflate must win over storing.
+    std::string payload(2000, 'a');
+    {
+        std::ofstream(db.dir / "v.txt") << payload;
+    }
+
+    std::string files = std::string("v.dbf") + '\x1F' + "v.txt";
+    ZipOut z = do_zip(db.hConn, ".", files.c_str(), "VERB");
+    REQUIRE_MESSAGE(z.rc == 0, z.rc);
+
+    ZipListOut l = do_list(db.hConn, z.archive.c_str());
+    REQUIRE_MESSAGE(l.rc == 0, l.rc);
+    REQUIRE(l.entries.size() == 2u);
+
+    const openads::engine::zip_arch::ZipEntry* dbf = nullptr;
+    const openads::engine::zip_arch::ZipEntry* txt = nullptr;
+    for (const auto& e : l.entries) {
+        if (e.name == "v.dbf") dbf = &e;
+        if (e.name == "v.txt") txt = &e;
+    }
+    REQUIRE(dbf != nullptr);
+    REQUIRE(txt != nullptr);
+    // Sizes match the on-disk sources.
+    CHECK(dbf->size == static_cast<std::uint64_t>(
+                          db.read_file(db.dir / "v.dbf").size()));
+    CHECK(txt->size == payload.size());
+    CHECK(txt->comp_size > 0u);
+    CHECK(txt->comp_size <= txt->size);
+    // Fresh files: sane timestamps, unencrypted, comment-free.
+    CHECK(dbf->year >= 2020u);
+    CHECK(txt->year >= 2020u);
+    CHECK(dbf->mon >= 1u);
+    CHECK(dbf->mon <= 12u);
+    CHECK_FALSE(dbf->encrypted);
+    CHECK_FALSE(txt->encrypted);
+    CHECK(dbf->comment.empty());
+    // Method is a real minizip method id (store/deflate here).
+    CHECK((dbf->method == 0u || dbf->method == 8u));
+    // Harbour NULL-count tolerance: the count out-param is optional.
+    {
+        std::string za = z.archive;
+        std::vector<UNSIGNED8> zb(za.begin(), za.end());
+        zb.push_back(0);
+        UNSIGNED32 len = 0;
+        AdsZipListFiles(db.hConn, zb.data(), nullptr, &len, nullptr);
+        std::vector<std::uint8_t> buf(len);
+        CHECK(AdsZipListFiles(db.hConn, zb.data(), buf.data(), &len,
+                              nullptr) == 0);
+    }
+}
+
+TEST_CASE("zip: list missing archive and escape fail loud") {
+    LocalDb db("openads_zip_list_bad");
+    db.make_table("b.dbf", 1);
+
+    ZipListOut m = do_list(db.hConn, "backup/nope_20000101.zip");
+    CHECK(m.rc != 0);
+    CHECK(m.count == 0u);
+    CHECK(m.entries.empty());
+
+    ZipListOut e = do_list(db.hConn, "../evil");
+    CHECK(e.rc != 0);
+    CHECK(e.count == 0u);
+}
+
+TEST_CASE("zip: remote list roundtrip over the wire") {
+    namespace fs = std::filesystem;
+    auto dir = fs::temp_directory_path() / "openads_zip_list_wire";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir, ec);
+
+    openads::network::Server srv;
+    REQUIRE(srv.start("127.0.0.1", 0).has_value());
+
+    char uri[512];
+    std::snprintf(uri, sizeof(uri), "tcp://127.0.0.1:%u/%s",
+                  static_cast<unsigned>(srv.port()),
+                  dir.string().c_str());
+    std::vector<UNSIGNED8> ub(uri, uri + std::strlen(uri) + 1);
+    ADSHANDLE hConn = 0;
+    REQUIRE(AdsConnect60(ub.data(), ADS_REMOTE_SERVER, nullptr,
+                         nullptr, 0, &hConn) == 0);
+
+    UNSIGNED8 def[] = "NAME,C,10,0";
+    UNSIGNED8 tname[] = "wl.dbf";
+    ADSHANDLE hT = 0;
+    REQUIRE(AdsCreateTable(hConn, tname, nullptr, ADS_CDX, 0, 0, 0, 0,
+                           def, &hT) == 0);
+    UNSIGNED8 f[] = "NAME";
+    REQUIRE(AdsAppendRecord(hT) == 0);
+    REQUIRE(AdsSetString(hT, f, (UNSIGNED8*)"wire", 4) == 0);
+    REQUIRE(AdsWriteRecord(hT) == 0);
+    REQUIRE(AdsCloseTable(hT) == 0);
+
+    ZipOut z = do_zip(hConn, ".", "wl.dbf", "WIRELIST");
+    REQUIRE_MESSAGE(z.rc == 0, z.rc);
+
+    // Bare name, slashed spelling, and missing archive over the wire.
+    ZipListOut l = do_list(hConn, z.archive.c_str());
+    REQUIRE_MESSAGE(l.rc == 0, l.rc);
+    CHECK(l.count == 1u);
+    REQUIRE(l.entries.size() == 1u);
+    CHECK(l.entries[0].name == "wl.dbf");
+    CHECK(l.entries[0].size > 0u);
+
+    ZipListOut m = do_list(hConn, "backup/nope_20000101.zip");
+    CHECK(m.rc != 0);
 
     REQUIRE(AdsDisconnect(hConn) == 0);
     srv.stop();

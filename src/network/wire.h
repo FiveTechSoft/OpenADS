@@ -304,6 +304,15 @@ enum class Opcode : std::uint8_t {
     //   [u32 files][u64 bytes][u64 archiveBytes]
     UnzipArchive        = 0x19,
     UnzipArchiveAck     = 0x1A,
+    // Central-directory listing (OAds_ZipFileCount/OAds_ZipFileList).
+    // Connection-level op (no table id); the archive spelling follows
+    // the unzip rule (bare names under backup/). NOT gated by
+    // EnableFileFunc. Needs no password (contents stay encrypted).
+    // Request ZipList:  [u16 zipLen][zip]
+    // Reply ZipListAck: [u32 count][packed ZipEntry records, see
+    //   engine/zip_arch.h pack_zip_entry; length-gated parse]
+    ZipList             = 0x1B,
+    ZipListAck          = 0x1C,
 
     // M12.29 — AdsDD* Data Dictionary property API, phase 1. Previously
     // every AdsDD* getter/setter silently returned empty/no-op over a

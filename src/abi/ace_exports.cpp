@@ -10333,6 +10333,50 @@ UNSIGNED32 ENTRYPOINT AdsUnzipFiles(ADSHANDLE hConnect,
     return ok();
 }
 
+// Central-directory listing for OAds_ZipFileCount/OAds_ZipFileList.
+// Packed entry layout: see engine::pack_zip_entry. Two-pass buffer
+// protocol like AdsDirectory (null/short buffer -> INSUFFICIENT and
+// the required size); pulCount is optional and always filled with
+// the entry count (0 on error paths that get that far).
+UNSIGNED32 ENTRYPOINT AdsZipListFiles(ADSHANDLE hConnect,
+                           UNSIGNED8* pucZip, UNSIGNED8* pucBuffer,
+                           UNSIGNED32* pulBufLen, UNSIGNED32* pulCount) {
+    arc2_trace("AdsZipListFiles");
+    if (!pucZip || !pulBufLen)
+        return fail(openads::AE_INTERNAL_ERROR, "null arg");
+    const std::string zip = openads::abi::to_internal(pucZip, 0);
+    auto ctx = resolve_fs_conn(hConnect);
+    std::vector<openads::engine::zip_arch::ZipEntry> entries;
+    if (ctx.remote) {
+        auto r = ctx.remote->zip_list(zip);
+        if (!r) return fail(r.error());
+        entries = std::move(r.value().entries);
+    } else {
+        if (!ctx.local)
+            return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
+        auto r = ctx.local->zip_list(zip);
+        if (!r) return fail(r.error());
+        entries = std::move(r.value());
+    }
+    if (entries.size() > 0xFFFFFFu)
+        return fail(openads::AE_INTERNAL_ERROR, "AdsZipListFiles: too many");
+    if (pulCount != nullptr)
+        *pulCount = static_cast<UNSIGNED32>(entries.size());
+    std::vector<std::uint8_t> packed;
+    for (const auto& e : entries)
+        openads::engine::zip_arch::pack_zip_entry(e, packed);
+    if (packed.size() > 16u * 1024u * 1024u)
+        return fail(openads::AE_INTERNAL_ERROR, "AdsZipListFiles: too large");
+    UNSIGNED32 need = static_cast<UNSIGNED32>(packed.size());
+    if (!pucBuffer || *pulBufLen < need) {
+        *pulBufLen = need;
+        return fail(openads::AE_INSUFFICIENT_BUFFER, "AdsZipListFiles");
+    }
+    if (need) std::memcpy(pucBuffer, packed.data(), need);
+    *pulBufLen = need;
+    return ok();
+}
+
 UNSIGNED32 ENTRYPOINT AdsRenameFile(ADSHANDLE hConn, UNSIGNED8* pucOld,
                                     UNSIGNED8* pucNew) {
     arc2_trace("AdsRenameFile");

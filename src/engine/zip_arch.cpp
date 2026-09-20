@@ -427,4 +427,184 @@ util::Result<std::vector<std::string>> list_entries(
     return names;
 }
 
+namespace {
+
+// Little-endian appends for pack_zip_entry (self-contained; the
+// server_fs TU owns an identical private set — not shared on purpose,
+// these two packings must never drift into one layout).
+void ze_u16(std::vector<std::uint8_t>& o, std::uint16_t v) {
+    o.push_back(static_cast<std::uint8_t>(v & 0xFF));
+    o.push_back(static_cast<std::uint8_t>((v >> 8) & 0xFF));
+}
+void ze_u32(std::vector<std::uint8_t>& o, std::uint32_t v) {
+    for (int i = 0; i < 4; ++i)
+        o.push_back(static_cast<std::uint8_t>((v >> (8 * i)) & 0xFF));
+}
+void ze_u64(std::vector<std::uint8_t>& o, std::uint64_t v) {
+    for (int i = 0; i < 8; ++i)
+        o.push_back(static_cast<std::uint8_t>((v >> (8 * i)) & 0xFF));
+}
+std::uint16_t ze_r16(const std::uint8_t* p) {
+    return static_cast<std::uint16_t>(p[0] | (p[1] << 8));
+}
+std::uint32_t ze_r32(const std::uint8_t* p) {
+    return static_cast<std::uint32_t>(p[0]) |
+           (static_cast<std::uint32_t>(p[1]) << 8) |
+           (static_cast<std::uint32_t>(p[2]) << 16) |
+           (static_cast<std::uint32_t>(p[3]) << 24);
+}
+std::uint64_t ze_r64(const std::uint8_t* p) {
+    std::uint64_t v = 0;
+    for (int i = 0; i < 8; ++i)
+        v |= static_cast<std::uint64_t>(p[i]) << (8 * i);
+    return v;
+}
+
+}  // namespace
+
+void pack_zip_entry(const ZipEntry& e, std::vector<std::uint8_t>& out) {
+    const std::uint16_t n = e.name.size() > 0xFFFF
+                                ? 0xFFFF
+                                : static_cast<std::uint16_t>(e.name.size());
+    const std::uint16_t c =
+        e.comment.size() > 0xFFFF
+            ? 0xFFFF
+            : static_cast<std::uint16_t>(e.comment.size());
+    ze_u16(out, n);
+    out.insert(out.end(), e.name.begin(), e.name.begin() + n);
+    ze_u64(out, e.size);
+    ze_u64(out, e.comp_size);
+    ze_u16(out, e.method);
+    ze_u32(out, e.crc);
+    ze_u16(out, e.year);
+    out.push_back(e.mon);
+    out.push_back(e.day);
+    out.push_back(e.hh);
+    out.push_back(e.mm);
+    out.push_back(e.ss);
+    ze_u16(out, e.internal_attr);
+    ze_u32(out, e.external_attr);
+    out.push_back(e.encrypted ? 1 : 0);
+    ze_u16(out, c);
+    out.insert(out.end(), e.comment.begin(), e.comment.begin() + c);
+}
+
+bool unpack_zip_entry(const std::vector<std::uint8_t>& pl, std::size_t& off,
+                      ZipEntry& e) {
+    // Fixed tail after the name+comment sums to 38 bytes; anything
+    // shorter is a truncated or hostile payload.
+    if (off + 2 > pl.size()) return false;
+    const auto n = ze_r16(pl.data() + off);
+    off += 2;
+    if (off + n + 38 > pl.size()) return false;
+    e.name.assign(reinterpret_cast<const char*>(pl.data() + off), n);
+    off += n;
+    e.size = ze_r64(pl.data() + off);
+    off += 8;
+    e.comp_size = ze_r64(pl.data() + off);
+    off += 8;
+    e.method = ze_r16(pl.data() + off);
+    off += 2;
+    e.crc = ze_r32(pl.data() + off);
+    off += 4;
+    e.year = ze_r16(pl.data() + off);
+    off += 2;
+    e.mon = pl[off++];
+    e.day = pl[off++];
+    e.hh = pl[off++];
+    e.mm = pl[off++];
+    e.ss = pl[off++];
+    e.internal_attr = ze_r16(pl.data() + off);
+    off += 2;
+    e.external_attr = ze_r32(pl.data() + off);
+    off += 4;
+    e.encrypted = pl[off++] != 0;
+    const auto c = ze_r16(pl.data() + off);
+    off += 2;
+    if (off + c > pl.size()) return false;
+    e.comment.assign(reinterpret_cast<const char*>(pl.data() + off), c);
+    off += c;
+    return true;
+}
+
+util::Result<std::vector<ZipEntry>> list_detailed(
+    const std::string& archive_abs) {
+    std::error_code ec;
+    if (!fs::is_regular_file(archive_abs, ec) || ec)
+        return make_error(openads::AE_NO_FILE_FOUND,
+                          "ziplist: archive not found: " + archive_abs);
+    unzFile uf = unzOpen64(archive_abs.c_str());
+    if (uf == nullptr)
+        return make_error(openads::AE_TABLE_CORRUPTED,
+                          "ziplist: not a readable archive: " + archive_abs);
+    std::vector<ZipEntry> out;
+    std::vector<char> namebuf(1024);
+    std::vector<char> cmtbuf(256);
+    int go = unzGoToFirstFile(uf);
+    while (go == UNZ_OK) {
+        unz_file_info64 info{};
+        if (unzGetCurrentFileInfo64(uf, &info, namebuf.data(),
+                                    static_cast<uLong>(namebuf.size()),
+                                    nullptr, 0, cmtbuf.data(),
+                                    static_cast<uLong>(cmtbuf.size())) !=
+            UNZ_OK) {
+            unzClose(uf);
+            return make_error(openads::AE_INTERNAL_ERROR,
+                              "ziplist: cannot read entry info");
+        }
+        // Names/comments past the working buffers are re-queried at
+        // exact size (position is unchanged by a failed-size query);
+        // absurd sizes mean a corrupt archive, not a big name.
+        if (info.size_filename >= namebuf.size() ||
+            info.size_file_comment >= cmtbuf.size()) {
+            if (info.size_filename > 0xFFFFu ||
+                info.size_file_comment > 0xFFFFu) {
+                unzClose(uf);
+                return make_error(openads::AE_TABLE_CORRUPTED,
+                                  "ziplist: entry too large");
+            }
+            namebuf.assign(info.size_filename + 1, 0);
+            cmtbuf.assign(info.size_file_comment + 1, 0);
+            if (unzGetCurrentFileInfo64(
+                    uf, &info, namebuf.data(),
+                    static_cast<uLong>(namebuf.size()), nullptr, 0,
+                    cmtbuf.data(),
+                    static_cast<uLong>(cmtbuf.size())) != UNZ_OK) {
+                unzClose(uf);
+                return make_error(openads::AE_INTERNAL_ERROR,
+                                  "ziplist: cannot read entry info");
+            }
+        }
+        ZipEntry e;
+        e.name = to_entry_seps(std::string(
+            namebuf.data(),
+            strnlen(namebuf.data(), namebuf.size())));
+        e.size = info.uncompressed_size;
+        e.comp_size = info.compressed_size;
+        e.method = static_cast<std::uint16_t>(info.compression_method);
+        e.crc = static_cast<std::uint32_t>(info.crc);
+        if (info.tmu_date.tm_year >= 1980) {
+            e.year = static_cast<std::uint16_t>(info.tmu_date.tm_year);
+            e.mon = static_cast<std::uint8_t>(info.tmu_date.tm_mon + 1);
+            e.day = static_cast<std::uint8_t>(info.tmu_date.tm_mday);
+            e.hh = static_cast<std::uint8_t>(info.tmu_date.tm_hour);
+            e.mm = static_cast<std::uint8_t>(info.tmu_date.tm_min);
+            e.ss = static_cast<std::uint8_t>(info.tmu_date.tm_sec);
+        }
+        e.internal_attr =
+            static_cast<std::uint16_t>(info.internal_fa);
+        e.external_attr = static_cast<std::uint32_t>(info.external_fa);
+        e.encrypted = (info.flag & 1u) != 0u;
+        e.comment = std::string(cmtbuf.data(),
+                                strnlen(cmtbuf.data(), cmtbuf.size()));
+        out.push_back(std::move(e));
+        go = unzGoToNextFile(uf);
+    }
+    unzClose(uf);
+    if (go != UNZ_END_OF_LIST_OF_FILE)
+        return make_error(openads::AE_INTERNAL_ERROR,
+                          "ziplist: archive walk failed");
+    return out;
+}
+
 }  // namespace openads::engine::zip_arch

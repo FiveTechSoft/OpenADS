@@ -260,6 +260,14 @@ public:
     util::Result<engine::zip_arch::Stats> unzip_archive(
         const std::string& dir, const std::string& zip,
         const std::string& password, bool overwrite, bool with_path);
+    // Central-directory listing for the zip-list family
+    // (OAds_ZipFileCount/OAds_ZipFileList via AdsZipListFiles, local
+    // or wire). Bare archive names are searched across every root's
+    // backup/ directory in order (the round-trip spelling zip_archive
+    // reports); anything else resolves under the jail directly —
+    // the same rule as unzip_archive. Needs no password.
+    util::Result<std::vector<engine::zip_arch::ZipEntry>> zip_list(
+        const std::string& zip);
 
 private:
     util::Result<void> recover_orphan_tx_();

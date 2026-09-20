@@ -58,4 +58,34 @@ util::Result<Stats> unzip_files(const std::string& archive_abs,
 util::Result<std::vector<std::string>> list_entries(
     const std::string& archive_abs);
 
+// One central-directory entry with the fields hb_GetFilesInZip's
+// verbose form reports (plus the raw attribute words). Reads the
+// central directory only — needs no password.
+struct ZipEntry {
+    std::string   name;                 // '/'-separated, as stored
+    std::uint64_t size      = 0;        // uncompressed bytes
+    std::uint64_t comp_size = 0;        // stored bytes
+    std::uint16_t method    = 0;        // 0 = store, 8 = deflate
+    std::uint32_t crc       = 0;        // IEEE CRC-32 of the data
+    std::uint16_t year = 0;             // full year, 0 = unknown
+    std::uint8_t  mon = 0, day = 0, hh = 0, mm = 0, ss = 0;
+    std::uint16_t internal_attr = 0;
+    std::uint32_t external_attr = 0;    // DOS attrs in the low byte
+    bool          encrypted = false;    // general-purpose flag bit 0
+    std::string comment;                // per-file comment (often empty)
+};
+
+util::Result<std::vector<ZipEntry>> list_detailed(
+    const std::string& archive_abs);
+
+// Packed entry layout shared by the ZipList wire payload and the
+// AdsZipListFiles buffer (all integers little-endian):
+//   [u16 nameLen][name][u64 size][u64 compSize][u16 method][u32 crc]
+//   [u16 year][u8 mon][u8 day][u8 hh][u8 mm][u8 ss]
+//   [u16 internalAttr][u32 externalAttr][u8 encrypted]
+//   [u16 commentLen][comment]
+void pack_zip_entry(const ZipEntry& e, std::vector<std::uint8_t>& out);
+bool unpack_zip_entry(const std::vector<std::uint8_t>& pl,
+                      std::size_t& off, ZipEntry& e);
+
 }  // namespace openads::engine::zip_arch

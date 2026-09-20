@@ -139,11 +139,20 @@ UNSIGNED32 ENTRYPOINT AdsZipFiles      (ADSHANDLE  hConnect,
                               UNSIGNED32* pulFiles, UNSIGNED64* pullBytes,
                               UNSIGNED64* pullArchiveBytes);
 UNSIGNED32 ENTRYPOINT AdsUnzipFiles    (ADSHANDLE  hConnect,
-                              UNSIGNED8* pucDir, UNSIGNED8* pucZip,
-                              UNSIGNED8* pucPassword, UNSIGNED16 usOverwrite,
-                              UNSIGNED16 usWithPath,
-                              UNSIGNED32* pulFiles, UNSIGNED64* pullBytes,
-                              UNSIGNED64* pullArchiveBytes);
+                               UNSIGNED8* pucDir, UNSIGNED8* pucZip,
+                               UNSIGNED8* pucPassword, UNSIGNED16 usOverwrite,
+                               UNSIGNED16 usWithPath,
+                               UNSIGNED32* pulFiles, UNSIGNED64* pullBytes,
+                               UNSIGNED64* pullArchiveBytes);
+// Central-directory listing (OAds_ZipFileCount/OAds_ZipFileList):
+// packed ZipEntry records (see engine pack_zip_entry layout) with
+// the AdsDirectory two-pass buffer protocol (null/short buffer ->
+// AE_INSUFFICIENT_BUFFER + required size in *pulBufLen). pulCount is
+// optional and always receives the entry count. The archive spelling
+// follows the unzip rule (bare names under backup/).
+UNSIGNED32 ENTRYPOINT AdsZipListFiles  (ADSHANDLE  hConnect,
+                               UNSIGNED8* pucZip, UNSIGNED8* pucBuffer,
+                               UNSIGNED32* pulBufLen, UNSIGNED32* pulCount);
 UNSIGNED32 ENTRYPOINT AdsFOpen         (ADSHANDLE  hConnect, UNSIGNED8* pucName,
                               UNSIGNED16 usMode, ADSHANDLE* phFile);
 UNSIGNED32 ENTRYPOINT AdsFCreate       (ADSHANDLE  hConnect, UNSIGNED8* pucName,

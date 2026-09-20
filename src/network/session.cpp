@@ -4016,6 +4016,44 @@ DispatchResult Session::dispatch(const Frame& f) {
             }
             break;
         }
+        case Opcode::ZipList: {
+            // Central-directory listing (OAds_ZipFileCount/List).
+            // Database op — NOT gated by EnableFileFunc.
+            if (!sess_conn_) {
+                reply = err("zip: not connected",
+                            openads::AE_NO_CONNECTION);
+                break;
+            }
+            std::size_t pos = 0;
+            std::string zip;
+            if (!read_lstr16(f.payload, pos, zip) ||
+                pos != f.payload.size()) {
+                reply = err("ZipList: bad payload");
+                break;
+            }
+            auto r = sess_conn_->zip_list(zip);
+            if (!r) {
+                reply = err("ZipList",
+                            static_cast<UNSIGNED32>(r.error().code));
+                break;
+            }
+            std::vector<std::uint8_t> packed;
+            for (const auto& e : r.value())
+                openads::engine::zip_arch::pack_zip_entry(e, packed);
+            if (packed.size() > 16u * 1024u * 1024u) {
+                reply = err("ZipList",
+                            static_cast<UNSIGNED32>(
+                                openads::AE_INTERNAL_ERROR));
+                break;
+            }
+            reply.opcode = Opcode::ZipListAck;
+            write_u32_le(
+                static_cast<std::uint32_t>(r.value().size()),
+                reply.payload);
+            reply.payload.insert(reply.payload.end(), packed.begin(),
+                                 packed.end());
+            break;
+        }
         case Opcode::SkipUnique: {
             if (f.payload.size() < 8) { reply = err("SkipUnique: bad payload"); break; }
             std::uint32_t iid = read_u32_le(f.payload.data());

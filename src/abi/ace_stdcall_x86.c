@@ -1320,6 +1320,18 @@ __declspec(dllexport) UNSIGNED32 __stdcall AdsUnzipFiles(ADSHANDLE a0, UNSIGNED8
     return rc;
 }
 
+/* ---- AdsZipListFiles ---- */
+#define AdsZipListFiles oadsimpl_AdsZipListFiles
+extern UNSIGNED32 ENTRYPOINT AdsZipListFiles(ADSHANDLE hConnect, UNSIGNED8* pucZip, UNSIGNED8* pucBuffer, UNSIGNED32* pulBufLen, UNSIGNED32* pulCount);
+#undef AdsZipListFiles
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsZipListFiles=_AdsZipListFiles")
+#pragma comment(linker, "/export:AdsZipListFiles=_AdsZipListFiles")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsZipListFiles(ADSHANDLE a0, UNSIGNED8* a1, UNSIGNED8* a2, UNSIGNED32* a3, UNSIGNED32* a4) {
+    UNSIGNED32 rc = oadsimpl_AdsZipListFiles(a0, a1, a2, a3, a4);
+    arc_log_rc("AdsZipListFiles", rc, 5, (uintptr_t)a0, (uintptr_t)a1, (uintptr_t)a2, (uintptr_t)a3, (uintptr_t)a4);
+    return rc;
+}
+
 /* ---- AdsDirectory ---- */
 #define AdsDirectory oadsimpl_AdsDirectory
 extern UNSIGNED32 ENTRYPOINT AdsDirectory(ADSHANDLE hConnect, UNSIGNED8* pucMask, UNSIGNED16 usAttr, UNSIGNED8* pucBuffer, UNSIGNED32* pulBufLen);

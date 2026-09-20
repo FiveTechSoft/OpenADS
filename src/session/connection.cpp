@@ -1397,6 +1397,36 @@ util::Result<engine::zip_arch::Stats> Connection::unzip_archive(
     return engine::zip_arch::unzip_files(archive, *dest, opt);
 }
 
+util::Result<std::vector<engine::zip_arch::ZipEntry>> Connection::zip_list(
+    const std::string& zip) {
+    const auto roots = platform::split_data_roots(data_dir_);
+    if (roots.empty())
+        return util::Error{5000, 0, "ziplist: no data directory", ""};
+    // Bare archive names resolve under a root's backup/ (the
+    // round-trip spelling zip_archive reports); anything else
+    // resolves under the jail directly — same rule as unzip_archive.
+    std::string archive;
+    if (zip.find_first_of("/\\:") == std::string::npos) {
+        std::error_code ec;
+        for (const auto& r : roots) {
+            const std::string cand =
+                (fs::path(r) / "backup" / zip).string();
+            if (fs::is_regular_file(cand, ec) && !ec) {
+                archive = cand;
+                break;
+            }
+        }
+    }
+    if (archive.empty()) {
+        auto r = platform::resolve_fs_path(roots, zip);
+        if (!r)
+            return util::Error{7079, 0,
+                               "ziplist: path outside data directory", zip};
+        archive = std::move(*r);
+    }
+    return engine::zip_arch::list_detailed(archive);
+}
+
 void Connection::set_encryption_password(const std::string& password) {
     // M11.2 — PBKDF2-HMAC-SHA256 for new tables (header 0xC4). Legacy
     // tables (0xC3) still use zero-padded password bytes.
