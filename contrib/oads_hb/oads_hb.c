@@ -997,8 +997,11 @@ HB_FUNC( OADS_ZIP )
 /* ------------------------------------------------------------------ */
 /*  OAds_UnZip( [hConn,] cDirName, cZip [, cPassword [, lOverwrite      */
 /*              [, lWithPath ]]] )                                     */
+/*  OAds_UnZip( [hConn,] cZip )  -- extract next to the archive        */
 /*    -> { nFiles, nBytes, nArchiveBytes }, NIL on failure             */
 /*  Extract a server-side archive (bare names resolve under backup/).  */
+/*  An empty or omitted destination extracts next to the archive       */
+/*  (hb_UnzipFile default: the archive's own directory).               */
 /* ------------------------------------------------------------------ */
 HB_FUNC( OADS_UNZIP )
 {
@@ -1011,7 +1014,9 @@ HB_FUNC( OADS_UNZIP )
     UNSIGNED32  ulRc;
     PHB_ITEM    pRet;
 
-    if( hb_pcount() >= 6 )
+    /* hConn is optional but arities overlap, so sniff the first
+       param: numeric -> explicit handle (as in OADS_ZIP). */
+    if( hb_pcount() >= 2 && hb_param( 1, HB_IT_NUMERIC ) != NULL )
     {
         hConn = ( ADSHANDLE ) hb_parnint( 1 );
         base  = 1;
@@ -1021,18 +1026,30 @@ HB_FUNC( OADS_UNZIP )
         AdsGetDefaultConnection( &hConn );
         base = 0;
     }
-    if( hb_pcount() < base + 2 )
+    if( hb_pcount() < base + 1 )
     {
         hb_ret();
         return;
     }
-    szDir       = hb_parc( base + 1 );
-    szZip       = hb_parc( base + 2 );
+    if( hb_pcount() < base + 2 )
+    {
+        /* Single positional: the archive; destination defaults to
+           the archive's own directory (hb_UnzipFile cPath rule). */
+        szDir = "";
+        szZip = hb_parc( base + 1 );
+    }
+    else
+    {
+        szDir = hb_parc( base + 1 );
+        szZip = hb_parc( base + 2 );
+        if( szDir == NULL )
+            szDir = "";
+    }
     szPassword  = hb_parc( base + 3 );
     usOverwrite = ( UNSIGNED16 ) ( hb_parl( base + 4 ) ? 1 : 0 );
     usWithPath  = ( UNSIGNED16 ) ( hb_parl( base + 5 ) ? 1 : 0 );
 
-    if( szDir == NULL || szZip == NULL )
+    if( szZip == NULL )
     {
         hb_ret();
         return;

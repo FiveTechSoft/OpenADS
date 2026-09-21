@@ -6,6 +6,15 @@
 
 ---
 
+## 2026-09-20 — UnZip destination defaults to archive's dir (v1.09.68)
+
+Field gap (hb_UnzipFile parity): no way to say "extract where the
+zip is". Empty/omitted `cDir` now extracts next to the archive
+(bare names: into `backup/` beside it); explicit dirs unchanged
+under the same jail. Wrapper arg shuffling keeps old forms working
+(single positional = the zip). Suites added incl. a remote wire
+case, 17/17 green locally both archs. Released v1.09.68.
+
 ## 2026-09-20 — Zip listing (hbZipArc parity, v1.09.67)
 
 Field request: inspect server-side archives without extracting.

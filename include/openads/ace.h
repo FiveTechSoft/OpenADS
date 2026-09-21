@@ -144,6 +144,8 @@ UNSIGNED32 ENTRYPOINT AdsUnzipFiles    (ADSHANDLE  hConnect,
                                UNSIGNED16 usWithPath,
                                UNSIGNED32* pulFiles, UNSIGNED64* pullBytes,
                                UNSIGNED64* pullArchiveBytes);
+// An empty pucDir extracts next to the archive (hb_UnzipFile
+// default: the archive's own directory).
 // Central-directory listing (OAds_ZipFileCount/OAds_ZipFileList):
 // packed ZipEntry records (see engine pack_zip_entry layout) with
 // the AdsDirectory two-pass buffer protocol (null/short buffer ->

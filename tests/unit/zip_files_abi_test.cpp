@@ -195,6 +195,40 @@ TEST_CASE("zip: explicit subdir takes the filename verbatim") {
     CHECK(bad2.rc != 0);
 }
 
+TEST_CASE("zip: unzip with empty dir extracts next to the archive") {
+    LocalDb db("openads_zip_emptydir");
+    db.make_table("e.dbf", 2);
+    {
+        std::ofstream(db.dir / "e.txt") << "hi";
+    }
+
+    // Explicit subdir archive, then extract with no destination:
+    // files land beside the archive (hb_UnzipFile cPath default).
+    std::string files = std::string("e.dbf") + '\x1F' + "e.txt";
+    ZipOut z = do_zip(db.hConn, ".", files.c_str(), "myback/nextto");
+    REQUIRE_MESSAGE(z.rc == 0, z.rc);
+    CHECK(z.archive == "myback/nextto");
+
+    UNSIGNED32 n = 0;
+    UNSIGNED64 nb = 0, ab = 0;
+    REQUIRE(AdsUnzipFiles(db.hConn, (UNSIGNED8*)"",
+                          (UNSIGNED8*)z.archive.c_str(),
+                          (UNSIGNED8*)"", 1, 0, &n, &nb, &ab) == 0);
+    CHECK(n == 2u);
+    CHECK(db.read_file(db.dir / "myback" / "e.txt") == "hi");
+
+    // Bare dated name + empty dir: backup/ is both found and target.
+    ZipOut zl = do_zip(db.hConn, ".", "e.txt", "LEGACY");
+    REQUIRE_MESSAGE(zl.rc == 0, zl.rc);
+    fs::remove(db.dir / "e.txt");
+    REQUIRE(AdsUnzipFiles(db.hConn, (UNSIGNED8*)"",
+                          (UNSIGNED8*)zl.archive.c_str(),
+                          (UNSIGNED8*)"", 1, 0, &n, &nb, &ab) == 0);
+    CHECK(n == 1u);
+    CHECK(!fs::exists(db.dir / "e.txt"));
+    CHECK(db.read_file(db.dir / "backup" / "e.txt") == "hi");
+}
+
 namespace openads::abi {
 void set_connection_legacy_paths(ADSHANDLE hConnect, bool on);
 }
@@ -481,8 +515,7 @@ TEST_CASE("zip: list verbose fields (local)") {
     }
 }
 
-TEST_CASE("zip: list missing archive and escape fail loud") {
-    LocalDb db("openads_zip_list_bad");
+TEST_CASE("zip: list missing archive and escape fail loud") {    LocalDb db("openads_zip_list_bad");
     db.make_table("b.dbf", 1);
 
     ZipListOut m = do_list(db.hConn, "backup/nope_20000101.zip");
@@ -538,6 +571,14 @@ TEST_CASE("zip: remote list roundtrip over the wire") {
 
     ZipListOut m = do_list(hConn, "backup/nope_20000101.zip");
     CHECK(m.rc != 0);
+
+    // Empty destination over the wire: extracts next to the archive.
+    UNSIGNED32 n = 0;
+    UNSIGNED64 nb = 0, ab = 0;
+    REQUIRE(AdsUnzipFiles(hConn, (UNSIGNED8*)"",
+                          (UNSIGNED8*)z.archive.c_str(),
+                          (UNSIGNED8*)"", 1, 0, &n, &nb, &ab) == 0);
+    CHECK(n == 1u);
 
     REQUIRE(AdsDisconnect(hConn) == 0);
     srv.stop();

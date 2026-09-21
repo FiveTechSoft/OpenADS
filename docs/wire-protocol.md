@@ -838,6 +838,7 @@ file name on any OS); `u32` lengths where a file set can exceed
   `[u32 files][u64 bytes][u64 archiveBytes][u16 arcLen][archiveRel]`
 - `UnzipArchive`: `[u16 dirLen][dir][u16 zipLen][zip]`
   `[u16 pwdLen][password][u8 overwrite][u8 withPath]`
+  (empty `dir` extracts next to the archive)
 - `UnzipArchiveAck`: `[u32 files][u64 bytes][u64 archiveBytes]`
 - `ZipList` (central-directory listing, `OAds_ZipFileCount` /
   `OAds_ZipFileList`): `[u16 zipLen][zip]` (archive spelling follows

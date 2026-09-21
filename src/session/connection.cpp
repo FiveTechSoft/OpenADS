@@ -1333,33 +1333,53 @@ util::Result<engine::zip_arch::Stats> Connection::unzip_archive(
     const auto roots = platform::split_data_roots(data_dir_);
     if (roots.empty())
         return util::Error{5000, 0, "unzip: no data directory", ""};
-    auto dest = platform::resolve_fs_path(roots, dir);
-    if (!dest)
-        return util::Error{7079, 0, "unzip: path outside data directory",
-                           dir};
+    // Empty dir extracts next to the archive (hb_UnzipFile default:
+    // cPath falls back to the archive's own directory). Otherwise the
+    // dir is the extraction destination, resolved under the jail.
+    std::optional<std::string> dest;
+    std::string archive;
+    if (!dir.empty()) {
+        dest = platform::resolve_fs_path(roots, dir);
+        if (!dest)
+            return util::Error{7079, 0,
+                               "unzip: path outside data directory", dir};
+    }
     // Bare archive names resolve under the destination root's backup/
     // (the roundtrip spelling zip_archive reports); anything else
-    // resolves under the jail directly.
-    std::string archive;
+    // resolves under the jail directly. With no destination, bare
+    // names are searched across every root's backup/ in order (the
+    // zip_list rule).
     if (zip.find_first_of("/\\:") == std::string::npos) {
-        std::string root;
-        for (const auto& r : roots) {
-            const std::string rn = zip_norm_path(r);
-            const std::string sn = zip_norm_path(*dest);
-            if ((sn.size() > rn.size() &&
-                 sn.compare(0, rn.size(), rn) == 0 &&
-                 sn[rn.size()] == '/') ||
-                sn == rn) {
-                root = r;
-                break;
+        if (dest.has_value()) {
+            std::string root;
+            for (const auto& r : roots) {
+                const std::string rn = zip_norm_path(r);
+                const std::string sn = zip_norm_path(*dest);
+                if ((sn.size() > rn.size() &&
+                     sn.compare(0, rn.size(), rn) == 0 &&
+                     sn[rn.size()] == '/') ||
+                    sn == rn) {
+                    root = r;
+                    break;
+                }
+            }
+            if (root.empty()) root = roots.front();
+            const std::string cand =
+                (fs::path(root) / "backup" / zip).string();
+            std::error_code ec;
+            if (fs::is_regular_file(cand, ec) && !ec)
+                archive = cand;
+        } else {
+            std::error_code ec;
+            for (const auto& r : roots) {
+                const std::string cand =
+                    (fs::path(r) / "backup" / zip).string();
+                if (fs::is_regular_file(cand, ec) && !ec) {
+                    archive = cand;
+                    break;
+                }
             }
         }
-        if (root.empty()) root = roots.front();
-        const std::string cand =
-            (fs::path(root) / "backup" / zip).string();
-        std::error_code ec;
-        if (fs::is_regular_file(cand, ec) && !ec)
-            archive = cand;
     }
     if (archive.empty()) {
         auto r = platform::resolve_fs_path(roots, zip);
@@ -1368,6 +1388,8 @@ util::Result<engine::zip_arch::Stats> Connection::unzip_archive(
                                "unzip: path outside data directory", zip};
         archive = std::move(*r);
     }
+    if (!dest.has_value())
+        dest = fs::path(archive).parent_path().string();
     // Fail-if-open: enumerate targets first; any extraction target
     // open on this connection fails loud (AE_FILE_IN_USE) instead of
     // pulling the file out from under a live handle.
