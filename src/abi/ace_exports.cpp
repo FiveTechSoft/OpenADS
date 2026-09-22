@@ -18,6 +18,7 @@ using openads::abi::lock_retry_policy;
 #include "abi/backend_registry.h"
 #include "abi/charset.h"
 #include "abi/last_error.h"
+#include "abi/runtime.h"
 
 #include "engine/aof_eval.h"
 #include "engine/aof_expr.h"
@@ -157,21 +158,8 @@ extern thread_local bool g_field_read_raw;
 // registry Handle is 64-bit; centralise the (value-preserving) narrowing.
 ADSHANDLE to_ads_handle(Handle h) { return static_cast<ADSHANDLE>(h); }
 
-struct ProcessState {
-    // M10.36 -- recursive_mutex so UNION dispatch can re-enter
-    // AdsExecuteSQLDirect (used to materialise each member's cursor)
-    // while still holding the outer lock.
-    std::recursive_mutex                                          mu;
-    openads::session::HandleRegistry                              registry;
-    std::unordered_map<Handle, std::unique_ptr<Connection>>       conns;
-    // M12.33 â€” remote find handles (owned here, not in a Connection).
-    std::vector<std::unique_ptr<Connection::TableFind>>            remote_finds;
-};
-
-ProcessState& state() {
-    static ProcessState s;
-    return s;
-}
+using openads::abi::detail::ProcessState;
+using openads::abi::detail::state;
 
 // Serialise the file-creating entry points (AdsCreateTable local paths,
 // AdsCreateIndex61 native branch) PER TARGET PATH. All serverd sessions

@@ -219,9 +219,8 @@ if(OPENADS_WITH_TLS)
     set(MBEDTLS_INSTALL            OFF CACHE BOOL "" FORCE)
     FetchContent_Declare(
         mbedtls
-        GIT_REPOSITORY https://github.com/Mbed-TLS/mbedtls.git
-        GIT_TAG        v3.6.2
-        GIT_SHALLOW    TRUE
+        URL      https://github.com/Mbed-TLS/mbedtls/archive/refs/tags/v3.6.2.tar.gz
+        URL_HASH SHA256=f4a876b1f6921ad0aefb445f974ef62414d33928640b2c45555c5e64a196a1a8
     )
     FetchContent_MakeAvailable(mbedtls)
     message(STATUS "OpenADS: TLS enabled via vendored mbedtls 3.6.2 (statically linked)")
@@ -246,15 +245,13 @@ if(OPENADS_WITH_HTTP)
     set(JSON_Install    OFF CACHE BOOL "" FORCE)
     FetchContent_Declare(
         cpp_httplib
-        GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
-        GIT_TAG        v0.18.5
-        GIT_SHALLOW    TRUE
+        URL      https://github.com/yhirose/cpp-httplib/archive/refs/tags/v0.18.5.tar.gz
+        URL_HASH SHA256=731190e97acd63edce57cc3dacd496f57e7743bfc7933da7137cb3e93ec6c9a0
     )
     FetchContent_Declare(
         nlohmann_json
-        GIT_REPOSITORY https://github.com/nlohmann/json.git
-        GIT_TAG        v3.11.3
-        GIT_SHALLOW    TRUE
+        URL      https://github.com/nlohmann/json/archive/refs/tags/v3.11.3.tar.gz
+        URL_HASH SHA256=0d8ef5af7f9794e3263480193c491549b2ba6cc74bb018906202ada498a79406
     )
     set(JSON_BuildTests OFF CACHE INTERNAL "")
     FetchContent_MakeAvailable(cpp_httplib nlohmann_json)
@@ -278,8 +275,8 @@ if(NOT EXISTS "${_openads_zlib_dir}/zlib.h")
     include(FetchContent)
     FetchContent_Declare(
         zlib_src
-        URL https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz
-        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+        URL      https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz
+        URL_HASH SHA256=9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23
     )
     set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
     set(SKIP_INSTALL_ALL ON CACHE BOOL "" FORCE)
@@ -334,8 +331,8 @@ if(OPENADS_WITH_SQLITE)
             include(FetchContent)
             FetchContent_Declare(
                 sqlite_amalgamation
-                URL https://www.sqlite.org/2024/sqlite-amalgamation-3460100.zip
-                DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+                URL      https://www.sqlite.org/2024/sqlite-amalgamation-3460100.zip
+                URL_HASH SHA256=77823cb110929c2bcb0f5d48e4833b5c59a8a6e40cdea3936b99e199dbbe5784
             )
             FetchContent_MakeAvailable(sqlite_amalgamation)
             set(_openads_sqlite_src "${sqlite_amalgamation_SOURCE_DIR}/sqlite3.c")
