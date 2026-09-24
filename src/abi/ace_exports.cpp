@@ -13455,7 +13455,10 @@ UNSIGNED32 ENTRYPOINT AdsSetLogical(ADSHANDLE hTable, UNSIGNED8* pucField,
             return fail(openads::AE_COLUMN_NOT_FOUND, "");
         }
         std::string fname = rt->fields[i].name;
-        return remote_buffered_set(rt, fname, bValue ? "1" : "0");
+        // Send the DBF logical byte itself ('T'/'F'), not "1"/"0": servers
+        // that write strings through AdsSetString (twin handle) stored the
+        // '1' raw, which index FOR evaluation and DBFCDX read as .F.
+        return remote_buffered_set(rt, fname, bValue ? "T" : "F");
     }
     Table* t = get_table(hTable);
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");

@@ -762,6 +762,28 @@ util::Result<void> encode_field_string(const DbfField& f,
                 return {};
             }
             break;
+        case DbfFieldType::Logical:
+            // A logical arriving as a string (remote AdsSetLogical sends
+            // "1"/"0"; the server's twin-handle write path routes it through
+            // AdsSetString) must be normalized to the DBF 'T'/'F' byte. The
+            // generic memcpy below stored a raw '1', which the engine decoder
+            // (T/t/Y/y only) reads as .F. -- so a FOR "comple = .F." tag kept
+            // the record after it was set .T. -- while AdsGetLogical (which
+            // also accepts '1') reported .T. to the app. DBFCDX / SAP ADS read
+            // '1' as .F. as well. Blank stays blank (uninitialized logical).
+            if (f.length >= 1) {
+                const auto p = value.find_first_not_of(" .");
+                if (p == std::string::npos) {
+                    dst[0] = ' ';
+                } else {
+                    const char c = value[p];
+                    dst[0] = (c == 'T' || c == 't' || c == 'Y' || c == 'y' ||
+                              c == '1') ? 'T' : 'F';
+                }
+                for (std::size_t i = 1; i < f.length; ++i) dst[i] = ' ';
+                return {};
+            }
+            break;
         case DbfFieldType::AutoInc:
         case DbfFieldType::Time:
             if (f.length >= 4) {
