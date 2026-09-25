@@ -1,9 +1,17 @@
 #include "drivers/ntx/ntx_index.h"
 
+#include "platform/lock.h"
 #include "platform/time.h"
 
 #include <algorithm>
+#include <chrono>
+#include <condition_variable>
 #include <cstring>
+#include <filesystem>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <thread>
 
 namespace openads::drivers::ntx {
 
@@ -48,7 +56,244 @@ platform::OpenMode map_mode(IndexOpenMode m) {
     return platform::OpenMode::ReadOnly;
 }
 
+
+// ---------------------------------------------------------------------------
+// Process-wide per-file NTX lock registry (see NTX_LOCK_OFF in the header).
+//
+// One entry per canonical .ntx path. In-process access is a reader/writer
+// lock layered over the OS byte lock:
+//   - a write BATCH has a single owner thread (other threads wait, the same
+//     thread's other workareas on the same file join it); the OS byte is
+//     held EXCLUSIVE from the first mutation until the last joined flush();
+//   - READERS (header refresh + key-cache rebuild) take the OS byte SHARED
+//     once for all concurrent in-process readers and never while a batch is
+//     open. Writers wait for readers to drain before locking the OS byte.
+// Keeping both under one entry matters on POSIX, where fcntl locks merge
+// per process: a same-process shared request would otherwise downgrade an
+// in-flight exclusive batch, and a reader's unlock would drop it.
+struct NtxLockEntry {
+    std::mutex                          mu;
+    std::condition_variable             cv;
+    std::size_t                         users   = 0;   // joined batch refs
+    std::thread::id                     owner{};
+    std::size_t                         readers = 0;   // in-process readers
+    std::optional<platform::ByteLock>   excl;          // held while users>0
+    std::optional<platform::ByteLock>   shared;        // held while readers>0
+};
+
+std::mutex& ntx_registry_mu() {
+    static std::mutex mu;
+    return mu;
+}
+
+std::unordered_map<std::string, std::shared_ptr<NtxLockEntry>>&
+ntx_registry() {
+    static std::unordered_map<std::string, std::shared_ptr<NtxLockEntry>> m;
+    return m;
+}
+
+std::shared_ptr<NtxLockEntry> ntx_entry(const std::string& key, bool create) {
+    std::lock_guard<std::mutex> lk(ntx_registry_mu());
+    auto& m  = ntx_registry();
+    auto  it = m.find(key);
+    if (it != m.end()) return it->second;
+    if (!create) return nullptr;
+    auto e = std::make_shared<NtxLockEntry>();
+    m.emplace(key, e);
+    return e;
+}
+
+std::string ntx_canonical(const std::string& path) {
+    try {
+        // weakly_canonical resolves symlinks (/tmp -> /private/tmp on macOS)
+        // so two spellings of one file share a registry entry.
+        return std::filesystem::weakly_canonical(
+                   std::filesystem::path(path)).string();
+    } catch (...) {
+        return path;
+    }
+}
+
+// Harbour peers lock with FLX_WAIT (no give-up). Writers use a generous
+// budget (~10 s of solid contention); readers a small one and fall back to
+// the in-memory / unlocked view rather than stall navigation.
+util::Result<platform::ByteLock>
+acquire_ntx_os_lock(platform::File& f, platform::LockKind kind,
+                    int max_retries) {
+    util::Error last_err{5035, 0, "NTX index lock not acquired", ""};
+    for (int i = 0; i < max_retries; ++i) {
+        auto lk = platform::ByteLock::try_acquire(f, NTX_LOCK_OFF, 1, kind);
+        if (lk) return std::move(lk).value();
+        last_err = lk.error();
+        const auto us = 50 + (i * 25);
+        std::this_thread::sleep_for(
+            std::chrono::microseconds(us > 5000 ? 5000 : us));
+    }
+    return last_err;
+}
+
+constexpr int kNtxWriteRetries = 2000;
+constexpr int kNtxReadRetries  = 400;
+
+// RAII in-process reader registration. `locked` is true when the OS byte
+// is held shared for this reader (directly or through a concurrent
+// in-process reader); false means "proceed best-effort without a lock"
+// (a batch is open in this process, or the peer never released).
+class NtxReadGuard {
+public:
+    NtxReadGuard(const std::string& key, platform::File& f) {
+        e_ = ntx_entry(key, true);
+        std::lock_guard<std::mutex> elk(e_->mu);
+        if (e_->users > 0) { e_.reset(); return; }   // batch open: defer
+        if (e_->readers == 0) {
+            auto l = acquire_ntx_os_lock(f, platform::LockKind::Shared,
+                                         kNtxReadRetries);
+            if (!l) { e_.reset(); return; }          // best-effort fallback
+            e_->shared = std::move(l).value();
+        }
+        ++e_->readers;
+        locked_ = true;
+    }
+    ~NtxReadGuard() {
+        if (!e_ || !locked_) return;
+        try {
+            std::lock_guard<std::mutex> elk(e_->mu);
+            if (e_->readers > 0 && --e_->readers == 0) {
+                e_->shared.reset();
+                e_->cv.notify_all();
+            }
+        } catch (...) {
+        }
+    }
+    NtxReadGuard(const NtxReadGuard&) = delete;
+    NtxReadGuard& operator=(const NtxReadGuard&) = delete;
+
+    bool locked() const noexcept { return locked_; }
+
+private:
+    std::shared_ptr<NtxLockEntry> e_;
+    bool locked_ = false;
+};
+
 } // namespace
+
+void NtxWriteLockJoin::release() noexcept {
+    if (!joined) return;
+    joined = false;
+    try {
+        auto e = ntx_entry(path, false);
+        if (!e) return;
+        std::lock_guard<std::mutex> elk(e->mu);
+        if (e->users > 0 && --e->users == 0) {
+            e->owner = std::thread::id{};
+            e->excl.reset();          // let peers (other processes) in
+            e->cv.notify_all();
+        }
+    } catch (...) {
+        // noexcept: a registry hiccup must never throw through a dtor.
+    }
+}
+
+bool NtxIndex::has_dirty_pages_() const {
+    for (const auto& kv : dirty_) {
+        if (kv.second) return true;
+    }
+    return false;
+}
+
+util::Result<void> NtxIndex::ensure_write_lock_() {
+    if (write_lock_join_.joined) return {};
+    if (lock_key_.empty()) lock_key_ = ntx_canonical(file_path_);
+    auto e = ntx_entry(lock_key_, true);
+    const auto self = std::this_thread::get_id();
+    // Bound our in-process wait (Harbour peers wait forever): long enough
+    // for a big REINDEX on a peer thread, short enough to surface a
+    // deadlock between two workareas writing two files in opposite order.
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    {
+        std::unique_lock<std::mutex> elk(e->mu);
+        for (;;) {
+            if (e->users > 0 && e->owner == self) {
+                ++e->users;             // same thread, another workarea
+                break;
+            }
+            if (e->users == 0 && e->readers == 0) {
+                // Take the OS byte while holding e->mu so no in-process
+                // reader or writer can race us onto the same region.
+                auto l = acquire_ntx_os_lock(file_,
+                                             platform::LockKind::Exclusive,
+                                             kNtxWriteRetries);
+                if (!l) return l.error();
+                e->excl  = std::move(l).value();
+                e->owner = self;
+                e->users = 1;
+                break;
+            }
+            if (e->cv.wait_until(elk, deadline) == std::cv_status::timeout &&
+                !(e->users == 0 && e->readers == 0) &&
+                !(e->users > 0 && e->owner == self)) {
+                return util::Error{5012, 0,
+                    "NTX write lock: in-process wait timed out", file_path_};
+            }
+        }
+    }
+    write_lock_join_.path   = lock_key_;
+    write_lock_join_.joined = true;
+    // We may have waited behind a peer's batch: adopt its tree before
+    // mutating (Harbour hb_ntxIndexLockWrite + hb_ntxIndexHeaderRead).
+    if (has_dirty_pages_()) return {};
+    return reload_header_locked_();
+}
+
+util::Result<void> NtxIndex::reload_header_locked_() {
+    std::uint8_t h[12]{};
+    auto got = file_.read_at(0, h, sizeof(h));
+    if (!got) return got.error();
+    if (got.value() < sizeof(h)) {
+        return util::Error{6106, 0, "NTX header truncated on refresh",
+                           file_path_};
+    }
+    const std::uint16_t ver  = read_u16_le(h + 2);
+    const std::uint32_t root = read_u32_le(h + 4);
+    const std::uint32_t next = read_u32_le(h + 8);
+    if (ver == version_ && root == root_page_ && next == next_avail_) {
+        return {};
+    }
+    // Peer rewrite: drop every cached page / key so the next access
+    // re-reads from disk (hb_ntxDiscardBuffers).
+    page_cache_.clear();
+    dirty_.clear();
+    stack_.clear();
+    version_    = ver;
+    root_page_  = root;
+    next_avail_ = next;
+    cache_.clear();
+    cache_dirty_ = true;
+    cache_idx_   = -1;
+    invalidate_pos_cache();
+    return {};
+}
+
+util::Result<void> NtxIndex::reload_header_if_changed_() {
+    // Our own un-flushed batch owns the tree: keep local state.
+    if (has_dirty_pages_()) return {};
+    // Holding the batch (exclusive) already: the header is ours to read.
+    if (write_lock_join_.joined) return reload_header_locked_();
+    if (lock_key_.empty()) lock_key_ = ntx_canonical(file_path_);
+    NtxReadGuard g(lock_key_, file_);
+    if (!g.locked()) {
+        // An in-process batch is open, or a peer held the byte past our
+        // read budget: keep the current, consistent in-memory snapshot;
+        // the next call picks the change up.
+        return {};
+    }
+    return reload_header_locked_();
+}
+
+void NtxIndex::refresh_from_disk() {
+    (void)reload_header_if_changed_();
+}
 
 std::uint16_t NtxIndex::get_key_count(const Page& p) {
     return read_u16_le(p.data());
@@ -125,6 +370,8 @@ util::Result<void> NtxIndex::open(const std::string& path, IndexOpenMode mode) {
         return util::Error{6106, 0, "NTX header truncated", path};
     }
 
+    version_    = read_u16_le(hdr.data() + 2);
+    lock_key_   = ntx_canonical(path);
     root_page_  = read_u32_le(hdr.data() + 4);
     next_avail_ = read_u32_le(hdr.data() + 8);
     item_size_  = read_u16_le(hdr.data() + 12);
@@ -247,6 +494,17 @@ NtxIndex::walk_subtree_(std::uint32_t page_off,
 
 util::Result<void> NtxIndex::ensure_cache_() {
     if (!cache_dirty_) return {};
+    // Rebuild under the shared index lock (hb_ntxIndexLockRead) so a peer
+    // writer cannot interleave page writes with our walk, and adopt any
+    // peer change first. Skipped while we own dirty pages / the batch.
+    std::optional<NtxReadGuard> rg;
+    if (!has_dirty_pages_() && !write_lock_join_.joined) {
+        if (lock_key_.empty()) lock_key_ = ntx_canonical(file_path_);
+        rg.emplace(lock_key_, file_);
+        if (rg->locked()) {
+            if (auto r = reload_header_locked_(); !r) return r.error();
+        }
+    }
     cache_.clear();
     if (root_page_ != 0) {
         if (auto r = walk_subtree_(root_page_, cache_); !r) return r.error();
@@ -257,6 +515,7 @@ util::Result<void> NtxIndex::ensure_cache_() {
 }
 
 util::Result<SeekOutcome> NtxIndex::seek_first() {
+    if (auto r = reload_header_if_changed_(); !r) return r.error();
     if (auto r = ensure_cache_(); !r) return r.error();
     if (cache_.empty()) return SeekOutcome{SeekHit::AfterEnd, 0, false};
     cache_idx_     = 0;
@@ -266,6 +525,7 @@ util::Result<SeekOutcome> NtxIndex::seek_first() {
 }
 
 util::Result<SeekOutcome> NtxIndex::seek_last() {
+    if (auto r = reload_header_if_changed_(); !r) return r.error();
     if (auto r = ensure_cache_(); !r) return r.error();
     if (cache_.empty()) return SeekOutcome{SeekHit::AfterEnd, 0, false};
     cache_idx_     = static_cast<std::int64_t>(cache_.size() - 1);
@@ -332,6 +592,7 @@ NtxIndex::seek_key_for_write_(const std::string& padded, bool soft,
 
 util::Result<SeekOutcome>
 NtxIndex::seek_key(const std::string& key, bool soft) {
+    if (auto r = reload_header_if_changed_(); !r) return r.error();
     if (auto r = ensure_cache_(); !r) return r.error();
     if (cache_.empty()) return SeekOutcome{SeekHit::AfterEnd, 0, false};
     std::string padded = key;
@@ -412,6 +673,8 @@ NtxIndex::insert(std::uint32_t recno, const std::string& key) {
     if (mode_ == IndexOpenMode::ReadOnly) {
         return util::Error{5000, 0, "NTX opened read-only", ""};
     }
+    if (auto wl = ensure_write_lock_(); !wl) return wl.error();
+    hdr_dirty_ = true;
     cache_dirty_ = true;
     invalidate_pos_cache();
     std::string padded = key;
@@ -751,6 +1014,8 @@ NtxIndex::erase(std::uint32_t recno, const std::string& key) {
     if (mode_ == IndexOpenMode::ReadOnly) {
         return util::Error{5000, 0, "NTX opened read-only", ""};
     }
+    if (auto wl = ensure_write_lock_(); !wl) return wl.error();
+    hdr_dirty_ = true;
     cache_dirty_ = true;
     invalidate_pos_cache();
     std::string padded = key;
@@ -801,10 +1066,34 @@ NtxIndex::erase(std::uint32_t recno, const std::string& key) {
 }
 
 util::Result<void> NtxIndex::flush() {
+    // Always drop our batch join on every exit path so a failed flush
+    // cannot pin the OS lock and starve every peer.
+    struct ReleaseJoin {
+        NtxWriteLockJoin& j;
+        ~ReleaseJoin() { j.release(); }
+    } guard{write_lock_join_};
+
+    // Read-only navigation leaves nothing dirty: write nothing. The old
+    // code rewrote every CACHED page here, clean ones included — without
+    // any lock that could put stale pages over a peer's fresh writes.
+    if (!has_dirty_pages_() && !hdr_dirty_) return {};
+    // A batch mutated the tree: write every cached page as before (all of
+    // them were re-read under this batch's exclusive lock, so none is
+    // stale), then publish the header.
     for (auto& [off, _] : page_cache_) {
         auto r = flush_page_(off);
         if (!r) return r.error();
     }
+    // Harbour bumps the 16-bit header version on every header save; peers
+    // compare it after taking the index lock and discard their buffers.
+    version_ = static_cast<std::uint16_t>(version_ + 1);
+    std::uint8_t h[10]{};
+    write_u16_le(h + 0, version_);
+    write_u32_le(h + 2, root_page_);
+    write_u32_le(h + 6, next_avail_);
+    auto wrote = file_.write_at(2, h, sizeof(h));
+    if (!wrote) return wrote.error();
+    hdr_dirty_ = false;
     return file_.sync();
 }
 
@@ -854,6 +1143,8 @@ NtxIndex::create(const std::string& path,
     NtxIndex ix;
     ix.file_       = std::move(file);
     ix.file_path_  = path;
+    ix.lock_key_   = ntx_canonical(path);
+    ix.version_    = 0x0001;
     ix.mode_       = IndexOpenMode::Shared;
     ix.root_page_  = 0;
     ix.next_avail_ = NTX_PAGE_SIZE;
@@ -910,6 +1201,11 @@ NtxIndex::set_numeric_format(std::uint16_t width, std::uint16_t dec) {
     // sees the field-derived key width + decimals. Read-modify-write the
     // 1024-byte header rather than rebuilding it, to preserve every other
     // field create() wrote (expression, tag name, options, ...).
+    if (auto wl = ensure_write_lock_(); !wl) return wl.error();
+    struct ReleaseJoin {
+        NtxWriteLockJoin& j;
+        ~ReleaseJoin() { j.release(); }
+    } guard{write_lock_join_};
     Page hdr{};
     auto got = file_.read_at(0, hdr.data(), hdr.size());
     if (!got) return got.error();
