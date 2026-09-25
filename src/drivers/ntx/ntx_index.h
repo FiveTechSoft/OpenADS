@@ -4,6 +4,7 @@
 #include "platform/file.h"
 
 #include <array>
+#include <cstdint>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -12,6 +13,50 @@ namespace openads::drivers::ntx {
 
 constexpr std::uint16_t NTX_PAGE_SIZE = 1024;
 constexpr std::uint16_t NTX_MAX_KEY   = 256;
+
+// Harbour DBFNTX index lock position. DBFNTX defaults to the
+// DB_DBFLOCK_CLIPPER scheme, whose index lock is 1 byte at
+// IDX_LOCKPOS_CLIPPER = 1000000000 on the .ntx (IDX_LOCKPOOL_CLIPPER = 0,
+// so readers and writers share the same single byte). Harbour takes it
+// SHARED around every read and EXCLUSIVE around every write, re-reading
+// the header (version @2, root @4, next @8) after each lock and dropping
+// its page buffers when anything changed; each header save bumps the
+// 16-bit version. OpenADS follows the same protocol: exclusive from the
+// first mutation of a batch until flush(), shared (best-effort) around
+// header refresh + cache rebuild, version bumped on every flushed batch.
+// Before this, OpenADS took no .ntx lock at all (roadmap debt "NTX: sin
+// lock de archivo de índice interproceso").
+constexpr std::uint64_t NTX_LOCK_OFF = 1000000000ULL;
+
+// RAII join handle for the process-wide per-file NTX lock registry.
+// Several NtxIndex instances (workareas) in one process can point at the
+// same .ntx; the OS byte lock is taken once per file per process and
+// in-process access is arbitrated by the registry (POSIX fcntl locks do
+// not separate handles of one process, and Win32 LockFileEx makes a
+// second handle of the same process fail). Movable, not copyable.
+struct NtxWriteLockJoin {
+    std::string path;
+    bool        joined = false;
+
+    NtxWriteLockJoin() = default;
+    NtxWriteLockJoin(const NtxWriteLockJoin&) = delete;
+    NtxWriteLockJoin& operator=(const NtxWriteLockJoin&) = delete;
+    NtxWriteLockJoin(NtxWriteLockJoin&& o) noexcept
+        : path(std::move(o.path)), joined(o.joined) { o.joined = false; }
+    NtxWriteLockJoin& operator=(NtxWriteLockJoin&& o) noexcept {
+        if (this != &o) {
+            release();
+            path   = std::move(o.path);
+            joined = o.joined;
+            o.joined = false;
+        }
+        return *this;
+    }
+    ~NtxWriteLockJoin() { release(); }
+
+    // Defined in ntx_index.cpp (process-wide registry lives there).
+    void release() noexcept;
+};
 
 class NtxIndex final : public IIndex {
 public:
@@ -51,6 +96,17 @@ public:
     util::Result<void> erase (std::uint32_t recno,
                                const std::string& key) override;
     util::Result<void> flush() override;
+
+    // Re-read the header (version / root / next) and drop every cached
+    // page when a peer (another process, Harbour DBFNTX or OpenADS)
+    // changed the index. Called by Table on absolute repositioning.
+    void refresh_from_disk() override;
+
+    // On-disk header version as last seen / written by this instance.
+    // Exposed for tests / interop verification.
+    std::uint16_t header_version() const { return version_; }
+    // True while this instance holds (joins) the exclusive write batch.
+    bool write_locked() const { return write_lock_join_.joined; }
 
     // Logical-position cache for O(1) scrollbar / OrdKeyNo / OrdKeyCount.
     // Mirrors CdxIndex's pos_walk_/pos_map_ but reuses the existing cache_
@@ -102,6 +158,12 @@ private:
     };
 
     util::Result<void> ensure_cache_();
+
+    // Inter-process lock protocol (see NTX_LOCK_OFF).
+    util::Result<void> ensure_write_lock_();
+    util::Result<void> reload_header_if_changed_();
+    util::Result<void> reload_header_locked_();
+    bool               has_dirty_pages_() const;
     util::Result<void> walk_subtree_(std::uint32_t page_off,
                                      std::vector<CachedKey>& out);
 
@@ -152,6 +214,10 @@ private:
     std::string                                    for_expr_;
     std::string                                    tag_name_;
     std::string                                    file_path_;  // set on open()
+    std::string                                    lock_key_;   // canonical path
+    std::uint16_t                                  version_   = 0;
+    bool                                           hdr_dirty_ = false;
+    NtxWriteLockJoin                               write_lock_join_;
 
     // Per-page cache (read-then-mutate).
     std::unordered_map<std::uint32_t, Page>        page_cache_;
