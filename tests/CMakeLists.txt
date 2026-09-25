@@ -42,6 +42,7 @@ add_executable(openads_unit_tests
     unit/dbf_record_test.cpp
     unit/dbf_write_test.cpp
     unit/ntx_driver_test.cpp
+    unit/ntx_index_lock_test.cpp
     unit/lock_mgr_test.cpp
     unit/engine_table_test.cpp
     unit/engine_table_write_test.cpp
