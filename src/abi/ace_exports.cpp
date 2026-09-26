@@ -10795,9 +10795,9 @@ UNSIGNED32 ENTRYPOINT AdsCheckExistence(ADSHANDLE hConn, UNSIGNED8* pucName,
                 if (stem_of(rt->prod_bag_path) == want ||
                     (!rt->last_open_bag.empty() &&
                      stem_of(rt->last_open_bag) == want) ||
-                    stem_of(rt->name) == want) {
-                    // rt->name is the table's own path as opened: a
-                    // live (or parked) table proves its dbf exists.
+                    // An open table proves only its exact file exists,
+                    // not a different extension with the same stem.
+                    rt->name == name) {
                     *pbExists = 1;
                     return ok();
                 }

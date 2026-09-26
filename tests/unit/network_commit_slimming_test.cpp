@@ -312,6 +312,18 @@ TEST_CASE("Commit slimming: dir and missing-file answers cache") {
             == AE_SUCCESS);
     CHECK(ex == 1u);
     CHECK(cs_op(kOpFileExists) == fe0);
+
+    // Regression: the open CS.DBF must NOT prove CS.Z01 exists merely
+    // because the stems match. The first miss goes to the server; the
+    // second is served by the negative FileExists cache.
+    REQUIRE(AdsCheckExistence(hConn, (UNSIGNED8*)"CS.Z01", &ex)
+            == AE_SUCCESS);
+    CHECK(ex == 0u);
+    CHECK(cs_op(kOpFileExists) == fe0 + 1);
+    REQUIRE(AdsCheckExistence(hConn, (UNSIGNED8*)"CS.Z01", &ex)
+            == AE_SUCCESS);
+    CHECK(ex == 0u);
+    CHECK(cs_op(kOpFileExists) == fe0 + 1);
     REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
 
     // Missing file: repeated "no" answers stop hitting the wire.
@@ -321,7 +333,7 @@ TEST_CASE("Commit slimming: dir and missing-file answers cache") {
     REQUIRE(AdsCheckExistence(hConn, (UNSIGNED8*)"NOPE.CDX", &ex)
             == AE_SUCCESS);
     CHECK(ex == 0u);
-    CHECK(cs_op(kOpFileExists) == fe0 + 1);
+    CHECK(cs_op(kOpFileExists) == fe0 + 2);
 
     REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
     srv.stop();
