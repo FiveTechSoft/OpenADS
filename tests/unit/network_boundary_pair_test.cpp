@@ -118,54 +118,42 @@ TEST_CASE("boundary pair, self-goto, and recno anchor over loopback") {
     CHECK(g_goto.load() == 1u);            // no new frame
     CHECK(recno_of(hT) == 3u);
 
-    // R1 — the GotoTop ack certified the bottom in the same visit.
+    // mtfix14 diagnostic: no pair is negotiated. Each opposite-boundary
+    // navigation goes over the wire; duplicate same-boundary calls remain
+    // suppressed. Verify the record and field, not just frame counts.
     REQUIRE(AdsGotoTop(hT) == AE_SUCCESS);
     CHECK(g_top.load() == 1u);
     CHECK(recno_of(hT) == 1u);
     REQUIRE(AdsGotoBottom(hT) == AE_SUCCESS);
-    CHECK(g_bottom.load() == 0u);          // served from the pair blob
-    CHECK(recno_of(hT) == 5u);             // and it IS the bottom row
+    CHECK(g_bottom.load() == 1u);
+    CHECK(recno_of(hT) == 5u);
     CHECK(id_field(hT) == "5");
     UNSIGNED16 atEof = 1;
     REQUIRE(AdsAtEOF(hT, &atEof) == AE_SUCCESS);
     CHECK(atEof == 0);
-
-    // The pair serve stamped bottom; a consecutive bottom is the old
-    // duplicate path, and the top that follows re-wires (no fresh
-    // certification for top was made by the LOCAL bottom serve... the
-    // certification from the earlier GotoBottom... none happened, so
-    // this top must wire and re-certify bottom).
     REQUIRE(AdsGotoBottom(hT) == AE_SUCCESS);
-    CHECK(g_bottom.load() == 0u);          // duplicate of the pair serve
+    CHECK(g_bottom.load() == 1u);  // duplicate
     REQUIRE(AdsGotoTop(hT) == AE_SUCCESS);
-    CHECK(g_top.load() == 2u);             // wire: re-certifies bottom
+    CHECK(g_top.load() == 2u);
     REQUIRE(AdsGotoBottom(hT) == AE_SUCCESS);
-    CHECK(g_bottom.load() == 0u);          // pair again
-    CHECK(recno_of(hT) == 5u);
-
-    // A write on this table kills the certification (the blob's row
-    // bytes predate it) and the frame expires the conn-wide seq anyway.
+    CHECK(g_bottom.load() == 2u);
     REQUIRE(AdsGotoTop(hT) == AE_SUCCESS);
-    CHECK(g_top.load() == 3u);             // wire: certify bottom again
+    CHECK(g_top.load() == 3u);
     REQUIRE(AdsLockRecord(hT, 0) == AE_SUCCESS);
     UNSIGNED8 fld[] = "ID";
     UNSIGNED8 seven[] = "7";
     REQUIRE(AdsSetField(hT, fld, seven, 1) == AE_SUCCESS);
     REQUIRE(AdsUnlockRecord(hT, 0) == AE_SUCCESS);
     REQUIRE(AdsGotoBottom(hT) == AE_SUCCESS);
-    CHECK(g_bottom.load() == 1u);          // back on the wire
+    CHECK(g_bottom.load() == 3u);
     CHECK(recno_of(hT) == 5u);
-    CHECK(id_field(hT) == "5");            // row 5 untouched by the write
-
-    // The wire GotoBottom also certified the TOP: this GotoTop is
-    // itself pair-served (symmetric certification).
+    CHECK(id_field(hT) == "5");
     REQUIRE(AdsGotoTop(hT) == AE_SUCCESS);
-    CHECK(g_top.load() == 3u);             // pair-served from the bottom
+    CHECK(g_top.load() == 4u);
     CHECK(recno_of(hT) == 1u);
-    // Conn-wide envelope: nav on ANOTHER table expires the pair.
-    REQUIRE(AdsGotoRecord(hU, 2) == AE_SUCCESS);   // other table's nav
+    REQUIRE(AdsGotoRecord(hU, 2) == AE_SUCCESS);
     REQUIRE(AdsGotoBottom(hT) == AE_SUCCESS);
-    CHECK(g_bottom.load() == 2u);          // wire: conn seq moved
+    CHECK(g_bottom.load() == 4u);
 
     openads::network::set_frame_trace_hook(nullptr);
 

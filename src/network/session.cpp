@@ -1805,8 +1805,9 @@ DispatchResult Session::dispatch(const Frame& f) {
                     openads::network::kCapSetFieldsBatch |
                     openads::network::kCapFlushInCloseAll |
                     openads::network::kCapNavOrderFuse |
-                    openads::network::kCapFlushTableDurable |
-                    openads::network::kCapNavBoundaryPair;
+                    openads::network::kCapFlushTableDurable;
+                    // mtfix14 diagnostic: do not advertise boundary pairs
+                    // to existing clients connecting to this test server.
                 reply.payload.push_back(
                     static_cast<std::uint8_t>( scaps        & 0xFFu));
                 reply.payload.push_back(

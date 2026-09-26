@@ -177,15 +177,12 @@ TEST_CASE("Nav batching: duplicate GotoTop/GotoBottom skip their frame") {
     REQUIRE(AdsGotoBottom(hTable) == AE_SUCCESS);
     CHECK(nb_op(kOpGotoBottom) == bot0 + 1);
 
-    // mtfix12 R1: the wire GotoBottom certified the TOP in the same
-    // server visit, so this top answers from the pair certification —
-    // stronger than the old re-wire. A wire nav with no certification
-    // (GotoRecord) invalidates it: the next top goes out again.
+    // mtfix14 diagnostic: no pair certification; both top calls wire.
     REQUIRE(AdsGotoTop(hTable) == AE_SUCCESS);
-    CHECK(nb_op(kOpGotoTop) == top0);       // pair-certified
+    CHECK(nb_op(kOpGotoTop) == top0 + 1);
     REQUIRE(AdsGotoRecord(hTable, 2) == AE_SUCCESS);
     REQUIRE(AdsGotoTop(hTable) == AE_SUCCESS);
-    CHECK(nb_op(kOpGotoTop) == top0 + 1);   // invalidated: back on wire
+    CHECK(nb_op(kOpGotoTop) == top0 + 2);
 
     REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
     REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);

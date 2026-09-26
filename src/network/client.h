@@ -130,7 +130,11 @@ public:
     // (see kCapNavBoundaryPair): one frame proves both ends, so a
     // back-to-back dbGoTop(); dbGoBottom() ritual costs one RTT.
     bool server_nav_boundary_pair() const noexcept {
-        return (server_caps_ & kCapNavBoundaryPair) != 0;
+        // mtfix14 diagnostic: keep all other mtfix13 behavior, but never
+        // request the opposite-boundary pair, even from older servers that
+        // advertise it. This isolates B_BIG's slow GotoTop without changing
+        // the wire shape for peers or the detached-workarea lane pinning.
+        return false;
     }
 
     // Current cursor-generation sequence (see nav_seq_). Relaxed load

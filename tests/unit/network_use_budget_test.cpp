@@ -111,8 +111,8 @@ TEST_CASE("Nav batching: full USE cycle stays within wire budget") {
     // boundary probes and duplicate navs contribute zero frames.
     CHECK(total <= 14u);
     CHECK(delta(0x40) == 1u);  // GotoTop: second suppressed
-    CHECK(delta(0x64) == 0u);  // GotoBottom: mtfix12 pair-certified by
-                               // the GotoTop's ack, second suppressed
+    CHECK(delta(0x64) == 1u);  // mtfix14: first GotoBottom goes to server;
+                               // the duplicate remains suppressed
     CHECK(delta(0x48) == 0u);  // AtEOF: served locally
     CHECK(delta(0x4C) == 0u);  // AtBOF: served locally
 
