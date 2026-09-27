@@ -18,18 +18,19 @@ namespace fs = std::filesystem;
 
 namespace {
 
-std::atomic<unsigned> g_top{0}, g_bottom{0}, g_goto{0}, g_recnum{0};
+std::atomic<unsigned> g_top{0}, g_bottom{0}, g_goto{0}, g_recnum{0}, g_keycount{0};
 
 void count_nav(const void*, std::uint8_t op, std::uint32_t, std::size_t,
                std::uint8_t, std::size_t, long long) {
     if (op == 0x40) g_top.fetch_add(1);          // GotoTop
     if (op == 0x64) g_bottom.fetch_add(1);       // GotoBottom
     if (op == 0x58) g_goto.fetch_add(1);         // GotoRecord
-    if (op == 0x4E) g_recnum.fetch_add(1);       // GetRecordNum
+    if (op == 0x4E) g_recnum.fetch_add(1);
+    if (op == 0xB0) g_keycount.fetch_add(1);       // GetKeyCount
 }
 
 void reset_counts() {
-    g_top = 0; g_bottom = 0; g_goto = 0; g_recnum = 0;
+    g_top = 0; g_bottom = 0; g_goto = 0; g_recnum = 0; g_keycount = 0;
 }
 
 std::uint32_t recno_of(ADSHANDLE h) {
@@ -118,42 +119,54 @@ TEST_CASE("boundary pair, self-goto, and recno anchor over loopback") {
     CHECK(g_goto.load() == 1u);            // no new frame
     CHECK(recno_of(hT) == 3u);
 
-    // mtfix14 diagnostic: no pair is negotiated. Each opposite-boundary
-    // navigation goes over the wire; duplicate same-boundary calls remain
-    // suppressed. Verify the record and field, not just frame counts.
+    // R1 — the GotoTop ack certified the bottom in the same visit.
     REQUIRE(AdsGotoTop(hT) == AE_SUCCESS);
     CHECK(g_top.load() == 1u);
     CHECK(recno_of(hT) == 1u);
     REQUIRE(AdsGotoBottom(hT) == AE_SUCCESS);
-    CHECK(g_bottom.load() == 1u);
-    CHECK(recno_of(hT) == 5u);
+    CHECK(g_bottom.load() == 0u);          // served from the pair blob
+    CHECK(recno_of(hT) == 5u);             // and it IS the bottom row
     CHECK(id_field(hT) == "5");
     UNSIGNED16 atEof = 1;
     REQUIRE(AdsAtEOF(hT, &atEof) == AE_SUCCESS);
     CHECK(atEof == 0);
+
+    // The pair serve stamped bottom; a consecutive bottom is the old
+    // duplicate path, and the top that follows re-wires (no fresh
+    // certification for top was made by the LOCAL bottom serve... the
+    // certification from the earlier GotoBottom... none happened, so
+    // this top must wire and re-certify bottom).
     REQUIRE(AdsGotoBottom(hT) == AE_SUCCESS);
-    CHECK(g_bottom.load() == 1u);  // duplicate
+    CHECK(g_bottom.load() == 0u);          // duplicate of the pair serve
     REQUIRE(AdsGotoTop(hT) == AE_SUCCESS);
-    CHECK(g_top.load() == 2u);
+    CHECK(g_top.load() == 2u);             // wire: re-certifies bottom
     REQUIRE(AdsGotoBottom(hT) == AE_SUCCESS);
-    CHECK(g_bottom.load() == 2u);
+    CHECK(g_bottom.load() == 0u);          // pair again
+    CHECK(recno_of(hT) == 5u);
+
+    // A write on this table kills the certification (the blob's row
+    // bytes predate it) and the frame expires the conn-wide seq anyway.
     REQUIRE(AdsGotoTop(hT) == AE_SUCCESS);
-    CHECK(g_top.load() == 3u);
+    CHECK(g_top.load() == 3u);             // wire: certify bottom again
     REQUIRE(AdsLockRecord(hT, 0) == AE_SUCCESS);
     UNSIGNED8 fld[] = "ID";
     UNSIGNED8 seven[] = "7";
     REQUIRE(AdsSetField(hT, fld, seven, 1) == AE_SUCCESS);
     REQUIRE(AdsUnlockRecord(hT, 0) == AE_SUCCESS);
     REQUIRE(AdsGotoBottom(hT) == AE_SUCCESS);
-    CHECK(g_bottom.load() == 3u);
+    CHECK(g_bottom.load() == 1u);          // back on the wire
     CHECK(recno_of(hT) == 5u);
-    CHECK(id_field(hT) == "5");
+    CHECK(id_field(hT) == "5");            // row 5 untouched by the write
+
+    // The wire GotoBottom also certified the TOP: this GotoTop is
+    // itself pair-served (symmetric certification).
     REQUIRE(AdsGotoTop(hT) == AE_SUCCESS);
-    CHECK(g_top.load() == 4u);
+    CHECK(g_top.load() == 3u);             // pair-served from the bottom
     CHECK(recno_of(hT) == 1u);
-    REQUIRE(AdsGotoRecord(hU, 2) == AE_SUCCESS);
+    // Conn-wide envelope: nav on ANOTHER table expires the pair.
+    REQUIRE(AdsGotoRecord(hU, 2) == AE_SUCCESS);   // other table's nav
     REQUIRE(AdsGotoBottom(hT) == AE_SUCCESS);
-    CHECK(g_bottom.load() == 4u);
+    CHECK(g_bottom.load() == 2u);          // wire: conn seq moved
 
     openads::network::set_frame_trace_hook(nullptr);
 
@@ -161,5 +174,99 @@ TEST_CASE("boundary pair, self-goto, and recno anchor over loopback") {
     REQUIRE(AdsCloseTable(hU) == AE_SUCCESS);
     REQUIRE(AdsDisconnect(hC) == AE_SUCCESS);
     s.stop();
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("boundary pair: scoped ordered bottom counts on demand") {
+    auto dir = fs::temp_directory_path() / "openads_bpair_scoped";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+    UNSIGNED8 path[512]{};
+    std::memcpy(path, dir.string().c_str(), dir.string().size());
+    ADSHANDLE local = 0;
+    REQUIRE(AdsConnect60(path, ADS_LOCAL_SERVER, nullptr, nullptr, 0,
+                         &local) == AE_SUCCESS);
+    UNSIGNED8 tn[] = "SCOPE.DBF";
+    UNSIGNED8 def[] = "GRP,C,1,0;ID,C,2,0";
+    ADSHANDLE tbl = 0;
+    REQUIRE(AdsCreateTable(local, tn, nullptr, ADS_CDX, 0, 0, 0, 0,
+                           def, &tbl) == AE_SUCCESS);
+    UNSIGNED8 grp[] = "GRP", id[] = "ID";
+    for (const char* value : {"A1", "A2", "A3", "B4"}) {
+        REQUIRE(AdsAppendRecord(tbl) == AE_SUCCESS);
+        REQUIRE(AdsSetField(tbl, grp, (UNSIGNED8*)value, 1) == AE_SUCCESS);
+        REQUIRE(AdsSetField(tbl, id, (UNSIGNED8*)(value + 1), 1)
+                == AE_SUCCESS);
+        REQUIRE(AdsWriteRecord(tbl) == AE_SUCCESS);
+    }
+    // One deleted A row makes physical count (4), scoped count (3)
+    // and scoped SET DELETED count (2) distinct.
+    REQUIRE(AdsGotoRecord(tbl, 2) == AE_SUCCESS);
+    REQUIRE(AdsDeleteRecord(tbl) == AE_SUCCESS);
+    REQUIRE(AdsWriteRecord(tbl) == AE_SUCCESS);
+    UNSIGNED8 bag[] = "SCOPE.CDX", tag[] = "BYGRP", expr[] = "GRP+ID";
+    ADSHANDLE idx = 0;
+    REQUIRE(AdsCreateIndex61(tbl, bag, tag, expr, nullptr, nullptr,
+                             ADS_COMPOUND, 512, &idx) == AE_SUCCESS);
+    REQUIRE(AdsCloseTable(tbl) == AE_SUCCESS);
+    REQUIRE(AdsDisconnect(local) == AE_SUCCESS);
+
+    openads::network::Server server;
+    REQUIRE(server.start("127.0.0.1", 0).has_value());
+    char uri[512]{};
+    std::snprintf(uri, sizeof(uri), "tcp://127.0.0.1:%u/%s",
+                  static_cast<unsigned>(server.port()), dir.string().c_str());
+    UNSIGNED8 sb[512]{};
+    std::memcpy(sb, uri, std::strlen(uri) + 1);
+    ADSHANDLE conn = 0;
+    REQUIRE(AdsConnect60(sb, ADS_REMOTE_SERVER, nullptr, nullptr, 0,
+                         &conn) == AE_SUCCESS);
+    REQUIRE(AdsOpenTable(conn, tn, nullptr, ADS_CDX, 0, 0, 0, 0,
+                         &tbl) == AE_SUCCESS);
+    REQUIRE(AdsGetIndexHandleByOrder(tbl, 1, &idx) == AE_SUCCESS);
+    REQUIRE(idx != 0);
+    UNSIGNED8 a[] = "A";
+    REQUIRE(AdsSetScope(idx, ADS_TOP, a, 1, ADS_STRINGKEY) == AE_SUCCESS);
+    REQUIRE(AdsSetScope(idx, ADS_BOTTOM, a, 1, ADS_STRINGKEY) == AE_SUCCESS);
+    REQUIRE(AdsShowDeleted(0) == AE_SUCCESS);
+    openads::network::set_frame_trace_hook(&count_nav);
+    reset_counts();
+    REQUIRE(AdsGotoTop(idx) == AE_SUCCESS);
+    CHECK(recno_of(tbl) == 1u);
+    CHECK(g_keycount.load() == 0u);  // no eager count from a plain GoTop
+    REQUIRE(AdsGotoBottom(idx) == AE_SUCCESS);
+    CHECK(g_bottom.load() == 0u);    // opposite landing served from pair
+    CHECK(recno_of(tbl) == 3u);      // deleted row 2 skipped
+    // A cold scoped order count is fetched only when Bottom is consumed.
+    CHECK(g_keycount.load() == 1u);
+    UNSIGNED32 kc = 0;
+    REQUIRE(AdsGetKeyCount(idx, 0, &kc) == AE_SUCCESS);
+    CHECK(kc == 2u);                 // not physical 4 or scoped 3
+    CHECK(g_keycount.load() == 1u);  // cached after bottom
+    REQUIRE(AdsGotoTop(idx) == AE_SUCCESS);
+    CHECK(recno_of(tbl) == 1u);
+
+    // Scope to no rows; top and bottom agree on BOF+EOF without
+    // treating a physical row or deleted key as visible.
+    UNSIGNED8 z[] = "Z";
+    REQUIRE(AdsSetScope(idx, ADS_TOP, z, 1, ADS_STRINGKEY) == AE_SUCCESS);
+    REQUIRE(AdsSetScope(idx, ADS_BOTTOM, z, 1, ADS_STRINGKEY) == AE_SUCCESS);
+    REQUIRE(AdsGotoTop(idx) == AE_SUCCESS);
+    UNSIGNED16 b = 0, e = 0;
+    REQUIRE(AdsAtBOF(tbl, &b) == AE_SUCCESS);
+    REQUIRE(AdsAtEOF(tbl, &e) == AE_SUCCESS);
+    CHECK(b == 1); CHECK(e == 1);
+    REQUIRE(AdsGotoBottom(idx) == AE_SUCCESS);
+    REQUIRE(AdsAtBOF(tbl, &b) == AE_SUCCESS);
+    REQUIRE(AdsAtEOF(tbl, &e) == AE_SUCCESS);
+    CHECK(b == 1); CHECK(e == 1);
+    REQUIRE(AdsGetKeyCount(idx, 0, &kc) == AE_SUCCESS);
+    CHECK(kc == 0u);
+    openads::network::set_frame_trace_hook(nullptr);
+    REQUIRE(AdsShowDeleted(1) == AE_SUCCESS);
+    REQUIRE(AdsCloseTable(tbl) == AE_SUCCESS);
+    REQUIRE(AdsDisconnect(conn) == AE_SUCCESS);
+    server.stop();
     fs::remove_all(dir, ec);
 }

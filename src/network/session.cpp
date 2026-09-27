@@ -1149,11 +1149,14 @@ void Session::pack_bound_trailer(Frame& reply, std::uint32_t id) {
 }
 
 // mtfix12 R1 (kCapNavBoundaryPair) — see session.h. The pair section:
-//   [u8 flags][u32 trailer_len][trailer][bound 6|10][u32 keycount?]
-// flags bit 0x02 = pair bound carries reccount, bit 0x04 = keycount
-// present (ordered tables; natural order derives count == reccount on
-// the client). The trailer is pack_row_trailer output at lookahead
-// depth 0 for the OPPOSITE boundary, read inside this same visit, so
+//   [u8 flags][u32 trailer_len][trailer][bound 6|10]
+// flags bit 0x02 = pair bound carries reccount. Bit 0x04 (optional key
+// count) remains unset: counting all scoped index keys on every GoTop
+// made B_BIG's 10-thread job 8.4 s instead of ~220 ms. If an opposite
+// GoBottom is actually consumed, the client asks for its key count only
+// when its per-order cache is cold, preserving scoped key-number truth.
+// The trailer is pack_row_trailer output at lookahead depth 0 for the
+// OPPOSITE boundary, read inside this same visit, so
 // the client's adjacent opposite-boundary call applies it verbatim.
 void Session::pack_boundary_pair(Frame& reply, std::uint32_t id,
                                  int which, ADSHANDLE hord,
@@ -1164,7 +1167,6 @@ void Session::pack_boundary_pair(Frame& reply, std::uint32_t id,
     blob.opcode = reply.opcode;
     Frame bnd;
     bnd.opcode = reply.opcode;
-    UNSIGNED32 kc = 0;
     bool granted = false;
     if (hord != 0) {
         // Ordered table: navigate the ABI twin (it carries the order
@@ -1181,7 +1183,6 @@ void Session::pack_boundary_pair(Frame& reply, std::uint32_t id,
             pack_row_trailer(blob, id, 0);
             pack_bound_trailer(bnd, id);
             if (bnd.payload.size() >= 10) flags |= 0x02;
-            if (AdsGetKeyCount(hord, 0, &kc) == 0) flags |= 0x04;
             granted = true;
         }
         if (empty_landing) {
@@ -1218,12 +1219,6 @@ void Session::pack_boundary_pair(Frame& reply, std::uint32_t id,
                          blob.payload.begin(), blob.payload.end());
     reply.payload.insert(reply.payload.end(),
                          bnd.payload.begin(), bnd.payload.end());
-    if ((flags & 0x04) != 0) {
-        reply.payload.push_back(static_cast<std::uint8_t>( kc        & 0xFFu));
-        reply.payload.push_back(static_cast<std::uint8_t>((kc >>  8) & 0xFFu));
-        reply.payload.push_back(static_cast<std::uint8_t>((kc >> 16) & 0xFFu));
-        reply.payload.push_back(static_cast<std::uint8_t>((kc >> 24) & 0xFFu));
-    }
 }
 
 // M12.22/M12.23 — read-ahead depth for one forward Skip.
@@ -1805,9 +1800,8 @@ DispatchResult Session::dispatch(const Frame& f) {
                     openads::network::kCapSetFieldsBatch |
                     openads::network::kCapFlushInCloseAll |
                     openads::network::kCapNavOrderFuse |
-                    openads::network::kCapFlushTableDurable;
-                    // mtfix14 diagnostic: do not advertise boundary pairs
-                    // to existing clients connecting to this test server.
+                    openads::network::kCapFlushTableDurable |
+                    openads::network::kCapNavBoundaryPair;
                 reply.payload.push_back(
                     static_cast<std::uint8_t>( scaps        & 0xFFu));
                 reply.payload.push_back(

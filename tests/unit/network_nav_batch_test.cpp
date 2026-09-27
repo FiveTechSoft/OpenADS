@@ -172,17 +172,19 @@ TEST_CASE("Nav batching: duplicate GotoTop/GotoBottom skip their frame") {
     REQUIRE(AdsGotoTop(hTable) == AE_SUCCESS);
     CHECK(nb_op(kOpGotoTop) == top0);
 
-    // Bottom twice: one frame, then suppressed.
+    // The warm open did not certify a pair, so the first bottom wires;
+    // the duplicate stays local.
     REQUIRE(AdsGotoBottom(hTable) == AE_SUCCESS);
     REQUIRE(AdsGotoBottom(hTable) == AE_SUCCESS);
     CHECK(nb_op(kOpGotoBottom) == bot0 + 1);
 
-    // mtfix14 diagnostic: no pair certification; both top calls wire.
+    // Restored pair certification: bottom's ack certifies top, so this
+    // call consumes the pair without another wire frame.
     REQUIRE(AdsGotoTop(hTable) == AE_SUCCESS);
-    CHECK(nb_op(kOpGotoTop) == top0 + 1);
+    CHECK(nb_op(kOpGotoTop) == top0);
     REQUIRE(AdsGotoRecord(hTable, 2) == AE_SUCCESS);
     REQUIRE(AdsGotoTop(hTable) == AE_SUCCESS);
-    CHECK(nb_op(kOpGotoTop) == top0 + 2);
+    CHECK(nb_op(kOpGotoTop) == top0 + 1);
 
     REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
     REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);

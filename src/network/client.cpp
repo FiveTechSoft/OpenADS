@@ -418,9 +418,8 @@ void connect_pack_payload(std::vector<std::uint8_t>& payload,
     // to a client that only understands forward ones (see kCapPrefetchBackward).
     std::uint32_t caps = kCapPrefetchConsume | kCapPrefetchBackward
                        | kCapOpenTableMode | kCapSetFieldsBatch
-                       | kCapFlushInCloseAll | kCapNavOrderFuse;
-    // mtfix14 diagnostic: do not advertise consumption of pair blobs.
-    // Other capabilities remain untouched.
+                       | kCapFlushInCloseAll | kCapNavOrderFuse
+                       | kCapNavBoundaryPair;
     for (int i = 0; i < 4; ++i)
         payload.push_back(static_cast<std::uint8_t>((caps >> (8 * i)) & 0xFFu));
 }
