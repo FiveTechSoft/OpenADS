@@ -12,6 +12,24 @@ Complete history of releases with categorized improvements.
 
 ---
 
+## Unreleased (main, 2026-09-25)
+
+### New Features
+
+- **Inter-process `.ntx` index lock, Harbour DBFNTX-compatible** —
+  the NTX driver now locks the `.ntx` file itself at byte
+  1,000,000,000, the same scheme Harbour's DBFNTX uses, so OpenADS,
+  Harbour and xHarbour/Clipper applications can share NTX indexes
+  across processes safely: reads take a shared lock, writes an
+  exclusive one held until `flush()`, and a version counter lets
+  other processes notice the change and reload the index. Before
+  this, only DBF record locks were aligned across processes and
+  concurrent writers could corrupt an `.ntx`. Covered by new
+  inter-process unit tests, including a two-process concurrent
+  writer test.
+
+---
+
 ## v1.8.98 — 2026-08-21
 
 ### Bug Fixes
