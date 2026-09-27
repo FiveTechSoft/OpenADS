@@ -17,6 +17,8 @@
 #include "openads/ace.h"
 #include "openads/error.h"
 #include "abi/lock_retry_policy.h"
+#include "abi/create_table_diag.h"
+#include "abi/last_error.h"
 #include "engine/server_fs.h"
 #include "platform/fs_sandbox.h"
 #include "platform/path.h"
@@ -1979,10 +1981,14 @@ DispatchResult Session::dispatch(const Frame& f) {
                     if (!stripped.empty()) rel = std::move(stripped);
                 }
             }
+            openads::abi::create_diag::Scope open_diag(rel,
+                std::to_string(sid_) + "." + openads::abi::create_diag::new_id());
             auto th = sess_conn_->open_table(rel,
                 openads::engine::TableType::Cdx,
                 open_mode);
             if (!th) {
+                openads::abi::create_diag::log("server-open-fail", th.error().code,
+                                              "table-open", th.error().sub_code);
                 std::fprintf(stderr, "[srv] OpenTable FAILED rel='%s' code=%d msg='%s'\n",
                              rel.c_str(), th.error().code,
                              th.error().message.c_str());
@@ -2006,6 +2012,7 @@ DispatchResult Session::dispatch(const Frame& f) {
                 if (!canon.empty()) {
                     if (!srv_->try_register_open(sid_, canon, excl)) {
                         sess_conn_->close_table(th.value());
+                        openads::abi::create_diag::log("server-open-exclusive-fail", 7040);
                         reply = err("OpenTable: table in use exclusively",
                                     7040);
                         break;
@@ -2015,6 +2022,7 @@ DispatchResult Session::dispatch(const Frame& f) {
             }
             tbls_.emplace(id, th.value());
             tbl_open_paths_.emplace(id, rel);
+            openads::abi::create_diag::log("server-open-ok");
             srv_->add_session_table(sid_, +1, rel);
             reply.opcode = Opcode::OpenTableAck;
             write_u32_le(id, reply.payload);
@@ -3676,16 +3684,26 @@ DispatchResult Session::dispatch(const Frame& f) {
             auto nb = to_cbuf(name);
             auto fb = to_cbuf(fields);
             ADSHANDLE hTable = 0;
+            openads::abi::create_diag::Scope cd_scope(name,
+                std::to_string(sid_) + "." + openads::abi::create_diag::new_id());
+            openads::abi::create_diag::log("server-wire-begin");
             UNSIGNED32 rrc = AdsCreateTable(
                 abi_conn_, nb.data(), nullptr,
                 table_type, char_type, 0, 0, memo_bs,
                 fb.data(), &hTable);
             if (rrc != 0) {
+                const auto captured = openads::abi::last_error_code();
+                openads::abi::create_diag::log("server-abi-fail", rrc,
+                    captured == static_cast<std::int32_t>(rrc) ? "last-error-matches" : "last-error-differs");
                 reply = err("CreateTable", rrc); break;
             }
+            openads::abi::create_diag::log("server-abi-ok");
             // Files are on disk under the data dir; release the local
             // handle so the client's subsequent OpenTable can take Shared.
-            if (hTable != 0) (void)AdsCloseTable(hTable);
+            if (hTable != 0) {
+                const auto close_rc = AdsCloseTable(hTable);
+                openads::abi::create_diag::log(close_rc ? "server-close-fail" : "server-close-ok", close_rc);
+            }
             reply.opcode = Opcode::CreateTableAck;
             break;
         }
@@ -4376,6 +4394,10 @@ DispatchResult Session::dispatch(const Frame& f) {
             }
             auto* tbl = sess_conn_->lookup_table(it->second);
             if (!tbl) { reply = err("AppendBlank: lookup failed"); break; }
+            auto diag_name = tbl_open_paths_.find(id);
+            openads::abi::create_diag::Scope append_diag(
+                diag_name == tbl_open_paths_.end() ? std::string() : diag_name->second,
+                std::to_string(sid_) + ".append." + std::to_string(id));
             // M12.16 dual-handle: CreateIndex/OpenIndex bind bags on the
             // parallel ABI Table (tbls_h_), not on the engine Table used by
             // the historical write path. Writing only through the engine
@@ -4384,7 +4406,12 @@ DispatchResult Session::dispatch(const Frame& f) {
             // exists so sync_all_indexes_ updates every bound tag.
             if (auto hit = tbls_h_.find(id); hit != tbls_h_.end()) {
                 UNSIGNED32 rrc = AdsAppendRecord(hit->second);
-                if (rrc != 0) { reply = err("AppendBlank", rrc); break; }
+                if (rrc != 0) {
+                    const auto captured = openads::abi::last_error_code();
+                    openads::abi::create_diag::log("server-append-abi-fail", rrc,
+                        captured == static_cast<std::int32_t>(rrc) ? "last-error-matches" : "last-error-differs");
+                    reply = err("AppendBlank", rrc); break;
+                }
                 // Storm fix — the client commits with DbCommit→FlushTable
                 // (which flushes this same handle); a per-append flush here
                 // multiplied CDX page writes ~9x under the 700-storm and
@@ -4394,9 +4421,17 @@ DispatchResult Session::dispatch(const Frame& f) {
                 tbl->set_pending_append(true);
             } else {
                 auto r = tbl->append_record();
-                if (!r) { reply = err("AppendBlank: append_record failed"); break; }
+                if (!r) {
+                    openads::abi::create_diag::log("server-append-engine-fail", r.error().code,
+                                                  "append-record", r.error().sub_code);
+                    reply = err("AppendBlank: append_record failed"); break;
+                }
                 tbl->set_pending_append(true);
             }
+            if (openads::abi::create_diag::enabled(
+                    diag_name == tbl_open_paths_.end() ? std::string() : diag_name->second) &&
+                diag_first_append_.insert(id).second)
+                openads::abi::create_diag::log("server-first-append-ok");
             reply.opcode = Opcode::AppendBlankAck;
             break;
         }

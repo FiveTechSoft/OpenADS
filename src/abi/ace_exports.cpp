@@ -18,6 +18,7 @@ using openads::abi::lock_retry_policy;
 #include "abi/backend_registry.h"
 #include "abi/charset.h"
 #include "abi/last_error.h"
+#include "abi/create_table_diag.h"
 #include "abi/runtime.h"
 
 #include "engine/aof_eval.h"
@@ -210,6 +211,8 @@ UNSIGNED32 write_new_table_file(const std::string& full,
     auto fres = openads::platform::File::open(
         full, openads::platform::OpenMode::CreateExclusive);
     if (!fres) {
+        openads::abi::create_diag::log("file-open-fail", fres.error().code,
+                                      "exclusive-open", fres.error().sub_code);
         std::error_code ec;
         if (fs::exists(full, ec)) {
             return fail(openads::util::Error{
@@ -223,6 +226,8 @@ UNSIGNED32 write_new_table_file(const std::string& full,
     auto file = std::move(fres).value();
     auto wrote = file.write_at(0, bytes.data(), bytes.size());
     if (!wrote || wrote.value() != bytes.size()) {
+        openads::abi::create_diag::log("file-write-fail", wrote ? 0 : wrote.error().code,
+            "short-or-failed-write", wrote ? 0 : wrote.error().sub_code);
         return fail(openads::util::Error{
             static_cast<std::int32_t>(openads::AE_INTERNAL_ERROR), 0,
             std::string(op) + ": write failed", ""});
@@ -8426,7 +8431,13 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
         auto otr = rc->open_table(name,
             static_cast<std::uint16_t>(map_open_mode(usMode)));
         lk.lock();
-        if (!otr) return fail(otr.error());
+        if (!otr) {
+            openads::abi::create_diag::Scope diag_scope(name,
+                openads::abi::create_diag::correlation);
+            openads::abi::create_diag::log("client-open-fail", otr.error().code,
+                "wire-open", otr.error().sub_code);
+            return fail(otr.error());
+        }
         auto& ot = otr.value();
         auto rt = std::make_unique<openads::network::RemoteTable>();
         rt->conn = rc;
@@ -9521,6 +9532,8 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
     }
     const auto rel  = openads::abi::to_internal(pucName, 0);
     const auto defs = openads::abi::to_internal(pucFields, 0);
+    openads::abi::create_diag::Scope create_scope(rel,
+        openads::abi::create_diag::correlation);
     const bool is_vfp = (usTableType == ADS_VFP);
     auto fields = parse_rddads_field_defs(defs, is_vfp);
     if (fields.empty()) {
@@ -9599,11 +9612,16 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
             // Create-over-existing must see closed files (SAP: overwrite
             // when closed, 7040 when open) — a parked handle reads as open.
             remote_flush_pools(rc);
+            openads::abi::create_diag::log("client-wire-begin");
             auto cr = rc->create_table(rel, defs,
                                        static_cast<std::uint16_t>(usTableType),
                                        static_cast<std::uint16_t>(usCharType),
                                        static_cast<std::uint16_t>(usMemoBlockSize));
-            if (!cr) return fail(cr.error());
+            if (!cr) {
+                openads::abi::create_diag::log("client-wire-fail", cr.error().code);
+                return fail(cr.error());
+            }
+            openads::abi::create_diag::log("client-wire-ok");
             // Re-open via the normal remote path so production-bag auto-open
             // and the implicit GotoTop match AdsOpenTable semantics.
             std::vector<UNSIGNED8> namebuf(rel.size() + 1, 0);
@@ -9613,8 +9631,13 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
                 (usTableType == ADS_ADT) ? ADS_ADT
                 : (usTableType == ADS_VFP) ? ADS_VFP
                 : ADS_CDX;
-            return AdsOpenTable(rc_h, namebuf.data(), pucAlias,
+            const UNSIGNED32 reopen_rc = AdsOpenTable(rc_h, namebuf.data(), pucAlias,
                                 open_type, usCharType, 0, 0, 1, phTable);
+            const auto reopen_error = reopen_rc ? openads::abi::last_error_code() : 0;
+            openads::abi::create_diag::log(reopen_rc ? "client-reopen-fail" : "client-reopen-ok",
+                                           reopen_rc, reopen_rc && reopen_error != static_cast<std::int32_t>(reopen_rc)
+                                               ? "last-error-differs" : "last-error-matches");
+            return reopen_rc;
         }
         // Explicit handle to a disconnected remote connection with no
         // live remote to fall back to: fail fast rather than writing a
@@ -9783,9 +9806,11 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
             if (const UNSIGNED32 wrc = write_new_table_file(
                     full.string(), adt_file, "AdsCreateTable: ADT");
                 wrc != openads::AE_SUCCESS) {
+                openads::abi::create_diag::log("adt-write-fail", wrc);
                 return wrc;
             }
         }
+        openads::abi::create_diag::log("adt-write-ok");
 
         // Create a companion .adm for MEMO/BINARY/IMAGE fields
         if (has_companion) {
@@ -9793,7 +9818,11 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
             adm.replace_extension(".adm");
             { std::error_code ec; fs::remove(adm, ec); }
             auto mr = openads::drivers::adm::AdmMemo::create(adm.string());
-            if (!mr) return fail(mr.error());
+            if (!mr) {
+                openads::abi::create_diag::log("memo-create-fail",
+                    mr.error().code, "memo", mr.error().sub_code);
+                return fail(mr.error());
+            }
         }
 
         // Open via the standard path so the caller gets a usable handle
@@ -9804,8 +9833,12 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
         std::size_t adt_nb = std::min<std::size_t>(rel_adt.size(),
                                                     sizeof(adt_namebuf) - 1);
         std::memcpy(adt_namebuf, rel_adt.data(), adt_nb);
-        return AdsOpenTable(hConn, adt_namebuf, adt_namebuf,
+        const auto local_reopen_rc = AdsOpenTable(hConn, adt_namebuf, adt_namebuf,
                             ADS_ADT, usCharType, 0, 0, 1, phTable);
+        const auto captured_error = local_reopen_rc ? openads::abi::last_error_code() : 0;
+        openads::abi::create_diag::log(local_reopen_rc ? "server-abi-reopen-fail" : "server-abi-reopen-ok",
+            local_reopen_rc, captured_error == static_cast<std::int32_t>(local_reopen_rc) ? "last-error-matches" : "last-error-differs");
+        return local_reopen_rc;
     }
 
     if (is_vfp) {
@@ -9870,9 +9903,11 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
             if (const UNSIGNED32 wrc = write_new_table_file(
                     full.string(), file, "AdsCreateTable: VFP");
                 wrc != openads::AE_SUCCESS) {
+                openads::abi::create_diag::log("vfp-write-fail", wrc);
                 return wrc;
             }
         }
+        openads::abi::create_diag::log("vfp-write-ok");
 
         if (has_memo) {
             fs::path fpt = full;
@@ -9880,14 +9915,22 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
             { std::error_code ec; fs::remove(fpt, ec); }
             std::uint16_t bs = usMemoBlockSize != 0 ? usMemoBlockSize : 512;
             auto mr = openads::drivers::fpt::FptMemo::create(fpt.string(), bs);
-            if (!mr) return fail(mr.error());
+            if (!mr) {
+                openads::abi::create_diag::log("memo-create-fail",
+                    mr.error().code, "memo", mr.error().sub_code);
+                return fail(mr.error());
+            }
         }
 
         UNSIGNED8 namebuf[260] = {0};
         std::size_t nb = std::min<std::size_t>(rel.size(), sizeof(namebuf) - 1);
         std::memcpy(namebuf, rel.data(), nb);
-        return AdsOpenTable(hConn, namebuf, namebuf,
+        const auto local_reopen_rc = AdsOpenTable(hConn, namebuf, namebuf,
                             ADS_VFP, usCharType, 0, 0, 1, phTable);
+        const auto captured_error = local_reopen_rc ? openads::abi::last_error_code() : 0;
+        openads::abi::create_diag::log(local_reopen_rc ? "server-abi-reopen-fail" : "server-abi-reopen-ok",
+            local_reopen_rc, captured_error == static_cast<std::int32_t>(local_reopen_rc) ? "last-error-matches" : "last-error-differs");
+        return local_reopen_rc;
     }
 
     // Ã¢â€â‚¬Ã¢â€â‚¬ DBF creation path (existing) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
@@ -9954,9 +9997,11 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
         if (const UNSIGNED32 wrc = write_new_table_file(
                 full.string(), file, "AdsCreateTable");
             wrc != openads::AE_SUCCESS) {
+            openads::abi::create_diag::log("dbf-write-fail", wrc);
             return wrc;
         }
     }
+    openads::abi::create_diag::log("dbf-write-ok");
 
     // If the field list declares any memo (M) field, stage an empty
     // .fpt next to the .dbf -- Connection::open_table auto-attaches it,
@@ -9974,7 +10019,11 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
             // usMemoBlockSize.
             std::uint16_t bs = usMemoBlockSize != 0 ? usMemoBlockSize : 512;
             auto mr = openads::drivers::fpt::FptMemo::create(fpt.string(), bs);
-            if (!mr) return fail(mr.error());
+            if (!mr) {
+                openads::abi::create_diag::log("memo-create-fail",
+                    mr.error().code, "memo", mr.error().sub_code);
+                return fail(mr.error());
+            }
         }
     }
 
@@ -9983,10 +10032,14 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
     UNSIGNED8 namebuf[260] = {0};
     std::size_t nb = std::min<std::size_t>(rel.size(), sizeof(namebuf) - 1);
     std::memcpy(namebuf, rel.data(), nb);
-    return AdsOpenTable(hConn, namebuf, namebuf,
+    const auto local_reopen_rc = AdsOpenTable(hConn, namebuf, namebuf,
                         ADS_CDX,             // table type
                         usCharType, 0, 0, 1, // char/lock/checkrights/mode
                         phTable);
+    const auto captured_error = local_reopen_rc ? openads::abi::last_error_code() : 0;
+    openads::abi::create_diag::log(local_reopen_rc ? "server-abi-reopen-fail" : "server-abi-reopen-ok",
+        local_reopen_rc, captured_error == static_cast<std::int32_t>(local_reopen_rc) ? "last-error-matches" : "last-error-differs");
+    return local_reopen_rc;
 }
 
 UNSIGNED32 ENTRYPOINT AdsDropTable(ADSHANDLE     hConnect,
@@ -13465,7 +13518,12 @@ bool fire_triggers_(Handle hConn, Connection* conn,
 UNSIGNED32 ENTRYPOINT AdsAppendRecord(ADSHANDLE hTable) {
     arc2_trace("AdsAppendRecord");
     if (auto* rt = get_remote_table(hTable)) {
-        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
+        openads::abi::create_diag::Scope append_scope(rt->name, {});
+        openads::abi::create_diag::log("client-append-enter");
+        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) {
+            openads::abi::create_diag::log("client-append-preflush-fail", frc);
+            return frc;
+        }
         remote_settle_cursor(rt);                   // M12.21 option C
         rt->row_valid        = false;               // M12.17
         rt->rec_count_cached = false;
@@ -13480,7 +13538,11 @@ UNSIGNED32 ENTRYPOINT AdsAppendRecord(ADSHANDLE hTable) {
         remote_clear_nav_boundaries(rt);
         rt->invalidate_prefetch();
         auto r = rt->conn->append_blank(rt->id);
-        if (!r) return fail(r.error());
+        if (!r) {
+            openads::abi::create_diag::log("client-append-fail", r.error().code,
+                "wire-append", r.error().sub_code);
+            return fail(r.error());
+        }
         // Fresh appends auto-lock (non-exclusive tables): pooled reuse
         // must not resurrect a locked handle. The ack carries no
         // recno, so the ledger cannot name the auto-lock -- mark the
@@ -13488,6 +13550,7 @@ UNSIGNED32 ENTRYPOINT AdsAppendRecord(ADSHANDLE hTable) {
         rt->ever_locked = true;
         rt->locks_uncertain = true;
         rt->write_dirty = true;
+        openads::abi::create_diag::log("client-append-ok");
         return ok();
     }
 #if defined(OPENADS_WITH_FIREBIRD)
