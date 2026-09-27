@@ -6,8 +6,8 @@
 //  - Flush/CloseAll defer to the close that absorbs them (server close
 //    flushes via its shadow handle and purges index bindings); any
 //    other intervening wire op flushes them first, in order.
-//  - CheckExistence serves positive answers locally until a
-//    file-mutating op clears the cache (negatives always go out).
+//  - CheckExistence always probes the server; external file/dir changes
+//    can occur outside this connection.
 //  - SetOrder to the ack-confirmed binding skips its frame (SetOrder
 //    never moves the cursor).
 //  - Order-handle key counts ride the parent's order cache.
@@ -234,7 +234,7 @@ TEST_CASE("Teardown batching: merged flush survives for unparked closes") {
     srv.stop();
 }
 
-TEST_CASE("Teardown batching: existence positives cache until mutation") {
+TEST_CASE("Teardown batching: existence probes reflect external changes") {
     tb_wipe();
     auto dir = tb_tmp_dir();
     tb_seed(dir);
@@ -253,14 +253,13 @@ TEST_CASE("Teardown batching: existence positives cache until mutation") {
     CHECK(ex == 1u);
     REQUIRE(AdsCheckExistence(hConn, fn, &ex) == AE_SUCCESS);
     CHECK(ex == 1u);
-    CHECK(tb_op(kOpFileExists) == fe0 + 1);
+    CHECK(tb_op(kOpFileExists) == fe0 + 3);
 
-    // A file-mutating op clears the cache: the next check goes out and
-    // reports the drop.
+    // A file-mutating op also changes the next live answer.
     REQUIRE(AdsDropTable(hConn, fn, 1) == AE_SUCCESS);
     REQUIRE(AdsCheckExistence(hConn, fn, &ex) == AE_SUCCESS);
     CHECK(ex == 0u);
-    CHECK(tb_op(kOpFileExists) == fe0 + 2);
+    CHECK(tb_op(kOpFileExists) == fe0 + 4);
 
     REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
     srv.stop();
@@ -588,7 +587,7 @@ TEST_CASE("Index park: CreateIndex invalidates the snapshot") {
     srv.stop();
 }
 
-TEST_CASE("Teardown batching: open bags answer existence locally") {
+TEST_CASE("Teardown batching: open bags do not hide filesystem changes") {
     tb_wipe();
     auto dir = tb_tmp_dir();
     tb_seed(dir);
@@ -599,28 +598,20 @@ TEST_CASE("Teardown batching: open bags answer existence locally") {
     ADSHANDLE hConn = tb_connect_remote(dir, srv.port());
     ADSHANDLE hTable = tb_open(hConn);
 
-    // The production bag is bound by this open table: existence is
-    // trivially true (any spelling that stems the same, including
-    // the .z01 production alias) with zero frames.
+    // A live table or bag cannot establish existence for a differently
+    // spelled path. The exact spelling must be checked on the server.
     const std::uint64_t fe0 = tb_op(kOpFileExists);
     UNSIGNED16 ex = 0;
-    UNSIGNED8 bag1[] = "TB.CDX";
-    REQUIRE(AdsCheckExistence(hConn, bag1, &ex) == AE_SUCCESS);
+    UNSIGNED8 bag[] = "TB.CDX";
+    REQUIRE(AdsCheckExistence(hConn, bag, &ex) == AE_SUCCESS);
     CHECK(ex == 1u);
-    UNSIGNED8 bag2[] = "tb.cdx";
-    REQUIRE(AdsCheckExistence(hConn, bag2, &ex) == AE_SUCCESS);
-    CHECK(ex == 1u);
-    UNSIGNED8 bag3[] = "TB.z01";
-    REQUIRE(AdsCheckExistence(hConn, bag3, &ex) == AE_SUCCESS);
-    CHECK(ex == 1u);
-    CHECK(tb_op(kOpFileExists) == fe0);
-
-    // A genuinely missing file still goes to the wire (negatives are
-    // never cached: the file may appear at any time).
+    UNSIGNED8 alias[] = "TB.z01";
+    REQUIRE(AdsCheckExistence(hConn, alias, &ex) == AE_SUCCESS);
+    CHECK(ex == 0u);
     UNSIGNED8 missing[] = "NOPE.CDX";
     REQUIRE(AdsCheckExistence(hConn, missing, &ex) == AE_SUCCESS);
     CHECK(ex == 0u);
-    CHECK(tb_op(kOpFileExists) == fe0 + 1);
+    CHECK(tb_op(kOpFileExists) == fe0 + 3);
 
     REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
     REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);

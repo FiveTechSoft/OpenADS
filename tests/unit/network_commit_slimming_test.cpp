@@ -11,14 +11,14 @@
 //   d) a table whose locks were all released parks at close instead
 //      of real-closing (the blunt ever_locked flag used to force a
 //      7-frame reopen per save);
-//   e) Repeated missing-FileExists probes cache per session. Directory
-//      existence and creation are never cached: peers may change them.
+//   e) File and directory existence always re-probe the server; external
+//      sessions and host operations may change them.
 // mtfix10:
 //   f) AdsGetNumLocks shares the GetAllLocks ledger fast path (rddads
 //      polls it after every commit/unlock -- it used to ride the wire
 //      op even when the ledger was provably complete);
-//   g) a FileExists probe for a table open on this connection answers
-//      from the open-table store (a live table proves its dbf exists).
+//   g) FileExists no longer uses an open-table shortcut: it checks the
+//      exact path even when a table or index with that stem is open.
 #include "doctest.h"
 #include "mgmt/mg_stats.h"
 #include "network/server.h"
@@ -320,36 +320,39 @@ TEST_CASE("Commit slimming: directory state always reflects server changes") {
     CHECK(fs::is_directory(dir / "cs_sub"));
     REQUIRE(AdsDirRemove(hConn, (UNSIGNED8*)"cs_sub") == AE_SUCCESS);
 
-    // A table open on this connection proves its own dbf exists: the
-    // probe answers from the open-table store with no wire op (mtfix10).
+    // FileExists is also a live probe. A positive answer for an open table
+    // must not bypass the server, nor may a missing bag be cached.
     ADSHANDLE hTable = cs_open(hConn);
     const std::uint64_t fe0 = cs_op(kOpFileExists);
     REQUIRE(AdsCheckExistence(hConn, (UNSIGNED8*)"CS.DBF", &ex)
             == AE_SUCCESS);
     CHECK(ex == 1u);
-    CHECK(cs_op(kOpFileExists) == fe0);
-
-    // Regression: the open CS.DBF must NOT prove CS.Z01 exists merely
-    // because the stems match. The first miss goes to the server; the
-    // second is served by the negative FileExists cache.
-    REQUIRE(AdsCheckExistence(hConn, (UNSIGNED8*)"CS.Z01", &ex)
-            == AE_SUCCESS);
-    CHECK(ex == 0u);
     CHECK(cs_op(kOpFileExists) == fe0 + 1);
     REQUIRE(AdsCheckExistence(hConn, (UNSIGNED8*)"CS.Z01", &ex)
             == AE_SUCCESS);
     CHECK(ex == 0u);
-    CHECK(cs_op(kOpFileExists) == fe0 + 1);
+    REQUIRE(AdsCheckExistence(hConn, (UNSIGNED8*)"CS.Z01", &ex)
+            == AE_SUCCESS);
+    CHECK(ex == 0u);
+    CHECK(cs_op(kOpFileExists) == fe0 + 3);
     REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
 
-    // Missing file: repeated "no" answers stop hitting the wire.
-    REQUIRE(AdsCheckExistence(hConn, (UNSIGNED8*)"NOPE.CDX", &ex)
+    // Positive-to-missing and missing-to-positive after external changes
+    // on the server, without a mutation through this connection.
+    REQUIRE(AdsCheckExistence(hConn, (UNSIGNED8*)"cs_sub", &ex)
             == AE_SUCCESS);
     CHECK(ex == 0u);
-    REQUIRE(AdsCheckExistence(hConn, (UNSIGNED8*)"NOPE.CDX", &ex)
+    REQUIRE(fs::create_directory(dir / "cs_sub", ec));
+    REQUIRE_FALSE(ec);
+    REQUIRE(AdsCheckExistence(hConn, (UNSIGNED8*)"cs_sub", &ex)
+            == AE_SUCCESS);
+    CHECK(ex == 1u);
+    REQUIRE(fs::remove(dir / "cs_sub", ec));
+    REQUIRE_FALSE(ec);
+    REQUIRE(AdsCheckExistence(hConn, (UNSIGNED8*)"cs_sub", &ex)
             == AE_SUCCESS);
     CHECK(ex == 0u);
-    CHECK(cs_op(kOpFileExists) == fe0 + 2);
+    CHECK(cs_op(kOpFileExists) == fe0 + 6);
 
     REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
     srv.stop();

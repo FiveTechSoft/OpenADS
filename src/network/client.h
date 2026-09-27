@@ -400,18 +400,9 @@ public:
     util::Result<void>          drop_table(const std::string& name,
                                             std::uint16_t delete_files);
 
-    // Server filesystem (EnableFileFunc on server).
-    // Positive-only existence cache (rddads probes the same production
-    // bags every USE): a "true" answer is served locally until any
-    // file-mutating op on this connection (erase/rename/drop/create,
-    // via file_exists_invalidate) clears it. Negatives always go to
-    // the wire — caching "missing" would hide a concurrently created
-    // table, while a stale "present" degrades to a clean open error.
-    // src (optional out): 0 = positive cache, 1 = negative cache,
-    // 2 = wire probe. For probe-level trace logging.
-    util::Result<bool>          file_exists(const std::string& path,
-                                            int* src = nullptr);
-    void                        file_exists_invalidate();
+    // Server filesystem (EnableFileFunc on server). External state is never
+    // cached: other sessions and host operations can change it at any time.
+    util::Result<bool>          file_exists(const std::string& path);
     util::Result<void>          file_erase(const std::string& path);
     util::Result<void>          file_rename(const std::string& old_p,
                                             const std::string& new_p);
@@ -661,17 +652,6 @@ private:
     // connection is fully established before any other thread
     // can hold its handle).
     std::string                 server_version_;
-    // Positive-only file-existence cache (see file_exists). Guarded
-    // by its own mutex: consulted on the read path, cleared by
-    // file-mutating ops, never held across wire calls.
-    std::set<std::string>       file_exists_cache_;
-    std::mutex                  file_exists_mu_;
-    // Negative half of the existence cache: repeated "missing" probes
-    // (Vouch checks optional bags/configs on every USE) are served
-    // locally until any file-mutating op on this connection clears it.
-    // A stale "missing" degrades to the app re-checking after its own
-    // create attempt (which clears the cache), never to wrong data.
-    std::set<std::string>       file_exists_neg_cache_;
 
 public:
     // Deferred disconnect (MT shared connections). AdsDisconnect on a

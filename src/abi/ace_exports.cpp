@@ -7954,9 +7954,6 @@ void remote_close_table_live(ADSHANDLE hTable,
 // arrange that (disconnect/open paths unlock first).
 static void remote_flush_pools_one(openads::network::RemoteConnection* rc) {
     if (rc == nullptr) return;
-    // File lifecycle changed meaning on disk: drop the existence
-    // cache alongside the parked handles.
-    rc->file_exists_invalidate();
     std::vector<std::unique_ptr<openads::network::RemoteTable>> parked;
     rc->parked_flush(parked);
     for (auto& e : parked) {
@@ -10820,53 +10817,12 @@ UNSIGNED32 ENTRYPOINT AdsCheckExistence(ADSHANDLE hConn, UNSIGNED8* pucName,
     auto name = openads::abi::to_internal(pucName, 0);
     auto ctx = resolve_fs_conn(hConn);
     if (ctx.remote) {
-        // Open-bag short-circuit (per-USE VouExistIndex probes): a bag
-        // bound by any live table on this connection trivially exists
-        // — the app is reading through it. Matched by lowercased stem
-        // (no directory, no extension; .cdx/.z01 are equivalent
-        // production spellings). False positives are safe (a real
-        // open follows and errors properly); false negatives never
-        // happen here.
-        auto stem_of = [](const std::string& p) {
-            std::string b = p;
-            auto sep = b.find_last_of("/\\");
-            if (sep != std::string::npos) b = b.substr(sep + 1);
-            auto dot = b.find_last_of('.');
-            if (dot != std::string::npos) b = b.substr(0, dot);
-            for (auto& c : b)
-                c = static_cast<char>(std::tolower(
-                        static_cast<unsigned char>(c)));
-            return b;
-        };
-        const std::string want = stem_of(name);
-        if (!want.empty()) {
-            // Shared store: hold s.mu for the scan (memory only, no wire).
-            std::lock_guard<std::recursive_mutex> lk_store(state().mu);
-            for (auto& kv : remote_table_store()) {
-                auto* rt = kv.first;
-                if (rt == nullptr || rt->conn != ctx.remote) continue;
-                if (stem_of(rt->prod_bag_path) == want ||
-                    (!rt->last_open_bag.empty() &&
-                     stem_of(rt->last_open_bag) == want) ||
-                    // An open table proves only its exact file exists,
-                    // not a different extension with the same stem.
-                    rt->name == name) {
-                    *pbExists = 1;
-                    return ok();
-                }
-            }
-        }
-        int fe_src = 2;
-        auto r = ctx.remote->file_exists(name, &fe_src);
+        // External directory/file changes require a wire probe even when an
+        // open table or index has the same stem: existence is not ownership.
+        auto r = ctx.remote->file_exists(name);
         if (!r) return fail(r.error());
-        // Probe-level visibility: the frame hook only logs wire misses,
-        // so cache hits used to be invisible in the trace. One line per
-        // probe with the REAL path (the frame hook's tid is a truncated
-        // hash that cannot distinguish same-length paths).
-        cli_trace("FileExists", "probe %s -> %s (%s)", name.c_str(),
-                  r.value() ? "yes" : "no",
-                  fe_src == 0 ? "pos-cache" :
-                  fe_src == 1 ? "neg-cache" : "wire");
+        cli_trace("FileExists", "probe %s -> %s (wire)", name.c_str(),
+                  r.value() ? "yes" : "no");
         *pbExists = r.value() ? 1 : 0;
         return ok();
     }

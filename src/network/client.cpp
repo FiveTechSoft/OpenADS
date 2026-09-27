@@ -2704,35 +2704,12 @@ std::uint64_t read_u64_le(const std::uint8_t* p) {
     return v;
 }
 
-// Existence-cache key: the server separator-normalizes client paths
-// (fs_sandbox), so "/" and "\\" spellings of one file are the same
-// file. Case is NOT folded: the server fs may be case-sensitive (Linux
-// hosts), where "A.DBF" and "a.dbf" are legitimately different files.
-std::string fs_cache_key(const std::string& path) {
-    std::string k = path;
-    for (auto& ch : k) {
-        if (ch == '/') ch = '\\';
-    }
-    return k;
-}
-
 } // namespace
 
+// File state can change on another connection or directly on the host.
+// Every existence probe must reach the server, just like DirExist.
 util::Result<bool>
-RemoteConnection::file_exists(const std::string& path, int* src) {
-    if (src != nullptr) *src = 2;
-    const std::string key = fs_cache_key(path);
-    {
-        std::lock_guard<std::mutex> lk(file_exists_mu_);
-        if (file_exists_cache_.count(key) != 0) {
-            if (src != nullptr) *src = 0;
-            return true;
-        }
-        if (file_exists_neg_cache_.count(key) != 0) {
-            if (src != nullptr) *src = 1;
-            return false;
-        }
-    }
+RemoteConnection::file_exists(const std::string& path) {
     Frame req;
     req.opcode = Opcode::FileExists;
     push_lp_str(req.payload, path);
@@ -2741,23 +2718,7 @@ RemoteConnection::file_exists(const std::string& path, int* src) {
     if (rep.value().opcode != Opcode::FileExistsAck ||
         rep.value().payload.empty())
         return fs_wire_err(rep.value(), "FileExists");
-    bool exists = rep.value().payload[0] != 0;
-    {
-        std::lock_guard<std::mutex> lk(file_exists_mu_);
-        if (exists) {
-            file_exists_cache_.insert(key);
-            file_exists_neg_cache_.erase(key);
-        } else {
-            file_exists_neg_cache_.insert(key);
-        }
-    }
-    return exists;
-}
-
-void RemoteConnection::file_exists_invalidate() {
-    std::lock_guard<std::mutex> lk(file_exists_mu_);
-    file_exists_cache_.clear();
-    file_exists_neg_cache_.clear();
+    return rep.value().payload[0] != 0;
 }
 
 util::Result<void>
@@ -2769,7 +2730,6 @@ RemoteConnection::file_erase(const std::string& path) {
     if (!rep) return rep.error();
     if (rep.value().opcode != Opcode::FileEraseAck)
         return fs_wire_err(rep.value(), "FileErase");
-    file_exists_invalidate();
     return {};
 }
 
@@ -2784,7 +2744,6 @@ RemoteConnection::file_rename(const std::string& old_p,
     if (!rep) return rep.error();
     if (rep.value().opcode != Opcode::FileRenameAck)
         return fs_wire_err(rep.value(), "FileRename");
-    file_exists_invalidate();
     return {};
 }
 
