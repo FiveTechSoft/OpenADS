@@ -151,6 +151,9 @@ TEST_CASE("CreateTable diagnostic isolates post-write reopen failure") {
     // force failure at companion memo creation, still after the DBF write.
     const std::string rel = "probe.dbf";
     fs::create_directories(data / "probe.fpt");
+    // Keep the directory non-empty so the server's pre-create remove()
+    // cannot erase it; the memo create must then fail on Windows.
+    std::ofstream(data / "probe.fpt" / "occupy") << "x";
 #else
     // The server's ABI create writes the requested relative path, but its
     // fixed 260-byte post-create name buffer truncates a longer path. This
