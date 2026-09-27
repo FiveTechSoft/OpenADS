@@ -11,8 +11,8 @@
 //   d) a table whose locks were all released parks at close instead
 //      of real-closing (the blunt ever_locked flag used to force a
 //      7-frame reopen per save);
-//   e) DirExist/DirMake answers cache per session (positive and
-//      negative), and repeated missing-FileExists probes cache too.
+//   e) Repeated missing-FileExists probes cache per session. Directory
+//      existence and creation are never cached: peers may change them.
 // mtfix10:
 //   f) AdsGetNumLocks shares the GetAllLocks ledger fast path (rddads
 //      polls it after every commit/unlock -- it used to ride the wire
@@ -268,7 +268,7 @@ TEST_CASE("Commit slimming: released-lock tables park at close") {
     srv.stop();
 }
 
-TEST_CASE("Commit slimming: dir and missing-file answers cache") {
+TEST_CASE("Commit slimming: directory state always reflects server changes") {
     cs_wipe();
     auto dir = cs_tmp_dir();
     cs_seed(dir);
@@ -278,31 +278,47 @@ TEST_CASE("Commit slimming: dir and missing-file answers cache") {
     srv.set_enable_file_func(true);
     ADSHANDLE hConn = cs_connect_remote(dir, srv.port());
 
-    // Existing dir: one probe, then local answers; DirMake is skipped
-    // outright once the dir is known.
     const std::uint64_t de0 = cs_op(kOpDirExist);
     const std::uint64_t dm0 = cs_op(kOpDirMake);
     UNSIGNED16 ex = 0;
     REQUIRE(AdsDirExist(hConn, (UNSIGNED8*)".", &ex) == AE_SUCCESS);
     CHECK(ex == 1u);
     REQUIRE(AdsDirExist(hConn, (UNSIGNED8*)".", &ex) == AE_SUCCESS);
-    CHECK(cs_op(kOpDirExist) == de0 + 1);
+    CHECK(ex == 1u);
+    CHECK(cs_op(kOpDirExist) == de0 + 2);
     REQUIRE(AdsDirMake(hConn, (UNSIGNED8*)".") == AE_SUCCESS);
-    CHECK(cs_op(kOpDirMake) == dm0);
-
-    // A fresh DirMake goes out once and then the dir is known.
-    REQUIRE(AdsDirMake(hConn, (UNSIGNED8*)"cs_sub") == AE_SUCCESS);
     CHECK(cs_op(kOpDirMake) == dm0 + 1);
+
+    REQUIRE(AdsDirMake(hConn, (UNSIGNED8*)"cs_sub") == AE_SUCCESS);
+    CHECK(cs_op(kOpDirMake) == dm0 + 2);
+    REQUIRE(fs::is_directory(dir / "cs_sub"));
     REQUIRE(AdsDirExist(hConn, (UNSIGNED8*)"cs_sub", &ex) == AE_SUCCESS);
     CHECK(ex == 1u);
-    CHECK(cs_op(kOpDirExist) == de0 + 1);
+    CHECK(cs_op(kOpDirExist) == de0 + 3);
 
-    // Our own DirRemove flips the cached answer to missing with no
-    // further probes.
-    REQUIRE(AdsDirRemove(hConn, (UNSIGNED8*)"cs_sub") == AE_SUCCESS);
+    // Simulate host maintenance or a second client: deletion bypasses this
+    // connection's DirRemove, so its next probe must reach the server.
+    std::error_code ec;
+    REQUIRE(fs::remove(dir / "cs_sub", ec));
+    REQUIRE_FALSE(ec);
     REQUIRE(AdsDirExist(hConn, (UNSIGNED8*)"cs_sub", &ex) == AE_SUCCESS);
     CHECK(ex == 0u);
-    CHECK(cs_op(kOpDirExist) == de0 + 1);
+    CHECK(cs_op(kOpDirExist) == de0 + 4);
+    REQUIRE(AdsDirMake(hConn, (UNSIGNED8*)"cs_sub") == AE_SUCCESS);
+    CHECK(cs_op(kOpDirMake) == dm0 + 3);
+    CHECK(fs::is_directory(dir / "cs_sub"));
+    REQUIRE(AdsDirExist(hConn, (UNSIGNED8*)"cs_sub", &ex) == AE_SUCCESS);
+    CHECK(ex == 1u);
+    CHECK(cs_op(kOpDirExist) == de0 + 5);
+
+    // A repeat mkdir must still reach the server (and remain idempotent),
+    // not claim success from an obsolete positive answer.
+    REQUIRE(fs::remove(dir / "cs_sub", ec));
+    REQUIRE_FALSE(ec);
+    REQUIRE(AdsDirMake(hConn, (UNSIGNED8*)"cs_sub") == AE_SUCCESS);
+    CHECK(cs_op(kOpDirMake) == dm0 + 4);
+    CHECK(fs::is_directory(dir / "cs_sub"));
+    REQUIRE(AdsDirRemove(hConn, (UNSIGNED8*)"cs_sub") == AE_SUCCESS);
 
     // A table open on this connection proves its own dbf exists: the
     // probe answers from the open-table store with no wire op (mtfix10).

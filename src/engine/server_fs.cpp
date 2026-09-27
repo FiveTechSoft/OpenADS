@@ -212,6 +212,11 @@ util::Result<std::vector<DirEntry>> fs_directory(const std::string& base_dir,
 util::Result<bool> fs_dir_exist(const std::string& abs_path) {
     std::error_code ec;
     bool d = fs::is_directory(abs_path, ec);
+    // A missing directory is an ordinary negative probe, not an I/O error.
+    // std::filesystem::is_directory(path, ec) sets no_such_file_or_directory
+    // in ec on some standard libraries (notably Linux/libstdc++).
+    if (ec == std::errc::no_such_file_or_directory)
+        return false;
     if (ec)
         return io_err(static_cast<std::int32_t>(openads::AE_INTERNAL_ERROR),
                       "dir exist failed", abs_path);

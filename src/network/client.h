@@ -672,15 +672,6 @@ private:
     // A stale "missing" degrades to the app re-checking after its own
     // create attempt (which clears the cache), never to wrong data.
     std::set<std::string>       file_exists_neg_cache_;
-    // Directory truth (EnableFileFunc): DirExist=true answers and
-    // successful DirMakes feed dir_known_; DirExist=false feeds
-    // dir_missing_. A known dir makes DirMake a no-op (the server
-    // create is idempotent) and DirExist answer locally. Our own
-    // DirRemove erases the path from both. Peer mkdir/rmdir is not
-    // tracked -- session-scoped, same trade as the file cache.
-    std::set<std::string>       dir_known_;
-    std::set<std::string>       dir_missing_;
-    std::mutex                  dir_cache_mu_;
 
 public:
     // Deferred disconnect (MT shared connections). AdsDisconnect on a

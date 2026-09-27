@@ -2993,14 +2993,12 @@ RemoteConnection::zip_list(const std::string& zip) {
     return o;
 }
 
+// Directory state may change through other sessions or on the server host.
+// Do not cache existence or skip an idempotent mkdir: a stale positive answer
+// can make a fresh organization fail its first CreateTable after its directory
+// was removed outside this connection.
 util::Result<bool>
 RemoteConnection::dir_exist(const std::string& path) {
-    const std::string key = fs_cache_key(path);
-    {
-        std::lock_guard<std::mutex> lk(dir_cache_mu_);
-        if (dir_known_.count(key) != 0) return true;
-        if (dir_missing_.count(key) != 0) return false;
-    }
     Frame req;
     req.opcode = Opcode::DirExist;
     push_lp_str(req.payload, path);
@@ -3009,26 +3007,11 @@ RemoteConnection::dir_exist(const std::string& path) {
     if (rep.value().opcode != Opcode::DirExistAck ||
         rep.value().payload.empty())
         return fs_wire_err(rep.value(), "DirExist");
-    const bool exists = rep.value().payload[0] != 0;
-    {
-        std::lock_guard<std::mutex> lk(dir_cache_mu_);
-        if (exists) {
-            dir_known_.insert(key);
-            dir_missing_.erase(key);
-        } else {
-            dir_missing_.insert(key);
-        }
-    }
-    return exists;
+    return rep.value().payload[0] != 0;
 }
 
 util::Result<void>
 RemoteConnection::dir_make(const std::string& path) {
-    const std::string key = fs_cache_key(path);
-    {
-        std::lock_guard<std::mutex> lk(dir_cache_mu_);
-        if (dir_known_.count(key) != 0) return {};
-    }
     Frame req;
     req.opcode = Opcode::DirMake;
     push_lp_str(req.payload, path);
@@ -3036,9 +3019,6 @@ RemoteConnection::dir_make(const std::string& path) {
     if (!rep) return rep.error();
     if (rep.value().opcode != Opcode::DirMakeAck)
         return fs_wire_err(rep.value(), "DirMake");
-    std::lock_guard<std::mutex> lk(dir_cache_mu_);
-    dir_known_.insert(key);
-    dir_missing_.erase(key);
     return {};
 }
 
@@ -3051,10 +3031,6 @@ RemoteConnection::dir_remove(const std::string& path) {
     if (!rep) return rep.error();
     if (rep.value().opcode != Opcode::DirRemoveAck)
         return fs_wire_err(rep.value(), "DirRemove");
-    std::lock_guard<std::mutex> lk(dir_cache_mu_);
-    const std::string rkey = fs_cache_key(path);
-    dir_known_.erase(rkey);
-    dir_missing_.insert(rkey);
     return {};
 }
 
