@@ -14,6 +14,23 @@ v1.0.0-rc29. Para el historial completo de commits, consulta el
 
 ---
 
+## Destacados: lock NTX interproceso (main, 2026-09-25)
+
+- **Lock interproceso del índice `.ntx`, compatible con Harbour
+  DBFNTX** — el driver NTX ahora bloquea el propio archivo `.ntx` en
+  el byte 1.000.000.000, el mismo esquema que usa DBFNTX de Harbour,
+  así que aplicaciones OpenADS, Harbour y xHarbour/Clipper pueden
+  compartir índices NTX entre procesos de forma segura: las lecturas
+  toman un lock compartido, las escrituras uno exclusivo mantenido
+  hasta `flush()`, y un contador de versión permite a los demás
+  procesos detectar el cambio y recargar el índice. Antes solo los
+  locks de registros DBF estaban alineados entre procesos y dos
+  escritores concurrentes podían corromper un `.ntx`. Cubierto por
+  nuevos tests unitarios interproceso, incluido un test con dos
+  procesos escritores concurrentes.
+
+---
+
 ## Destacados v1.8.33
 
 ### Fix: Resolución de path en `AdsCreateIndex` legacy
