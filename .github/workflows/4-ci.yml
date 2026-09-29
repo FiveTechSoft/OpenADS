@@ -1,0 +1,305 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.os }} / ${{ matrix.preset }}${{ matrix.tls && ' / TLS' || '' }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            preset: msvc-x64
+            tls: false
+          # 32-bit MSVC: many deployments still ship x86. CI must build it
+          # so x86-only breakage (bitness-dependent narrowing C4244/C2220,
+          # SQLLEN*/SQLPOINTER signatures C2733, /WX C4100) can't slip past.
+          - os: windows-2022
+            preset: msvc-x86
+            tls: false
+          - os: ubuntu-24.04
+            preset: ninja-clang
+            tls: false
+          - os: macos-14
+            preset: default
+            tls: false
+          # M12.12 — verify the OPENADS_WITH_TLS path (vendored
+          # mbedtls 3.6) on at least one runner per release.
+          - os: ubuntu-24.04
+            preset: ninja-clang
+            tls: true
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Version string comes from `git describe --tags`: without
+          # tag refs a main-branch checkout reports a bare SHA (no
+          # dots) and network_version_test fails everywhere. Releases
+          # check out the tag itself so they never hit this.
+          # fetch-tags alone stays shallow (default fetch-depth: 1), so
+          # describe still can't see v* tags - fetch the full history.
+          fetch-tags: true
+          fetch-depth: 0
+
+      - name: Install Ninja (Linux / macOS)
+        if: runner.os != 'Windows'
+        uses: seanmiddleditch/gha-setup-ninja@v6
+
+      - name: Configure
+        run: |
+          cmake --preset ${{ matrix.preset }} \
+                ${{ matrix.tls && '-DOPENADS_WITH_TLS=ON' || '' }}
+        shell: bash
+
+      - name: Build
+        run: cmake --build build/${{ matrix.preset }} --config Release --target dbf_cdx_bench openads_unit_tests
+
+      - name: Test
+        run: ctest --test-dir build/${{ matrix.preset }} --output-on-failure -C Release
+
+      - name: Bench smoke (CDX multi-tag create)
+        # Small run to smoke the optimized INDEX ON / bulk create path (#128)
+        run: |
+          BENCH="build/${{ matrix.preset }}/tests/Release/dbf_cdx_bench${{ runner.os == 'Windows' && '.exe' || '' }}"
+          if [ -f "$BENCH" ]; then
+            "$BENCH" 1000 || true
+          fi
+        shell: bash
+
+  php-binding:
+    name: PHP binding
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v6
+
+      - name: Build OpenADS ACE library
+        run: |
+          cmake --preset ninja-clang
+          cmake --build build/ninja-clang --config Release --target openads_ace
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: ffi
+          ini-values: ffi.enable=1
+
+      - name: Install PHP dependencies
+        working-directory: bindings/php
+        run: composer install --no-interaction
+
+      - name: Run PHP binding tests
+        working-directory: bindings/php
+        env:
+          OPENADS_ACE_LIB: ${{ github.workspace }}/build/ninja-clang/src/libace64.so
+        run: composer test
+
+  sql-uri-smoke:
+    name: SQL URI smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v6
+
+      - name: Configure
+        run: cmake --preset ninja-clang
+        shell: bash
+
+      - name: Build unit tests
+        run: cmake --build build/ninja-clang --config Release --target openads_unit_tests
+        shell: bash
+
+      - name: Run SQL URI smoke tests
+        run: |
+          ctest --test-dir build/ninja-clang -C Release --output-on-failure \
+            -R "sql_uri_smoke|sqlite_filter_pushdown|sqlite_seek_smoke"
+        shell: bash
+
+  sql-live-pg-maria:
+    name: SQL live PG + Maria
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      mariadb:
+        image: mariadb:11
+        env:
+          MARIADB_ALLOW_EMPTY_ROOT_PASSWORD: "yes"
+          MARIADB_DATABASE: test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "healthcheck.sh --connect --innodb_initialized"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libpq-dev libmariadb-dev
+
+      - name: Install Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v6
+
+      - name: Configure (PostgreSQL + MariaDB)
+        run: |
+          cmake --preset ninja-clang \
+            -DOPENADS_WITH_POSTGRESQL=ON \
+            -DOPENADS_WITH_MARIADB=ON
+        shell: bash
+
+      - name: Build unit tests
+        run: cmake --build build/ninja-clang --config Release --target openads_unit_tests
+        shell: bash
+
+      - name: Run live PG + Maria smoke tests
+        env:
+          OPENADS_TEST_PG_URI: postgresql://postgres@127.0.0.1:5432/postgres
+          OPENADS_TEST_MARIADB_URI: mariadb://root@127.0.0.1:3306/test
+        run: |
+          ctest --test-dir build/ninja-clang -C Release --output-on-failure \
+            -R "pg_live_smoke|maria_live_smoke"
+        shell: bash
+
+  sql-live-mssql:
+    name: SQL live MSSQL
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: Y
+          MSSQL_SA_PASSWORD: OpenADS_CI_Passw0rd!
+        ports:
+          - 1433:1433
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P OpenADS_CI_Passw0rd! -Q 'SELECT 1' || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+          --health-start-period 30s
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Install Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v6
+
+      - name: Configure (MSSQL)
+        run: cmake --preset ninja-clang -DOPENADS_WITH_MSSQL=ON -DOPENADS_WITH_TLS=ON
+        shell: bash
+
+      - name: Build unit tests
+        run: cmake --build build/ninja-clang --config Release --target openads_unit_tests
+        shell: bash
+
+      - name: Run live MSSQL smoke test
+        env:
+          OPENADS_TEST_MSSQL_CONNSTR: mssql://sa:OpenADS_CI_Passw0rd!@127.0.0.1:1433/master
+        run: |
+          ctest --test-dir build/ninja-clang -C Release --output-on-failure \
+            -R mssql_live_smoke
+        shell: bash
+
+  sql-live-firebird:
+    name: SQL live Firebird
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build firebird-dev firebird3.0-utils
+
+      - name: Install Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v6
+
+      - name: Seed embedded Firebird fixture
+        run: |
+          mkdir -p /tmp/openads-fb
+          cat > /tmp/openads-fb/seed.sql <<'EOF'
+          CREATE DATABASE '/tmp/openads-fb/live.fdb' USER 'SYSDBA' DEFAULT CHARACTER SET UTF8;
+          EXIT;
+          EOF
+          isql-fb -user SYSDBA -i /tmp/openads-fb/seed.sql
+
+      - name: Configure (Firebird)
+        run: cmake --preset ninja-clang -DOPENADS_WITH_FIREBIRD=ON
+        shell: bash
+
+      - name: Build unit tests
+        run: cmake --build build/ninja-clang --config Release --target openads_unit_tests
+        shell: bash
+
+      - name: Run live Firebird smoke test
+        env:
+          OPENADS_TEST_FIREBIRD_DB: /tmp/openads-fb/live.fdb
+        run: |
+          ctest --test-dir build/ninja-clang -C Release --output-on-failure \
+            -R firebird_live_smoke
+        shell: bash
+
+  harbour-smoke:
+    name: Harbour smoke (Windows)
+    runs-on: windows-2022
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Cache Harbour toolchain
+        uses: actions/cache@v4
+        id: harbour-cache
+        with:
+          path: ${{ runner.temp }}/harbour-ci
+          key: harbour-core-master-msvc64-v5-${{ hashFiles('tools/scripts/bootstrap_harbour_ci.ps1') }}
+
+      - name: Configure OpenADS
+        run: cmake --preset msvc-x64
+        shell: bash
+
+      - name: Build OpenADS + make_cdx
+        run: cmake --build build/msvc-x64 --config Release --target openads_ace make_cdx
+        shell: bash
+
+      - name: Bootstrap Harbour
+        run: pwsh -File tools/scripts/bootstrap_harbour_ci.ps1
+        env:
+          HARBOUR_CI_ROOT: ${{ runner.temp }}/harbour-ci
+          OPENADS_ROOT: ${{ github.workspace }}
+          OPENADS_BUILD: ${{ github.workspace }}/build/msvc-x64
+          GIT_TERMINAL_PROMPT: "0"
+
+      - name: Run Harbour smoke
+        run: pwsh -File tools/scripts/run_harbour_smoke.ps1
+        env:
+          OPENADS_BUILD: ${{ github.workspace }}/build/msvc-x64
+          HARBOUR_ROOT: ${{ runner.temp }}/harbour-ci
