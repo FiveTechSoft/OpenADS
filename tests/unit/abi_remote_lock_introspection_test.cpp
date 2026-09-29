@@ -5,8 +5,9 @@
 // remote handles (ace_exports.cpp returned early for get_remote_table()),
 // so Harbour dbRecordInfo(DBRI_LOCKED) and dbRLockList() under ADSCDX
 // always answered .F./{} — Vouch's IsLogged() thread bailed out.
-// The IsRecordLocked (0x13) / GetAllLocks (0x15) wire opcodes forward the
-// query to the server-side per-session lock state.
+// AdsIsRecordLocked answers from the client lock ledger when complete;
+// GetAllLocks (0x15) falls back to the server's own-handle list for append
+// auto-locks that the client cannot name. The global OS probe stays internal.
 #include "doctest.h"
 #include "openads/ace.h"
 #include "openads/error.h"
@@ -158,7 +159,39 @@ ADS_SHARED, &hTable)
     REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
 }
 
-TEST_CASE("M13.1 remote AdsIsRecordLocked sees other connections' locks") {
+TEST_CASE("M12.36 remote append auto-lock is visible via own-handle fallback") {
+    auto dir = lock_tmp_dir();
+    seed_lock_fixture(dir);
+    openads::network::Server srv;
+    REQUIRE(srv.start("127.0.0.1", 0).has_value());
+    char uri[512];
+    std::snprintf(uri, sizeof(uri), "tcp://127.0.0.1:%u/%s",
+                  static_cast<unsigned>(srv.port()), dir.string().c_str());
+    UNSIGNED8 srvbuf[512]{};
+    std::memcpy(srvbuf, uri, std::strlen(uri) + 1);
+    ADSHANDLE hConn = 0, hTable = 0;
+    REQUIRE(AdsConnect60(srvbuf, ADS_REMOTE_SERVER, nullptr, nullptr, 0,
+                         &hConn) == AE_SUCCESS);
+    UNSIGNED8 tname[] = "li.dbf";
+    REQUIRE(AdsOpenTable(hConn, tname, nullptr, ADS_CDX, ADS_ANSI,
+                         ADS_COMPATIBLE_LOCKING, ADS_IGNORERIGHTS,
+                         ADS_SHARED, &hTable) == AE_SUCCESS);
+    REQUIRE(AdsAppendRecord(hTable) == AE_SUCCESS);
+    UNSIGNED32 rec = 0;
+    REQUIRE(AdsGetRecordNum(hTable, 0, &rec) == AE_SUCCESS);
+    REQUIRE(rec != 0);
+    UNSIGNED16 locked = 0;
+    REQUIRE(AdsIsRecordLocked(hTable, rec, &locked) == AE_SUCCESS);
+    CHECK(locked == 1);
+    REQUIRE(AdsUnlockTable(hTable) == AE_SUCCESS);
+    REQUIRE(AdsIsRecordLocked(hTable, rec, &locked) == AE_SUCCESS);
+    CHECK(locked == 0);
+    REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
+    REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
+    srv.stop();
+}
+
+TEST_CASE("M13.1 remote AdsIsRecordLocked reports only its own locks") {
     auto dir = lock_tmp_dir();
     seed_lock_fixture(dir);
 
@@ -190,26 +223,28 @@ ADS_SHARED,
     REQUIRE(AdsIsRecordLocked(tB, 3, &locked) == AE_SUCCESS);
     CHECK(locked == 0);
 
-    // A locks record 3: B's status query must see the cross-connection
-    // lock (SAP global semantics - login-semaphore guards depend on it),
-    // while A's own view still reports it and a neighbour stays free.
+    // A owns record 3. B must not mistake A's lock for its own.
     REQUIRE(AdsLockRecord(tA, 3) == AE_SUCCESS);
     REQUIRE(AdsIsRecordLocked(tB, 3, &locked) == AE_SUCCESS);
-    CHECK(locked == 1);
+    CHECK(locked == 0);
     REQUIRE(AdsIsRecordLocked(tA, 3, &locked) == AE_SUCCESS);
     CHECK(locked == 1);
     REQUIRE(AdsIsRecordLocked(tB, 4, &locked) == AE_SUCCESS);
     CHECK(locked == 0);
 
-    // A's file lock covers every record from B's point of view.
+    // A's file lock is A's own state, never B's.
     REQUIRE(AdsLockTable(tA) == AE_SUCCESS);
-    REQUIRE(AdsIsRecordLocked(tB, 2, &locked) == AE_SUCCESS);
+    REQUIRE(AdsIsRecordLocked(tA, 2, &locked) == AE_SUCCESS);
     CHECK(locked == 1);
+    REQUIRE(AdsIsRecordLocked(tB, 2, &locked) == AE_SUCCESS);
+    CHECK(locked == 0);
     REQUIRE(AdsUnlockTable(tA) == AE_SUCCESS);
+    REQUIRE(AdsIsRecordLocked(tA, 2, &locked) == AE_SUCCESS);
+    CHECK(locked == 0);
     REQUIRE(AdsIsRecordLocked(tB, 2, &locked) == AE_SUCCESS);
     CHECK(locked == 0);
 
-    // After A unlocks, B sees the record free again.
+    // Once A unlocks, neither handle claims ownership.
     REQUIRE(AdsUnlockRecord(tA, 3) == AE_SUCCESS);
     REQUIRE(AdsIsRecordLocked(tB, 3, &locked) == AE_SUCCESS);
     CHECK(locked == 0);

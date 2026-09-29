@@ -1883,6 +1883,11 @@ util::Result<void> Table::lock_record_excl(std::uint32_t recno) {
 
 util::Result<void> Table::try_lock_record_excl(std::uint32_t recno) {
     if (mode_ == OpenMode::Read) return {};
+    // A record lock is binary at the Table/ACE level. A repeated RLock on
+    // this handle must not increment LockMgr's internal reference count:
+    // one UnlockRecord must release the OS byte even after repeated RLocks.
+    if (recno_locks_.find(recno) != recno_locks_.end())
+        return load_record_(recno);
     if (table_lock_) {
         recno_locks_.emplace(recno, LockHandle{});
         return load_record_(recno);
@@ -1890,10 +1895,7 @@ util::Result<void> Table::try_lock_record_excl(std::uint32_t recno) {
     auto h = locks_.try_lock_record_excl(driver_->file(), to_lock_type_(),
                                          locking_, recno);
     if (!h) return h.error();
-    auto [it, inserted] = recno_locks_.emplace(recno, std::move(h).value());
-    if (!inserted) {
-        (void)it;
-    }
+    recno_locks_.emplace(recno, std::move(h).value());
     return load_record_(recno);
 }
 

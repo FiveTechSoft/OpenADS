@@ -8,7 +8,7 @@
 // blocks the next dbRLock() forever (the GN_COUNT R-LOCKING loop).
 //
 // This file pins every lock/unlock case: current vs explicit recno,
-// refcounted double locks, unlock of non-held records, append auto-lock
+// idempotent double locks, unlock of non-held records, append auto-lock
 // release, the dbUnlock equivalence, cross-connection contention, and
 // the multi-thread shared-connection scenario from the field.
 
@@ -108,7 +108,7 @@ TEST_CASE("lockfull local: lock current then unlock current") {
     fs::remove_all(dir, ec);
 }
 
-TEST_CASE("lockfull local: double lock is refcounted, needs two unlocks") {
+TEST_CASE("lockfull local: double lock needs one unlock") {
     auto dir = fs::temp_directory_path() / "oads_lf_refcount";
     std::error_code ec;
     fs::remove_all(dir, ec);
@@ -118,7 +118,6 @@ TEST_CASE("lockfull local: double lock is refcounted, needs two unlocks") {
     REQUIRE(AdsLockRecord(hT, 2) == 0);
     REQUIRE(AdsLockRecord(hT, 2) == 0);
     CHECK(num_locks(hT) == 1u);
-    REQUIRE(AdsUnlockRecord(hT, 2) == 0);
     REQUIRE(AdsUnlockRecord(hT, 2) == 0);
     CHECK(num_locks(hT) == 0u);
     REQUIRE(AdsCloseTable(hT) == 0);
@@ -214,6 +213,38 @@ TEST_CASE("lockfull remote: lock current / unlock current over the wire") {
     CHECK(num_locks(hT) == 0u);
     REQUIRE(AdsCloseTable(hT) == 0);
     REQUIRE(AdsDisconnect(hC) == 0);
+    srv.stop();
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("lockfull remote: repeated lock needs one unlock") {
+    auto dir = fs::temp_directory_path() / "oads_lf_remote_repeat";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    openads::network::Server srv;
+    REQUIRE(srv.start("127.0.0.1", 0).has_value());
+    ADSHANDLE hSetup = connect_local(dir);
+    stage_table(dir, "RC_REPEAT", 5, hSetup);
+    REQUIRE(AdsDisconnect(hSetup) == 0);
+
+    ADSHANDLE hA = connect_remote(dir, srv.port());
+    ADSHANDLE hB = connect_remote(dir, srv.port());
+    auto hTA = open_shared(hA, "RC_REPEAT");
+    auto hTB = open_shared(hB, "RC_REPEAT");
+    REQUIRE(AdsLockRecord(hTA, 2) == 0);
+    REQUIRE(AdsLockRecord(hTA, 2) == 0);
+    CHECK(num_locks(hTA) == 1u);
+    // The lock remains exclusive until its one and only release.
+    CHECK(AdsLockRecord(hTB, 2) != 0);
+    REQUIRE(AdsUnlockRecord(hTA, 2) == 0);
+    CHECK(num_locks(hTA) == 0u);
+    // The other session must acquire the real OS lock after just one unlock.
+    REQUIRE(AdsLockRecord(hTB, 2) == 0);
+    REQUIRE(AdsUnlockRecord(hTB, 2) == 0);
+    REQUIRE(AdsCloseTable(hTA) == 0);
+    REQUIRE(AdsCloseTable(hTB) == 0);
+    REQUIRE(AdsDisconnect(hA) == 0);
+    REQUIRE(AdsDisconnect(hB) == 0);
     srv.stop();
     fs::remove_all(dir, ec);
 }

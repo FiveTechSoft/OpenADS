@@ -38416,28 +38416,49 @@ UNSIGNED32 ENTRYPOINT AdsIsRecordInAOF(ADSHANDLE, UNSIGNED32, UNSIGNED16* p)
     {
     arc2_trace("AdsIsRecordInAOF"); if (p) *p = 1; return openads::AE_SUCCESS; }
 // ulRecord == 0 means "the current record" (ACE convention). Reports
-// whether *this* connection holds an exclusive lock on it. Remote
-// handles go over the wire (M12.36 IsRecordLocked opcode); the server
-// translates recno 0 to the current record on its side.
+// whether this table handle owns the lock, not whether another user does.
+// The global OS byte probe remains separately in Table::is_record_locked_any.
 UNSIGNED32 ENTRYPOINT AdsIsRecordLocked(ADSHANDLE hTable, UNSIGNED32 ulRecord,
                              UNSIGNED16* pbLocked) {
     arc2_trace("AdsIsRecordLocked");
     if (pbLocked == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
     *pbLocked = 0;
     if (auto* rt = get_remote_table(hTable)) {
-        auto r = rt->conn->is_record_locked(rt->id, ulRecord);
+        const std::uint32_t rec = ulRecord == 0
+            ? (rt->row_valid ? rt->current_recno : 0) : ulRecord;
+        // A held file lock or an explicit recno in the client ledger is
+        // positive proof of ownership, even if an append also made the
+        // ledger incomplete. A negative answer is safe only when complete.
+        if (rt->table_lock_held ||
+            (rec != 0 && rt->held_recs.count(rec) != 0)) {
+            *pbLocked = 1;
+            return ok();
+        }
+        if (rec != 0 && !rt->locks_uncertain) return ok();
+        // Append auto-locks and unknown current recnos need the server's
+        // GetAllLocks, which enumerates this wire table's owning ABI handle.
+        auto r = rt->conn->get_all_locks(rt->id);
         if (!r) return fail(r.error());
-        *pbLocked = r.value();
+        std::uint32_t target = rec;
+        if (target == 0) {
+            auto rn = rt->conn->get_record_num(rt->id);
+            if (!rn) return fail(rn.error());
+            target = rn.value();
+        }
+        const auto& held = r.value();
+        *pbLocked = rt->table_lock_held ||
+            std::find(held.begin(), held.end(), target) != held.end();
         return ok();
     }
     Table* t = get_table(hTable);
     if (t == nullptr) return fail(openads::AE_INTERNAL_ERROR, "no table");
-    std::uint32_t rec = (ulRecord == 0) ? t->recno() : ulRecord;
-    // mtfix11: SAP answers across connections - own registrations plus a
-    // non-destructive OS lock-byte probe, not this table's list alone.
-    auto any = t->is_record_locked_any(rec);
-    if (!any) return fail(any.error());
-    *pbLocked = any.value() ? 1 : 0;
+    const std::uint32_t rec = ulRecord == 0 ? t->recno() : ulRecord;
+    if (t->is_table_locked()) {
+        *pbLocked = 1;
+    } else {
+        const auto held = t->held_record_locks();
+        *pbLocked = std::find(held.begin(), held.end(), rec) != held.end();
+    }
     return ok();
 }
 UNSIGNED32 ENTRYPOINT AdsIsServerLoaded(UNSIGNED8*, UNSIGNED16* p)

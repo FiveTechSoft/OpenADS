@@ -422,9 +422,9 @@ TEST_CASE("Lock 5 records, unlock in reverse order, verify count each step") {
 }
 
 // ===========================================================================
-// Re-entrant record lock: same record locked twice → only one unlock needed?
+// Repeated record lock is idempotent: one unlock releases the OS lock
 // ===========================================================================
-TEST_CASE("Re-entrant record lock: two locks on same recno, need two unlocks") {
+TEST_CASE("Repeated record lock: two locks on same recno need one unlock") {
     const auto dir = fs::temp_directory_path() / "openads_lock_reenter";
     std::error_code ec;
     fs::remove_all(dir, ec);
@@ -433,31 +433,25 @@ TEST_CASE("Re-entrant record lock: two locks on same recno, need two unlocks") {
     auto hConn = connect_local(dir);
     auto hTbl = open_table(hConn, "RE", "RE");
 
-    // Lock the same record twice (re-entrant).
+    // Lock the same record twice on one table handle.
     REQUIRE(AdsLockRecord(hTbl, 3) == 0);
     REQUIRE(AdsLockRecord(hTbl, 3) == 0);
 
     UNSIGNED16 cnt = 0;
     REQUIRE(AdsGetNumLocks(hTbl, &cnt) == 0);
-    // Re-entrant locks are refcounted — it depends on implementation whether
-    // the count reflects refcount (2) or unique records (1).
-    // For ACE-compatible: AdsGetNumLocks counts the lock count, not unique recnos.
+    CHECK(cnt == 1);  // one held record, not two nested acquisitions
 
     UNSIGNED16 locked = 9;
     REQUIRE(AdsIsRecordLocked(hTbl, 3, &locked) == 0);
     CHECK(locked == 1);  // Still locked
 
-    // First unlock — record should still be locked (refcount 1).
-    REQUIRE(AdsUnlockRecord(hTbl, 3) == 0);
-    locked = 9;
-    REQUIRE(AdsIsRecordLocked(hTbl, 3, &locked) == 0);
-    CHECK(locked == 1);  // Still locked (re-entrant)
-
-    // Second unlock — now truly unlocked.
+    // One unlock releases the record, despite two successful RLocks.
     REQUIRE(AdsUnlockRecord(hTbl, 3) == 0);
     locked = 9;
     REQUIRE(AdsIsRecordLocked(hTbl, 3, &locked) == 0);
     CHECK(locked == 0);
+    REQUIRE(AdsGetNumLocks(hTbl, &cnt) == 0);
+    CHECK(cnt == 0);
 
     REQUIRE(AdsCloseTable(hTbl) == 0);
     REQUIRE(AdsDisconnect(hConn) == 0);
