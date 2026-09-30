@@ -1,0 +1,66 @@
+name: Apply validated patch
+on:
+  workflow_dispatch:
+    inputs:
+      message:
+        description: Commit message
+        required: true
+        type: string
+      expected_head:
+        description: Expected main SHA
+        required: true
+        type: string
+      patch_base64:
+        description: Base64 encoded git patch
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Validate and apply patch
+        env:
+          EXPECTED_HEAD: ${{ inputs.expected_head }}
+          PATCH_BASE64: ${{ inputs.patch_base64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          printf '%s' "$PATCH_BASE64" | base64 --decode > "$RUNNER_TEMP/change.patch"
+          git apply --numstat "$RUNNER_TEMP/change.patch" > "$RUNNER_TEMP/numstat"
+          while IFS=$'\t' read -r added deleted path; do
+            case "$path" in
+              src/engine/table.cpp|tests/*|docs/*) ;;
+              *) echo "Disallowed path: $path"; exit 1 ;;
+            esac
+          done < "$RUNNER_TEMP/numstat"
+          git apply --check "$RUNNER_TEMP/change.patch"
+          git apply "$RUNNER_TEMP/change.patch"
+      - name: Build and test
+        run: |
+          cmake --preset ninja-clang
+          cmake --build build/ninja-clang --config Release --target openads_unit_tests
+          ctest --test-dir build/ninja-clang --output-on-failure -C Release
+        shell: bash
+      - name: Commit and push
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MESSAGE: ${{ inputs.message }}
+          EXPECTED_HEAD: ${{ inputs.expected_head }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/engine/table.cpp tests docs
+          git diff --cached --quiet && exit 1
+          git commit -m "$MESSAGE"
+          git push origin HEAD:main
