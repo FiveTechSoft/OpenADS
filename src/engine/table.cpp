@@ -1154,6 +1154,1161 @@ util::Result<void> Table::append_record() {
         return util::Error{5000, 0, "table opened read-only", ""};
     }
     // GoCold the previous row before starting a new append.
+
+#include "session/connection.h"
+
+#include "openads/error.h"
+#include "engine/index_expr.h"
+#include "engine/oem_collation.h"
+
+#include "drivers/adt/adt_driver.h"
+#include "drivers/cache/cached_driver.h"
+#include "drivers/cdx/cdx_driver.h"
+#include "drivers/cdx/cdx_index.h"
+#include "drivers/ntx/ntx_driver.h"
+
+#include "abi/lock_retry_policy.h"
+
+#include <algorithm>
+#include <cctype>
+#include <chrono>
+#include <cstdio>
+#include <cstring>
+#include <utility>
+
+#include <atomic>
+
+namespace openads::engine {
+
+// Global SET DELETE flag (process-wide). Default true = include
+// deleted rows (Clipper SET DELETED OFF). Set by AdsShowDeleted in
+// the ABI layer.
+static std::atomic<bool> g_show_deleted{true};
+bool show_deleted() noexcept { return g_show_deleted.load(); }
+void set_show_deleted(bool v) noexcept { g_show_deleted.store(v); }
+
+// Global SET EXACT flag. Default false = Clipper SET EXACT OFF.
+static std::atomic<bool> g_set_exact{false};
+bool set_exact() noexcept { return g_set_exact.load(); }
+void set_set_exact(bool v) noexcept { g_set_exact.store(v); }
+
+// Global epoch (pivot year for 2-digit dates). Default 1900.
+static std::atomic<std::uint16_t> g_epoch{1900};
+std::uint16_t epoch() noexcept { return g_epoch.load(); }
+void set_epoch(std::uint16_t v) noexcept { g_epoch.store(v); }
+
+} // namespace openads::engine
+
+namespace openads::abi {
+
+inline bool show_deleted_for(const openads::engine::Table* t) noexcept {
+    if (t != nullptr) {
+        // SAP: AdsShowDeleted "has no effect upon ADT tables" — rows
+        // deleted in an ADT "can never be retrieved by a client
+        // application" (ace_adsshowdeleted). Only DBF-family tables
+        // (CDX/NTX/VFP) surface deleted rows under the TRUE default.
+        if (t->table_type() == openads::engine::TableType::Adt) {
+            return false;
+        }
+        if (auto* owner = t->owner()) {
+            return owner->show_deleted();
+        }
+    }
+    return openads::engine::show_deleted();
+}
+
+inline bool show_deleted() noexcept {
+    return openads::engine::show_deleted();
+}
+
+}  // namespace openads::abi
+
+namespace openads::engine {
+
+bool Table::show_deleted_records() const noexcept {
+    return openads::abi::show_deleted_for(this);
+}
+
+namespace {
+
+void write_adt_blob_ref(std::uint8_t* dst, std::uint32_t block_no,
+                        std::uint32_t data_len) noexcept {
+    dst[0] = static_cast<std::uint8_t>( block_no        & 0xFFu);
+    dst[1] = static_cast<std::uint8_t>((block_no >>  8) & 0xFFu);
+    dst[2] = static_cast<std::uint8_t>((block_no >> 16) & 0xFFu);
+    dst[3] = static_cast<std::uint8_t>((block_no >> 24) & 0xFFu);
+    dst[4] = static_cast<std::uint8_t>( data_len        & 0xFFu);
+    dst[5] = static_cast<std::uint8_t>((data_len >>  8) & 0xFFu);
+    dst[6] = static_cast<std::uint8_t>((data_len >> 16) & 0xFFu);
+    dst[7] = static_cast<std::uint8_t>((data_len >> 24) & 0xFFu);
+    dst[8] = 0x00;
+}
+
+} // namespace
+
+util::Result<Table> Table::open(const std::string& path,
+                                TableType type,
+                                OpenMode mode,
+                                LockingMode locking) {
+    std::unique_ptr<drivers::IDriver> drv;
+    switch (type) {
+        case TableType::Cdx:
+            drv = std::make_unique<drivers::cdx::CdxDriver>();
+            break;
+        case TableType::Ntx:
+            drv = std::make_unique<drivers::ntx::NtxDriver>();
+            break;
+        case TableType::Adt:
+            drv = std::make_unique<drivers::adt::AdtDriver>();
+            break;
+        case TableType::Vfp:
+            drv = std::make_unique<drivers::cdx::CdxDriver>();
+            break;
+    }
+    drivers::DriverOpenMode dmode = drivers::DriverOpenMode::ReadOnly;
+    switch (mode) {
+        case OpenMode::Read:      dmode = drivers::DriverOpenMode::ReadOnly;  break;
+        case OpenMode::Shared:    dmode = drivers::DriverOpenMode::Shared;    break;
+        case OpenMode::Exclusive: dmode = drivers::DriverOpenMode::Exclusive; break;
+    }
+    if (auto r = drv->open(path, dmode); !r) return r.error();
+    Table t{std::move(drv), mode, locking, type};
+    t.path_ = path;
+    t.locks_.set_record_geometry(t.driver_->header_length(),
+                                 t.driver_->record_length());
+    if (t.driver_->record_count() == 0) {
+        t.state_ = State::Limbo;
+    }
+    return t;
+}
+
+Table Table::from_driver(std::unique_ptr<drivers::IDriver> drv,
+                         std::string path,
+                         TableType type,
+                         OpenMode mode,
+                         LockingMode locking) {
+    Table t{std::move(drv), mode, locking, type};
+    t.path_ = std::move(path);
+    t.locks_.set_record_geometry(t.driver_->header_length(),
+                                 t.driver_->record_length());
+    if (t.driver_->record_count() == 0) {
+        t.state_ = State::Limbo;
+    }
+    return t;
+}
+
+std::uint16_t Table::field_count() const noexcept {
+    return static_cast<std::uint16_t>(driver_->fields().size());
+}
+
+const drivers::DbfField& Table::field_descriptor(std::uint16_t idx) const {
+    return driver_->fields().at(idx);
+}
+
+std::int32_t Table::field_index(const std::string& name) const noexcept {
+    const auto& fs = driver_->fields();
+    // Case-insensitive: DBF field names are always uppercase in storage;
+    // SQL column names / index expressions may arrive in any case.
+    auto scan_for = [&](const std::string& want) -> std::int32_t {
+        for (std::size_t i = 0; i < fs.size(); ++i) {
+            if (fs[i].name.size() != want.size()) continue;
+            bool eq = true;
+            for (std::size_t j = 0; j < want.size(); ++j) {
+                if (std::toupper(static_cast<unsigned char>(want[j])) !=
+                    std::toupper(static_cast<unsigned char>(fs[i].name[j]))) {
+                    eq = false; break;
+                }
+            }
+            if (eq) return static_cast<std::int32_t>(i);
+        }
+        return -1;
+    };
+    auto scan = [&]() -> std::int32_t {
+        std::int32_t found = scan_for(name);
+        // DBF storage truncates field names to 10 characters at CREATE
+        // (a proc __output column `databasepath` lands as DATABASEPA in
+        // the temp free table), so a longer lookup name can only mean
+        // the truncated field — retry with the storage-truncated form.
+        // ONLY for a plain identifier: an index expression like
+        // `CCODIGOCON+CDOCUMETRA` starts with a 10-char field name, and
+        // truncating it would report the whole compound key as that bare
+        // field — pinning the key length to the first component's width,
+        // which collapses every later component out of the key.
+        const bool plain_ident =
+            !name.empty() &&
+            std::all_of(name.begin(), name.end(), [](char c) {
+                return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+            });
+        if (found < 0 && plain_ident && name.size() > 10)
+            found = scan_for(name.substr(0, 10));
+        return found;
+    };
+    // O(1) repeat lookups via an upper-cased-name cache. Wrapped so an
+    // allocation failure degrades to the linear scan rather than violating
+    // noexcept.
+    try {
+        std::string key;
+        key.reserve(name.size());
+        for (char c : name)
+            key.push_back(static_cast<char>(
+                std::toupper(static_cast<unsigned char>(c))));
+        auto it = field_index_cache_.find(key);
+        if (it != field_index_cache_.end()) return it->second;
+        std::int32_t found = scan();
+        field_index_cache_.emplace(std::move(key), found);
+        return found;
+    } catch (...) {
+        return scan();
+    }
+}
+
+std::uint32_t Table::record_count() const noexcept {
+    return driver_->record_count();
+}
+
+util::Result<void> Table::load_record_(std::uint32_t recno) {
+    // GoCold before replacing the buffer (navigation / absolute goto).
+    if (record_dirty_) {
+        if (auto r = commit_dirty_record(); !r) return r.error();
+    }
+    auto buf = driver_->read_record_raw(recno);
+    if (!buf) return buf.error();
+    record_buf_ = std::move(buf).value();
+    recno_      = recno;
+    state_      = State::Positioned;
+    return {};
+}
+
+std::string Table::compute_index_key_(const drivers::IIndex* idx) const {
+    const std::string& expr    = idx->expression();
+    const std::uint16_t key_len = idx->key_length();
+    // FoxPro/Harbour numeric & date CDX keys are an 8-byte order-preserving
+    // binary encoding, not text. Build those bytes here so both the write
+    // path (sync_all_indexes_) and the engine's own seek-after-write stay
+    // consistent. Everything else (character keys, NTX/ADI) keeps the
+    // legacy text path so existing files round-trip byte-exact.
+    if (idx->key_encoding() == drivers::KeyEncoding::FoxNumeric) {
+        double d = 0.0;
+        evaluate_index_expr_number(const_cast<Table&>(*this), expr, d);
+        return fox_numeric_key(d);
+    }
+    // Numeric NTX keys are native zero-padded fixed-width text (negatives
+    // byte-complemented). Build them here so the write path and the engine's
+    // own seek-after-write stay byte-identical to what a native reader expects.
+    if (idx->key_encoding() == drivers::KeyEncoding::NtxNumeric) {
+        double d = 0.0;
+        evaluate_index_expr_number(const_cast<Table&>(*this), expr, d);
+        return ntx_numeric_key(d, idx->key_length(), idx->key_decimals());
+    }
+    // Compound expressions (UPPER(NAME), STR(AGE,3), concatenation,
+    // SUBSTR, ...) handled by engine/index_expr.cpp. Bare field-name
+    // expressions short-circuit there to the legacy raw-bytes path so
+    // existing CDX files stay byte-exact.
+    auto r = evaluate_index_expr(const_cast<Table&>(*this), expr, key_len);
+    if (!r) return std::string(key_len, ' ');
+    return r.value();
+}
+
+// Snapshot the current key for every bound index. Caller invokes
+// this BEFORE mutating record_buf_ so the snapshot reflects the
+// pre-write key per index; after the write, sync_all_indexes_(snap)
+// erases each prior key and inserts the new one.
+std::vector<Table::IndexSnap>
+Table::snapshot_index_keys_() {
+    std::vector<IndexSnap> out;
+    auto push = [&](drivers::IIndex* idx) {
+        if (idx == nullptr) return;
+        // A tag can be bound twice — as the active order and parked as an
+        // extra view (reopened bag). Syncing it twice erases+inserts the
+        // same (key, recno) pair twice per commit, duplicating entries.
+        for (const auto& s : out) {
+            if (s.idx == idx) return;
+        }
+        IndexSnap s;
+        s.idx      = idx;
+        s.prev_key = compute_index_key_(idx);
+        const std::string& cond = idx->condition();
+        s.prev_included =
+            cond.empty() || evaluate_index_expr_truthy(*this, cond);
+        out.push_back(std::move(s));
+    };
+    if (order_ && order_->index()) push(order_->index());
+    for (auto* x : extra_index_views_) push(x);
+    return out;
+}
+
+util::Result<void> Table::sync_active_index_(const std::string& /*unused*/) {
+    // Re-entered after a full snapshot was taken on the caller's
+    // side; that path is the new sync_all_indexes_ below.
+    return {};
+}
+
+util::Result<void> Table::sync_all_indexes_(
+    const std::vector<IndexSnap>& snap) {
+    for (const auto& s : snap) {
+        drivers::IIndex* idx = s.idx;
+        if (idx == nullptr) continue;
+        const std::string& prev_key = s.prev_key;
+        std::string new_key = compute_index_key_(idx);
+        // Conditional (FOR) tags index only records whose condition
+        // currently evaluates true — write-time maintenance included:
+        // appends and edits must move the record in and out of the tag as
+        // it crosses the boundary. Previously every written record got a
+        // key, so a conditional tag degenerated into a full index; and a
+        // record crossing INTO the condition with an unchanged key was
+        // swallowed by the prev==new shortcut and never inserted at all.
+        const std::string& cond = idx->condition();
+        const bool include =
+            cond.empty() || evaluate_index_expr_truthy(*this, cond);
+        // Erase prior (recno, prev_key).
+        //
+        // On a genuine UPDATE of an indexed record the old entry MUST
+        // exist — a missing key means the B-tree is corrupt (stale
+        // separators, duplicate keys) and we propagate the error so the
+        // caller can abort before inserting the new key on top of a stale
+        // entry.
+        //
+        // On a fresh APPEND the snapshot was taken before fields were set,
+        // so prev_key is the blank-key encoding (spaces/zeros) that was
+        // never inserted.  5044 ("key not found") is expected there and
+        // tolerated so the insert below can proceed. The append marker is
+        // tracked per recno (append_pending_recno_), not only per edit
+        // session (snap_was_append_): an intermediate no-op commit — a
+        // per-field flush that changes no key — clears pending_append_
+        // before the key-bearing commit, and without the recno marker the
+        // tolerated erase became a bogus corrupt-tree abort that dropped
+        // the new key (remote AppendBlank + SetField flow, key field not
+        // written first).
+        const bool fresh_append =
+            snap_was_append_ ||
+            (append_pending_recno_ != 0 && recno_ == append_pending_recno_);
+        const bool tolerate_missing_erase = fresh_append;
+
+        if (!include) {
+            // Does not match the FOR (or no longer does): erase only when
+            // the record WAS indexed before this edit.
+            if (s.prev_included && !prev_key.empty()) {
+                if (auto e = idx->erase(recno_, prev_key); !e) {
+                    if (!tolerate_missing_erase) return e.error();
+                }
+            }
+            continue;
+        }
+
+        // Blank-key trap: an appended record whose key equals the blank
+        // encoding (numeric 0 -> fox(0), all-space text) compared equal to
+        // the snapshot and its insert was skipped entirely — the record
+        // never reached the index (bulk walks lost it, key counts ran
+        // short). Track the views already keyed this append session and
+        // never skip the first insert of a fresh append. A record that did
+        // not match the FOR before the edit is in the same state: not
+        // indexed, so an unchanged key still needs the insert. Unique
+        // views are excluded: a blank key must not collide in a unique bag.
+        const bool key_not_inserted_yet =
+            fresh_append && !idx->unique() &&
+            append_keys_done_.count(idx) == 0;
+        const bool need_insert = !s.prev_included || key_not_inserted_yet;
+        if (prev_key == new_key && !need_insert) continue;
+
+        // key_not_inserted_yet also means there is nothing to erase: the
+        // view never saw this recno. Attempting the erase walks the tree
+        // for a guaranteed 5044 miss — on large bags that measured as the
+        // bulk of the v1.09.13 append regression. Insert directly.
+        if (key_not_inserted_yet) {
+            if (idx->unique()) {
+                auto sr = idx->seek_key(new_key, /*soft=*/false);
+                if (sr) {
+                    const auto& so = sr.value();
+                    if (so.positioned &&
+                        so.hit == openads::drivers::SeekHit::Exact &&
+                        so.recno != recno_) {
+                        return util::Error{openads::AE_UNIQUE_INDEX_VIOLATION,
+                            0, "duplicate key value in unique index '" +
+                            idx->expression() + "'", ""};
+                    }
+                }
+            }
+            if (auto e = idx->insert(recno_, new_key); !e) {
+                return e.error();
+            }
+            append_keys_done_.insert(idx);
+            continue;
+        }
+
+        if (!prev_key.empty() && prev_key != new_key && s.prev_included) {
+            if (auto e = idx->erase(recno_, prev_key); !e) {
+                if (!tolerate_missing_erase) return e.error();
+                // Fresh append: tolerate missing key (blank-key snapshot).
+            }
+        }
+        // Enforce uniqueness before inserting: seek for the new key and reject
+        // if another record already carries it.
+        if (idx->unique()) {
+            auto sr = idx->seek_key(new_key, /*soft=*/false);
+            if (sr) {
+                const auto& so = sr.value();
+                if (so.positioned &&
+                    so.hit == openads::drivers::SeekHit::Exact &&
+                    so.recno != recno_) {
+                    return util::Error{openads::AE_UNIQUE_INDEX_VIOLATION, 0,
+                        "duplicate key value in unique index '" +
+                        idx->expression() + "'", ""};
+                }
+            }
+        }
+        if (auto e = idx->insert(recno_, new_key); !e) {
+            return e.error();
+        }
+        if (fresh_append) append_keys_done_.insert(idx);
+    }
+    return {};
+}
+
+util::Result<void> Table::ensure_writable_() {
+    if (state_ != State::Positioned) {
+        return util::Error{5068, 0, "no record positioned", ""};
+    }
+    // GoHot-equivalent write guard (harbour dbf1.c hb_dbfGoHot).  In shared
+    // mode the caller must hold either a file lock (FLock) or a record lock
+    // (RLock) on the CURRENT row before mutating it.  Newly-appended
+    // records pass because AdsAppendRecord physically auto-locks the new
+    // recno (xBase / ACE implicit append lock).  pending_append_ is
+    // deliberately NOT consulted: it stays set until WriteRecord, so an app
+    // could append, move to a victim row, and edit it with no lock at all
+    // (Pritpal Bedi: "Editing succeeds - no alert about LOCK REQUIRED").
+    // Exclusive and read-only opens bypass the check — they grant
+    // unrestricted access by definition.
+    if (mode_ == OpenMode::Shared && !is_table_locked()) {
+        if (recno_locks_.find(recno_) == recno_locks_.end()) {
+            return util::Error{5035, 0,
+                "write failed — record not locked (RLock or FLock required "
+                "in shared mode)", ""};
+        }
+    }
+    return {};
+}
+
+util::Result<void> Table::begin_dirty_edit_() {
+    if (auto w = ensure_writable_(); !w) return w.error();
+    // Snapshot index keys once, before the first mutation of this row.
+    if (!record_dirty_) {
+        index_snap_       = snapshot_index_keys_();
+        snap_was_append_  = pending_append_;
+        record_dirty_     = true;
+    }
+    return {};
+}
+
+void Table::discard_dirty_() noexcept {
+    record_dirty_    = false;
+    snap_was_append_ = false;
+    index_snap_.clear();
+}
+
+util::Result<void> Table::commit_dirty_record() {
+    // Only genuinely dirty rows go through here. A bare append
+    // (AdsAppendRecord + WriteRecord with NO field writes) is keyed via
+    // commit_bare_append(), called from the ABI's AdsWriteRecord; keeping
+    // the two paths separate avoids a redundant writeback per appended
+    // record (the ~40% v1.09.13 append regression).
+    if (!record_dirty_) return {};
+    if (auto wb = writeback_record_(); !wb) return wb.error();
+    auto snap = std::move(index_snap_);
+    record_dirty_ = false;
+    pending_append_ = false;
+    index_snap_.clear();
+    return sync_all_indexes_(snap);
+}
+
+util::Result<void> Table::commit_bare_append() {
+    // Key a never-field-edited appended record (the blank-key test pins
+    // this): snapshot the current blank state and let sync_all_indexes_
+    // insert exactly one key per bound view. No writeback: append_record
+    // already wrote the row; this only makes it visible to the index.
+    if (auto r = ensure_writable_(); !r) return r.error();
+    if (!pending_append_) return {};
+    pending_append_ = false;
+    append_pending_recno_ = recno_;
+    append_keys_done_.clear();
+    auto snap = snapshot_index_keys_();
+    return sync_all_indexes_(snap);
+}
+
+util::Result<void> Table::writeback_record_() {
+    if (auto w = ensure_writable_(); !w) return w.error();
+    if (tx_ && tx_->active()) {
+        auto cur = driver_->read_record_raw(recno_);
+        if (cur) {
+            std::vector<std::uint8_t> before = std::move(cur).value();
+            std::vector<std::uint8_t> after(record_buf_);
+            tx_->note_before_image(tid_, recno_, std::move(before), std::move(after));
+        }
+    }
+    return driver_->write_record_raw(recno_, record_buf_.data(),
+                                     record_buf_.size());
+}
+
+// Clipper / DBFCDX: a scope bound SHORTER than the index key bounds by PREFIX —
+// every key that begins with it is inside the scope. Comparing a full-width key
+// against a short bound puts all of them PAST the bottom ("2B 22563     1" is
+// lexicographically greater than "2B 22563"), which empties the scope. Compare
+// only as many bytes as the bound supplies.
+// The top bound needs no such care mathematically (any extension of a prefix is
+// >= the prefix), but it is written symmetrically so the two read alike and a
+// future edit cannot break one without the other.
+// TOP is the traversal-side START bound: an ascending walk keeps keys >= top;
+// a descending one keeps keys <= top (it steps DOWN from the top bound).
+bool Table::key_in_top_scope_(const std::string& key) const {
+    if (!order_ || !order_->scope().top.has_value()) return true;
+    const std::string& top = *order_->scope().top;
+    if (order_->descending_traverse()) {
+        if (key.size() > top.size())
+            return key.compare(0, top.size(), top) <= 0;
+        return key <= top;
+    }
+    if (key.size() > top.size())
+        return key.compare(0, top.size(), top) >= 0;
+    return key >= top;
+}
+
+// BOTTOM is the traversal-side END bound: ascending keeps keys <= bottom;
+// descending keeps keys >= bottom.
+bool Table::key_in_bottom_scope_(const std::string& key) const {
+    if (!order_ || !order_->scope().bottom.has_value()) return true;
+    const std::string& bottom = *order_->scope().bottom;
+    if (order_->descending_traverse()) {
+        if (key.size() > bottom.size())
+            return key.compare(0, bottom.size(), bottom) >= 0;
+        return key >= bottom;
+    }
+    if (key.size() > bottom.size())
+        return key.compare(0, bottom.size(), bottom) <= 0;
+    return key <= bottom;
+}
+
+void Table::set_recno_sequence(std::vector<std::uint32_t> seq) {
+    recno_sequence_ = std::move(seq);
+    sequence_idx_   = -1;
+    // Installed, even when empty: an empty visible set means "no rows",
+    // not "walk everything". See Table::recno_sequence_active().
+    recno_sequence_active_ = true;
+}
+
+util::Result<void> Table::goto_top() {
+    // Settle any pending field edits before leaving the current row
+    // (empty-table paths never call load_record_).
+    // If the dirty record cannot be flushed (shared mode + no lock),
+    // discard it silently — goto_top is a navigation operation.
+    if (auto r = commit_dirty_record(); !r) discard_dirty_();
+    // Absolute reposition: drop any read-ahead block so we observe
+    // writes made through another handle and start the scan fresh.
+    driver_->invalidate_read_cache();
+    // Multiuser: peer appends update the on-disk header; re-read so
+    // natural-order navigation reaches the new LastRec (Pritpal Bedi:
+    // browse only walked rows present at open while RecCount was current).
+    driver_->refresh_record_count_from_disk();
+    if (order_ && order_->index()) order_->index()->refresh_from_disk();
+    // Empty table → Limbo regardless of active order / sequence.
+    if (driver_->record_count() == 0) {
+        state_ = State::Limbo; recno_ = 0; return {};
+    }
+    if (recno_sequence_active_) {
+        if (recno_sequence_.empty()) {
+            state_ = State::Limbo; recno_ = 0; return {};
+        }
+        sequence_idx_ = 0;
+        std::uint32_t r = recno_sequence_.front();
+        return load_record_(r);
+    }
+    if (order_ && order_->index()) {
+        auto* idx = order_->index();
+        util::Result<drivers::SeekOutcome> r = drivers::SeekOutcome{};
+        if (order_->descending_traverse()) {
+            if (order_->scope().top.has_value()) {
+                // Descending traversal starts at the highest key allowed
+                // by the top bound; a soft seek may land ABOVE it, so step
+                // back (prev) until the key is inside the scope. Landing
+                // unconditionally on seek_last() put the cursor past the
+                // top bound and the walk read as empty (Pritpal Bedi's
+                // descending scope case).
+                r = idx->seek_key(*order_->scope().top, /*soft=*/true);
+                while (r && r.value().positioned &&
+                       !key_in_top_scope_(idx->current_key())) {
+                    r = idx->prev();
+                    if (!r) break;
+                }
+            } else {
+                r = idx->seek_last();
+            }
+        } else if (order_->scope().top.has_value()) {
+            r = idx->seek_key(*order_->scope().top, true);
+        } else {
+            r = idx->seek_first();
+        }
+        if (!r) return r.error();
+        if (!r.value().positioned) {
+            state_ = State::Limbo; recno_ = 0; return {};
+        }
+        // Out-of-scope landing: for an ascending walk the overflow shows
+        // past the BOTTOM bound; for a descending one it shows past the
+        // TOP (the walk then steps DOWN towards the bottom bound).
+        const bool out_of_scope = order_->descending_traverse()
+            ? !key_in_top_scope_(idx->current_key())
+            : !key_in_bottom_scope_(idx->current_key());
+        if (out_of_scope) {
+            state_ = State::Eof; recno_ = 0; return {};
+        }
+        // SET DELETE ON: skip deleted rows in the walk direction.
+        // If everything's deleted (or filtered out by the index +
+        // delete combo) → Limbo so DBGOTOP reports BOF+EOF both
+        // true (Clipper / DBFCDX convention for "no visible row").
+        if (!openads::abi::show_deleted_for(this)) {
+            while (r.value().positioned) {
+                auto ld = load_record_(r.value().recno);
+                if (!ld && ld.error().code != 5000) return ld.error();
+                // A 5000 here is a stale index entry (recno > rec_count,
+                // e.g. a PACK left this tag unreconstructed). Native ADSCDX
+                // walks past it, so treat it like a deleted row and advance.
+                if (ld && !is_deleted()) return {};
+                r = order_->descending_traverse()
+                        ? idx->prev() : idx->next();
+                if (!r) return r.error();
+                if (r.value().positioned &&
+                    !key_in_bottom_scope_(idx->current_key())) {
+                    state_ = State::Limbo; recno_ = 0; return {};
+                }
+            }
+            state_ = State::Limbo; recno_ = 0; return {};
+        }
+        // SET DELETE OFF: land on the first index entry, stepping past any
+        // stale ones (recno > rec_count after a PACK) the way native ADSCDX
+        // does instead of raising ADSCDX/5000.
+        while (r.value().positioned) {
+            auto ld = load_record_(r.value().recno);
+            if (!ld && ld.error().code != 5000) return ld.error();
+            if (ld) return {};
+            r = order_->descending_traverse() ? idx->prev() : idx->next();
+            if (!r) return r.error();
+            if (r.value().positioned &&
+                !key_in_bottom_scope_(idx->current_key())) {
+                state_ = State::Limbo; recno_ = 0; return {};
+            }
+        }
+        state_ = State::Limbo; recno_ = 0; return {};
+    }
+    if (driver_->record_count() == 0) {
+        // GOTOP on empty re-enters Limbo (BOF+EOF both true).
+        state_ = State::Limbo; recno_ = 0; return {};
+    }
+    if (auto r = load_record_(1); !r) return r.error();
+    if (filter_ && state_ == State::Positioned && !filter_(*this)) {
+        return skip(1);
+    }
+    // SET DELETE ON without an active index: walk forward over the
+    // raw record range until a live row appears.
+    if (!openads::abi::show_deleted_for(this)) {
+        std::uint32_t r = 1;
+        while (r <= driver_->record_count() && is_deleted()) {
+            ++r;
+            if (r > driver_->record_count()) {
+                state_ = State::Limbo; recno_ = 0; return {};
+            }
+            if (auto ld = load_record_(r); !ld) return ld.error();
+        }
+    }
+    return {};
+}
+
+util::Result<void> Table::goto_bottom() {
+    if (auto r = commit_dirty_record(); !r) return r.error();
+    // Absolute reposition: drop any read-ahead block (see goto_top).
+    driver_->invalidate_read_cache();
+    driver_->refresh_record_count_from_disk();
+    if (order_ && order_->index()) order_->index()->refresh_from_disk();
+    // Empty table → Limbo regardless of active order / sequence.
+    if (driver_->record_count() == 0) {
+        state_ = State::Limbo; recno_ = 0; return {};
+    }
+    if (recno_sequence_active_) {
+        if (recno_sequence_.empty()) {
+            state_ = State::Limbo; recno_ = 0; return {};
+        }
+        sequence_idx_ = static_cast<std::int64_t>(recno_sequence_.size() - 1);
+        return load_record_(recno_sequence_.back());
+    }
+    if (order_ && order_->index()) {
+        auto* idx = order_->index();
+        util::Result<drivers::SeekOutcome> r = idx->seek_last();
+        if (!r) return r.error();
+        if (!r.value().positioned) {
+            state_ = State::Limbo; recno_ = 0; return {};
+        }
+        while (r.value().positioned &&
+               !key_in_bottom_scope_(idx->current_key())) {
+            r = idx->prev();
+            if (!r) return r.error();
+        }
+        if (!r.value().positioned ||
+            !key_in_top_scope_(idx->current_key())) {
+            state_ = State::Eof; recno_ = 0; return {};
+        }
+        if (!openads::abi::show_deleted_for(this)) {
+            while (r.value().positioned) {
+                auto ld = load_record_(r.value().recno);
+                if (!ld && ld.error().code != 5000) return ld.error();
+                // Stale index entry (recno > rec_count after a PACK): step
+                // past it like a deleted row instead of raising 5000.
+                if (ld && !is_deleted()) {
+                    return {};
+                }
+                r = idx->prev();
+                if (!r) return r.error();
+            }
+            state_ = State::Limbo; recno_ = 0; return {};
+        }
+        // SET DELETE OFF: land on the last entry, stepping back past stale
+        // ones the way native ADSCDX does instead of raising 5000.
+        while (r.value().positioned) {
+            auto ld = load_record_(r.value().recno);
+            if (!ld && ld.error().code != 5000) return ld.error();
+            if (ld) return {};
+            r = idx->prev();
+            if (!r) return r.error();
+        }
+        state_ = State::Limbo; recno_ = 0; return {};
+    }
+    auto n = driver_->record_count();
+    if (n == 0) {
+        state_ = State::Limbo; recno_ = 0; return {};
+    }
+    if (auto r = load_record_(n); !r) return r.error();
+    // SET DELETE ON without active index: walk back to first live.
+    if (!openads::abi::show_deleted_for(this)) {
+        std::uint32_t r = n;
+        while (r >= 1 && is_deleted()) {
+            if (r == 1) {
+                state_ = State::Limbo; recno_ = 0; return {};
+            }
+            --r;
+            if (auto ld = load_record_(r); !ld) return ld.error();
+        }
+    }
+    return {};
+}
+
+util::Result<void> Table::goto_record(std::uint32_t recno) {
+    if (auto r = commit_dirty_record(); !r) return r.error();
+    // Leaving the record ends the append key-sync window (see
+    // append_pending_recno_ in table.h).
+    append_pending_recno_ = 0;
+    append_keys_done_.clear();
+    // Absolute reposition / AdsRefreshRecord: drop any read-ahead block
+    // so the (re)read hits disk — this is how a workarea sees an edit
+    // made through another handle, and how RefreshRecord re-reads.
+    driver_->invalidate_read_cache();
+    // Multiuser: a peer may have appended since we last read the header.
+    // Without this, GO <new_recno> and "past end" decisions use a stale
+    // LastRec and the browse never reaches peer-appended rows.
+    driver_->refresh_record_count_from_disk();
+    // Harbour / SAP-ACE / Clipper convention: GO 0 is the phantom
+    // position. On empty table → Limbo (BOF+EOF). Otherwise → Eof,
+    // unless we were already sitting in Limbo (e.g. after a
+    // GOTOP that walked over an all-deleted set under SET
+    // DELETE ON) — preserve Limbo then so DBGOTO(0) doesn't
+    // accidentally promote to Eof and lose the BOF half.
+    if (recno == 0) {
+        if (driver_->record_count() == 0 || state_ == State::Limbo) {
+            state_ = State::Limbo; recno_ = 0; return {};
+        }
+        state_ = State::Eof;
+        recno_ = 0;
+        return {};
+    }
+    if (recno > driver_->record_count()) {
+        // Clipper / dbf1.c: GO past-end is a phantom position
+        // (Limbo) — BOTH BOF() and EOF() true. recno() reports
+        // LastRec()+1.
+        state_ = State::Limbo; recno_ = 0;
+        return {};
+    }
+    auto r = load_record_(recno);
+    if (!r) return r.error();
+    // Re-position the active index cursor on this row's key so a
+    // subsequent SKIP walks from here (and not from wherever the
+    // index was left after a previous SEEK / SKIP-past-end). When
+    // multiple records share the key we need to walk forward to
+    // the entry whose recno actually equals what the caller asked
+    // for — otherwise SKIP(±1) jumps to a sibling-key boundary.
+    if (order_ && order_->index()) {
+        auto* idx = order_->index();
+        idx->invalidate_cursor();
+        std::string key = compute_index_key_(idx);
+        auto sk = idx->seek_key(key, /*soft=*/false);
+        if (sk && sk.value().positioned) {
+            std::uint32_t guard = 0;
+            while (sk.value().recno != recno && guard++ < 1024) {
+                auto nx = idx->next();
+                if (!nx || !nx.value().positioned) break;
+                std::string ck = idx->current_key();
+                if (ck.size() < key.size())
+                    ck.append(key.size() - ck.size(), ' ');
+                if (ck.size() > key.size()) ck.resize(key.size());
+                if (std::memcmp(ck.data(), key.data(), key.size()) != 0)
+                    break;
+                sk = nx;
+            }
+            if (sk.value().recno != recno) {
+                idx->invalidate_cursor();
+            }
+        }
+    }
+    return {};
+}
+
+void Table::load_record_for_bulk_scan(std::vector<std::uint8_t> buf,
+                                      std::uint32_t recno) {
+    // Bulk reindex / key-collect replaces the buffer deliberately; any
+    // pending edit on another row should already have been settled by
+    // the caller. Drop dirty state so we don't later GoCold a stale snap.
+    discard_dirty_();
+    record_buf_ = std::move(buf);
+    recno_      = recno;
+    state_      = State::Positioned;
+}
+
+util::Result<std::vector<std::vector<std::pair<std::string, std::uint32_t>>>>
+Table::collect_keys_for_multiple_expressions(
+    const std::vector<std::string>& expressions,
+    const std::vector<std::string>& for_clauses,
+    const std::vector<std::uint16_t>& key_lens) {
+
+    const auto n = expressions.size();
+    if (for_clauses.size() != n || key_lens.size() != n) {
+        return util::Error{5000, 0, "mismatched expression lists", ""};
+    }
+
+    std::vector<std::vector<std::pair<std::string, std::uint32_t>>> results(n);
+    const auto rec_count = driver_->record_count();
+
+    for (std::uint32_t r = 1; r <= rec_count; ++r) {
+        auto raw = driver_->read_record_raw(r);
+        if (!raw) continue;
+        load_record_for_bulk_scan(std::move(raw.value()), r);
+
+        for (size_t i = 0; i < n; ++i) {
+            const auto& for_expr = for_clauses[i];
+            if (!for_expr.empty() &&
+                !evaluate_index_expr_truthy(*this, for_expr)) {
+                continue;
+            }
+            auto k = evaluate_index_expr(*this, expressions[i], key_lens[i]);
+            if (k) {
+                results[i].emplace_back(std::move(k.value()), r);
+            }
+        }
+    }
+    return results;
+}
+
+util::Result<void> Table::refresh_record_buffer() {
+    if (state_ != State::Positioned || recno_ == 0) return {};
+    // AdsRefreshRecord discards uncommitted buffer edits and reloads
+    // the on-disk image (do not GoCold first).
+    discard_dirty_();
+    return load_record_(recno_);
+}
+
+util::Result<void> Table::skip(std::int32_t delta) {
+    // Settle dirty buffer before cursor motion (GoCold). load_record_
+    // also commits, but EOF/BOF exits never load.
+    if (auto r = commit_dirty_record(); !r) return r.error();
+    // Leaving the record ends the append key-sync window (see
+    // append_pending_recno_ in table.h).
+    append_pending_recno_ = 0;
+    append_keys_done_.clear();
+    // Multiuser visibility vs browse speed:
+    //   - GoTop / GoBottom / GetRecordCount always re-read the header.
+    //   - Per-Skip full refresh was correct but ~header-I/O per keystroke
+    //     and crushed xBrowse (Pritpal). Instead we refresh only when the
+    //     cached EOF fence is about to fire (natural order) or when the
+    //     index walk runs off the end (peer may have grown the bag).
+    // SQL materialised sequences stay a frozen snapshot.
+    if (recno_sequence_active_) {
+        if (delta == 0) {
+            if (state_ == State::Bof) sequence_idx_ = -1;
+            else if (state_ == State::Eof)
+                sequence_idx_ =
+                    static_cast<std::int64_t>(recno_sequence_.size());
+            return {};
+        }
+        std::int64_t idx = sequence_idx_;
+        if (state_ == State::Bof) idx = -1;
+        if (state_ == State::Eof)
+            idx = static_cast<std::int64_t>(recno_sequence_.size());
+        idx += delta;
+        if (idx < 0) {
+            state_ = State::Bof; recno_ = 0; sequence_idx_ = -1; return {};
+        }
+        if (idx >= static_cast<std::int64_t>(recno_sequence_.size())) {
+            state_ = State::Eof; recno_ = 0;
+            sequence_idx_ = static_cast<std::int64_t>(recno_sequence_.size());
+            return {};
+        }
+        sequence_idx_ = idx;
+        return load_record_(recno_sequence_[static_cast<std::size_t>(idx)]);
+    }
+    if (order_ && order_->index()) {
+        auto* idx = order_->index();
+        if (delta == 0) return {};
+        // M10.4: when the order is descending, forward-skip walks
+        // prev() instead of next() so the cursor moves through the
+        // tree in reverse from the caller's perspective.
+        bool effective_forward = (delta > 0) ^ order_->descending_traverse();
+        util::Result<drivers::SeekOutcome> r = drivers::SeekOutcome{};
+        const bool skip_deleted = !openads::abi::show_deleted_for(this);
+        std::int32_t want = std::abs(delta);
+        std::int32_t taken = 0;
+        // Clipper convention: SKIP that overshoots the order leaves
+        // the cursor on the LAST visited live record and reports Bof
+        // / Eof — not on recno 0. Track the most-recent live we saw.
+        std::uint32_t last_live = recno_;
+        while (taken < want) {
+            r = effective_forward ? idx->next() : idx->prev();
+            if (!r) return r.error();
+            if (!r.value().positioned) {
+                // Index walk end: do not re-read the bag on every Skip
+                // (browse hot path). GoTop/GoBottom already refresh the
+                // CDX header so a full re-paint sees peer keys.
+                if (delta > 0) {
+                    state_ = State::Eof; recno_ = 0;
+                } else {
+                    state_ = State::Bof;
+                    if (last_live != 0) {
+                        (void)load_record_(last_live);
+                        state_ = State::Bof;
+                    } else {
+                        recno_ = 0;
+                    }
+                }
+                return {};
+            }
+            if (!key_in_top_scope_(idx->current_key()) ||
+                !key_in_bottom_scope_(idx->current_key())) {
+                if (delta > 0) {
+                    state_ = State::Eof; recno_ = 0;
+                } else {
+                    state_ = State::Bof;
+                    if (last_live != 0) {
+                        (void)load_record_(last_live);
+                        state_ = State::Bof;
+                    } else {
+                        recno_ = 0;
+                    }
+                }
+                return {};
+            }
+            if (skip_deleted) {
+                // Probe the row's deleted flag without advancing
+                // the user-visible step count.
+                auto ld = load_record_(r.value().recno);
+                if (!ld) {
+                    if (ld.error().code != 5000) return ld.error();
+                    // Stale index entry (recno > rec_count after a PACK):
+                    // invisible like a deleted row — skip without counting.
+                    continue;
+                }
+                if (is_deleted()) continue;
+            } else if (r.value().recno > driver_->record_count()) {
+                // SET DELETED OFF doesn't load every row (perf), so a stale
+                // entry would only surface at the final load below. Gate
+                // cheaply on the recno range — no I/O in the common case —
+                // and only when it looks past the live count confirm with a
+                // load: a genuine just-appended row (peer multiuser) loads
+                // fine and counts; a stale PACK leftover returns 5000 and is
+                // skipped without counting.
+                auto ld = load_record_(r.value().recno);
+                if (!ld) {
+                    if (ld.error().code != 5000) return ld.error();
+                    continue;
+                }
+            }
+            last_live = r.value().recno;
+            ++taken;
+        }
+        return load_record_(r.value().recno);
+    }
+    auto n = driver_->record_count();
+    if (n == 0) {
+        // Empty may be stale: a peer could have just written the first row.
+        driver_->refresh_record_count_from_disk();
+        n = driver_->record_count();
+    }
+    if (n == 0) {
+        // Skip on empty:
+        //   delta == 0  -> preserve current state (Limbo / Bof / Eof
+        //                  per Clipper SKIP-zero "refresh, don't move").
+        //   delta > 0   -> Eof (single flag).
+        //   delta < 0   -> Bof (single flag).
+        if (delta > 0) state_ = State::Eof;
+        else if (delta < 0) state_ = State::Bof;
+        recno_ = 0; return {};
+    }
+    // Rows the cursor must not land on: deleted rows when SET DELETED
+    // is ON (show_deleted() == false) and rows rejected by an active
+    // filter. The index-order path above already skips deleted rows;
+    // the natural-order path must do the same.
+    const bool skip_deleted = !openads::abi::show_deleted_for(this);
+    auto must_skip = [&]() -> bool {
+        if (state_ != State::Positioned) return false;
+        if (skip_deleted && is_deleted()) return true;
+        if (filter_ && !filter_(*this)) return true;
+        return false;
+    };
+    // Lazy multiuser refresh of the EOF fence: only re-read the header
+    // when a step would land past the cached LastRec (or before 1).
+    auto refresh_n_if_needed = [&](std::int64_t pos) {
+        if (pos < 1) return;
+        if (pos <= static_cast<std::int64_t>(n)) return;
+        driver_->refresh_record_count_from_disk();
+        n = driver_->record_count();
+    };
+    if ((skip_deleted || filter_) && delta != 0) {
+        // M12.33 — count VISIBLE rows, like the index-order path above.
+        // The old recno + delta jump (then slide only while sitting on a
+        // hidden row) landed one visible row short for every hidden row
+        // strictly inside the range, so a remote folded Skip(N) re-served
+        // a row the client had already painted (the "deleted record
+        // duplicates the previous item" browse bug).
+        const std::int64_t stepdir = (delta > 0) ? 1 : -1;
+        const std::int64_t want =
+            (delta > 0) ? delta : -static_cast<std::int64_t>(delta);
+        std::int64_t pos = static_cast<std::int64_t>(recno_);
+        std::int64_t taken = 0;
+        while (taken < want) {
+            pos += stepdir;
+            if (pos < 1) { state_ = State::Bof; recno_ = 0; return {}; }
+            refresh_n_if_needed(pos);
+            if (pos > static_cast<std::int64_t>(n)) {
+                state_ = State::Eof; recno_ = n + 1; return {};
+            }
+            if (auto r = load_record_(static_cast<std::uint32_t>(pos)); !r) {
+                return r.error();
+            }
+            if (must_skip()) continue;
+            ++taken;
+        }
+        return {};
+    }
+    std::int64_t target = static_cast<std::int64_t>(recno_) + delta;
+    if (state_ == State::Bof && delta > 0) target = delta;
+    if (target < 1) { state_ = State::Bof; recno_ = 0; return {}; }
+    refresh_n_if_needed(target);
+    if (target > static_cast<std::int64_t>(n)) {
+        state_ = State::Eof; recno_ = n + 1; return {};
+    }
+    if (auto r = load_record_(static_cast<std::uint32_t>(target)); !r) {
+        return r.error();
+    }
+    // Skip(0) refresh on a hidden row still slides off it (Clipper
+    // filter convention: the cursor never rests on an invisible row).
+    if (skip_deleted || filter_) {
+        std::int64_t step = (delta >= 0) ? 1 : -1;
+        while (must_skip()) {
+            std::int64_t nt = static_cast<std::int64_t>(recno_) + step;
+            if (nt < 1) { state_ = State::Bof; recno_ = 0; return {}; }
+            if (nt > static_cast<std::int64_t>(n)) {
+                state_ = State::Eof; recno_ = n + 1; return {};
+            }
+            if (auto r = load_record_(static_cast<std::uint32_t>(nt)); !r) {
+                return r.error();
+            }
+        }
+    }
+    return {};
+}
+
+util::Result<drivers::DbfFieldValue>
+Table::read_field(std::uint16_t field_index) {
+    if (state_ != State::Positioned) {
+        // 5068 = AE_NO_CURRENT_RECORD (SAP ADS SDK). Harbour rddads'
+        // adsGetValue special-cases this exact code as the graceful
+        // "read past the last record" path and substitutes a blank value;
+        // any other error code — including 5026 (AE_INVALID_WORKAREA) — is
+        // raised as a hard error (the ADSCDX/5000 failure TBrowse hits when
+        // it paints an EOF row).
+        return util::Error{5068, 0, "table not positioned on a record",
+                           ""};
+    }
+    if (field_index >= driver_->fields().size()) {
+        return util::Error{5063, 0, "field index out of range", ""};
+    }
+    const auto& f = driver_->fields().at(field_index);
+    // M13 — a VFP column whose _NullFlags bit is set holds undefined data
+    // bytes; report NULL instead of decoding the stale payload. (ADT
+    // sentinel NULLs are recognized inside decode_field via f.adt.)
+    if (type_ == TableType::Vfp && is_field_null(field_index)) {
+        drivers::DbfFieldValue nul;
+        nul.is_null = true;
+        return nul;
+    }
+    auto v = drivers::decode_field(f, record_buf_.data(), record_buf_.size());
+    if (!v) return v.error();
+
+    // ADT binary memo/binary reference (9 bytes in record):
+    //   uint32 LE block_no | uint32 LE data_len | 0x00
+    // Detected by field.length == 9 which is exclusive to ADT memo refs
+    // (DBF memo fields are always 10-byte ASCII).
+    if ((f.type == drivers::DbfFieldType::Memo ||
+         f.type == drivers::DbfFieldType::Binary) &&
+        f.length == 9 && memo_) {
+        const std::uint8_t* ref = record_buf_.data() + f.record_offset;
+        std::uint32_t block_no = static_cast<std::uint32_t>(ref[0])        |
+                                (static_cast<std::uint32_t>(ref[1]) <<  8) |
+                                (static_cast<std::uint32_t>(ref[2]) << 16) |
+                                (static_cast<std::uint32_t>(ref[3]) << 24);
+        std::uint32_t data_len = static_cast<std::uint32_t>(ref[4])        |
+                                (static_cast<std::uint32_t>(ref[5]) <<  8) |
+                                (static_cast<std::uint32_t>(ref[6]) << 16) |
+                                (static_cast<std::uint32_t>(ref[7]) << 24);
+        if (block_no != 0 && data_len != 0) {
+            auto mr = memo_->read(block_no, data_len);
+            if (!mr) return mr.error();
+            drivers::DbfFieldValue out;
+            out.as_string = std::move(mr).value();
+            return out;
+        }
+        return v;
+    }
+
+    // DBF ASCII memo reference: 10-byte decimal block number.
+    if (f.type == drivers::DbfFieldType::Memo && memo_) {
+        std::string raw(reinterpret_cast<const char*>(
+            record_buf_.data() + f.record_offset), f.length);
+        // Skip leading spaces; trailing NULs/spaces ignored by stoul.
+        std::uint32_t block = 0;
+        try {
+            std::size_t pos = 0;
+            block = static_cast<std::uint32_t>(std::stoul(raw, &pos, 10));
+        } catch (...) {
+            block = 0;
+        }
+        if (block != 0) {
+            auto mr = memo_->read(block);
+            if (!mr) return mr.error();
+            drivers::DbfFieldValue out;
+            out.as_string = std::move(mr).value();
+            return out;
+        }
+    }
+    return v;
+}
+
+util::Result<void> Table::append_record() {
+    bump_live_gen();
+    if (mode_ == OpenMode::Read) {
+        return util::Error{5000, 0, "table opened read-only", ""};
+    }
+    // GoCold the previous row before starting a new append.
     if (auto r = commit_dirty_record(); !r) return r.error();
     auto rec = drivers::make_empty_record(driver_->record_length());
 
@@ -1222,12 +2377,15 @@ util::Result<void> Table::append_record() {
     // erase until that commit lands (see append_pending_recno_ in table.h).
     append_pending_recno_ = recno_;
     append_keys_done_.clear();
-    // Auto-lock the new recno so field puts pass GoHot. Do NOT use the
-    // blocking kernel acquire: a peer FLock/Browse covers the VFP rec-lock
+    // LOCAL ADT exclusive opens already grant unrestricted writes; taking
+    // an OS byte-range lock for every append and retaining all of them until
+    // UnlockTable makes the kernel lock tree grow without bound (~1k/s at
+    // 10k records with no indexes). Keep other table types unchanged.
+    // Do NOT use the blocking kernel acquire: a peer FLock/Browse covers the VFP rec-lock
     // range and LockFileEx waits forever (B_BIG N=700 convoy). Retry with
     // the ACE lock budget, then roll the blank row back so a timeout
     // cannot leave a durable empty record.
-    {
+    if (mode_ != OpenMode::Exclusive || type_ != TableType::Adt) {
         const auto p = openads::abi::lock_retry_policy();
         const auto t0 = std::chrono::steady_clock::now();
         const auto deadline = t0 + std::chrono::milliseconds(
