@@ -4,8 +4,16 @@ on:
   workflow_dispatch:
     inputs:
       patch_base64:
-        description: "Base64 of a git diff patch (src/engine/**, tests/**, docs/** only)"
-        required: true
+        description: "Base64 of a git diff patch, optionally gzip-compressed"
+        required: false
+        type: string
+      restore_from:
+        description: "Restore mode: commit SHA (7-40 hexadecimal characters)"
+        required: false
+        type: string
+      restore_path:
+        description: "Restore mode: one ordinary file in src/engine/**, tests/** or docs/**"
+        required: false
         type: string
       commit_message:
         description: "Commit message"
@@ -40,24 +48,63 @@ jobs:
       - name: Record exact base
         id: base
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-      - name: Decode, apply cleanly and enforce allowlist
+      - name: Prepare restore or patch and enforce allowlist
         env:
           PATCH_BASE64: ${{ inputs.patch_base64 }}
+          RESTORE_FROM: ${{ inputs.restore_from }}
+          RESTORE_PATH: ${{ inputs.restore_path }}
           COMMIT_MESSAGE: ${{ inputs.commit_message }}
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PYTHON'
-          import base64, os, pathlib, subprocess
+          import base64, gzip, os, pathlib, re, subprocess
           if not os.environ["COMMIT_MESSAGE"].strip():
               raise SystemExit("Commit message must not be empty")
           encoded = "".join(os.environ["PATCH_BASE64"].split())
-          patch = base64.b64decode(encoded, validate=True)
-          if not patch:
-              raise SystemExit("Patch must not be empty")
+          restore_from = os.environ["RESTORE_FROM"].strip()
+          restore_path = os.environ["RESTORE_PATH"]
           artifact = pathlib.Path(os.environ["RUNNER_TEMP"]) / "reviewed-patch"
           artifact.mkdir()
           patch_file = artifact / "patch.diff"
+          if restore_from or restore_path:
+              if encoded or not restore_from or not restore_path:
+                  raise SystemExit("Use either patch_base64 OR both restore_from and restore_path")
+              if not re.fullmatch(r"[0-9a-fA-F]{7,40}", restore_from):
+                  raise SystemExit("restore_from must be a commit SHA")
+              parts = restore_path.split("/")
+              allowed = restore_path.startswith(("src/engine/", "tests/", "docs/"))
+              if (not allowed or any(p in ("", ".", "..") for p in parts)
+                      or any(p.lower() == ".git" for p in parts)
+                      or "\\" in restore_path):
+                  raise SystemExit("Disallowed restore_path")
+              commit = subprocess.check_output([
+                  "git", "rev-parse", "--verify", restore_from + "^{commit}"
+              ]).decode().strip()
+              entry = subprocess.check_output([
+                  "git", "--literal-pathspecs", "ls-tree", "-z", commit, "--", restore_path
+              ]).split(b"\0")
+              entry = [e for e in entry if e]
+              if len(entry) != 1:
+                  raise SystemExit("restore_path must name exactly one existing file")
+              metadata, actual_path = entry[0].split(b"\t", 1)
+              mode, kind, _ = metadata.split()
+              if actual_path != os.fsencode(restore_path) or kind != b"blob" or mode not in (b"100644", b"100755"):
+                  raise SystemExit("restore_path must name one ordinary file, not a directory or symlink")
+              subprocess.run([
+                  "git", "--literal-pathspecs", "checkout", commit, "--", restore_path
+              ], check=True)
+              # Normalize the one-file restore into the same exact patch used by all CI jobs.
+              patch = subprocess.check_output([
+                  "git", "diff", "--cached", "--binary", "--full-index", "--no-ext-diff", "--no-renames"
+              ])
+              subprocess.run(["git", "reset", "--hard", "HEAD"], check=True)
+          else:
+              patch = base64.b64decode(encoded, validate=True)
+              if patch.startswith(b"\x1f\x8b"):
+                  patch = gzip.decompress(patch)
+          if not patch:
+              raise SystemExit("Input makes no changes")
           patch_file.write_bytes(patch)
           subprocess.run(["git", "apply", "--check", "--index", str(patch_file)], check=True)
           subprocess.run(["git", "apply", "--index", str(patch_file)], check=True)
@@ -67,6 +114,8 @@ jobs:
           paths = [p for p in paths if p]
           if not paths:
               raise SystemExit("Patch makes no changes")
+          if restore_path and paths != [os.fsencode(restore_path)]:
+              raise SystemExit("Restore must change exactly the requested file")
           for path in paths:
               parts = path.split(b"/")
               allowed = (path.startswith(b"src/engine/") or
