@@ -201,6 +201,9 @@ jobs:
           cp "$BUILD"/tools/serverd/openads_serverd "$STAGE/"
           cp "$BUILD"/tools/bench/openads_bench   "$STAGE/"
           cp LICENSE NOTICE README.md openads.ini.sample "$STAGE/"
+          mkdir -p "$STAGE/include/openads"
+          cp include/openads/ace.h "$STAGE/include/ace.h"
+          cp include/openads/{ace,error,openads_sql,platform,version}.h "$STAGE/include/openads/"
           tar czvf "$STAGE.tar.gz" "$STAGE"
           ls -la "$STAGE.tar.gz"
           echo "ASSET=$STAGE.tar.gz" >> "$GITHUB_ENV"
@@ -260,6 +263,9 @@ jobs:
           Copy-Item "$build/tools/bench/Release/openads_bench.exe"     "$stage/"
           Copy-Item LICENSE,NOTICE,README.md,openads.ini.sample  $stage/
           Copy-Item QUICKSTART.md                              "$stage/" -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory "$stage/include/openads" -Force | Out-Null
+          Copy-Item include/openads/ace.h "$stage/include/ace.h"
+          Copy-Item include/openads/ace.h,include/openads/error.h,include/openads/openads_sql.h,include/openads/platform.h,include/openads/version.h "$stage/include/openads/"
           # Harbour HB_FUNC wrappers for the oads_* VFS API — compiled
           # into the app, not shipped in the DLL. Arch-independent C
           # source: both Windows zips carry it. (Pritpal Bedi.)
@@ -437,6 +443,9 @@ jobs:
           cp "$BUILD"/tools/serverd/openads_serverd "$STAGE/"
           cp "$BUILD"/tools/bench/openads_bench   "$STAGE/"
           cp LICENSE NOTICE README.md openads.ini.sample "$STAGE/"
+          mkdir -p "$STAGE/include/openads"
+          cp include/openads/ace.h "$STAGE/include/ace.h"
+          cp include/openads/{ace,error,openads_sql,platform,version}.h "$STAGE/include/openads/"
           tar czvf "$STAGE.tar.gz" "$STAGE"
           ls -la "$STAGE.tar.gz"
           echo "ASSET=$STAGE.tar.gz" >> "$GITHUB_ENV"
