@@ -149,7 +149,9 @@ jobs:
       contents: read
     name: ${{ matrix.os }} / ${{ matrix.preset }}${{ matrix.tls && ' / TLS' || '' }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # Recent macOS runs exhaust ci.yml's 30-minute budget during Test.
+    # Give macOS 90 minutes; preserve the original 30 minutes elsewhere.
+    timeout-minutes: ${{ matrix.os == 'macos-14' && 90 || 30 }}
     strategy:
       fail-fast: false
       matrix:
