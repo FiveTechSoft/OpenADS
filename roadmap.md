@@ -63,7 +63,11 @@ esperan el flush. 8/8 tests MT en verde; suite x64 completa 100% (5/5).
 4. Avisar a Pritpal: re-probar su secuencia de 16 instancias con v1.8.67.
 
 ### Deudas anotadas
-- NTX: sin lock de archivo de índice interproceso (solo DBF alineado).
+- ~~NTX: sin lock de archivo de índice interproceso (solo DBF alineado).~~
+  **Resuelto (2026-09-25):** lock compatible con Harbour DBFNTX en el byte
+  1.000.000.000 del `.ntx`: lecturas compartidas, escrituras exclusivas hasta
+  `flush()`, incremento de versión y recarga si otro proceso cambió el índice.
+  Implementado en main (d7e89c4, a8f365b, 4c2bc44, bf8d9d1); tests NTX pasan.
 - Hojas vacías tras erase conservan separador stale-high (lazy delete);
   Harbour haría NODE_JOIN. Riesgo acotado, documentado en el código.
 - VFP (0x30) header path sin tocar (hdrLen/displacements estilo FoxPro).

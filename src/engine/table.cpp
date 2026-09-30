@@ -1222,12 +1222,15 @@ util::Result<void> Table::append_record() {
     // erase until that commit lands (see append_pending_recno_ in table.h).
     append_pending_recno_ = recno_;
     append_keys_done_.clear();
-    // Auto-lock the new recno so field puts pass GoHot. Do NOT use the
-    // blocking kernel acquire: a peer FLock/Browse covers the VFP rec-lock
+    // Exclusive ADT opens permit writes without a record lock. Avoid
+    // accumulating an unused append auto-lock on each new row, including
+    // when this engine Table is used by the server. Shared ADT and other
+    // table types retain their existing auto-lock behavior.
+    // Do NOT use the blocking kernel acquire: a peer FLock/Browse covers the VFP rec-lock
     // range and LockFileEx waits forever (B_BIG N=700 convoy). Retry with
     // the ACE lock budget, then roll the blank row back so a timeout
     // cannot leave a durable empty record.
-    {
+    if (mode_ != OpenMode::Exclusive || type_ != TableType::Adt) {
         // Engine-internal budget, decoupled from the client-facing ACE lock
         // policy (single-attempt by default): the app cannot retry this
         // internal auto-lock itself, so it keeps its own short wait.
@@ -1860,6 +1863,12 @@ TableTypeForLock Table::to_lock_type_() const noexcept {
 
 util::Result<void> Table::lock_record_excl(std::uint32_t recno) {
     if (mode_ == OpenMode::Read) return {};
+    // A record lock is binary at the Table/ACE level, exactly as in
+    // try_lock_record_excl: a repeated lock on this handle must not
+    // increment LockMgr's internal reference count, or a single
+    // UnlockRecord would leave the OS byte locked forever.
+    if (recno_locks_.find(recno) != recno_locks_.end())
+        return load_record_(recno);
     if (table_lock_) {
         // xBase semantics (hb_dbfRawLock REC_LOCK): a record lock while the
         // table lock is held is a no-op success — the FLock range already
@@ -1873,11 +1882,7 @@ util::Result<void> Table::lock_record_excl(std::uint32_t recno) {
     auto h = locks_.lock_record_excl(driver_->file(), to_lock_type_(),
                                      locking_, recno);
     if (!h) return h.error();
-    auto [it, inserted] = recno_locks_.emplace(recno, std::move(h).value());
-    if (!inserted) {
-        // Nested acquire on the same record — refcount bumped in LockMgr.
-        (void)it;
-    }
+    recno_locks_.emplace(recno, std::move(h).value());
     return load_record_(recno);
 }
 

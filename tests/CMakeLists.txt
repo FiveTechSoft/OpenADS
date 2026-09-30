@@ -42,6 +42,7 @@ add_executable(openads_unit_tests
     unit/dbf_record_test.cpp
     unit/dbf_write_test.cpp
     unit/ntx_driver_test.cpp
+    unit/ntx_index_lock_test.cpp
     unit/lock_mgr_test.cpp
     unit/engine_table_test.cpp
     unit/engine_table_write_test.cpp
@@ -266,6 +267,7 @@ add_executable(openads_unit_tests
     unit/network_frame_reader_test.cpp
     unit/abi_adt_smoke_test.cpp
     unit/abi_adt_create_test.cpp
+    unit/abi_adt_append_exclusive_test.cpp
     unit/abi_adt_wide_numeric_test.cpp
     unit/abi_adi_create_test.cpp
     unit/abi_adi_separate_bag_test.cpp

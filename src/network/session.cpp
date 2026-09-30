@@ -3090,18 +3090,23 @@ DispatchResult Session::dispatch(const Frame& f) {
             if (!tbl) { reply = err("IsRecordLocked: lookup failed"); break; }
             // ACE convention: recno 0 = the current record.
             if (rn == 0) rn = tbl->recno();
-            // mtfix11: SAP AdsIsRecordLocked answers across connections;
-            // the own-session lock list alone is blind to other sessions
-            // (login-semaphore guards read this op and silently admitted
-            // every newcomer). Own registrations plus a non-destructive
-            // OS lock-byte probe - which also covers locks held through
-            // this session's ABI twin handle, whose Table object is not
-            // `tbl`.
             std::uint16_t locked = 0;
-            if (auto any = tbl->is_record_locked_any(rn); any) {
-                locked = any.value() ? 1 : 0;
+            // Own-handle state for this session. The wire LockTable
+            // opcode locks the ENGINE Table below (record locks route
+            // through the ABI twin when it exists), so the answer is the
+            // engine table lock OR the twin's record locks.
+            if (tbl->is_table_locked()) {
+                locked = 1;
+            } else if (auto hit = tbls_h_.find(id); hit != tbls_h_.end()) {
+                UNSIGNED16 b = 0;
+                if (AdsIsRecordLocked(hit->second, rn, &b) != 0) {
+                    reply = err("IsRecordLocked: failed"); break;
+                }
+                locked = b;
             } else {
-                reply = err("IsRecordLocked: probe failed"); break;
+                for (std::uint32_t held : tbl->held_record_locks()) {
+                    if (held == rn) { locked = 1; break; }
+                }
             }
             reply.opcode = Opcode::IsRecordLockedAck;
             write_u16_le(locked, reply.payload);

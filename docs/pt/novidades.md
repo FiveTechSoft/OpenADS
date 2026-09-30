@@ -14,6 +14,56 @@ v1.0.0-rc29. Para o histórico completo de commits, consulte o
 
 ---
 
+## Destaques: locks de registro idempotentes e introspecção real (main, 2026-09-29)
+
+- **Os locks de registro são idempotentes por handle e a introspecção
+  responde o estado do chamador** (Pritpal Bedi) - bloquear duas vezes
+  o mesmo registro em um handle se empilhava: cada `AdsLockRecord`
+  repetido incrementava um contador interno e o registro continuava
+  bloqueado até desfazer todos os locks. Agora um lock repetido é um
+  no-op e um único `AdsUnlockRecord` o libera, como no ADS.
+  `AdsIsRecordLocked` e `DBRI_LOCKED` respondem se o handle que chama
+  detém o lock, em vez do de qualquer conexão, e clientes remotos
+  obtêm introspecção real entre conexões: o servidor responde à
+  consulta wire `IsRecordLocked` contra o lock da tabela do engine e
+  os locks de registro da sessão. A suite de locks foi refeita (116
+  testes), com um teste novo que observa um lock através de uma
+  segunda conexão real.
+
+---
+
+## Destaques: escrita xBase sobre MariaDB, campos numéricos e lógicos (main, 2026-09-29)
+
+- **Os setters numéricos e lógicos agora escrevem em tabelas
+  `mariadb://`** - `AdsSetDouble`, `AdsSetLong`, `AdsSetLongLong` e
+  `AdsSetLogical` não tinham ramo MariaDB e caíam na busca de tabelas
+  DBF nativas, falhando com `5000 unknown table`. Agora gravam no
+  staging de `MariaConnection::set_field`, como `AdsSetString` já
+  fazia: doubles são formatados com `"%.17g"` e lógicos como
+  `"1"`/`"0"`, que o MariaDB converte tanto em colunas numéricas
+  quanto `CHAR(1)`. APPEND e REPLACE de campos caractere/data já
+  funcionavam; isto completa a escrita em modo xBase. Coberto por um
+  novo teste ao vivo (ida e volta de INSERT e UPDATE numérico/lógico).
+
+---
+
+## Destaques: lock NTX entre processos (main, 2026-09-25)
+
+- **Lock entre processos do índice `.ntx`, compatível com Harbour
+  DBFNTX** — o driver NTX agora bloqueia o próprio arquivo `.ntx` no
+  byte 1.000.000.000, o mesmo esquema que o DBFNTX do Harbour usa,
+  então aplicativos OpenADS, Harbour e xHarbour/Clipper podem
+  compartilhar índices NTX entre processos com segurança: leituras
+  tomam um lock compartilhado, escritas um exclusivo mantido até
+  `flush()`, e um contador de versão permite aos demais processos
+  perceber a mudança e recarregar o índice. Antes apenas os locks de
+  registros DBF estavam alinhados entre processos e dois escritores
+  concorrentes podiam corromper um `.ntx`. Coberto por novos testes
+  unitários entre processos, incluindo um teste com dois processos
+  escritores concorrentes.
+
+---
+
 ## Destaques v1.8.14
 
 ### SQL — o cursor do resultado não começa mais em uma linha vazia fantasma

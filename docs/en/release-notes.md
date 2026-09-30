@@ -12,6 +12,56 @@ Complete history of releases with categorized improvements.
 
 ---
 
+## Unreleased (main, 2026-09-29)
+
+### Bug Fixes
+
+- **xBase writes to MariaDB/MySQL: numeric and logical setters now
+  reach the staging buffer** - `AdsSetDouble`, `AdsSetLong`,
+  `AdsSetLongLong` and `AdsSetLogical` had no MariaDB branch and fell
+  through to the native-DBF table lookup, failing with
+  `5000 unknown table` on `mariadb://` tables. They now stage through
+  `MariaConnection::set_field`, like `AdsSetString` already did:
+  doubles are formatted with `"%.17g"` and logicals as `"1"`/`"0"`,
+  which MariaDB coerces into both numeric and `CHAR(1)` columns.
+  Append and REPLACE of character/date fields already worked; this
+  completes the xBase write path. Covered by a new live test
+  (numeric/logical INSERT and UPDATE round-trip).
+
+- **Record locks are idempotent per handle, and lock introspection
+  reports the caller's own state** (Pritpal Bedi) - locking the same
+  record twice on one handle used to stack: a repeated `AdsLockRecord`
+  bumped an internal count and the record stayed locked until every
+  lock was undone. A repeated lock is now a no-op and a single
+  `AdsUnlockRecord` releases it, matching ADS. `AdsIsRecordLocked` and
+  `DBRI_LOCKED` now answer whether the calling handle holds the lock
+  instead of any connection's, and remote clients get real
+  cross-connection introspection: the server answers the
+  `IsRecordLocked` wire query against the engine table lock and the
+  session's record locks. The lock suite was reworked (116 tests),
+  including a new test that observes a lock through a real second
+  connection.
+
+---
+
+## Unreleased (main, 2026-09-25)
+
+### New Features
+
+- **Inter-process `.ntx` index lock, Harbour DBFNTX-compatible** —
+  the NTX driver now locks the `.ntx` file itself at byte
+  1,000,000,000, the same scheme Harbour's DBFNTX uses, so OpenADS,
+  Harbour and xHarbour/Clipper applications can share NTX indexes
+  across processes safely: reads take a shared lock, writes an
+  exclusive one held until `flush()`, and a version counter lets
+  other processes notice the change and reload the index. Before
+  this, only DBF record locks were aligned across processes and
+  concurrent writers could corrupt an `.ntx`. Covered by new
+  inter-process unit tests, including a two-process concurrent
+  writer test.
+
+---
+
 ## v1.8.98 — 2026-08-21
 
 ### Bug Fixes

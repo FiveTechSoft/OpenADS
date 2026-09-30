@@ -125,6 +125,34 @@ TEST_CASE("lockfull local: double lock needs one unlock") {
     fs::remove_all(dir, ec);
 }
 
+TEST_CASE("lockfull local: repeated lock frees the OS byte after one unlock") {
+    auto dir = fs::temp_directory_path() / "oads_lf_second_handle";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    auto hSetup = connect_local(dir);
+    stage_table(dir, "LC2X", 5, hSetup);
+    REQUIRE(AdsDisconnect(hSetup) == 0);
+    auto hA = connect_local(dir);
+    auto hB = connect_local(dir);
+    auto hTA = open_shared(hA, "LC2X");
+    auto hTB = open_shared(hB, "LC2X");
+    REQUIRE(AdsLockRecord(hTA, 2) == 0);
+    REQUIRE(AdsLockRecord(hTA, 2) == 0);   // repeated RLock on one handle
+    CHECK(num_locks(hTA) == 1u);
+    // The lock stays exclusive until its one and only release.
+    CHECK(AdsLockRecord(hTB, 2) != 0);
+    REQUIRE(AdsUnlockRecord(hTA, 2) == 0);
+    CHECK(num_locks(hTA) == 0u);
+    // The other connection must acquire the real OS lock after one unlock.
+    REQUIRE(AdsLockRecord(hTB, 2) == 0);
+    REQUIRE(AdsUnlockRecord(hTB, 2) == 0);
+    REQUIRE(AdsCloseTable(hTA) == 0);
+    REQUIRE(AdsCloseTable(hTB) == 0);
+    REQUIRE(AdsDisconnect(hA) == 0);
+    REQUIRE(AdsDisconnect(hB) == 0);
+    fs::remove_all(dir, ec);
+}
+
 TEST_CASE("lockfull local: unlock of a non-held record is a safe no-op") {
     auto dir = fs::temp_directory_path() / "oads_lf_notheld";
     std::error_code ec;

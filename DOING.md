@@ -6,6 +6,26 @@
 
 ---
 
+## 2026-09-29 — MariaDB xBase setters + NTX inter-process lock (v1.09.70)
+
+MariaDB: `AdsSetDouble`/`AdsSetLong`/`AdsSetLongLong`/`AdsSetLogical`
+had no MariaDB branch — `5000 unknown table` on `mariadb://` tables;
+now stage via `MariaConnection::set_field` like `AdsSetString`
+(`"%.17g"`, `"1"`/`"0"`). New live write test (INSERT/UPDATE
+round-trip, lock contention). NTX (25-sep): Harbour DBFNTX-compatible
+inter-process `.ntx` lock (byte 1,000,000,000, shared/exclusive,
+version counter). Released v1.09.70.
+
+## 2026-09-24 — REMOTE logical writes store T/F (v1.09.69)
+
+Contributor patch on v1.09.68: remote `AdsSetLogical` sent "1"/"0",
+twin-handle `AdsSetString` path stored the byte raw. App saw `.T.`,
+index FOR eval + DBFCDX/SAP saw `.F.` — closed work orders stuck in
+`FOR comple = .F.` browses. Client now sends `T`/`F`, server
+`encode_field_string` normalizes logicals (blank stays blank). New
+remote regression (plain + FOR-tag). Suite 1593/1594 locally
+(x64 MinGW, only pre-existing CDX alloc-tail). Released v1.09.69.
+
 ## 2026-09-20 — UnZip destination defaults to archive's dir (v1.09.68)
 
 Field gap (hb_UnzipFile parity): no way to say "extract where the

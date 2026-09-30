@@ -14216,6 +14216,22 @@ UNSIGNED32 ENTRYPOINT AdsSetLogical(ADSHANDLE hTable, UNSIGNED8* pucField,
         // '1' raw, which index FOR evaluation and DBFCDX read as .F.
         return remote_buffered_set(rt, fname, bValue ? "T" : "F");
     }
+#if defined(OPENADS_WITH_MARIADB)
+    if (auto* mt = get_maria_table(hTable)) {
+        if (pucField == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+        if (mt->conn == nullptr)
+            return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
+        // Same staging path as AdsSetString; flush_record quotes every
+        // staged value with escape_literal.  Stage "1"/"0", not 'T'/'F':
+        // a quoted 1/0 coerces into both TINYINT and CHAR(1) columns,
+        // while 'T' cannot land in a numeric column.  AdsGetLogical
+        // already accepts both spellings on read.
+        std::string fname(reinterpret_cast<const char*>(pucField));
+        auto r = mt->conn->set_field(mt, fname, bValue ? "1" : "0");
+        if (!r) return fail(r.error());
+        return ok();
+    }
+#endif
     Table* t = get_table(hTable);
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
     std::uint16_t idx = 0;
@@ -14254,6 +14270,22 @@ UNSIGNED32 ENTRYPOINT AdsSetDouble(ADSHANDLE hTable, UNSIGNED8* pucField,
         std::snprintf(nbuf, sizeof(nbuf), "%.17g", dValue);
         return remote_buffered_set(rt, fname, std::string(nbuf));
     }
+#if defined(OPENADS_WITH_MARIADB)
+    if (auto* mt = get_maria_table(hTable)) {
+        if (pucField == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+        if (mt->conn == nullptr)
+            return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
+        // Same staging path as AdsSetString: flush_record quotes the
+        // staged text and MariaDB coerces a well-formed numeric string
+        // into INT/DOUBLE columns.  "%.17g" round-trips a double.
+        std::string fname(reinterpret_cast<const char*>(pucField));
+        char nbuf[64];
+        std::snprintf(nbuf, sizeof(nbuf), "%.17g", dValue);
+        auto r = mt->conn->set_field(mt, fname, std::string(nbuf));
+        if (!r) return fail(r.error());
+        return ok();
+    }
+#endif
     Table* t = get_table(hTable);
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
     std::uint16_t idx = 0;

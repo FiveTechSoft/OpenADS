@@ -52,9 +52,10 @@ void seed_fixture(MYSQL* conn) {
     };
     exec("DROP TABLE IF EXISTS clientes");
     exec("CREATE TABLE clientes ("
-         "id INT PRIMARY KEY, nome VARCHAR(64), saldo DOUBLE)");
-    exec("INSERT INTO clientes (id, nome, saldo) VALUES "
-         "(1, 'Ana', 10.5), (2, 'Bob', NULL), (3, 'Cid', 0.0)");
+         "id INT PRIMARY KEY, nome VARCHAR(64), saldo DOUBLE,"
+         " activo TINYINT)");
+    exec("INSERT INTO clientes (id, nome, saldo, activo) VALUES "
+         "(1, 'Ana', 10.5, 1), (2, 'Bob', NULL, 0), (3, 'Cid', 0.0, 1)");
 }
 
 std::string rtrim(std::string s) {
@@ -126,6 +127,69 @@ TEST_CASE("ABI: mariadb AdsAppendRecord + AdsSetString + AdsWriteRecord + AdsDel
     REQUIRE(AdsWriteRecord(hTable) == 0);
     REQUIRE(AdsGotoBottom(hTable) == 0);
     CHECK(rtrim(field_str(hTable, "nome")) == "DanX");
+
+    REQUIRE(AdsDeleteRecord(hTable) == 0);
+    CHECK(row_count(hTable) == 3);
+
+    REQUIRE(AdsCloseTable(hTable) == 0);
+    REQUIRE(AdsDisconnect(hConn) == 0);
+}
+
+TEST_CASE("ABI: mariadb AdsSetDouble / AdsSetLong / AdsSetLogical write path") {
+    const char* uri_cstr = test_maria_uri();
+    MYSQL* seed = connect_seed(uri_cstr);
+    if (seed == nullptr) {
+        MESSAGE("MariaDB not reachable; skipping live setter test");
+        return;
+    }
+    seed_fixture(seed);
+    mysql_close(seed);
+
+    const std::string uri = uri_cstr;
+    std::vector<UNSIGNED8> srv(uri.size() + 1);
+    std::memcpy(srv.data(), uri.c_str(), uri.size() + 1);
+    ADSHANDLE hConn = 0;
+    REQUIRE(AdsConnect60(srv.data(), ADS_LOCAL_SERVER,
+                         nullptr, nullptr, 0, &hConn) == 0);
+
+    UNSIGNED8 tbl_name[32] = "clientes";
+    ADSHANDLE hTable = 0;
+    REQUIRE(AdsOpenTable(hConn, tbl_name, tbl_name,
+                         ADS_DEFAULT, 0, 0, 0, ADS_DEFAULT, &hTable) == 0);
+
+    UNSIGNED8 f_id[8] = "id";
+    UNSIGNED8 f_saldo[16] = "saldo";
+    UNSIGNED8 f_activo[16] = "activo";
+
+    // INSERT path: append a row through the numeric/logical setters.
+    REQUIRE(AdsAppendRecord(hTable) == 0);
+    REQUIRE(AdsSetLong(hTable, f_id, 100) == 0);
+    set_str(hTable, "nome", "Eve");
+    REQUIRE(AdsSetDouble(hTable, f_saldo, 7.25) == 0);
+    REQUIRE(AdsSetLogical(hTable, f_activo, 1) == 0);
+    REQUIRE(AdsWriteRecord(hTable) == 0);
+    CHECK(row_count(hTable) == 4);
+
+    REQUIRE(AdsGotoBottom(hTable) == 0);
+    SIGNED32 lval = 0;
+    double dval = 0.0;
+    UNSIGNED16 bval = 0;
+    REQUIRE(AdsGetLong(hTable, f_id, &lval) == 0);
+    CHECK(lval == 100);
+    REQUIRE(AdsGetDouble(hTable, f_saldo, &dval) == 0);
+    CHECK(dval == doctest::Approx(7.25));
+    REQUIRE(AdsGetLogical(hTable, f_activo, &bval) == 0);
+    CHECK(bval == 1);
+
+    // UPDATE path on the positioned row.
+    REQUIRE(AdsSetDouble(hTable, f_saldo, 8.5) == 0);
+    REQUIRE(AdsSetLogical(hTable, f_activo, 0) == 0);
+    REQUIRE(AdsWriteRecord(hTable) == 0);
+    REQUIRE(AdsGotoBottom(hTable) == 0);
+    REQUIRE(AdsGetDouble(hTable, f_saldo, &dval) == 0);
+    CHECK(dval == doctest::Approx(8.5));
+    REQUIRE(AdsGetLogical(hTable, f_activo, &bval) == 0);
+    CHECK(bval == 0);
 
     REQUIRE(AdsDeleteRecord(hTable) == 0);
     CHECK(row_count(hTable) == 3);
