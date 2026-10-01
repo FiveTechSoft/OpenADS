@@ -24,9 +24,9 @@ Repeat Tim's report with CDX-format ECLMST.adi (adt_cdx_index=1): select eclcom 
 
 ## Automated build status
 
-The guarded patch run passed Linux Clang build/test with and without TLS before committing the working-branch change. CI #51 passed all 10 non-macOS jobs: Windows x64/x86, Linux Clang with and without TLS, Harbour smoke (Windows), PHP binding, and four SQL jobs.
+The guarded patch run passed Linux Clang build/test with and without TLS before committing the working-branch change. [fork CI run 51](https://github.com/bedipritpal/OpenADS/actions/runs/36812469507) passed all 10 non-macOS jobs: Windows x64/x86, Linux Clang with and without TLS, Harbour smoke (Windows), PHP binding, and four SQL jobs.
 
-macOS unit validation is incomplete. Its Configure and Build steps passed, but the Test step reached the runner's 30-minute job cap and was canceled after printing only "Start 1: openads_unit_tests". No source assertion failure was shown. Investigation is continuing. This limitation does not count as a macOS unit-test pass. Release packaging still requires every canonical archive and successful platform builds before publication.
+macOS unit validation is incomplete. Its Configure and Build steps passed, but the Test step reached the runner's 30-minute job cap and was canceled after printing only "Start 1: openads_unit_tests". No source assertion failure was shown. Investigation is continuing. This limitation does not count as a macOS unit-test pass. Packaging run 33 built every canonical archive successfully. Its macOS diagnostic Test step also timed out at the existing 20-minute step cap. The repeated timeout still does not count as a macOS unit-test pass. Final archives are opened and checked for required files, matching ACE aliases and the mtfix22 version stamp before publication.
 
 Apply-patch: https://github.com/bedipritpal/OpenADS/actions/runs/36812071504
 CI: https://github.com/bedipritpal/OpenADS/actions/runs/36812469507
