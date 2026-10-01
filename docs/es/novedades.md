@@ -14,6 +14,20 @@ v1.0.0-rc29. Para el historial completo de commits, consulta el
 
 ---
 
+## Destacados: APPEND en ADT LOCAL EXCLUSIVE (main, 2026-09-30)
+
+- **APPEND ya no se ralentiza al crecer una tabla ADT exclusiva**
+  (reportado por Tim) - `Table::append_record()` tomaba un lock de
+  registro por cada fila nueva incluso con `ADS_EXCLUSIVE`; los locks
+  se acumulaban hasta desbloquear o cerrar la tabla y encarecían los
+  siguientes APPEND y el lock de cabecera. Ahora el APPEND en ADT
+  exclusivo omite ese lock redundante. En modo compartido se conserva
+  el auto-lock y sus garantías de escritura. El formato ADT no cambia:
+  las tablas existentes se siguen abriendo. Un test nuevo comprueba
+  10.000 registros, su contenido y que no se acumulen locks.
+
+---
+
 ## Destacados: locks de registro idempotentes e introspección real (main, 2026-09-29)
 
 - **Los locks de registro son idempotentes por handle y la

@@ -12,6 +12,24 @@ Complete history of releases with categorized improvements.
 
 ---
 
+## Unreleased (main, 2026-09-30)
+
+### Bug Fixes
+
+- **LOCAL ADT bulk append no longer slows as an exclusive table grows**
+  (reported by Tim) - `Table::append_record()` auto-locked every new
+  record even when the table was opened `ADS_EXCLUSIVE`. The unused
+  byte-range locks accumulated until unlock/close and made later
+  appends and the ADT header lock progressively slower. Exclusive ADT
+  appends now skip that redundant record lock. Shared opens still
+  auto-lock each new record, preserving their write-guard and lock
+  visibility semantics. The ADT file format is unchanged, so existing
+  tables reopen normally. A new LOCAL ADT regression appends 10,000
+  records and checks the count, contents and absence of accumulated
+  locks on an exclusive handle.
+
+---
+
 ## Unreleased (main, 2026-09-29)
 
 ### Bug Fixes
