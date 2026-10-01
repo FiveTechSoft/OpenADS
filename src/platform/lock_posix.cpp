@@ -103,17 +103,18 @@ void ByteLock::release_() noexcept {
 
 util::Result<ByteLock> ByteLock::acquire(File& f, std::uint64_t offset,
                                          std::uint64_t length, LockKind kind) {
-#ifdef F_OFD_SETLK
+#if defined(F_OFD_SETLK) && !defined(__APPLE__)
     return do_lock(f, offset, length, kind, kSetLkW);
 #else
-    // No OFD locks here (macOS): a blocking F_SETLKW can wait forever on a
-    // stale holder and hang the caller (CI test runs sat on it until the
-    // job timeout). Poll with F_SETLK and give up after a bounded wait, so
-    // a stall becomes a lock error naming the holder instead of a hang.
+    // macOS: its SDK defines the OFD commands, but a blocking F_OFD_SETLKW
+    // waits forever when a leaked holder lives in this same process (CI
+    // test runs sat on it until the job timeout). Poll the non-blocking
+    // command and give up after a bounded wait, so a stall becomes a lock
+    // error instead of a hang.
     const auto deadline =
         std::chrono::steady_clock::now() + std::chrono::seconds(30);
     for (;;) {
-        auto r = do_lock(f, offset, length, kind, F_SETLK);
+        auto r = do_lock(f, offset, length, kind, kSetLk);
         if (r) return r;
         if (r.error().sub_code != EAGAIN && r.error().sub_code != EACCES) {
             return r;
@@ -127,7 +128,13 @@ util::Result<ByteLock> ByteLock::acquire(File& f, std::uint64_t offset,
             int fd = static_cast<int>(
                 reinterpret_cast<intptr_t>(f.native_handle()) - 1);
             long holder = -1;
-            if (::fcntl(fd, F_GETLK, &q) == 0 && q.l_type != F_UNLCK) {
+#ifdef F_OFD_GETLK
+            q.l_pid = 0;
+            const int kGetLk = F_OFD_GETLK;
+#else
+            const int kGetLk = F_GETLK;
+#endif
+            if (::fcntl(fd, kGetLk, &q) == 0 && q.l_type != F_UNLCK) {
                 holder = static_cast<long>(q.l_pid);
             }
             std::fprintf(stderr,
