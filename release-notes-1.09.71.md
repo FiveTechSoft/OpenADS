@@ -28,6 +28,7 @@ Reported by Tim (via Antonio) while converting an application's data to `.adt`.
 * `openads-1.09.71-windows-x64.zip`
 * `openads-1.09.71-windows-x86.zip`
 * `openads-1.09.71-linux-x64.tar.gz`
-* macOS: NOT included in this release / sin binario macOS esta vez
-  (macOS CI stalls in the unit tests; under investigation).
+* `openads-1.09.71-macos-universal.tar.gz` - built, but its unit tests
+  stall in CI and did not complete, so this package is UNTESTED /
+  paquete macOS sin pruebas completas (under investigation).
   `release.yml` treats the macOS leg as optional until that is fixed.
