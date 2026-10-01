@@ -18,6 +18,8 @@ permissions:
 
 jobs:
   build:
+    # Published mtfix assets are the reviewed bytes, never rebuild on tag push.
+    if: ${{ github.event_name == 'workflow_dispatch' || !contains(github.ref, '-mtfix') }}
     name: ${{ matrix.os }} / ${{ matrix.arch }}
     runs-on: ${{ matrix.os }}
     # 90: a cold Harbour SDK build (Linux leg) plus the full tree can
@@ -495,7 +497,7 @@ jobs:
     needs: build
     # A cancelled/failed best-effort leg (macOS) must not skip publish;
     # only a genuine workflow-run cancellation should.
-    if: ${{ always() && needs.build.result != 'skipped' }}
+    if: ${{ always() && needs.build.result != 'skipped' && (github.event_name == 'workflow_dispatch' || !contains(github.ref, '-mtfix')) }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
@@ -642,6 +644,24 @@ jobs:
             echo "::error::Do not ship *-win-x64.zip / *-win-x86.zip."
             echo "Canonical names are *-windows-x64.zip / *-windows-x86.zip."
             printf '%s\n' "${bad[@]}"
+            exit 1
+          fi
+
+      - name: Refuse to replace an existing public test build
+        if: ${{ contains(steps.tag.outputs.tag, '-mtfix') }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TEST_TAG: ${{ steps.tag.outputs.tag }}
+        shell: bash
+        run: |
+          if gh release view "$TEST_TAG" --json isDraft > existing-release.json 2>release-error.txt; then
+            if ! jq -e '.isDraft == true' existing-release.json >/dev/null; then
+              echo "::error::Public test-build assets are immutable; use a new mtfix tag."
+              exit 1
+            fi
+          elif ! grep -qi 'release not found' release-error.txt; then
+            cat release-error.txt
+            echo "::error::Could not verify existing release state; refusing upload."
             exit 1
           fi
 
