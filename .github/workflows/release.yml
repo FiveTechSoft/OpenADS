@@ -593,6 +593,10 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
+          # Test builds stay private until packages and notes are verified.
+          draft: ${{ contains(steps.tag.outputs.tag, '-mtfix') }}
+          prerelease: ${{ contains(steps.tag.outputs.tag, '-mtfix') }}
+          make_latest: ${{ contains(steps.tag.outputs.tag, '-mtfix') && 'false' || 'legacy' }}
           body_path: ${{ steps.notes.outputs.path }}
           files: out/*
 
