@@ -40,6 +40,36 @@ void* native_from_fd(int fd) {
     return reinterpret_cast<void*>(static_cast<intptr_t>(fd) + 1);
 }
 
+#ifdef __APPLE__
+// macOS: flock() and fcntl() byte locks share one lock list, and a held
+// flock (even on the very same fd) makes every fcntl byte lock on the
+// file fail with EAGAIN (verified with a probe on macos-14: flock SH then
+// F_WRLCK -> EAGAIN; flock released -> ok). The engine takes its share
+// guard with flock on every open and its append/record locks with fcntl,
+// so on macOS appends were refused on tables that were open. Emulate the
+// per-open-file-description share guard with an OFD fcntl lock on one
+// sentinel byte far from the engine's lock bytes instead: same semantics
+// (contends between fds of one process, released on close), but it does
+// not collide with the byte locks.
+constexpr off_t kShareGuardByte = static_cast<off_t>(0x7FFFFFFFFF00ULL);
+
+int share_guard(int fd, short type) {
+    struct flock fl{};
+    fl.l_type   = type;
+    fl.l_whence = SEEK_SET;
+    fl.l_start  = kShareGuardByte;
+    fl.l_len    = 1;
+    fl.l_pid    = 0;
+    return ::fcntl(fd, F_OFD_SETLK, &fl);
+}
+#else
+int share_guard(int fd, short type) {
+    return ::flock(fd, type == F_WRLCK ? (LOCK_EX | LOCK_NB)
+                     : type == F_RDLCK ? (LOCK_SH | LOCK_NB)
+                                       : LOCK_UN);
+}
+#endif
+
 } // namespace
 
 File::File(File&& other) noexcept : native_(other.native_) {
@@ -85,7 +115,7 @@ util::Result<File> File::open(const std::string& path, OpenMode mode) {
         // on close). POSIX has no share modes; cooperating OpenADS
         // creators serialise on this so a create over a file another
         // process holds open fails instead of truncating underneath it.
-        if (::flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        if (share_guard(fd, F_WRLCK) != 0) {
             util::Error e = os_error("flock");
             ::close(fd);
             return e;
@@ -146,14 +176,14 @@ util::Result<void> File::try_lock_shared() {
     // flock locks are per open-file-description, so two fds from separate
     // open() calls in the SAME process still contend — exactly the Win32
     // share=0 semantics the create path relies on. LOCK_NB: callers retry.
-    if (::flock(fd, LOCK_SH | LOCK_NB) != 0) return os_error("flock");
+    if (share_guard(fd, F_RDLCK) != 0) return os_error("flock");
     return {};
 }
 
 void File::release_lock_shared() {
     if (native_ == nullptr) return;
     int fd = fd_from_native(native_);
-    ::flock(fd, LOCK_UN);
+    share_guard(fd, F_UNLCK);
 }
 
 } // namespace openads::platform
