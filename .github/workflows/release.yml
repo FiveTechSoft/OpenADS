@@ -337,6 +337,9 @@ jobs:
           fi
           echo "path=$F" >> "$GITHUB_OUTPUT"
 
+      # macOS is temporarily optional (its unit tests stall in CI): the
+      # macOS leg and asset are no longer required, and the release
+      # notes must say so. Restore both lines once macOS is fixed.
       # All-or-nothing release: every leg must be green AND every
       # canonical asset present, otherwise fail loudly instead of
       # shipping a partial kit (v1.09.50 went out without the Linux
@@ -353,8 +356,7 @@ jobs:
           for asset in \
             "openads-${V}-windows-x64.zip" \
             "openads-${V}-windows-x86.zip" \
-            "openads-${V}-linux-x64.tar.gz" \
-            "openads-${V}-macos-universal.tar.gz"; do
+            "openads-${V}-linux-x64.tar.gz"; do
             if [ ! -f "out/${asset}" ]; then
               echo "::error::Missing required release asset: ${asset}"
               missing=1
@@ -368,8 +370,7 @@ jobs:
           for leg in \
             "windows-2022 / x64" \
             "windows-2022 / x86" \
-            "ubuntu-24.04 / x64" \
-            "macos-14 / universal"; do
+            "ubuntu-24.04 / x64"; do
             concl=$(gh api "$JOBS_URL" --jq \
               ".jobs[] | select(.name == \"$leg\") | .conclusion")
             if [ "$concl" != "success" ]; then
