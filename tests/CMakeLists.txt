@@ -267,6 +267,7 @@ add_executable(openads_unit_tests
     unit/network_frame_reader_test.cpp
     unit/abi_adt_smoke_test.cpp
     unit/abi_adt_create_test.cpp
+    unit/abi_adt_append_exclusive_test.cpp
     unit/abi_adt_wide_numeric_test.cpp
     unit/abi_adi_create_test.cpp
     unit/abi_adi_separate_bag_test.cpp

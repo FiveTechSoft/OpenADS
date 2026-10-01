@@ -1222,12 +1222,15 @@ util::Result<void> Table::append_record() {
     // erase until that commit lands (see append_pending_recno_ in table.h).
     append_pending_recno_ = recno_;
     append_keys_done_.clear();
-    // Auto-lock the new recno so field puts pass GoHot. Do NOT use the
-    // blocking kernel acquire: a peer FLock/Browse covers the VFP rec-lock
+    // LOCAL ADT exclusive opens already grant unrestricted writes; taking
+    // an OS byte-range lock for every append and retaining all of them until
+    // UnlockTable makes the kernel lock tree grow without bound (~1k/s at
+    // 10k records with no indexes). Keep other table types unchanged.
+    // Do NOT use the blocking kernel acquire: a peer FLock/Browse covers the VFP rec-lock
     // range and LockFileEx waits forever (B_BIG N=700 convoy). Retry with
     // the ACE lock budget, then roll the blank row back so a timeout
     // cannot leave a durable empty record.
-    {
+    if (mode_ != OpenMode::Exclusive || type_ != TableType::Adt) {
         const auto p = openads::abi::lock_retry_policy();
         const auto t0 = std::chrono::steady_clock::now();
         const auto deadline = t0 + std::chrono::milliseconds(
