@@ -548,6 +548,48 @@ jobs:
       # tarball because publish ran on 3 of 4 legs). macOS keeps its
       # stall-tolerant test step, but a real macOS build break still
       # blocks here via the job conclusion.
+      - name: Open every archive and verify contents and version
+        env:
+          RELEASE_VERSION: ${{ steps.ver.outputs.version }}
+        shell: bash
+        run: |
+          python3 - <<'PYVERIFY'
+          import os, pathlib, tarfile, zipfile, hashlib
+          version = os.environ['RELEASE_VERSION']
+          assets = list(pathlib.Path('out').glob('*'))
+          assert assets, 'No archives'
+          for path in assets:
+              if path.suffix == '.zip':
+                  with zipfile.ZipFile(path) as z:
+                      assert z.testzip() is None, 'ZIP CRC failure'
+                      files = {n: z.read(n) for n in z.namelist() if not n.endswith('/')}
+              else:
+                  with tarfile.open(path) as t:
+                      files = {m.name: t.extractfile(m).read() for m in t.getmembers() if m.isfile()}
+              byname = {pathlib.PurePosixPath(n).name: data for n, data in files.items()}
+              required = ['LICENSE','NOTICE','README.md','openads.ini.sample']
+              windows = '-windows-' in path.name
+              if windows:
+                  bits = '64' if '-x64.' in path.name else '32'
+                  required += [f'ace{bits}.dll',f'openace{bits}.dll',f'ace{bits}.lib',f'openace{bits}.lib',f'libopenace{bits}.a','openads_serverd.exe','openads_bench.exe','oads_hb.c']
+                  assert byname[f'ace{bits}.dll'] == byname[f'openace{bits}.dll'], 'ACE aliases differ'
+                  binary = byname['openads_serverd.exe']
+              else:
+                  ext = 'dylib' if '-macos-' in path.name else 'so'
+                  required += [f'libace64.{ext}',f'libopenace64.{ext}','openads_serverd','openads_bench']
+                  assert byname[f'libace64.{ext}'] == byname[f'libopenace64.{ext}'], 'ACE aliases differ'
+                  binary = byname['openads_serverd']
+              for name in required:
+                  assert name in byname and byname[name], f'{path}: missing/empty {name}'
+              for header in ['ace','error','openads_sql','platform','version']:
+                  assert any(n.endswith(f'include/openads/{header}.h') for n in files), f'Missing header {header}'
+              assert version.encode() in binary, f'{path}: server version stamp absent'
+              assert version.encode() in byname[('openace'+bits+'.dll') if windows else ('libopenace64.'+ext)], f'{path}: ACE version stamp absent'
+              if '-macos-' in path.name:
+                  assert binary[:4] in [bytes.fromhex('cafebabe'),bytes.fromhex('cafebabf')], 'Not a universal server'
+              print(f'VERIFIED {path.name}: {len(files)} files; version {version}; sha256 {hashlib.sha256(path.read_bytes()).hexdigest()}', flush=True)
+          PYVERIFY
+
       - name: Require all legs green and all assets present
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
