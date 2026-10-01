@@ -9,6 +9,12 @@
 #include <fcntl.h>
 #include <thread>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <algorithm>
+#include <mutex>
+#include <sys/stat.h>
+#include <vector>
+#endif
 
 // OFD (open-file-description) locks are used only where they are proven
 // to work. The macOS SDK defines F_OFD_SETLK, but there they made the
@@ -60,6 +66,52 @@ std::uint64_t fold_lock_offset(std::uint64_t offset) {
     return offset;
 }
 
+
+#ifdef __APPLE__
+// macOS has no OFD locks and plain fcntl locks are process-scoped, so two
+// handles of the same process never conflict and one handle's unlock or
+// close drops the other's range. This registry restores the per-handle
+// semantics inside the process: every held byte range is recorded per
+// file identity (dev, ino) with its owner handle, conflicts between
+// different owners are refused here, and fcntl is still taken so other
+// PROCESSES see the lock. Unlock re-applies the ranges that other owners
+// still hold, because an fcntl unlock is process-wide.
+struct HeldRange {
+    std::uint64_t dev, ino;
+    void*         owner;
+    std::uint64_t start, len;
+    bool          exclusive;
+};
+std::mutex            g_reg_mu;
+std::vector<HeldRange> g_reg;
+
+bool file_id(int fd, std::uint64_t& dev, std::uint64_t& ino) {
+    struct stat st{};
+    if (::fstat(fd, &st) != 0) return false;
+    dev = static_cast<std::uint64_t>(st.st_dev);
+    ino = static_cast<std::uint64_t>(st.st_ino);
+    return true;
+}
+
+// len == 0 means "to end of file" for fcntl: treat as unbounded.
+bool overlaps(std::uint64_t as, std::uint64_t al,
+              std::uint64_t bs, std::uint64_t bl) {
+    const std::uint64_t ae = al == 0 ? ~0ULL : as + al;
+    const std::uint64_t be = bl == 0 ? ~0ULL : bs + bl;
+    return as < be && bs < ae;
+}
+
+bool reg_conflict(std::uint64_t dev, std::uint64_t ino, void* owner,
+                  std::uint64_t start, std::uint64_t len, bool excl) {
+    for (const auto& h : g_reg) {
+        if (h.dev != dev || h.ino != ino || h.owner == owner) continue;
+        if (!overlaps(h.start, h.len, start, len)) continue;
+        if (excl || h.exclusive) return true;
+    }
+    return false;
+}
+#endif
+
 util::Result<ByteLock> do_lock(File& f, std::uint64_t offset,
                                std::uint64_t length, LockKind kind,
                                int cmd) {
@@ -71,11 +123,32 @@ util::Result<ByteLock> do_lock(File& f, std::uint64_t offset,
     fl.l_pid    = 0;            // OFD requires l_pid=0
     // native_handle() stores (fd + 1) to avoid the nullptr/fd-0 collision.
     int fd = static_cast<int>(reinterpret_cast<intptr_t>(f.native_handle()) - 1);
+#ifdef __APPLE__
+    std::uint64_t dev = 0, ino = 0;
+    const bool have_id = file_id(fd, dev, ino);
+    const std::uint64_t fstart = fold_lock_offset(offset);
+    std::lock_guard<std::mutex> g(g_reg_mu);
+    if (have_id && reg_conflict(dev, ino, f.native_handle(), fstart, length,
+                                kind == LockKind::Exclusive)) {
+        errno = EAGAIN;
+        return os_error("in-process byte lock conflict");
+    }
+    if (::fcntl(fd, cmd, &fl) == -1) {
+        auto e = os_error("fcntl(F_SETLK)");
+        return e;
+    }
+    if (have_id) {
+        g_reg.push_back({dev, ino, f.native_handle(), fstart, length,
+                         kind == LockKind::Exclusive});
+    }
+    return ByteLock{f.native_handle(), offset, length};
+#else
     if (::fcntl(fd, cmd, &fl) == -1) {
         auto e = os_error("fcntl(F_SETLK)");
         return e;
     }
     return ByteLock{f.native_handle(), offset, length};
+#endif
 }
 
 } // namespace
@@ -108,7 +181,39 @@ void ByteLock::release_() noexcept {
     fl.l_pid    = 0;
     // native_handle() stores (fd + 1) to avoid the nullptr/fd-0 collision.
     int fd = static_cast<int>(reinterpret_cast<intptr_t>(native_) - 1);
+#ifdef __APPLE__
+    {
+        std::uint64_t dev = 0, ino = 0;
+        const bool have_id = file_id(fd, dev, ino);
+        std::lock_guard<std::mutex> g(g_reg_mu);
+        const std::uint64_t fstart = fold_lock_offset(offset_);
+        if (have_id) {
+            auto it = std::find_if(g_reg.begin(), g_reg.end(),
+                [&](const HeldRange& h) {
+                    return h.dev == dev && h.ino == ino && h.owner == native_ &&
+                           h.start == fstart && h.len == length_;
+                });
+            if (it != g_reg.end()) g_reg.erase(it);
+        }
+        ::fcntl(fd, kSetLk, &fl);
+        if (have_id) {
+            // The unlock above is process-wide: put back what other
+            // owners (and this owner's remaining ranges) still hold.
+            for (const auto& h : g_reg) {
+                if (h.dev != dev || h.ino != ino) continue;
+                if (!overlaps(h.start, h.len, fstart, length_)) continue;
+                struct flock rl{};
+                rl.l_type   = h.exclusive ? F_WRLCK : F_RDLCK;
+                rl.l_whence = SEEK_SET;
+                rl.l_start  = static_cast<off_t>(h.start);
+                rl.l_len    = static_cast<off_t>(h.len);
+                ::fcntl(fd, F_SETLK, &rl);
+            }
+        }
+    }
+#else
     ::fcntl(fd, kSetLk, &fl);
+#endif
     native_ = nullptr;
 }
 
@@ -184,6 +289,18 @@ util::Result<bool> ByteLock::probe(File& f, std::uint64_t offset,
     // Pre-3.15 fallback: process-scoped GETLK reports other PROCESSES only;
     // same-process conflicts stay invisible (degraded, never wrong-safe).
     if (::fcntl(fd, F_GETLK, &fl) == -1) return os_error("fcntl(F_GETLK)");
+#endif
+#ifdef __APPLE__
+    {
+        std::uint64_t dev = 0, ino = 0;
+        if (file_id(fd, dev, ino)) {
+            std::lock_guard<std::mutex> g(g_reg_mu);
+            if (reg_conflict(dev, ino, f.native_handle(),
+                             fold_lock_offset(offset), length, true)) {
+                return true;
+            }
+        }
+    }
 #endif
     return fl.l_type != F_UNLCK;
 }
