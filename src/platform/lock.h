@@ -52,4 +52,12 @@ private:
     std::uint64_t length_ = 0;
 };
 
+#ifdef __APPLE__
+// macOS only: drop the in-process lock-registry entries of a handle that
+// is being closed (the kernel drops its fcntl locks on close; a ByteLock
+// released after the close would otherwise leave a phantom entry that
+// blocks every other handle of the file).
+void forget_byte_locks(void* native) noexcept;
+#endif
+
 } // namespace openads::platform
