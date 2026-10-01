@@ -313,6 +313,7 @@ jobs:
   # flattens it into the release but does not require the leg to be green.
   # (Requested by Pritpal Bedi for his LAN test server.)
   build-glibc231:
+    if: ${{ github.event_name == 'workflow_dispatch' || !contains(github.ref, '-mtfix') }}
     name: ubuntu 20.04 container / x64 (glibc 2.31)
     runs-on: ubuntu-24.04
     container: ubuntu:20.04
