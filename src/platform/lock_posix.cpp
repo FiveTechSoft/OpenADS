@@ -5,7 +5,9 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstdio>
+#include <chrono>
 #include <fcntl.h>
+#include <thread>
 #include <unistd.h>
 
 namespace openads::platform {
@@ -101,7 +103,44 @@ void ByteLock::release_() noexcept {
 
 util::Result<ByteLock> ByteLock::acquire(File& f, std::uint64_t offset,
                                          std::uint64_t length, LockKind kind) {
+#ifdef F_OFD_SETLK
     return do_lock(f, offset, length, kind, kSetLkW);
+#else
+    // No OFD locks here (macOS): a blocking F_SETLKW can wait forever on a
+    // stale holder and hang the caller (CI test runs sat on it until the
+    // job timeout). Poll with F_SETLK and give up after a bounded wait, so
+    // a stall becomes a lock error naming the holder instead of a hang.
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    for (;;) {
+        auto r = do_lock(f, offset, length, kind, F_SETLK);
+        if (r) return r;
+        if (r.error().sub_code != EAGAIN && r.error().sub_code != EACCES) {
+            return r;
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            struct flock q{};
+            q.l_type   = (kind == LockKind::Exclusive) ? F_WRLCK : F_RDLCK;
+            q.l_whence = SEEK_SET;
+            q.l_start  = static_cast<off_t>(fold_lock_offset(offset));
+            q.l_len    = static_cast<off_t>(length);
+            int fd = static_cast<int>(
+                reinterpret_cast<intptr_t>(f.native_handle()) - 1);
+            long holder = -1;
+            if (::fcntl(fd, F_GETLK, &q) == 0 && q.l_type != F_UNLCK) {
+                holder = static_cast<long>(q.l_pid);
+            }
+            std::fprintf(stderr,
+                "openads: byte lock wait timed out (offset=%llu len=%llu "
+                "holder_pid=%ld self_pid=%ld)\n",
+                static_cast<unsigned long long>(offset),
+                static_cast<unsigned long long>(length), holder,
+                static_cast<long>(::getpid()));
+            return r;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+#endif
 }
 
 util::Result<ByteLock> ByteLock::try_acquire(File& f, std::uint64_t offset,
