@@ -1,222 +1,215 @@
-name: apply-patch
-
-# Manually triggered: lands one reviewed patch on one branch, but only
-# after it applies cleanly, stays inside the allowed paths, builds, and
-# passes the full test suite. If any step fails, nothing is pushed.
-#
-# Inputs are never pasted into shell scripts directly. Every script
-# reads them from environment variables, so a crafted branch name or
-# message can't run commands.
+name: Apply reviewed patch
 
 on:
   workflow_dispatch:
     inputs:
-      branch:
-        description: "Branch to commit to (not the default branch)"
-        required: true
+      patch_base64:
+        description: "Base64 of a git diff patch, optionally gzip-compressed"
+        required: false
         type: string
-      expected_head:
-        description: "Full 40-character SHA the branch must be at right now"
-        required: true
+      restore_from:
+        description: "Restore mode: commit SHA (7-40 hexadecimal characters)"
+        required: false
         type: string
-      patch_b64:
-        description: "Patch (git diff or git format-patch output), base64-encoded"
-        required: true
+      restore_path:
+        description: "Restore mode: one ordinary file in src/engine/**, tests/** or docs/**"
+        required: false
         type: string
       commit_message:
-        description: "Commit message (one line)"
+        description: "Commit message"
         required: true
         type: string
-      trigger_ci:
-        description: "After pushing, start ci.yml on the branch (needs workflow_dispatch in ci.yml)"
-        required: false
-        type: boolean
-        default: true
 
-# Default for every job: read-only. Only the commit job gets write.
 permissions:
-  contents: read
+  contents: write
 
-# One run per branch at a time; a second run waits instead of racing.
 concurrency:
-  group: apply-patch-${{ inputs.branch }}
+  group: openads-apply-patch-main
   cancel-in-progress: false
 
-env:
-  # Safety limits. Edit here if you need to change them.
-  MAX_FILES: "20"
-  MAX_PATCH_B64_CHARS: "60000"
-  # Paths the patch may touch (extended regex, matched against the full
-  # path). .github/ is deliberately NOT allowed: a patch must never be
-  # able to change workflows, and GitHub also refuses workflow-file
-  # pushes made with the built-in token.
-  ALLOWED_PATHS_REGEX: '^(src/|include/|tests/|cmake/|docs/|bindings/|tools/|examples/|CMakeLists\.txt$|CMakePresets\.json$|CHANGELOG\.md$|README\.md$)'
-
 jobs:
-  validate:
-    name: Validate patch
+  prepare:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      base_sha: ${{ steps.base.outputs.sha }}
     steps:
-      - name: Check inputs
+      - name: Require dispatch from main
         env:
-          BRANCH: ${{ inputs.branch }}
-          EXPECTED_HEAD: ${{ inputs.expected_head }}
-          PATCH_B64: ${{ inputs.patch_b64 }}
-          COMMIT_MESSAGE: ${{ inputs.commit_message }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if ! [[ "$BRANCH" =~ ^[A-Za-z0-9._/-]{1,100}$ ]] || [[ "$BRANCH" == *..* ]] || [[ "$BRANCH" == -* ]]; then
-            echo "::error::Branch name has characters that are not allowed."; exit 1
-          fi
-          if [[ "$BRANCH" == "$DEFAULT_BRANCH" ]]; then
-            echo "::error::Refusing to commit to the default branch ($DEFAULT_BRANCH)."; exit 1
-          fi
-          if ! [[ "$EXPECTED_HEAD" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::expected_head must be a full 40-character lowercase SHA."; exit 1
-          fi
-          if (( ${#PATCH_B64} > MAX_PATCH_B64_CHARS )); then
-            echo "::error::Patch is larger than $MAX_PATCH_B64_CHARS base64 characters."; exit 1
-          fi
-          if [[ -z "${COMMIT_MESSAGE// }" ]] || (( ${#COMMIT_MESSAGE} > 200 )); then
-            echo "::error::Commit message must be 1-200 characters."; exit 1
-          fi
-
-      - name: Check out branch
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+          DISPATCH_REF: ${{ github.ref }}
+        run: test "$DISPATCH_REF" = refs/heads/main
+      - uses: actions/checkout@v5
         with:
-          ref: ${{ inputs.branch }}
+          ref: main
+          fetch-tags: true
           fetch-depth: 0
           persist-credentials: false
-
-      - name: Check branch head matches expected_head
+      - name: Record exact base
+        id: base
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Prepare restore or patch and enforce allowlist
         env:
-          EXPECTED_HEAD: ${{ inputs.expected_head }}
+          PATCH_BASE64: ${{ inputs.patch_base64 }}
+          RESTORE_FROM: ${{ inputs.restore_from }}
+          RESTORE_PATH: ${{ inputs.restore_path }}
+          COMMIT_MESSAGE: ${{ inputs.commit_message }}
         shell: bash
         run: |
           set -euo pipefail
-          actual="$(git rev-parse HEAD)"
-          if [[ "$actual" != "$EXPECTED_HEAD" ]]; then
-            echo "::error::Branch is at $actual, expected $EXPECTED_HEAD. Someone pushed in between; nothing was changed."; exit 1
-          fi
-
-      - name: Decode patch
-        env:
-          PATCH_B64: ${{ inputs.patch_b64 }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          # Strip spaces and line breaks the web form may add. Any other
-          # damage makes decoding fail here, before anything is applied.
-          printf '%s' "$PATCH_B64" | tr -d ' \t\r\n' | base64 --decode > "$RUNNER_TEMP/change.patch"
-          if [[ ! -s "$RUNNER_TEMP/change.patch" ]]; then
-            echo "::error::Decoded patch is empty."; exit 1
-          fi
-          # Trailing blank lines after the last hunk (common when a patch
-          # is copied or saved by an editor) can be read as extra context
-          # lines and make the patch fail. Trim them to one final newline.
-          # Only the very end of the file is touched; hunk contents and
-          # line counts are left as they are.
-          python3 - "$RUNNER_TEMP/change.patch" <<'PY'
-          import re, sys
-          path = sys.argv[1]
-          data = open(path, "rb").read()
-          fixed = re.sub(rb"(?:\r?\n[ \t\r]*)+\Z", b"\n", data)
-          if fixed != data:
-              print("Trimmed trailing blank lines from the patch.")
-          open(path, "wb").write(fixed)
-          PY
-          sha256sum "$RUNNER_TEMP/change.patch"
-
-      - name: Apply patch and check paths
-        shell: bash
-        run: |
-          set -euo pipefail
-          git apply --check --index "$RUNNER_TEMP/change.patch"
-          git apply --index "$RUNNER_TEMP/change.patch"
-
-          # What actually changed, from git itself (covers adds, deletes
-          # and both sides of renames).
-          git diff --cached --name-status --no-renames > "$RUNNER_TEMP/changed.txt"
-          cat "$RUNNER_TEMP/changed.txt"
-          count="$(wc -l < "$RUNNER_TEMP/changed.txt")"
-          if (( count == 0 )); then
-            echo "::error::Patch changes nothing."; exit 1
-          fi
-          if (( count > MAX_FILES )); then
-            echo "::error::Patch touches $count files; the limit is $MAX_FILES."; exit 1
-          fi
-
-          bad=0
-          while IFS=$'\t' read -r status path; do
-            if ! [[ "$path" =~ $ALLOWED_PATHS_REGEX ]]; then
-              echo "::error::Path not allowed: $path"; bad=1
-            fi
-          done < "$RUNNER_TEMP/changed.txt"
-
-          # No symlinks, submodules or executable-bit changes.
-          # Raw lines look like ":<old mode> <new mode> ...". Reject any
-          # symlink (120000) or submodule (160000), and any mode change
-          # on an existing file.
-          if git diff --cached --raw --no-renames | awk '{o=substr($1,2); n=$2; if (o ~ /^(120000|160000)$/ || n ~ /^(120000|160000)$/ || (o != "000000" && n != "000000" && o != n)) bad=1} END {exit !bad}'; then
-            echo "::error::Patch changes file modes (symlink, submodule or executable bit)."; bad=1
-          fi
-          exit $bad
-
-      - name: Save patch for the next jobs
+          python3 - <<'PYTHON'
+          import base64, gzip, os, pathlib, re, subprocess
+          if not os.environ["COMMIT_MESSAGE"].strip():
+              raise SystemExit("Commit message must not be empty")
+          encoded = "".join(os.environ["PATCH_BASE64"].split())
+          restore_from = os.environ["RESTORE_FROM"].strip()
+          restore_path = os.environ["RESTORE_PATH"]
+          artifact = pathlib.Path(os.environ["RUNNER_TEMP"]) / "reviewed-patch"
+          artifact.mkdir()
+          patch_file = artifact / "patch.diff"
+          if restore_from or restore_path:
+              if encoded or not restore_from or not restore_path:
+                  raise SystemExit("Use either patch_base64 OR both restore_from and restore_path")
+              if not re.fullmatch(r"[0-9a-fA-F]{7,40}", restore_from):
+                  raise SystemExit("restore_from must be a commit SHA")
+              parts = restore_path.split("/")
+              allowed = restore_path.startswith(("src/engine/", "tests/", "docs/"))
+              if (not allowed or any(p in ("", ".", "..") for p in parts)
+                      or any(p.lower() == ".git" for p in parts)
+                      or "\\" in restore_path):
+                  raise SystemExit("Disallowed restore_path")
+              commit = subprocess.check_output([
+                  "git", "rev-parse", "--verify", restore_from + "^{commit}"
+              ]).decode().strip()
+              entry = subprocess.check_output([
+                  "git", "--literal-pathspecs", "ls-tree", "-z", commit, "--", restore_path
+              ]).split(b"\0")
+              entry = [e for e in entry if e]
+              if len(entry) != 1:
+                  raise SystemExit("restore_path must name exactly one existing file")
+              metadata, actual_path = entry[0].split(b"\t", 1)
+              mode, kind, _ = metadata.split()
+              if actual_path != os.fsencode(restore_path) or kind != b"blob" or mode not in (b"100644", b"100755"):
+                  raise SystemExit("restore_path must name one ordinary file, not a directory or symlink")
+              subprocess.run([
+                  "git", "--literal-pathspecs", "checkout", commit, "--", restore_path
+              ], check=True)
+              # Normalize the one-file restore into the same exact patch used by all CI jobs.
+              patch = subprocess.check_output([
+                  "git", "diff", "--cached", "--binary", "--full-index", "--no-ext-diff", "--no-renames"
+              ])
+              subprocess.run(["git", "reset", "--hard", "HEAD"], check=True)
+          else:
+              patch = base64.b64decode(encoded, validate=True)
+              if patch.startswith(b"\x1f\x8b"):
+                  patch = gzip.decompress(patch)
+          if not patch:
+              raise SystemExit("Input makes no changes")
+          patch_file.write_bytes(patch)
+          subprocess.run(["git", "apply", "--check", "--index", str(patch_file)], check=True)
+          subprocess.run(["git", "apply", "--index", str(patch_file)], check=True)
+          paths = subprocess.check_output([
+              "git", "diff", "--cached", "--name-only", "--no-renames", "-z"
+          ]).split(b"\0")
+          paths = [p for p in paths if p]
+          if not paths:
+              raise SystemExit("Patch makes no changes")
+          if restore_path and paths != [os.fsencode(restore_path)]:
+              raise SystemExit("Restore must change exactly the requested file")
+          for path in paths:
+              parts = path.split(b"/")
+              allowed = (path.startswith(b"src/engine/") or
+                         path.startswith(b"tests/") or path.startswith(b"docs/"))
+              if (not allowed or any(p in (b"", b".", b"..") for p in parts)
+                      or any(p.lower() == b".git" for p in parts)):
+                  raise SystemExit("Disallowed path: " + repr(path))
+          # Reject symlinks and submodules, including type changes.
+          raw = subprocess.check_output([
+              "git", "diff", "--cached", "--raw", "--no-renames", "-z"
+          ]).split(b"\0")
+          for metadata in raw[::2]:
+              if not metadata:
+                  continue
+              old_mode, new_mode = metadata.split()[:2]
+              if old_mode[1:] not in (b"000000", b"100644", b"100755") or new_mode not in (b"000000", b"100644", b"100755"):
+                  raise SystemExit("Only ordinary files may be patched")
+          (artifact / "base.sha").write_bytes(subprocess.check_output(["git", "rev-parse", "HEAD"]))
+          PYTHON
+      - name: Share validated patch with checks
         uses: actions/upload-artifact@v4
         with:
-          name: change-patch
-          path: ${{ runner.temp }}/change.patch
-          retention-days: 3
+          name: reviewed-patch
+          path: ${{ runner.temp }}/reviewed-patch/
+          retention-days: 1
+          if-no-files-found: error
 
   build-and-test:
-    name: Build and test / ${{ matrix.preset }}${{ matrix.tls && ' / TLS' || '' }}
-    needs: validate
+    needs: prepare
+    permissions:
+      contents: read
+    name: ${{ matrix.os }} / ${{ matrix.preset }}${{ matrix.tls && ' / TLS' || '' }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # macOS is out of the matrix for now: its unit tests stall and a timeout
+    # cancels the whole run. Re-add the macos-14 entry once that is fixed.
+    timeout-minutes: ${{ matrix.os == 'macos-14' && 90 || 30 }}
+    continue-on-error: ${{ matrix.os == 'macos-14' }}
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         include:
+          - os: windows-2022
+            preset: msvc-x64
+            tls: false
+          # 32-bit MSVC: many deployments still ship x86. CI must build it
+          # so x86-only breakage (bitness-dependent narrowing C4244/C2220,
+          # SQLLEN*/SQLPOINTER signatures C2733, /WX C4100) can't slip past.
+          - os: windows-2022
+            preset: msvc-x86
+            tls: false
           - os: ubuntu-24.04
             preset: ninja-clang
             tls: false
+          # M12.12 — verify the OPENADS_WITH_TLS path (vendored
+          # mbedtls 3.6) on at least one runner per release.
           - os: ubuntu-24.04
             preset: ninja-clang
             tls: true
     steps:
-      - name: Check out the exact expected commit
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+      - uses: actions/checkout@v5
         with:
-          ref: ${{ inputs.expected_head }}
-          # Full history + tags, or git describe returns a bare SHA and
-          # network_version_test fails (same fix as ci.yml).
-          fetch-depth: 0
-          fetch-tags: true
+          ref: ${{ needs.prepare.outputs.base_sha }}
           persist-credentials: false
+          # Version string comes from `git describe --tags`: without
+          # tag refs a main-branch checkout reports a bare SHA (no
+          # dots) and network_version_test fails everywhere. Releases
+          # check out the tag itself so they never hit this.
+          # fetch-tags alone stays shallow (default fetch-depth: 1), so
+          # describe still can't see v* tags - fetch the full history.
+          fetch-tags: true
+          fetch-depth: 0
 
-      - name: Get patch
+      - name: Download validated patch
         uses: actions/download-artifact@v4
         with:
-          name: change-patch
-          path: ${{ runner.temp }}/patch
-
-      - name: Apply patch
+          name: reviewed-patch
+          path: ${{ runner.temp }}/reviewed-patch
+      - name: Apply validated patch
         shell: bash
-        run: git apply "$RUNNER_TEMP/patch/change.patch"
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$(cat "$RUNNER_TEMP/reviewed-patch/base.sha")"
+          git apply --check --index "$RUNNER_TEMP/reviewed-patch/patch.diff"
+          git apply --index "$RUNNER_TEMP/reviewed-patch/patch.diff"
 
-      - name: Install Ninja
+      - name: Install Ninja (Linux / macOS)
+        if: runner.os != 'Windows'
         uses: seanmiddleditch/gha-setup-ninja@v6
 
-      # Configure / Build / Test are the same commands as ci.yml.
       - name: Configure
-        shell: bash
         run: |
           cmake --preset ${{ matrix.preset }} \
                 ${{ matrix.tls && '-DOPENADS_WITH_TLS=ON' || '' }}
+        shell: bash
 
       - name: Build
         run: cmake --build build/${{ matrix.preset }} --config Release --target dbf_cdx_bench openads_unit_tests
@@ -224,77 +217,404 @@ jobs:
       - name: Test
         run: ctest --test-dir build/${{ matrix.preset }} --output-on-failure -C Release
 
-  commit:
-    name: Commit and push
-    needs: build-and-test
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      contents: write
-      # Only used to start ci.yml after the push (see last step).
-      actions: write
-    steps:
-      - name: Check out branch
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
-        with:
-          ref: ${{ inputs.branch }}
-          fetch-depth: 0
-
-      - name: Check head again
-        env:
-          EXPECTED_HEAD: ${{ inputs.expected_head }}
-        shell: bash
+      - name: Bench smoke (CDX multi-tag create)
+        # Small run to smoke the optimized INDEX ON / bulk create path (#128)
         run: |
-          set -euo pipefail
-          actual="$(git rev-parse HEAD)"
-          if [[ "$actual" != "$EXPECTED_HEAD" ]]; then
-            echo "::error::Branch moved to $actual while tests ran. Nothing pushed."; exit 1
+          BENCH="build/${{ matrix.preset }}/tests/Release/dbf_cdx_bench${{ runner.os == 'Windows' && '.exe' || '' }}"
+          if [ -f "$BENCH" ]; then
+            "$BENCH" 1000 || true
           fi
+        shell: bash
 
-      - name: Get patch
+  php-binding:
+    needs: prepare
+    permissions:
+      contents: read
+    name: PHP binding
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.base_sha }}
+          persist-credentials: false
+      - name: Download validated patch
         uses: actions/download-artifact@v4
         with:
-          name: change-patch
-          path: ${{ runner.temp }}/patch
-
-      - name: Commit and push
-        env:
-          BRANCH: ${{ inputs.branch }}
-          COMMIT_MESSAGE: ${{ inputs.commit_message }}
-          ACTOR: ${{ github.actor }}
+          name: reviewed-patch
+          path: ${{ runner.temp }}/reviewed-patch
+      - name: Apply validated patch
         shell: bash
         run: |
           set -euo pipefail
-          git apply --index "$RUNNER_TEMP/patch/change.patch"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
-          printf '%s\n\nApplied by apply-patch workflow, run %s, started by %s.\n' \
-            "$COMMIT_MESSAGE" "$GITHUB_RUN_ID" "$ACTOR" > "$RUNNER_TEMP/msg.txt"
-          git commit -F "$RUNNER_TEMP/msg.txt"
-          # Plain push, never force. If the branch moved, GitHub rejects
-          # it and nothing lands.
-          git push origin "HEAD:refs/heads/$BRANCH"
-          echo "Pushed $(git rev-parse HEAD) to $BRANCH"
+          test "$(git rev-parse HEAD)" = "$(cat "$RUNNER_TEMP/reviewed-patch/base.sha")"
+          git apply --check --index "$RUNNER_TEMP/reviewed-patch/patch.diff"
+          git apply --index "$RUNNER_TEMP/reviewed-patch/patch.diff"
 
-      # A push made with the built-in token does not start push-triggered
-      # workflows, and PR runs it causes wait for approval on the PR page.
-      # A workflow_dispatch request is the exception, so start ci.yml that
-      # way. This only works if ci.yml lists workflow_dispatch under on:,
-      # which a person has to add (this workflow can't edit workflow files).
-      # The commit has already landed, so a problem here is a warning only.
-      - name: Start CI on the branch
-        if: ${{ inputs.trigger_ci }}
+
+      - name: Install Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v6
+
+      - name: Build OpenADS ACE library
+        run: |
+          cmake --preset ninja-clang
+          cmake --build build/ninja-clang --config Release --target openads_ace
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: ffi
+          ini-values: ffi.enable=1
+
+      - name: Install PHP dependencies
+        working-directory: bindings/php
+        run: composer install --no-interaction
+
+      - name: Run PHP binding tests
+        working-directory: bindings/php
         env:
-          BRANCH: ${{ inputs.branch }}
-          GH_TOKEN: ${{ github.token }}
+          OPENADS_ACE_LIB: ${{ github.workspace }}/build/ninja-clang/src/libace64.so
+        run: composer test
+
+  sql-uri-smoke:
+    needs: prepare
+    permissions:
+      contents: read
+    name: SQL URI smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.base_sha }}
+          persist-credentials: false
+      - name: Download validated patch
+        uses: actions/download-artifact@v4
+        with:
+          name: reviewed-patch
+          path: ${{ runner.temp }}/reviewed-patch
+      - name: Apply validated patch
         shell: bash
         run: |
-          if ! grep -qE '^[[:space:]]*workflow_dispatch:' .github/workflows/ci.yml; then
-            echo "::warning::ci.yml has no workflow_dispatch trigger, so CI was not started. Approve the pending run on the PR page, or add workflow_dispatch to ci.yml."
-            exit 0
-          fi
-          if gh workflow run ci.yml --ref "$BRANCH"; then
-            echo "Started ci.yml on $BRANCH."
-          else
-            echo "::warning::Could not start ci.yml. The commit was pushed; start CI from the Actions tab."
-          fi
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$(cat "$RUNNER_TEMP/reviewed-patch/base.sha")"
+          git apply --check --index "$RUNNER_TEMP/reviewed-patch/patch.diff"
+          git apply --index "$RUNNER_TEMP/reviewed-patch/patch.diff"
+
+
+      - name: Install Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v6
+
+      - name: Configure
+        run: cmake --preset ninja-clang
+        shell: bash
+
+      - name: Build unit tests
+        run: cmake --build build/ninja-clang --config Release --target openads_unit_tests
+        shell: bash
+
+      - name: Run SQL URI smoke tests
+        run: |
+          ctest --test-dir build/ninja-clang -C Release --output-on-failure \
+            -R "sql_uri_smoke|sqlite_filter_pushdown|sqlite_seek_smoke"
+        shell: bash
+
+  sql-live-pg-maria:
+    needs: prepare
+    permissions:
+      contents: read
+    name: SQL live PG + Maria
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      mariadb:
+        image: mariadb:11
+        env:
+          MARIADB_ALLOW_EMPTY_ROOT_PASSWORD: "yes"
+          MARIADB_DATABASE: test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "healthcheck.sh --connect --innodb_initialized"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.base_sha }}
+          persist-credentials: false
+      - name: Download validated patch
+        uses: actions/download-artifact@v4
+        with:
+          name: reviewed-patch
+          path: ${{ runner.temp }}/reviewed-patch
+      - name: Apply validated patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$(cat "$RUNNER_TEMP/reviewed-patch/base.sha")"
+          git apply --check --index "$RUNNER_TEMP/reviewed-patch/patch.diff"
+          git apply --index "$RUNNER_TEMP/reviewed-patch/patch.diff"
+
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libpq-dev libmariadb-dev
+
+      - name: Install Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v6
+
+      - name: Configure (PostgreSQL + MariaDB)
+        run: |
+          cmake --preset ninja-clang \
+            -DOPENADS_WITH_POSTGRESQL=ON \
+            -DOPENADS_WITH_MARIADB=ON
+        shell: bash
+
+      - name: Build unit tests
+        run: cmake --build build/ninja-clang --config Release --target openads_unit_tests
+        shell: bash
+
+      - name: Run live PG + Maria smoke tests
+        env:
+          OPENADS_TEST_PG_URI: postgresql://postgres@127.0.0.1:5432/postgres
+          OPENADS_TEST_MARIADB_URI: mariadb://root@127.0.0.1:3306/test
+        run: |
+          ctest --test-dir build/ninja-clang -C Release --output-on-failure \
+            -R "pg_live_smoke|maria_live_smoke"
+        shell: bash
+
+  sql-live-mssql:
+    needs: prepare
+    permissions:
+      contents: read
+    name: SQL live MSSQL
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: Y
+          MSSQL_SA_PASSWORD: OpenADS_CI_Passw0rd!
+        ports:
+          - 1433:1433
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P OpenADS_CI_Passw0rd! -Q 'SELECT 1' || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+          --health-start-period 30s
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.base_sha }}
+          persist-credentials: false
+      - name: Download validated patch
+        uses: actions/download-artifact@v4
+        with:
+          name: reviewed-patch
+          path: ${{ runner.temp }}/reviewed-patch
+      - name: Apply validated patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$(cat "$RUNNER_TEMP/reviewed-patch/base.sha")"
+          git apply --check --index "$RUNNER_TEMP/reviewed-patch/patch.diff"
+          git apply --index "$RUNNER_TEMP/reviewed-patch/patch.diff"
+
+
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Install Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v6
+
+      - name: Configure (MSSQL)
+        run: cmake --preset ninja-clang -DOPENADS_WITH_MSSQL=ON -DOPENADS_WITH_TLS=ON
+        shell: bash
+
+      - name: Build unit tests
+        run: cmake --build build/ninja-clang --config Release --target openads_unit_tests
+        shell: bash
+
+      - name: Run live MSSQL smoke test
+        env:
+          OPENADS_TEST_MSSQL_CONNSTR: mssql://sa:OpenADS_CI_Passw0rd!@127.0.0.1:1433/master
+        run: |
+          ctest --test-dir build/ninja-clang -C Release --output-on-failure \
+            -R mssql_live_smoke
+        shell: bash
+
+  sql-live-firebird:
+    needs: prepare
+    permissions:
+      contents: read
+    name: SQL live Firebird
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.base_sha }}
+          persist-credentials: false
+      - name: Download validated patch
+        uses: actions/download-artifact@v4
+        with:
+          name: reviewed-patch
+          path: ${{ runner.temp }}/reviewed-patch
+      - name: Apply validated patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$(cat "$RUNNER_TEMP/reviewed-patch/base.sha")"
+          git apply --check --index "$RUNNER_TEMP/reviewed-patch/patch.diff"
+          git apply --index "$RUNNER_TEMP/reviewed-patch/patch.diff"
+
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build firebird-dev firebird3.0-utils
+
+      - name: Install Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v6
+
+      - name: Seed embedded Firebird fixture
+        run: |
+          mkdir -p /tmp/openads-fb
+          cat > /tmp/openads-fb/seed.sql <<'EOF'
+          CREATE DATABASE '/tmp/openads-fb/live.fdb' USER 'SYSDBA' DEFAULT CHARACTER SET UTF8;
+          EXIT;
+          EOF
+          isql-fb -user SYSDBA -i /tmp/openads-fb/seed.sql
+
+      - name: Configure (Firebird)
+        run: cmake --preset ninja-clang -DOPENADS_WITH_FIREBIRD=ON
+        shell: bash
+
+      - name: Build unit tests
+        run: cmake --build build/ninja-clang --config Release --target openads_unit_tests
+        shell: bash
+
+      - name: Run live Firebird smoke test
+        env:
+          OPENADS_TEST_FIREBIRD_DB: /tmp/openads-fb/live.fdb
+        run: |
+          ctest --test-dir build/ninja-clang -C Release --output-on-failure \
+            -R firebird_live_smoke
+        shell: bash
+
+  harbour-smoke:
+    needs: prepare
+    permissions:
+      contents: read
+    name: Harbour smoke (Windows)
+    runs-on: windows-2022
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.base_sha }}
+          persist-credentials: false
+      - name: Download validated patch
+        uses: actions/download-artifact@v4
+        with:
+          name: reviewed-patch
+          path: ${{ runner.temp }}/reviewed-patch
+      - name: Apply validated patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$(cat "$RUNNER_TEMP/reviewed-patch/base.sha")"
+          git apply --check --index "$RUNNER_TEMP/reviewed-patch/patch.diff"
+          git apply --index "$RUNNER_TEMP/reviewed-patch/patch.diff"
+
+
+      - name: Cache Harbour toolchain
+        uses: actions/cache@v4
+        id: harbour-cache
+        with:
+          path: ${{ runner.temp }}/harbour-ci
+          key: harbour-core-master-msvc64-v5-${{ hashFiles('tools/scripts/bootstrap_harbour_ci.ps1') }}
+
+      - name: Configure OpenADS
+        run: cmake --preset msvc-x64
+        shell: bash
+
+      - name: Build OpenADS + make_cdx
+        run: cmake --build build/msvc-x64 --config Release --target openads_ace make_cdx
+        shell: bash
+
+      - name: Bootstrap Harbour
+        run: pwsh -File tools/scripts/bootstrap_harbour_ci.ps1
+        env:
+          HARBOUR_CI_ROOT: ${{ runner.temp }}/harbour-ci
+          OPENADS_ROOT: ${{ github.workspace }}
+          OPENADS_BUILD: ${{ github.workspace }}/build/msvc-x64
+          GIT_TERMINAL_PROMPT: "0"
+
+      - name: Run Harbour smoke
+        run: pwsh -File tools/scripts/run_harbour_smoke.ps1
+        env:
+          OPENADS_BUILD: ${{ github.workspace }}/build/msvc-x64
+          HARBOUR_ROOT: ${{ runner.temp }}/harbour-ci
+
+  commit:
+    needs:
+      - prepare
+      - build-and-test
+      - php-binding
+      - sql-uri-smoke
+      - sql-live-pg-maria
+      - sql-live-mssql
+      - sql-live-firebird
+      - harbour-smoke
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-tags: true
+          fetch-depth: 0
+      - name: Download validated patch
+        uses: actions/download-artifact@v4
+        with:
+          name: reviewed-patch
+          path: ${{ runner.temp }}/reviewed-patch
+      - name: Commit and push only the tested patch
+        env:
+          COMMIT_MESSAGE: ${{ inputs.commit_message }}
+          EXPECTED_BASE: ${{ needs.prepare.outputs.base_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(cat "$RUNNER_TEMP/reviewed-patch/base.sha")" = "$EXPECTED_BASE"
+          git fetch origin main
+          test "$(git rev-parse origin/main)" = "$EXPECTED_BASE" || {
+            echo "main changed while checks ran. Dispatch again against the new base."
+            exit 1
+          }
+          test "$(git rev-parse HEAD)" = "$EXPECTED_BASE"
+          git apply --check --index "$RUNNER_TEMP/reviewed-patch/patch.diff"
+          git apply --index "$RUNNER_TEMP/reviewed-patch/patch.diff"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          printf '%s\n' "$COMMIT_MESSAGE" > "$RUNNER_TEMP/patch-commit-message.txt"
+          git -c core.hooksPath=/dev/null commit -F "$RUNNER_TEMP/patch-commit-message.txt"
+          git push origin HEAD:refs/heads/main
