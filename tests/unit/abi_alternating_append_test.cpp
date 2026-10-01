@@ -25,18 +25,6 @@
 #include <string>
 #include <vector>
 
-// macOS: fcntl byte locks are process-scoped (no OFD locks), so two handles
-// in the SAME process never conflict. Tests that need that cross-handle
-// exclusion are expected to fail on macOS; may_fail keeps them running and
-// visible without failing the suite. Cross-process locking is unaffected.
-// Tracked: in-process lock registry for macOS (follow-up).
-#ifdef __APPLE__
-#define OADS_MACOS_PROC_LOCKS_MAY_FAIL true
-#else
-#define OADS_MACOS_PROC_LOCKS_MAY_FAIL false
-#endif
-
-
 namespace fs = std::filesystem;
 
 namespace {
@@ -319,7 +307,7 @@ TEST_CASE("Append/commit/unlock churn leaves no locks held") {
     fs::remove_all(dir, ec);
 }
 
-TEST_CASE("Local record lock blocks a remote write and vice versa" * doctest::may_fail(OADS_MACOS_PROC_LOCKS_MAY_FAIL)) {
+TEST_CASE("Local record lock blocks a remote write and vice versa") {
     const auto dir = fs::temp_directory_path() / "openads_cross_contention";
     std::error_code ec;
     fs::remove_all(dir, ec);

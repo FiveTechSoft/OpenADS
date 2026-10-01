@@ -13,18 +13,6 @@
 #include <thread>
 #include <vector>
 
-// macOS: fcntl byte locks are process-scoped (no OFD locks), so two handles
-// in the SAME process never conflict. Tests that need that cross-handle
-// exclusion are expected to fail on macOS; may_fail keeps them running and
-// visible without failing the suite. Cross-process locking is unaffected.
-// Tracked: in-process lock registry for macOS (follow-up).
-#ifdef __APPLE__
-#define OADS_MACOS_PROC_LOCKS_MAY_FAIL true
-#else
-#define OADS_MACOS_PROC_LOCKS_MAY_FAIL false
-#endif
-
-
 namespace fs = std::filesystem;
 
 // ---------------------------------------------------------------------------
@@ -95,7 +83,7 @@ fs::path stage_dbf(const fs::path& dir, const char* name = "test.dbf",
 //         (User: "Normal behavior of DBFCDX is to raise error in 2nd instance.
 //          Not raise error but just return FALSE — do not stay there waiting.")
 // ===========================================================================
-TEST_CASE("Remote: record lock contention — B's lock fails, does not hang" * doctest::may_fail(OADS_MACOS_PROC_LOCKS_MAY_FAIL)) {
+TEST_CASE("Remote: record lock contention — B's lock fails, does not hang") {
     const auto dir = fs::temp_directory_path() / "openads_pritpal_rlock";
     std::error_code ec;
     fs::remove_all(dir, ec);
@@ -219,7 +207,7 @@ TEST_CASE("Remote: write without lock returns error 5035 (GoHot guard)") {
 // Test 3: FLock contention — A holds FLock, B's FLock fails
 //         (User tests FLock in multi-instance scenario)
 // ===========================================================================
-TEST_CASE("Remote: FLock contention — B's FLock fails after retries" * doctest::may_fail(OADS_MACOS_PROC_LOCKS_MAY_FAIL)) {
+TEST_CASE("Remote: FLock contention — B's FLock fails after retries") {
     const auto dir = fs::temp_directory_path() / "openads_pritpal_flock";
     std::error_code ec;
     fs::remove_all(dir, ec);

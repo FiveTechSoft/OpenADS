@@ -14,18 +14,6 @@
 #include <fstream>
 #include <vector>
 
-// macOS: fcntl byte locks are process-scoped (no OFD locks), so two handles
-// in the SAME process never conflict. Tests that need that cross-handle
-// exclusion are expected to fail on macOS; may_fail keeps them running and
-// visible without failing the suite. Cross-process locking is unaffected.
-// Tracked: in-process lock registry for macOS (follow-up).
-#ifdef __APPLE__
-#define OADS_MACOS_PROC_LOCKS_MAY_FAIL true
-#else
-#define OADS_MACOS_PROC_LOCKS_MAY_FAIL false
-#endif
-
-
 namespace fs = std::filesystem;
 
 // ---------------------------------------------------------------------------
@@ -789,7 +777,7 @@ TEST_CASE("AdsIsRecordLocked on record 0 with no current record") {
 // ===========================================================================
 // Lock cycle/retry policy integration: contention produces correct timing
 // ===========================================================================
-TEST_CASE("Lock retry: tight policy → contention resolved within expected window" * doctest::may_fail(OADS_MACOS_PROC_LOCKS_MAY_FAIL)) {
+TEST_CASE("Lock retry: tight policy → contention resolved within expected window") {
     const auto dir = fs::temp_directory_path() / "openads_lock_retry_policy";
     std::error_code ec;
     fs::remove_all(dir, ec);

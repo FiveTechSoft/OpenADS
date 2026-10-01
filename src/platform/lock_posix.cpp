@@ -153,6 +153,15 @@ util::Result<ByteLock> do_lock(File& f, std::uint64_t offset,
 
 } // namespace
 
+#ifdef __APPLE__
+void forget_byte_locks(void* native) noexcept {
+    std::lock_guard<std::mutex> g(g_reg_mu);
+    g_reg.erase(std::remove_if(g_reg.begin(), g_reg.end(),
+                    [&](const HeldRange& h) { return h.owner == native; }),
+                g_reg.end());
+}
+#endif
+
 ByteLock::ByteLock(ByteLock&& other) noexcept
     : native_(other.native_), offset_(other.offset_), length_(other.length_) {
     other.native_ = nullptr;
