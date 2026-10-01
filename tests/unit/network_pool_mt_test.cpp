@@ -134,9 +134,17 @@ TEST_CASE("Session pool: MT threads open/read/close on parallel lanes") {
             if (AdsCloseTable(hT) != AE_SUCCESS) failures.fetch_add(1);
         }
     };
-    std::vector<std::thread> th;
-    for (int w = 0; w < 4; ++w) th.emplace_back(worker, w);
-    for (auto& t : th) t.join();
+    // Repeat the whole 4-thread phase: the old data race on the shared
+    // remote-table store (unlocked park-path erase) hit ~1 run in 30, so
+    // one pass per test run was not enough to catch it. Rounds after the
+    // first also exercise park/adopt across threads (fresh thread ids
+    // deal onto lanes again).
+    constexpr int kRounds = 25;
+    for (int round = 0; round < kRounds; ++round) {
+        std::vector<std::thread> th;
+        for (int w = 0; w < 4; ++w) th.emplace_back(worker, w);
+        for (auto& t : th) t.join();
+    }
     CHECK(failures.load() == 0);
 
     // Pool + deferred accounting intact: reopen on the same handle works,

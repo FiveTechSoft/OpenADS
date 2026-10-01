@@ -3,9 +3,10 @@
 // Field: process A locks its username record for life; occasionally a
 // second process B locks the SAME record and proceeds (never on
 // DBFCDX). The gate is LockRecord -> server try_lock_record_excl ->
-// OS byte lock; IsRecordLocked is own-table-only by design (see
-// Session::IsRecordLocked + AdsIsRecordLocked) and can never serve as
-// the cross-process check.
+// OS byte lock. IsRecordLocked was own-table-only at birth (the
+// single-login guard that QUERIED instead of attempting stayed blind);
+// mtfix11 makes it cross-owner aware via the OS probe, matching SAP -
+// but the enforcement gate below still rests on LockRecord attempts.
 //
 // Matrix: A holds rec 3 (natural vs ordered/twin path on each side),
 // B must fail the same recno. Then close/reopen handover: A closes

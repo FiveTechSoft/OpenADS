@@ -4,6 +4,8 @@ name: macos-diag
 # per-assertion output and, if they stall, dumps thread stacks.
 on:
   workflow_dispatch:
+  push:
+    branches: [mtfix23-sync]
 
 jobs:
   diag:

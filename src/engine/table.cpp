@@ -1222,16 +1222,19 @@ util::Result<void> Table::append_record() {
     // erase until that commit lands (see append_pending_recno_ in table.h).
     append_pending_recno_ = recno_;
     append_keys_done_.clear();
-    // LOCAL ADT exclusive opens already grant unrestricted writes; taking
-    // an OS byte-range lock for every append and retaining all of them until
-    // UnlockTable makes the kernel lock tree grow without bound (~1k/s at
-    // 10k records with no indexes). Keep other table types unchanged.
+    // Exclusive ADT opens permit writes without a record lock. Avoid
+    // accumulating an unused append auto-lock on each new row, including
+    // when this engine Table is used by the server. Shared ADT and other
+    // table types retain their existing auto-lock behavior.
     // Do NOT use the blocking kernel acquire: a peer FLock/Browse covers the VFP rec-lock
     // range and LockFileEx waits forever (B_BIG N=700 convoy). Retry with
     // the ACE lock budget, then roll the blank row back so a timeout
     // cannot leave a durable empty record.
     if (mode_ != OpenMode::Exclusive || type_ != TableType::Adt) {
-        const auto p = openads::abi::lock_retry_policy();
+        // Engine-internal budget, decoupled from the client-facing ACE lock
+        // policy (single-attempt by default): the app cannot retry this
+        // internal auto-lock itself, so it keeps its own short wait.
+        const auto& p = openads::abi::engine_append_lock_policy();
         const auto t0 = std::chrono::steady_clock::now();
         const auto deadline = t0 + std::chrono::milliseconds(
             p.budget_ms() == 0 ? 1 : p.budget_ms());
@@ -1245,7 +1248,7 @@ util::Result<void> Table::append_record() {
                 std::chrono::steady_clock::now() >= deadline) {
                 break;
             }
-            openads::abi::lock_retry_sleep(i);
+            openads::abi::lock_retry_sleep(p, i);
         }
         if (!locked) {
             const std::uint32_t failed = recno_;
@@ -1976,6 +1979,24 @@ std::vector<std::uint32_t> Table::held_record_locks() const {
     return out;
 }
 
+util::Result<bool> Table::is_record_locked_any(std::uint32_t recno) {
+    if (table_lock_.has_value()) return true;
+    if (recno_locks_.count(recno) != 0) return true;
+    if (!driver_ || mode_ == OpenMode::Read) return false;
+    const auto lt = to_lock_type_();
+    auto rec = locks_.probe_record(driver_->file(), lt, locking_, recno);
+    if (!rec) return rec.error();
+    if (rec.value()) return true;
+    // Cdx/Vfp FLock ranges span every record-lock byte, so the record
+    // probe above already reports another owner's FLock - and a
+    // file-lock probe here would false-positive on ANY held record
+    // lock (those bytes live inside the FLock range). Only Ntx/Adt,
+    // whose FLock byte sits outside the record region, need the
+    // file-lock probe to see another owner's FLock.
+    if (LockMgr::file_lock_covers_records(lt)) return false;
+    return locks_.probe_file(driver_->file(), lt, locking_);
+}
+
 util::Result<void> Table::try_lock_table_excl() {
     if (mode_ == OpenMode::Read) return {};
     if (table_lock_) return {};
@@ -2030,6 +2051,8 @@ void Table::set_order(std::unique_ptr<drivers::IIndex> idx) {
 }
 
 void Table::clear_order() {
+    explicit_order_focus_ = false;
+    created_order_focus_ = false;
     order_.reset();
 }
 

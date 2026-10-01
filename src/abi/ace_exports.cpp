@@ -18,6 +18,8 @@ using openads::abi::lock_retry_policy;
 #include "abi/backend_registry.h"
 #include "abi/charset.h"
 #include "abi/last_error.h"
+#include "abi/create_table_diag.h"
+#include "abi/runtime.h"
 
 #include "engine/aof_eval.h"
 #include "engine/aof_expr.h"
@@ -157,21 +159,8 @@ extern thread_local bool g_field_read_raw;
 // registry Handle is 64-bit; centralise the (value-preserving) narrowing.
 ADSHANDLE to_ads_handle(Handle h) { return static_cast<ADSHANDLE>(h); }
 
-struct ProcessState {
-    // M10.36 -- recursive_mutex so UNION dispatch can re-enter
-    // AdsExecuteSQLDirect (used to materialise each member's cursor)
-    // while still holding the outer lock.
-    std::recursive_mutex                                          mu;
-    openads::session::HandleRegistry                              registry;
-    std::unordered_map<Handle, std::unique_ptr<Connection>>       conns;
-    // M12.33 â€” remote find handles (owned here, not in a Connection).
-    std::vector<std::unique_ptr<Connection::TableFind>>            remote_finds;
-};
-
-ProcessState& state() {
-    static ProcessState s;
-    return s;
-}
+using openads::abi::detail::ProcessState;
+using openads::abi::detail::state;
 
 // Serialise the file-creating entry points (AdsCreateTable local paths,
 // AdsCreateIndex61 native branch) PER TARGET PATH. All serverd sessions
@@ -222,6 +211,8 @@ UNSIGNED32 write_new_table_file(const std::string& full,
     auto fres = openads::platform::File::open(
         full, openads::platform::OpenMode::CreateExclusive);
     if (!fres) {
+        openads::abi::create_diag::log("file-open-fail", fres.error().code,
+                                      "exclusive-open", fres.error().sub_code);
         std::error_code ec;
         if (fs::exists(full, ec)) {
             return fail(openads::util::Error{
@@ -235,6 +226,8 @@ UNSIGNED32 write_new_table_file(const std::string& full,
     auto file = std::move(fres).value();
     auto wrote = file.write_at(0, bytes.data(), bytes.size());
     if (!wrote || wrote.value() != bytes.size()) {
+        openads::abi::create_diag::log("file-write-fail", wrote ? 0 : wrote.error().code,
+            "short-or-failed-write", wrote ? 0 : wrote.error().sub_code);
         return fail(openads::util::Error{
             static_cast<std::int32_t>(openads::AE_INTERNAL_ERROR), 0,
             std::string(op) + ": write failed", ""});
@@ -755,12 +748,15 @@ UNSIGNED32 remote_emit_close_all(openads::network::RemoteTable* rt) {
     }
     rt->close_all_indexes_pending = false;
     rt->indexes_parked = false;
+    rt->parked_nav_which = 0;
     rt->parked_by_tag.clear();
     rt->parked_handles.clear();
     rt->index_by_tag.clear();
     rt->index_handles.clear();
     rt->active_index_id = 0;
     rt->last_nav = 0;
+    rt->pair_valid = false;
+    rt->anchor_ok = false;
     return ok();
 }
 // Parked-index truth enforcement (see the nav entries): order-dependent
@@ -1486,37 +1482,87 @@ bool remote_table_has_index(const openads::network::RemoteTable* rt) {
            (rt->active_index_id != 0 || !rt->index_by_tag.empty());
 }
 
-// Grid log for WAN diagnosis: fixed-width columns (3-space separated,
-// like ads_err.log) plus a variable-length detail tail, so both naked
-// eyes and analytical tools can parse it:
-//
-//   [+       123ms]   [V_USRCFG    ]   [AdsAtBOF            ]   nav=0 row=1
-//    | ms since trace start | table alias | operation       | detail...
-//
-// Same-ms runs read as locally served calls; an RTT-sized jump between
-// adjacent lines is exactly one wire round-trip.
-static void cli_trace_line(long long ms, const char* who, const char* op,
-                           const char* detail) {
+// Diagnostic WAN trace. Off unless wire_trace=1; no file opens or timestamps
+// on the disabled request path. Payload and seek keys are never logged.
+static bool cli_trace_on() {
     static const bool on = openads::util::client_setting_truthy(
         "OPENADS_WIRE_TRACE", "wire_trace");
-    if (!on) return;
-    FILE* hf = std::fopen("C:/tmp/cli_trace.log", "a");
-    if (hf == nullptr) return;
-    std::fprintf(hf, "[+%9lldms]   [%-12.12s]   [%-20.20s]   %s\n", ms,
-                 who != nullptr ? who : "-",
-                 op != nullptr ? op : "-", detail != nullptr ? detail : "");
+    return on;
+}
+
+static const std::string& cli_trace_path() {
+    static const std::string path = [] {
+        auto p = openads::util::client_setting("OPENADS_WIRE_TRACE_FILE",
+                                                "wire_trace_file");
+        return p.empty() ? std::string("C:/tmp/cli_trace.log") : p;
+    }();
+    return path;
+}
+
+struct CliTraceState {
+    std::mutex mu;
+    std::map<std::pair<const void*, std::uint32_t>, std::string> tables;
+    std::map<std::pair<const void*, std::uint32_t>, std::string> indexes;
+};
+static CliTraceState& cli_trace_state() {
+    static CliTraceState trace;
+    return trace;
+}
+
+// Called after a successful open; table ID belongs to its connection,
+// not globally. Do not hold this mutex while performing any wire request.
+static void cli_trace_table_open(const openads::network::RemoteTable* rt) {
+    if (!cli_trace_on() || !rt || !rt->conn) return;
+    auto& trace = cli_trace_state();
+    std::lock_guard<std::mutex> lk(trace.mu);
+    trace.tables[{rt->conn, rt->id}] =
+        rt->alias.empty() ? rt->name : rt->alias;
+}
+static void cli_trace_table_close(const openads::network::RemoteTable* rt) {
+    if (!cli_trace_on() || !rt || !rt->conn) return;
+    auto& trace = cli_trace_state();
+    std::lock_guard<std::mutex> lk(trace.mu);
+    trace.tables.erase({rt->conn, rt->id});
+    for (const auto& entry : rt->index_by_tag)
+        trace.indexes.erase({rt->conn, entry.second});
+}
+
+static void cli_trace_write_locked(FILE* hf, long long ms,
+                                   const char* who, const char* op,
+                                   const char* detail) {
+    const auto now = std::chrono::system_clock::now();
+    const auto epoch_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now.time_since_epoch()).count();
+    const auto secs = std::chrono::system_clock::to_time_t(now);
+    std::tm local{};
+#if defined(_WIN32)
+    localtime_s(&local, &secs);
+#else
+    localtime_r(&secs, &local);
+#endif
+    char stamp[32];
+    std::strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", &local);
+    std::fprintf(hf, "%s.%03lld [+%9lldms] [%-20.20s] [%-20.20s] %s\n",
+                 stamp, static_cast<long long>(epoch_ms % 1000), ms,
+                 who ? who : "-", op ? op : "-", detail ? detail : "");
+}
+
+static void cli_trace_line(long long ms, const char* who, const char* op,
+                           const char* detail) {
+    if (!cli_trace_on()) return;
+    auto& trace = cli_trace_state();
+    std::lock_guard<std::mutex> lk(trace.mu);
+    FILE* hf = std::fopen(cli_trace_path().c_str(), "a");
+    if (!hf) return;
+    cli_trace_write_locked(hf, ms, who, op, detail);
     std::fclose(hf);
 }
 
 static long long cli_trace_ms() {
-    // Millisecond stamp since the first traced call: adjacent-line gaps
-    // separate local answers (~0 ms) from wire round-trips (~RTT ms),
-    // which is the whole point of reading this log.
     static const auto t0 = std::chrono::steady_clock::now();
     return static_cast<long long>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - t0)
-            .count());
+            std::chrono::steady_clock::now() - t0).count());
 }
 
 static void cli_trace(const char* op, const char* fmt, ...) {
@@ -1528,16 +1574,11 @@ static void cli_trace(const char* op, const char* fmt, ...) {
     buf[sizeof(buf) - 1] = 0;
     cli_trace_line(cli_trace_ms(), "-", op, buf);
 }
-// Table-attributed variant: the alias (file name when the open
-// carried none) goes in the grid's table column, so repeated probe
-// blocks attribute to the table that paid them.
 static void cli_trace_tbl(const openads::network::RemoteTable* rt,
                           const char* op, const char* fmt, ...) {
-    std::string who;
-    if (rt != nullptr) {
-        who = !rt->alias.empty() ? rt->alias : rt->name;
-    }
-    if (who.empty()) who = "-";
+    if (!cli_trace_on()) return;
+    const std::string who = rt == nullptr ? "-" :
+        (!rt->alias.empty() ? rt->alias : rt->name);
     char buf[512];
     va_list ap;
     va_start(ap, fmt);
@@ -1545,6 +1586,161 @@ static void cli_trace_tbl(const openads::network::RemoteTable* rt,
     va_end(ap);
     buf[sizeof(buf) - 1] = 0;
     cli_trace_line(cli_trace_ms(), who.c_str(), op, buf);
+}
+
+static const char* cli_trace_opcode(std::uint8_t op) {
+    switch (op) {
+        case 0x01: return "Hello";
+        case 0x10: return "Connect";
+        case 0x12: return "Disconnect";
+        case 0x20: return "OpenTable";
+        case 0x22: return "CloseTable";
+        case 0x30: return "ExecuteSQL";
+        case 0x32: return "Fetch";
+        case 0x40: return "GotoTop";
+        case 0x42: return "Skip";
+        case 0x44: return "GetField";
+        case 0x46: return "GetRecordCount";
+        case 0x48: return "AtEOF";
+        case 0x4A: return "DescribeTable";
+        case 0x4C: return "AtBOF";
+        case 0x4E: return "GetRecordNum";
+        case 0x62: return "IsRecordDeleted";
+        case 0x64: return "GotoBottom";
+        case 0x66: return "IsFound";
+        case 0x68: return "RefreshRecord";
+        case 0x6A: return "GetTableType";
+        case 0x6C: return "GetRecordLength";
+        case 0x6E: return "GetNumIndexes";
+        case 0x70: return "GetLastAutoinc";
+        case 0x72: return "LockRecord";
+        case 0x74: return "UnlockRecord";
+        case 0x76: return "LockTable";
+        case 0x78: return "UnlockTable";
+        case 0x7A: return "PackTable";
+        case 0x7C: return "ZapTable";
+        case 0x7E: return "FlushFileBuffers";
+        case 0x80: return "CloseAllIndexes";
+        case 0x82: return "SetAOF";
+        case 0x84: return "ClearAOFRemote";
+        case 0x86: return "GetAOFOptLevel";
+        case 0x88: return "OpenIndex";
+        case 0x8A: return "CloseIndex";
+        case 0x8C: return "SetOrder";
+        case 0x8E: return "SetOrderByName";
+        case 0x90: return "Seek";
+        case 0x92: return "SeekLast";
+        case 0x94: return "CreateIndex";
+        case 0x96: return "SkipUnique";
+        case 0x98: return "SetScope";
+        case 0x9A: return "ClearScope";
+        case 0x9C: return "FetchCurrentRow";
+        case 0x50: return "AppendBlank";
+        case 0x52: return "SetField";
+        case 0x5E: return "SetFields";
+        case 0x54: return "DeleteRecord";
+        case 0x56: return "RecallRecord";
+        case 0x58: return "GotoRecord";
+        case 0x5A: return "FlushTable";
+        case 0x5C: return "GetKeyType";
+        case 0x60: return "Reindex";
+        case 0x9E: return "GetLastTableUpdate";
+        case 0x13: return "IsRecordLocked";
+        case 0x15: return "GetAllLocks";
+        case 0xA0: return "MgConnect";
+        case 0xA2: return "MgRequest";
+        case 0xA4: return "FetchWhere";
+        case 0xA6: return "Aggregate";
+        case 0xA8: return "GetRecord";
+        case 0xAA: return "SetRecord";
+        case 0xAC: return "CustomizeAOF";
+        case 0xAE: return "GetRecordCRC";
+        case 0xB0: return "GetKeyCount";
+        case 0x03: return "GetKeyNum";
+        case 0x05: return "FindTables";
+        case 0x07: return "BeginTransaction";
+        case 0x09: return "CommitTransaction";
+        case 0x0B: return "RollbackTransaction";
+        case 0x0D: return "FindRecord";
+        case 0x17: return "ZipArchive";
+        case 0x19: return "UnzipArchive";
+        case 0x1B: return "ZipList";
+        case 0xB2: return "DDGetProperty";
+        case 0xB4: return "DDSetProperty";
+        case 0xB6: return "DDCreateProc";
+        case 0xB8: return "DDCreateFunction";
+        case 0xBA: return "DDCreateTrigger";
+        case 0xBC: return "DDDropTrigger";
+        case 0xBE: return "DDDropView";
+        case 0xC0: return "DDDropLink";
+        case 0xC2: return "DDCreateUser";
+        case 0xC4: return "DDDropObject";
+        case 0xC6: return "DDAddUserToGroup";
+        case 0xC8: return "DDRemoveUserFromGroup";
+        case 0xCA: return "DDCreateLink";
+        case 0xCC: return "DDModifyLink";
+        case 0xCE: return "DDCreateRefIntegrity";
+        case 0xD0: return "DDCreateView";
+        case 0xD2: return "DDAddIndexFile";
+        case 0xD4: return "DDRemoveIndexFile";
+        case 0xD6: return "DDGetPermissions";
+        case 0xD8: return "DDGrantPermission";
+        case 0xDA: return "ShowDeleted";
+        case 0xDC: return "CreateTable";
+        case 0xDE: return "DropTable";
+        case 0xE0: return "FileExists";
+        case 0xE2: return "FileErase";
+        case 0xE4: return "FileRename";
+        case 0xE6: return "FileSize";
+        case 0xE8: return "FileMTime";
+        case 0xEA: return "Directory";
+        case 0xEC: return "DirExist";
+        case 0xEE: return "DirMake";
+        case 0xF0: return "DirRemove";
+        case 0xF2: return "FOpen";
+        case 0xF4: return "FCreate";
+        case 0xF6: return "FClose";
+        case 0xF8: return "FRead";
+        case 0xFA: return "FWrite";
+        case 0xFC: return "FSeek";
+        case 0xFE: return "Mutex";
+        default: return "Other";
+    }
+}
+
+// One line per completed request/reply. Connection and table ID identify
+// overlapping aliases, duration includes send+receive; no payload bytes.
+static void cli_trace_frame_hook(const void* conn, std::uint8_t op,
+                                 std::uint32_t tid, std::size_t req_bytes,
+                                 std::uint8_t rep_op, std::size_t rep_bytes,
+                                 long long us) {
+    auto& trace = cli_trace_state();
+    std::lock_guard<std::mutex> lk(trace.mu);
+    std::string table = "-";
+    const bool index_op = op == 0x90 || op == 0x92 || op == 0x8A ||
+                          op == 0x8C || op == 0x8E || op == 0x5C;
+    if (index_op) {
+        const auto ix = trace.indexes.find({conn, tid});
+        if (ix != trace.indexes.end()) table = ix->second;
+    } else if (op != 0x01 && op != 0x10 && op != 0x20 &&
+               op != 0x30 && op != 0x32 && op != 0x05 && op != 0x07 &&
+               op != 0x09 && op != 0x0B) {
+        const auto it = trace.tables.find({conn, tid});
+        if (it != trace.tables.end()) table = it->second;
+    }
+    char buf[200];
+    std::snprintf(buf, sizeof(buf),
+                  "wire op=0x%02X tid=%u req=%lu ack=0x%02X ackb=%lu dur_us=%lld conn=%04X",
+                  static_cast<unsigned>(op), static_cast<unsigned>(tid),
+                  static_cast<unsigned long>(req_bytes),
+                  static_cast<unsigned>(rep_op),
+                  static_cast<unsigned long>(rep_bytes), us,
+                  static_cast<unsigned>(reinterpret_cast<std::uintptr_t>(conn) & 0xFFFFu));
+    FILE* hf = std::fopen(cli_trace_path().c_str(), "a");
+    if (!hf) return;
+    cli_trace_write_locked(hf, cli_trace_ms(), table.c_str(),
+                           cli_trace_opcode(op), buf);
+    std::fclose(hf);
 }
 
 void remote_clear_nav_boundaries(openads::network::RemoteTable* rt) {
@@ -1656,10 +1852,136 @@ void remote_sync_keyno_gototop(openads::network::RemoteTable* rt) {
     }
 }
 
+// True when the server itself certified, on the latest cursor-affecting
+// frame, that this table's cursor sits on no row with BOTH limits set
+// (the xBase empty-cursor state), and nothing client-side could have
+// changed what that means since. Filters are excluded on purpose: the
+// server key/record counts do not apply them, so an empty filtered
+// cursor says nothing about the counts.
+bool remote_cursor_proven_empty(const openads::network::RemoteTable* rt) {
+    return rt != nullptr && rt->conn != nullptr &&
+           !rt->row_valid &&
+           rt->bound_bof_ok && rt->bound_bof &&
+           rt->bound_eof_ok && rt->bound_eof &&
+           rt->bound_seq == rt->conn->nav_seq() &&
+           !rt->pending_order &&
+           rt->pending_sets.empty() &&
+           rt->filter_expr.empty() && rt->aof_expr.empty();
+}
+
+// "Still empty" window (user-approved trade-off, 23/09/2026): after the
+// server certifies a table physically EMPTY (record count 0) with the
+// cursor on no row (BOF+EOF), Seek / GO n on it are answered "not found"
+// locally for a short time instead of paying a round trip each. Vouch
+// probes its empty per-user settings tables ~280 times per startup.
+// Risk accepted: a record another STATION adds inside the window is seen
+// only when the window ends. This station's own writes (any append /
+// field write / SQL on this connection) close the window at once.
+// OPENADS_EMPTY_TTL_MS: window length, default 1500, 0 = off, max 2000.
+std::uint32_t remote_empty_ttl_ms() {
+    static const std::uint32_t v = [] {
+        const char* e = std::getenv("OPENADS_EMPTY_TTL_MS");
+        if (e == nullptr || *e == 0) return 1500u;
+        long x = std::strtol(e, nullptr, 10);
+        if (x < 0) x = 0;
+        if (x > 2000) x = 2000;
+        return static_cast<std::uint32_t>(x);
+    }();
+    return v;
+}
+
+// mtfix12 R2 opt-in envelope (his explicit flag): conn-wide by
+// default — any cursor-affecting frame on the connection expires the
+// self-goto anchor. OPENADS_NAV_SELF_GOTO=table scopes freshness to
+// the table handle: server cursors are per handle, so only this
+// handle's frames can move its cursor, and the per-table generation
+// (bumped centrally in request()) sees them all. For his deployment —
+// writes coordinated by SEMA4s and physical locks — this is safe; the
+// general default stays conn-wide.
+bool remote_self_goto_per_table() {
+    static const bool v = [] {
+        const char* e = std::getenv("OPENADS_NAV_SELF_GOTO");
+        return e != nullptr && std::strcmp(e, "table") == 0;
+    }();
+    return v;
+}
+
+bool remote_empty_window(const openads::network::RemoteTable* rt) {
+    if (rt == nullptr || rt->conn == nullptr) return false;
+    const std::uint32_t ttl = remote_empty_ttl_ms();
+    if (ttl == 0) return false;
+    if (rt->row_valid || !rt->pending_sets.empty() || rt->write_dirty)
+        return false;
+    if (!(rt->bound_bof_ok && rt->bound_bof &&
+          rt->bound_eof_ok && rt->bound_eof))
+        return false;
+    // The count must come from the same certification as the bounds.
+    if (!(rt->count_bound_ok && rt->count_bound == 0 &&
+          rt->count_bound_seq == rt->bound_seq))
+        return false;
+    if (rt->bound_data_epoch != rt->conn->data_epoch()) return false;
+    const auto age = std::chrono::steady_clock::now() - rt->bound_at;
+    return age >= std::chrono::steady_clock::duration::zero() &&
+           age <= std::chrono::milliseconds(ttl);
+}
+
+// Leave the table exactly as a wire answer on an empty table would:
+// no row, both limits, recno/count unchanged, certified at the current
+// seq (bound_at is NOT refreshed: the window runs from the last real
+// server answer, never extended by local answers).
+void remote_empty_restamp(openads::network::RemoteTable* rt) {
+    const std::uint64_t seq = rt->conn->nav_seq();
+    rt->row_valid = false;
+    rt->invalidate_prefetch();
+    rt->nav_at_bof = true;
+    rt->nav_at_eof = true;
+    rt->nav_not_bof = false;
+    rt->nav_not_eof = false;
+    rt->bound_seq = seq;
+    rt->recno_bound_seq = seq;
+    rt->count_bound_seq = seq;
+    rt->last_nav = 0;
+    // The serve lands on no row: no anchor, and any certified pair
+    // landing described a state this serve just replaced.
+    rt->pair_valid = false;
+    rt->anchor_ok = false;
+}
+
+// Memo key for AdsGetRecordLength re-opens: lowercased table name plus
+// the whole schema. Empty (= no memo) when the schema is not known.
+std::string remote_record_length_key(const openads::network::RemoteTable* rt) {
+    if (rt == nullptr || !rt->fields_cached || rt->fields.empty() ||
+        rt->name.empty()) {
+        return {};
+    }
+    std::string k = rt->name;
+    for (auto& c : k)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    for (const auto& fd : rt->fields) {
+        k.push_back('\x1f');
+        k += fd.name;
+        k.push_back('\x1e');
+        k += std::to_string(fd.type) + "," + std::to_string(fd.length) +
+             "," + std::to_string(fd.decimals);
+    }
+    return k;
+}
+
 void remote_sync_keyno_gotobottom(openads::network::RemoteTable* rt) {
     if (rt == nullptr) return;
     remote_clear_nav_boundaries(rt);
     if (remote_table_has_index(rt)) {
+        // An ordered GotoBottom that the server certified empty (no row,
+        // BOF+EOF) proves the order holds no visible keys in its scope:
+        // the server key count (scope + SET DELETED aware, filter-blind)
+        // is 0. Seed it instead of asking — the empty tables of a USE
+        // otherwise pay one GetKeyCount frame each here.
+        if (rt->active_index_id != 0 && !rt->key_count_cached &&
+            remote_cursor_proven_empty(rt)) {
+            rt->cached_key_count = 0;
+            rt->key_count_cached = true;
+            rt->key_counts[rt->active_index_id] = 0;
+        }
         // Bottom of the ORDER, not of the file: with a scope active the
         // last key is key #scoped_key_count, not #physical_rec_count.
         const std::uint32_t kc = remote_ensure_key_count(rt);
@@ -1706,6 +2028,22 @@ void remote_nav_stamp(openads::network::RemoteTable* rt, int which,
     rt->last_nav_order = order;
     rt->last_nav_row   = rt->row_valid;
     rt->last_nav_seq   = rt->conn->nav_seq();
+}
+
+// mtfix12 R1 — opposite-boundary certification serve check. True when
+// the just-landed GotoTop/GotoBottom carried THIS boundary's full
+// landing state (kCapNavBoundaryPair) and the same freshness envelope
+// the duplicate check uses still holds — conn-wide nav_seq unchanged —
+// plus no write touched this table since certification (the blob's row
+// bytes predate any write; a stale blob must never overwrite fresher
+// row state). Pending local mutations stay on the wire path.
+bool remote_nav_pair(const openads::network::RemoteTable* rt, int which,
+                     std::uint32_t order) {
+    return rt != nullptr && rt->conn != nullptr && rt->pair_valid &&
+           rt->pair_which == which && rt->pair_order == order &&
+           rt->pair_seq == rt->conn->nav_seq() &&
+           rt->pair_write_gen == rt->conn->tbl_write_gen(rt->id) &&
+           rt->pending_sets.empty() && !rt->pending_order;
 }
 
 // Empty-cursor sticky for AdsAtBOF/AdsAtEOF: true when the last wire
@@ -4168,6 +4506,12 @@ bool& in_ri_check() {
 // Find the Connection that owns Table* t.
 Connection* conn_for_table(Table* t) {
     auto& s = state();
+    // Each Connection's table map is changed under s.mu (open/close), so
+    // the scan must hold it too. Without it a navigation on one session
+    // (snapshot_ri_pks) read a map another session was inserting into
+    // (found by ThreadSanitizer under the session-pool test). Lock order
+    // s.mu -> registry matches register_object/release.
+    std::lock_guard<std::recursive_mutex> lk(s.mu);
     Connection* found = nullptr;
     s.registry.for_each_handle([&](Handle, HandleKind k, void* p) {
         if (k != HandleKind::Connection || found) return;
@@ -6654,6 +6998,93 @@ remote_pool_lanes_of(openads::network::RemoteConnection* rc) {
     return pool->lanes;
 }
 
+// Lane pinning by (logical connection, path, alias).
+//
+// The thread-affine lane pool spreads a process's tables over several
+// server sessions for parallel wire throughput, but record locks are
+// owned per server SESSION. Harbour's zero-space pattern
+// (hb_dbRequest/hb_dbDetach - one workarea shared process-wide across
+// threads for login semaphores) needs the opposite: a workarea's lock
+// identity must survive being driven from any thread, and must survive a
+// close + fresh USE of the same alias (Vouch's LogUse). DBFCDX gets this
+// for free because the lock list lives in the workarea struct itself.
+//
+// Pinning gives each (connection, normalized path, alias) one stable
+// lane for the connection's lifetime: every USE of that alias+path from
+// any thread - including the first USE after a close - binds to the same
+// server session, so locks taken through it stay visible and unlockable
+// no matter which thread is holding the workarea. Different aliases of
+// the same file keep different owners (UsrConsole-style cross-owner lock
+// probes still conflict, either on another lane or as another server-side
+// Table object on the same lane). Single-threaded callers are unaffected
+// (thread affinity already kept them on lane 0).
+//
+// Pins persist across AdsCloseTable on purpose - a close releases held
+// locks (same as DBFCDX closing a workarea); what pinning preserves is
+// IDENTITY for the next open, not the locks themselves. Pins are dropped
+// at AdsDisconnect.
+//
+// Default ON; kill switch: openads.ini lane_pin_alias = 0 (or
+// OPENADS_LANE_PIN_ALIAS=0) restores pure thread-affinity.
+static std::unordered_map<std::string, openads::network::RemoteConnection*>&
+remote_lane_pins() {
+    static std::unordered_map<std::string, openads::network::RemoteConnection*> m;
+    return m;
+}
+static bool remote_lane_pin_enabled() {
+    static const bool on = [] {
+        const std::string v = openads::util::client_setting(
+            "OPENADS_LANE_PIN_ALIAS", "lane_pin_alias");
+        if (v.empty()) return true;
+        std::string l = v;
+        for (auto& c : l) c = static_cast<char>(::tolower((unsigned char)c));
+        return !(l == "0" || l == "false" || l == "off" || l == "no");
+    }();
+    return on;
+}
+static std::string remote_lane_pin_key(ADSHANDLE rem_h,
+                                       const std::string& name,
+                                       const std::string& alias) {
+    std::string n = name;
+    for (auto& c : n) { if (c == '\\') c = '/'; }
+    std::string a = alias;
+    for (auto& c : a) c = static_cast<char>(::toupper((unsigned char)c));
+    return std::to_string(static_cast<unsigned long long>(rem_h)) +
+           '\x01' + n + '\x01' + a;
+}
+// Resolve the lane for a (connection, path, alias) open: pinned lane when
+// one is recorded and alive, otherwise the thread-affine pick, which then
+// becomes the pin. s.mu must be held.
+static openads::network::RemoteConnection*
+remote_pool_lane_for_open(ADSHANDLE rem_h, const std::string& name,
+                          const std::string& alias) {
+    namespace net = openads::network;
+    if (!remote_lane_pin_enabled())
+        return remote_pool_lane_conn(static_cast<Handle>(rem_h));
+    const std::string key = remote_lane_pin_key(rem_h, name, alias);
+    auto& pins = remote_lane_pins();
+    auto it = pins.find(key);
+    if (it != pins.end()) {
+        if (it->second != nullptr && it->second->valid()) return it->second;
+        pins.erase(it);   // dead lane: fall through and re-pin
+    }
+    net::RemoteConnection* rc = remote_pool_lane_conn(static_cast<Handle>(rem_h));
+    if (rc != nullptr) pins[key] = rc;
+    return rc;
+}
+// Drop every pin of a logical connection (AdsDisconnect). s.mu held.
+static void remote_lane_pins_clear(ADSHANDLE rem_h) {
+    const std::string prefix =
+        std::to_string(static_cast<unsigned long long>(rem_h)) + '\x01';
+    for (auto it = remote_lane_pins().begin();
+         it != remote_lane_pins().end();) {
+        if (it->first.compare(0, prefix.size(), prefix) == 0)
+            it = remote_lane_pins().erase(it);
+        else
+            ++it;
+    }
+}
+
 extern "C" {
 
 
@@ -6710,6 +7141,9 @@ UNSIGNED32 ENTRYPOINT AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 usServerType
                         UNSIGNED8* pucUser, UNSIGNED8* pucPwd,
                         UNSIGNED32 /*ulOptions*/, ADSHANDLE* phConnect) {
     arc2_trace("AdsConnect60");
+    if (cli_trace_on()) {
+        openads::network::set_frame_trace_hook(&cli_trace_frame_hook);
+    }
     if (phConnect == nullptr) return fail(openads::AE_INTERNAL_ERROR,
                                           "phConnect is null");
     auto path = openads::abi::to_internal(pucServer, 0);
@@ -7330,6 +7764,12 @@ remote_table_store() {
 std::unique_ptr<openads::network::RemoteTable>
 remote_table_take(openads::network::RemoteTable* rt) {
     if (rt == nullptr) return nullptr;
+    // remote_table_store() is shared by every thread (all lanes of a
+    // session pool): every access must hold s.mu. The park path in
+    // AdsCloseTable used to call this unlocked while other threads
+    // inserted/erased under s.mu -- a data race on the map that corrupted
+    // the heap under the 4-thread pool test (~1 run in 30 on Linux).
+    std::lock_guard<std::recursive_mutex> lk(state().mu);
     auto& m = remote_table_store();
     auto it = m.find(rt);
     if (it == m.end()) return nullptr;
@@ -7340,6 +7780,7 @@ remote_table_take(openads::network::RemoteTable* rt) {
 
 void remote_table_forget(openads::network::RemoteTable* rt) {
     if (rt == nullptr) return;
+    std::lock_guard<std::recursive_mutex> lk(state().mu);  // see take()
     remote_table_store().erase(rt);
 }
 
@@ -7358,6 +7799,7 @@ void remote_invalidate_index_parks(openads::network::RemoteConnection* rc) {
             if (c == l) return true;
         return false;
     };
+    std::lock_guard<std::recursive_mutex> lk(state().mu);  // shared store
     for (auto& kv : remote_table_store()) {
         auto* rt = kv.first;
         if (rt == nullptr || !lane_match(rt->conn)) continue;
@@ -7383,6 +7825,7 @@ std::string remote_pool_key(const std::string& name,
 // Parked tables keep no registry handle, so relations addressed by
 // handle could neither follow nor clean up -- real-close those.
 bool remote_table_has_relations(ADSHANDLE hTable) {
+    std::lock_guard<std::recursive_mutex> lk(state().mu);
     auto& tbl = relation_map();
     if (tbl.find(hTable) != tbl.end()) return true;
     for (auto& [parent, kids] : tbl) {
@@ -7400,12 +7843,41 @@ bool remote_table_has_relations(ADSHANDLE hTable) {
 // so no peer can invalidate them behind our back — an active order
 // resumes exactly (Vouch keeps IndexOrd()=1 across USEs; excluding it
 // would empty the pool).
+// wire_trace only: first rule (in remote_table_poolable order, then
+// relations) that keeps a closing table out of the park. Mirrors the
+// checks below; it never decides anything itself.
+const char* remote_table_unpoolable_reason(
+        openads::network::RemoteTable* rt, ADSHANDLE hTable) {
+    if (rt == nullptr || rt->conn == nullptr) return "no_connection";
+    if (!rt->close_counted) return "sql_cursor";
+    if (rt->open_exclusive) return "exclusive";
+    if (!rt->pending_sets.empty()) return "pending_sets";
+    if (!rt->held_recs.empty() || rt->table_lock_held ||
+        rt->locks_uncertain) return "locks_held";
+    if (rt->scope_touched) return "scope";
+    if (!rt->aof_expr.empty()) return "aof";
+    if (!rt->filter_expr.empty()) return "filter";
+    if (rt->flush_file_pending || rt->close_all_indexes_pending)
+        return "teardown_pending";
+    if (rt->pending_order) return "pending_order";
+    if (remote_table_has_relations(hTable)) return "relations";
+    return "none";
+}
+
 bool remote_table_poolable(openads::network::RemoteTable* rt) {
     if (rt == nullptr || rt->conn == nullptr) return false;
     if (!rt->close_counted) return false;   // SQL cursors etc.
     if (rt->open_exclusive) return false;   // parked exclusive blocks peers
     if (!rt->pending_sets.empty()) return false;  // flushed before close
-    if (rt->ever_locked || rt->scope_touched) return false;
+    // Locks once held no longer bar the park by themselves: the ledger
+    // proves whether any lock is STILL held (a parked table would
+    // otherwise pin it against every peer forever). ever_locked stays
+    // recorded for the trace but stops forcing a real close -- that
+    // policy cost GN_COUNT/FA_ACC01/USASELOG a full 7-frame reopen per
+    // voucher save.
+    if (!rt->held_recs.empty() || rt->table_lock_held ||
+        rt->locks_uncertain) return false;
+    if (rt->scope_touched) return false;
     if (!rt->aof_expr.empty() || !rt->filter_expr.empty()) return false;
     // Deferred teardown (FlushFileBuffers/CloseAllIndexes) is absorbed
     // by a real close, never by a park (no server close happens) — the
@@ -7435,6 +7907,7 @@ void remote_close_table_live(ADSHANDLE hTable,
     auto* rc = rt->conn;
     const bool counted = rt->close_counted;
     if (rc != nullptr) (void)rc->close_table(rt->id);
+    cli_trace_table_close(rt);
     if (hTable != 0) forget_relations(hTable);
     auto& s2 = state();
     openads::network::RemoteConnection* fire = nullptr;
@@ -7481,9 +7954,6 @@ void remote_close_table_live(ADSHANDLE hTable,
 // arrange that (disconnect/open paths unlock first).
 static void remote_flush_pools_one(openads::network::RemoteConnection* rc) {
     if (rc == nullptr) return;
-    // File lifecycle changed meaning on disk: drop the existence
-    // cache alongside the parked handles.
-    rc->file_exists_invalidate();
     std::vector<std::unique_ptr<openads::network::RemoteTable>> parked;
     rc->parked_flush(parked);
     for (auto& e : parked) {
@@ -7616,6 +8086,8 @@ UNSIGNED32 ENTRYPOINT AdsDisconnect(ADSHANDLE hConnect) {
             // ANY lane still has open tables.
             auto lanes = remote_pool_lanes_of(rc0);
             if (lanes.empty()) lanes.push_back(rc0);
+            // Lane pins name lanes of this connection; drop them all.
+            remote_lane_pins_clear(hConnect);
             // Null out rt->conn on any open SQL cursors that reference this
             // connection so AdsCloseTable can detect the dangling case and
             // skip the wire op rather than crashing with a use-after-free.
@@ -7789,13 +8261,6 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
     }
     if (auto* rc0 = s.registry.lookup<openads::network::RemoteConnection>(
             rem_h, HandleKind::RemoteConnection)) {
-        // MT lane: this thread's session for the logical connection.
-        // Each table pins to its lane via rt->conn below (cursor/order
-        // bindings are per-session server-side); single-threaded callers
-        // always get the primary (lane 0) — behaviour unchanged.
-        openads::network::RemoteConnection* rc =
-            remote_pool_lane_conn(static_cast<Handle>(rem_h));
-        if (rc == nullptr) rc = rc0;
         auto name = openads::abi::to_internal(pucName, 0);
         // M12.33 â€” strip tcp:// URI prefix that legacy Delphi TAdsTable
         // components embed in the table name (e.g.
@@ -7830,6 +8295,15 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
         if (alias.empty()) {
             alias = std::filesystem::path(name).stem().string();
         }
+        // MT lane: this table's session for the logical connection.
+        // Lane pinning (default ON): same alias+path binds to the same
+        // lane from any thread and across close/reopen, so record-lock
+        // identity follows the workarea (zero-space detach/request).
+        // Without pinning: this thread's affine lane, and single-threaded
+        // callers always get the primary (lane 0) — behaviour unchanged.
+        openads::network::RemoteConnection* rc =
+            remote_pool_lane_for_open(rem_h, name, alias);
+        if (rc == nullptr) rc = rc0;
         openads::util::write_remote_open_audit(name, alias);
         // Pooled re-USE (USE latency): same connection/path/alias/mode
         // within TTL reuses the parked server handle — no OpenTable wire
@@ -7843,6 +8317,39 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
                 adopted = std::move(hit);
             }
         }
+        if (cli_trace_on()) {
+            // Park diagnostics: hit/miss for this lane, plus whether
+            // another lane of the same session pool holds it parked.
+            char pbuf[320];
+            if (adopted) {
+                std::snprintf(pbuf, sizeof(pbuf), "park hit id=%u %.200s",
+                              static_cast<unsigned>(adopted->id),
+                              name.c_str());
+            } else {
+                const std::string pk = remote_pool_key(name, alias, usMode);
+                bool other_lane = false;
+                auto pit = remote_lane_pool_of().find(rc);
+                if (pit != remote_lane_pool_of().end() &&
+                    pit->second != nullptr) {
+                    for (auto* ln : pit->second->lanes) {
+                        if (ln != nullptr && ln != rc &&
+                            ln->parked_contains(pk)) {
+                            other_lane = true;
+                            break;
+                        }
+                    }
+                }
+                std::snprintf(pbuf, sizeof(pbuf),
+                              "park miss%s conn=%04X %.200s",
+                              other_lane ? " (parked on other lane)" : "",
+                              static_cast<unsigned>(
+                                  reinterpret_cast<std::uintptr_t>(rc) &
+                                  0xFFFFu),
+                              name.c_str());
+            }
+            cli_trace_line(cli_trace_ms(), alias.c_str(), "AdsOpenTable",
+                           pbuf);
+        }
         if (adopted) {
             adopted->row_valid = false;
             adopted->rec_count_cached = false;
@@ -7853,6 +8360,9 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
             adopted->found_cached = false;
             adopted->nav_at_bof = adopted->nav_at_eof = false;
             adopted->last_nav = 0;  // re-stamped by the warm GotoTop below
+            adopted->pair_valid = false;
+            adopted->anchor_ok = false;
+            adopted->parked_nav_which = 0;
             adopted->flush_file_pending = false;
             adopted->close_all_indexes_pending = false;
             adopted->pending_order = false;
@@ -7906,9 +8416,25 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
             remote_flush_pools(rc);
             lk.lock();
         }
+        // Release s.mu across the OpenTable round-trip (same rule as the
+        // pool flush above and the production auto-open below). Holding
+        // it here blocks every other ABI call in the process for a full
+        // RTT, and with an in-process server (local serverd / tests) it
+        // deadlocks: this thread waits on rc's request lock, the lane
+        // thread that owns it waits on a reply, and the server handler
+        // for that reply waits on s.mu. Nothing below touches shared
+        // state until the lock is re-taken.
+        lk.unlock();
         auto otr = rc->open_table(name,
             static_cast<std::uint16_t>(map_open_mode(usMode)));
-        if (!otr) return fail(otr.error());
+        lk.lock();
+        if (!otr) {
+            openads::abi::create_diag::Scope diag_scope(name,
+                openads::abi::create_diag::correlation);
+            openads::abi::create_diag::log("client-open-fail", otr.error().code,
+                "wire-open", otr.error().sub_code);
+            return fail(otr.error());
+        }
         auto& ot = otr.value();
         auto rt = std::make_unique<openads::network::RemoteTable>();
         rt->conn = rc;
@@ -7919,6 +8445,25 @@ UNSIGNED32 ENTRYPOINT AdsOpenTable(ADSHANDLE  hConnect,
         rt->open_mode_raw = usMode;
         rt->open_exclusive =
             (map_open_mode(usMode) == openads::engine::OpenMode::Exclusive);
+        // Table type is decided by the server from the opened file's
+        // extension alone (.adt -> ADS_ADT, anything else -> ADS_CDX;
+        // see the GetTableType handler). The name we just opened carries
+        // that extension, so answer it locally. No extension -> leave it
+        // to the wire (the server may have resolved one).
+        {
+            std::string ext = std::filesystem::path(name).extension().string();
+            for (auto& c : ext)
+                c = static_cast<char>(std::tolower(
+                        static_cast<unsigned char>(c)));
+            if (!ext.empty()) {
+                rt->cached_table_type = (ext == ".adt") ? ADS_ADT : ADS_CDX;
+                rt->table_type_cached = true;
+            }
+        }
+        cli_trace_table_open(rt.get());
+        cli_trace_tbl(rt.get(), "AdsOpenTable", "opened id=%u mode=%u",
+                      static_cast<unsigned>(rt->id),
+                      static_cast<unsigned>(usMode));
         rc->deferred_open_tables += 1;
         Handle gh = s.registry.register_object(
             HandleKind::RemoteTable, rt.get());
@@ -8580,11 +9125,23 @@ UNSIGNED32 ENTRYPOINT AdsGetRecordLength(ADSHANDLE hTable, UNSIGNED32* pulLen) {
             *pulLen = rt->cached_record_length;
             return ok();
         }
+        // Re-open of a table already measured on this connection with
+        // the identical schema: same file layout, same length.
+        const std::string memo_key = remote_record_length_key(rt);
+        if (!memo_key.empty() &&
+            rt->conn->recall_record_length(memo_key,
+                                           rt->cached_record_length)) {
+            rt->record_length_cached = true;
+            *pulLen = rt->cached_record_length;
+            return ok();
+        }
         auto r = rt->conn->get_record_length(rt->id);
         if (!r) return fail(r.error());
         *pulLen = r.value();
         rt->cached_record_length = r.value();
         rt->record_length_cached = true;
+        if (!memo_key.empty())
+            rt->conn->remember_record_length(memo_key, r.value());
         return ok();
     }
     Table* t = get_table(hTable);
@@ -8972,6 +9529,8 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
     }
     const auto rel  = openads::abi::to_internal(pucName, 0);
     const auto defs = openads::abi::to_internal(pucFields, 0);
+    openads::abi::create_diag::Scope create_scope(rel,
+        openads::abi::create_diag::correlation);
     const bool is_vfp = (usTableType == ADS_VFP);
     auto fields = parse_rddads_field_defs(defs, is_vfp);
     if (fields.empty()) {
@@ -9050,11 +9609,16 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
             // Create-over-existing must see closed files (SAP: overwrite
             // when closed, 7040 when open) — a parked handle reads as open.
             remote_flush_pools(rc);
+            openads::abi::create_diag::log("client-wire-begin");
             auto cr = rc->create_table(rel, defs,
                                        static_cast<std::uint16_t>(usTableType),
                                        static_cast<std::uint16_t>(usCharType),
                                        static_cast<std::uint16_t>(usMemoBlockSize));
-            if (!cr) return fail(cr.error());
+            if (!cr) {
+                openads::abi::create_diag::log("client-wire-fail", cr.error().code);
+                return fail(cr.error());
+            }
+            openads::abi::create_diag::log("client-wire-ok");
             // Re-open via the normal remote path so production-bag auto-open
             // and the implicit GotoTop match AdsOpenTable semantics.
             std::vector<UNSIGNED8> namebuf(rel.size() + 1, 0);
@@ -9064,8 +9628,13 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
                 (usTableType == ADS_ADT) ? ADS_ADT
                 : (usTableType == ADS_VFP) ? ADS_VFP
                 : ADS_CDX;
-            return AdsOpenTable(rc_h, namebuf.data(), pucAlias,
+            const UNSIGNED32 reopen_rc = AdsOpenTable(rc_h, namebuf.data(), pucAlias,
                                 open_type, usCharType, 0, 0, 1, phTable);
+            const auto reopen_error = reopen_rc ? openads::abi::last_error_code() : 0;
+            openads::abi::create_diag::log(reopen_rc ? "client-reopen-fail" : "client-reopen-ok",
+                                           reopen_rc, reopen_rc && reopen_error != static_cast<std::int32_t>(reopen_rc)
+                                               ? "last-error-differs" : "last-error-matches");
+            return reopen_rc;
         }
         // Explicit handle to a disconnected remote connection with no
         // live remote to fall back to: fail fast rather than writing a
@@ -9234,9 +9803,11 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
             if (const UNSIGNED32 wrc = write_new_table_file(
                     full.string(), adt_file, "AdsCreateTable: ADT");
                 wrc != openads::AE_SUCCESS) {
+                openads::abi::create_diag::log("adt-write-fail", wrc);
                 return wrc;
             }
         }
+        openads::abi::create_diag::log("adt-write-ok");
 
         // Create a companion .adm for MEMO/BINARY/IMAGE fields
         if (has_companion) {
@@ -9244,7 +9815,11 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
             adm.replace_extension(".adm");
             { std::error_code ec; fs::remove(adm, ec); }
             auto mr = openads::drivers::adm::AdmMemo::create(adm.string());
-            if (!mr) return fail(mr.error());
+            if (!mr) {
+                openads::abi::create_diag::log("memo-create-fail",
+                    mr.error().code, "memo", mr.error().sub_code);
+                return fail(mr.error());
+            }
         }
 
         // Open via the standard path so the caller gets a usable handle
@@ -9255,8 +9830,12 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
         std::size_t adt_nb = std::min<std::size_t>(rel_adt.size(),
                                                     sizeof(adt_namebuf) - 1);
         std::memcpy(adt_namebuf, rel_adt.data(), adt_nb);
-        return AdsOpenTable(hConn, adt_namebuf, adt_namebuf,
+        const auto local_reopen_rc = AdsOpenTable(hConn, adt_namebuf, adt_namebuf,
                             ADS_ADT, usCharType, 0, 0, 1, phTable);
+        const auto captured_error = local_reopen_rc ? openads::abi::last_error_code() : 0;
+        openads::abi::create_diag::log(local_reopen_rc ? "server-abi-reopen-fail" : "server-abi-reopen-ok",
+            local_reopen_rc, captured_error == static_cast<std::int32_t>(local_reopen_rc) ? "last-error-matches" : "last-error-differs");
+        return local_reopen_rc;
     }
 
     if (is_vfp) {
@@ -9321,9 +9900,11 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
             if (const UNSIGNED32 wrc = write_new_table_file(
                     full.string(), file, "AdsCreateTable: VFP");
                 wrc != openads::AE_SUCCESS) {
+                openads::abi::create_diag::log("vfp-write-fail", wrc);
                 return wrc;
             }
         }
+        openads::abi::create_diag::log("vfp-write-ok");
 
         if (has_memo) {
             fs::path fpt = full;
@@ -9331,14 +9912,22 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
             { std::error_code ec; fs::remove(fpt, ec); }
             std::uint16_t bs = usMemoBlockSize != 0 ? usMemoBlockSize : 512;
             auto mr = openads::drivers::fpt::FptMemo::create(fpt.string(), bs);
-            if (!mr) return fail(mr.error());
+            if (!mr) {
+                openads::abi::create_diag::log("memo-create-fail",
+                    mr.error().code, "memo", mr.error().sub_code);
+                return fail(mr.error());
+            }
         }
 
         UNSIGNED8 namebuf[260] = {0};
         std::size_t nb = std::min<std::size_t>(rel.size(), sizeof(namebuf) - 1);
         std::memcpy(namebuf, rel.data(), nb);
-        return AdsOpenTable(hConn, namebuf, namebuf,
+        const auto local_reopen_rc = AdsOpenTable(hConn, namebuf, namebuf,
                             ADS_VFP, usCharType, 0, 0, 1, phTable);
+        const auto captured_error = local_reopen_rc ? openads::abi::last_error_code() : 0;
+        openads::abi::create_diag::log(local_reopen_rc ? "server-abi-reopen-fail" : "server-abi-reopen-ok",
+            local_reopen_rc, captured_error == static_cast<std::int32_t>(local_reopen_rc) ? "last-error-matches" : "last-error-differs");
+        return local_reopen_rc;
     }
 
     // Ã¢â€â‚¬Ã¢â€â‚¬ DBF creation path (existing) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
@@ -9405,9 +9994,11 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
         if (const UNSIGNED32 wrc = write_new_table_file(
                 full.string(), file, "AdsCreateTable");
             wrc != openads::AE_SUCCESS) {
+            openads::abi::create_diag::log("dbf-write-fail", wrc);
             return wrc;
         }
     }
+    openads::abi::create_diag::log("dbf-write-ok");
 
     // If the field list declares any memo (M) field, stage an empty
     // .fpt next to the .dbf -- Connection::open_table auto-attaches it,
@@ -9425,7 +10016,11 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
             // usMemoBlockSize.
             std::uint16_t bs = usMemoBlockSize != 0 ? usMemoBlockSize : 512;
             auto mr = openads::drivers::fpt::FptMemo::create(fpt.string(), bs);
-            if (!mr) return fail(mr.error());
+            if (!mr) {
+                openads::abi::create_diag::log("memo-create-fail",
+                    mr.error().code, "memo", mr.error().sub_code);
+                return fail(mr.error());
+            }
         }
     }
 
@@ -9434,10 +10029,14 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
     UNSIGNED8 namebuf[260] = {0};
     std::size_t nb = std::min<std::size_t>(rel.size(), sizeof(namebuf) - 1);
     std::memcpy(namebuf, rel.data(), nb);
-    return AdsOpenTable(hConn, namebuf, namebuf,
+    const auto local_reopen_rc = AdsOpenTable(hConn, namebuf, namebuf,
                         ADS_CDX,             // table type
                         usCharType, 0, 0, 1, // char/lock/checkrights/mode
                         phTable);
+    const auto captured_error = local_reopen_rc ? openads::abi::last_error_code() : 0;
+    openads::abi::create_diag::log(local_reopen_rc ? "server-abi-reopen-fail" : "server-abi-reopen-ok",
+        local_reopen_rc, captured_error == static_cast<std::int32_t>(local_reopen_rc) ? "last-error-matches" : "last-error-differs");
+    return local_reopen_rc;
 }
 
 UNSIGNED32 ENTRYPOINT AdsDropTable(ADSHANDLE     hConnect,
@@ -9969,6 +10568,24 @@ UNSIGNED32 ENTRYPOINT AdsRefreshRecord(ADSHANDLE hTable) {
     arc2_trace("AdsRefreshRecord");
     if (auto* rt = get_remote_table(hTable)) {
         if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
+        // Refresh right after a GotoRecord on this handle, with nothing
+        // at all sent to the server in between (no lock, write, nav or
+        // read frame) and the cursor still on the row that ack carried:
+        // the server's GotoRecord had just re-read that row from disk,
+        // which is all a refresh does. Serve it from that ack.
+        if (rt->goto_row_fresh && rt->row_valid && rt->conn != nullptr &&
+            rt->goto_row_frame_seq == rt->conn->frame_seq() &&
+            rt->current_recno == rt->goto_row_recno &&
+            rt->cursor_lag == 0 && rt->pending_sets.empty()) {
+            rt->goto_row_fresh = false;
+            cli_trace_tbl(rt, "AdsRefreshRecord", "served from GotoRecord ack");
+            rt->invalidate_prefetch();
+            rt->rec_count_cached = false;
+            rt->key_count_cached = false;
+            rt->key_counts.clear();
+            return ok();
+        }
+        rt->goto_row_fresh = false;
         remote_settle_cursor(rt);                   // M12.21 option C
         rt->row_valid = false;                      // M12.17 cache invalidation
         rt->rec_count_cached = false;
@@ -10041,8 +10658,76 @@ UNSIGNED32 ENTRYPOINT AdsGotoRecord(ADSHANDLE hTable, UNSIGNED32 ulRecord) {
         // walk on the very next AdsGetRelKeyPos call (~22 sec for 9500 records).
         const std::uint32_t prev_recno =
             rt->row_valid ? rt->current_recno : 0u;
-        auto r = rt->conn->goto_record(rt, ulRecord);
-        if (!r) return fail(r.error());
+        // GO 0 on a table the server certified physically EMPTY with the
+        // cursor already in the empty (BOF+EOF, no row) state: the server
+        // keeps that state (Table::goto_record preserves the phantom
+        // position on GO 0 even if another station appended meanwhile)
+        // and would send back exactly the bounds/recno we already hold.
+        // Answer it locally. GO n>0 always goes to the wire (a peer may
+        // have appended record n). Only for record count 0: on a
+        // non-empty table GO 0 moves the server's engine cursor.
+        const bool empty_goto_exact =
+            ulRecord == 0u &&
+            remote_cursor_proven_empty(rt) &&
+            rt->count_bound_ok && rt->count_bound == 0 &&
+            rt->count_bound_seq == rt->conn->nav_seq();
+        const bool empty_goto =
+            empty_goto_exact || remote_empty_window(rt);
+        // mtfix12 R2 — self-GotoRecord: the app re-issues GotoRecord
+        // for the recno the server cursor already sits on (FWH xBrowse
+        // bookmark restore). Serve locally when the certified anchor
+        // IS the wanted recno, the row cache holds that very row, no
+        // prefetch drain is outstanding (lag 0: client logical ==
+        // server cursor), and the freshness envelope holds —
+        // conn-wide by default, per-table under the explicit opt-in.
+        // The serve is byte-identical to the wire ack: same row (cache),
+        // same position (anchor), lag stays 0, keyno preserved below
+        // (ulRecord == prev_recno), duplicate-nav stamp expired as a
+        // real frame would.
+        const bool self_goto =
+            ulRecord != 0u && rt->row_valid &&
+            rt->current_recno == ulRecord && rt->cursor_lag == 0 &&
+            rt->anchor_ok && rt->anchor_recno == ulRecord &&
+            rt->pending_sets.empty() &&
+            (remote_self_goto_per_table()
+                 ? rt->anchor_tbl_seq == rt->conn->tbl_nav_seq(rt->id)
+                 : rt->anchor_seq == rt->conn->nav_seq());
+        rt->goto_row_fresh = false;
+        if (self_goto) {
+            cli_trace_tbl(rt, "AdsGotoRecord", "served locally (self-goto)");
+            // A wire GotoRecord ack carries the row but NO lookahead
+            // block, and its trailer parse clears the queue — mirror
+            // that exactly, or a following Skip drains rows a real
+            // reposition would have discarded (the ramp test caught
+            // this: the skip never reached the wire).
+            rt->invalidate_prefetch();
+            rt->goto_row_fresh     = true;
+            rt->goto_row_frame_seq = rt->conn->frame_seq();
+            rt->goto_row_recno     = rt->current_recno;
+            rt->last_nav = 0;  // a real frame would have expired it
+        } else if (empty_goto) {
+            if (empty_goto_exact) {
+                cli_trace_tbl(rt, "AdsGotoRecord", "served locally (empty table)");
+                rt->invalidate_prefetch();
+                // A real frame would have expired the duplicate-nav stamp.
+                rt->last_nav = 0;
+                rt->pair_valid = false;
+                rt->anchor_ok = false;  // landed on no row
+            } else {
+                cli_trace_tbl(rt, "AdsGotoRecord",
+                              "empty window: served locally want=%u",
+                              ulRecord);
+                remote_empty_restamp(rt);
+            }
+        } else {
+            auto r = rt->conn->goto_record(rt, ulRecord);
+            if (!r) return fail(r.error());
+            if (rt->row_valid) {
+                rt->goto_row_fresh     = true;
+                rt->goto_row_frame_seq = rt->conn->frame_seq();
+                rt->goto_row_recno     = rt->current_recno;
+            }
+        }
         if (remote_table_has_index(rt)) {
             // Only invalidate when the cursor actually moved: same-record
             // restores (the xbrowse common case) keep the cached key number.
@@ -10132,39 +10817,12 @@ UNSIGNED32 ENTRYPOINT AdsCheckExistence(ADSHANDLE hConn, UNSIGNED8* pucName,
     auto name = openads::abi::to_internal(pucName, 0);
     auto ctx = resolve_fs_conn(hConn);
     if (ctx.remote) {
-        // Open-bag short-circuit (per-USE VouExistIndex probes): a bag
-        // bound by any live table on this connection trivially exists
-        // — the app is reading through it. Matched by lowercased stem
-        // (no directory, no extension; .cdx/.z01 are equivalent
-        // production spellings). False positives are safe (a real
-        // open follows and errors properly); false negatives never
-        // happen here.
-        auto stem_of = [](const std::string& p) {
-            std::string b = p;
-            auto sep = b.find_last_of("/\\");
-            if (sep != std::string::npos) b = b.substr(sep + 1);
-            auto dot = b.find_last_of('.');
-            if (dot != std::string::npos) b = b.substr(0, dot);
-            for (auto& c : b)
-                c = static_cast<char>(std::tolower(
-                        static_cast<unsigned char>(c)));
-            return b;
-        };
-        const std::string want = stem_of(name);
-        if (!want.empty()) {
-            for (auto& kv : remote_table_store()) {
-                auto* rt = kv.first;
-                if (rt == nullptr || rt->conn != ctx.remote) continue;
-                if (stem_of(rt->prod_bag_path) == want ||
-                    (!rt->last_open_bag.empty() &&
-                     stem_of(rt->last_open_bag) == want)) {
-                    *pbExists = 1;
-                    return ok();
-                }
-            }
-        }
+        // External directory/file changes require a wire probe even when an
+        // open table or index has the same stem: existence is not ownership.
         auto r = ctx.remote->file_exists(name);
         if (!r) return fail(r.error());
+        cli_trace("FileExists", "probe %s -> %s (wire)", name.c_str(),
+                  r.value() ? "yes" : "no");
         *pbExists = r.value() ? 1 : 0;
         return ok();
     }
@@ -10861,7 +11519,19 @@ UNSIGNED32 ENTRYPOINT AdsCloseTable(ADSHANDLE hTable) {
                 // reading its members is use-after-move (it crashed).
                 std::string pkey = remote_pool_key(owned->name, owned->alias,
                                                    owned->open_mode_raw);
+                openads::network::RemoteTable* traced = owned.get();
+                if (cli_trace_on()) {
+                    cli_trace_tbl(traced, "AdsCloseTable", "parked id=%u",
+                                  static_cast<unsigned>(traced->id));
+                }
                 rc->parked_store(std::move(pkey), std::move(owned), evicted);
+                if (cli_trace_on()) {
+                    for (auto& e : evicted) {
+                        cli_trace_tbl(e.get(), "AdsCloseTable",
+                                      "evicted from park id=%u",
+                                      e ? static_cast<unsigned>(e->id) : 0u);
+                    }
+                }
                 for (auto& e : evicted) remote_close_table_live(0, e.get());
                 return ok();
             }
@@ -10870,6 +11540,11 @@ UNSIGNED32 ENTRYPOINT AdsCloseTable(ADSHANDLE hTable) {
         // server close flushes data via its shadow handle and purges
         // the table's index bindings, so these frames would be waste.
         // A parked index snapshot dies with the handle (same purge).
+        if (cli_trace_on()) {
+            cli_trace_tbl(rt, "AdsCloseTable", "real close id=%u reason=%s",
+                          static_cast<unsigned>(rt->id),
+                          remote_table_unpoolable_reason(rt, hTable));
+        }
         rt->flush_file_pending = false;
         rt->close_all_indexes_pending = false;
         rt->indexes_parked = false;
@@ -10921,6 +11596,7 @@ UNSIGNED32 ENTRYPOINT AdsCloseTable(ADSHANDLE hTable) {
 UNSIGNED32 ENTRYPOINT AdsGotoTop(ADSHANDLE hTable) {
     arc2_trace("AdsGotoTop");
     if (auto* ri = get_remote_index(hTable)) {
+        if (ri->parent) ri->parent->created_order_focus = false;
         // Sets + teardown flush here, but NOT a deferred order switch:
         // that absorbs into the nav below (fused frame) when it targets
         // this order, or flushes plainly inside remote_index_goto_top's
@@ -10967,6 +11643,18 @@ UNSIGNED32 ENTRYPOINT AdsGotoTop(ADSHANDLE hTable) {
                 apply_relations_for_handle(to_ads_handle(th));
             return ok();
         }
+        if (remote_nav_pair(ri->parent, 1, ri->id)) {
+            // mtfix12 R1: the preceding GotoBottom certified this
+            // landing in the same server visit; apply it verbatim.
+            auto pr = ri->parent->conn->apply_pair_blob(ri->parent);
+            if (!pr) return fail(pr.error());
+            cli_trace_tbl(ri->parent, "AdsGotoTop(idx)", "pair certified");
+            remote_sync_keyno_gototop(ri->parent);
+            remote_nav_stamp(ri->parent, 1, ri->id);
+            if (Handle th = handle_for_remote_table(ri->parent))
+                apply_relations_for_handle(to_ads_handle(th));
+            return ok();
+        }
         auto r = openads::network::remote_index_goto_top(ri);
         if (!r) return fail(r.error());
         remote_sync_keyno_gototop(ri->parent);
@@ -10980,6 +11668,15 @@ UNSIGNED32 ENTRYPOINT AdsGotoTop(ADSHANDLE hTable) {
         return ok();
     }
     if (auto* rt = get_remote_table(hTable)) {
+        // Stock rddads sets focus 0 by switching from index to table handle,
+        // without a SetOrder call. Drop only an implicitly inherited order.
+        if (!rt->explicit_order_focus && !rt->created_order_focus &&
+            (rt->active_index_id != 0 ||
+             (rt->server_order_id != 0 && rt->server_order_id != openads::network::RemoteTable::kOrderUnknown) ||
+             (rt->pending_order && rt->pending_order_id != 0))) {
+            if (UNSIGNED32 rc = AdsSetIndexOrderByHandle(hTable, 0); rc != 0)
+                return rc;
+        }
         // Sets + teardown flush here; a deferred order switch absorbs
         // into the nav below (fused frame) instead of going out alone.
         if (UNSIGNED32 frc = remote_flush_sets(rt); frc != 0) return frc;
@@ -11025,6 +11722,15 @@ UNSIGNED32 ENTRYPOINT AdsGotoTop(ADSHANDLE hTable) {
             apply_relations_for_handle(hTable);
             return ok();
         }
+        if (remote_nav_pair(rt, 1, rt->server_order_id)) {
+            auto pr = rt->conn->apply_pair_blob(rt);
+            if (!pr) return fail(pr.error());
+            cli_trace_tbl(rt, "AdsGotoTop", "pair certified");
+            remote_sync_keyno_gototop(rt);
+            remote_nav_stamp(rt, 1, rt->server_order_id);
+            apply_relations_for_handle(hTable);
+            return ok();
+        }
         auto r = rt->conn->goto_top(rt);
         if (!r) return fail(r.error());
         remote_sync_keyno_gototop(rt);
@@ -11041,6 +11747,11 @@ UNSIGNED32 ENTRYPOINT AdsGotoTop(ADSHANDLE hTable) {
     }
     Table* t = get_table(hTable);
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
+    if (lookup_table_by_index(hTable) != nullptr) t->set_created_order_focus(false);
+    if (state().registry.lookup<Table>(hTable, HandleKind::Table) != nullptr &&
+        !t->explicit_order_focus()) {
+        park_active_order(t);
+    }
     auto r = t->goto_top();
     if (!r) return fail(r.error());
     snapshot_ri_pks(t);
@@ -11051,6 +11762,7 @@ UNSIGNED32 ENTRYPOINT AdsGotoTop(ADSHANDLE hTable) {
 UNSIGNED32 ENTRYPOINT AdsGotoBottom(ADSHANDLE hTable) {
     arc2_trace("AdsGotoBottom");
     if (auto* ri = get_remote_index(hTable)) {
+        if (ri->parent) ri->parent->created_order_focus = false;
         // Sets + teardown flush here, but NOT a deferred order switch:
         // that absorbs into the nav below (fused frame) when it targets
         // this order, or flushes plainly otherwise.
@@ -11093,6 +11805,17 @@ UNSIGNED32 ENTRYPOINT AdsGotoBottom(ADSHANDLE hTable) {
                 apply_relations_for_handle(to_ads_handle(th));
             return ok();
         }
+        if (remote_nav_pair(ri->parent, 2, ri->id)) {
+            // mtfix12 R1: the preceding GotoTop certified this landing.
+            auto pr = ri->parent->conn->apply_pair_blob(ri->parent);
+            if (!pr) return fail(pr.error());
+            cli_trace_tbl(ri->parent, "AdsGotoBottom(idx)", "pair certified");
+            remote_sync_keyno_gotobottom(ri->parent);
+            remote_nav_stamp(ri->parent, 2, ri->id);
+            if (Handle th = handle_for_remote_table(ri->parent))
+                apply_relations_for_handle(to_ads_handle(th));
+            return ok();
+        }
         auto r = openads::network::remote_index_goto_bottom(ri);
         if (!r) return fail(r.error());
         remote_sync_keyno_gotobottom(ri->parent);
@@ -11106,6 +11829,15 @@ UNSIGNED32 ENTRYPOINT AdsGotoBottom(ADSHANDLE hTable) {
         return ok();
     }
     if (auto* rt = get_remote_table(hTable)) {
+        // Stock rddads sets focus 0 by switching from index to table handle,
+        // without a SetOrder call. Drop only an implicitly inherited order.
+        if (!rt->explicit_order_focus && !rt->created_order_focus &&
+            (rt->active_index_id != 0 ||
+             (rt->server_order_id != 0 && rt->server_order_id != openads::network::RemoteTable::kOrderUnknown) ||
+             (rt->pending_order && rt->pending_order_id != 0))) {
+            if (UNSIGNED32 rc = AdsSetIndexOrderByHandle(hTable, 0); rc != 0)
+                return rc;
+        }
         // Sets + teardown flush here; a deferred order switch absorbs
         // into the nav below (fused frame) instead of going out alone.
         if (UNSIGNED32 frc = remote_flush_sets(rt); frc != 0) return frc;
@@ -11142,6 +11874,15 @@ UNSIGNED32 ENTRYPOINT AdsGotoBottom(ADSHANDLE hTable) {
             apply_relations_for_handle(hTable);
             return ok();
         }
+        if (remote_nav_pair(rt, 2, rt->server_order_id)) {
+            auto pr = rt->conn->apply_pair_blob(rt);
+            if (!pr) return fail(pr.error());
+            cli_trace_tbl(rt, "AdsGotoBottom", "pair certified");
+            remote_sync_keyno_gotobottom(rt);
+            remote_nav_stamp(rt, 2, rt->server_order_id);
+            apply_relations_for_handle(hTable);
+            return ok();
+        }
         auto r = rt->conn->goto_bottom(rt);
         if (!r) return fail(r.error());
         remote_sync_keyno_gotobottom(rt);
@@ -11158,6 +11899,11 @@ UNSIGNED32 ENTRYPOINT AdsGotoBottom(ADSHANDLE hTable) {
     }
     Table* t = get_table(hTable);
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
+    if (lookup_table_by_index(hTable) != nullptr) t->set_created_order_focus(false);
+    if (state().registry.lookup<Table>(hTable, HandleKind::Table) != nullptr &&
+        !t->explicit_order_focus()) {
+        park_active_order(t);
+    }
     auto r = t->goto_bottom();
     if (!r) return fail(r.error());
     snapshot_ri_pks(t);
@@ -11169,6 +11915,7 @@ UNSIGNED32 ENTRYPOINT AdsSkip(ADSHANDLE hTable, SIGNED32 lRows) {
     arc2_trace("AdsSkip");
     seek_last_retry_latch() = false;
     if (auto* ri = get_remote_index(hTable)) {
+        if (ri->parent) ri->parent->created_order_focus = false;
         cli_trace_tbl(ri->parent, "AdsSkip(idx)", "rows=%d", (int)lRows);
         openads::network::RemoteTable* rt = ri->parent;
         if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
@@ -11187,7 +11934,26 @@ UNSIGNED32 ENTRYPOINT AdsSkip(ADSHANDLE hTable, SIGNED32 lRows) {
         return ok();
     }
     if (auto* rt = get_remote_table(hTable)) {
+        // Stock rddads sets focus 0 by switching from index to table handle,
+        // without a SetOrder call. Drop only an implicitly inherited order.
+        const bool natural_transition = !rt->explicit_order_focus && !rt->created_order_focus &&
+            (rt->active_index_id != 0 ||
+             (rt->server_order_id != 0 && rt->server_order_id != openads::network::RemoteTable::kOrderUnknown) ||
+             (rt->pending_order && rt->pending_order_id != 0));
+        const std::uint32_t natural_anchor = rt->row_valid ? rt->current_recno : 0;
+        if (natural_transition) {
+            if (UNSIGNED32 rc = AdsSetIndexOrderByHandle(hTable, 0); rc != 0)
+                return rc;
+        }
         if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
+        // Cached boundary landings/read-ahead can leave the physical server
+        // cursor elsewhere. Clearing the order also drops their lag, so
+        // anchor a direct natural Skip at the client-visible physical row.
+        if ((natural_transition || (rt->server_order_id == 0 && rt->pair_local_position)) &&
+            natural_anchor != 0) {
+            auto r = rt->conn->goto_record(rt, natural_anchor);
+            if (!r) return fail(r.error());
+        }
         if (UNSIGNED32 frc = remote_close_parked_indexes(rt); frc != 0) {
             return frc;
         }
@@ -11240,6 +12006,11 @@ UNSIGNED32 ENTRYPOINT AdsSkip(ADSHANDLE hTable, SIGNED32 lRows) {
     }
     Table* t = get_table(hTable);
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
+    if (lookup_table_by_index(hTable) != nullptr) t->set_created_order_focus(false);
+    if (state().registry.lookup<Table>(hTable, HandleKind::Table) != nullptr &&
+        !t->explicit_order_focus()) {
+        park_active_order(t);
+    }
     auto r = t->skip(lRows);
     if (!r) return fail(r.error());
     snapshot_ri_pks(t);
@@ -12037,6 +12808,17 @@ UNSIGNED32 ENTRYPOINT AdsGetRecordNum(ADSHANDLE hTable, UNSIGNED16 /*bFilterOpti
             *pulRecordNum = rt->recno_bound;
             return ok();
         }
+        // mtfix12 R3 — the R2 anchor certifies the server cursor's
+        // recno even when the local row cache was dropped without a
+        // wire move. With no drain outstanding (lag 0), the wire answer
+        // would be exactly anchor_recno.
+        if (rt->anchor_ok && rt->cursor_lag == 0 &&
+            (remote_self_goto_per_table()
+                 ? rt->anchor_tbl_seq == rt->conn->tbl_nav_seq(rt->id)
+                 : rt->anchor_seq == rt->conn->nav_seq())) {
+            *pulRecordNum = rt->anchor_recno;
+            return ok();
+        }
         // Phantom derivation (no frame, no currency): at the EOF
         // phantom the recno is LastRec+1 by Clipper convention — a
         // pure function of the certified EOF flag plus the cached
@@ -12747,7 +13529,12 @@ bool fire_triggers_(Handle hConn, Connection* conn,
 UNSIGNED32 ENTRYPOINT AdsAppendRecord(ADSHANDLE hTable) {
     arc2_trace("AdsAppendRecord");
     if (auto* rt = get_remote_table(hTable)) {
-        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
+        openads::abi::create_diag::Scope append_scope(rt->name, {});
+        openads::abi::create_diag::log("client-append-enter");
+        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) {
+            openads::abi::create_diag::log("client-append-preflush-fail", frc);
+            return frc;
+        }
         remote_settle_cursor(rt);                   // M12.21 option C
         rt->row_valid        = false;               // M12.17
         rt->rec_count_cached = false;
@@ -12762,11 +13549,19 @@ UNSIGNED32 ENTRYPOINT AdsAppendRecord(ADSHANDLE hTable) {
         remote_clear_nav_boundaries(rt);
         rt->invalidate_prefetch();
         auto r = rt->conn->append_blank(rt->id);
-        if (!r) return fail(r.error());
+        if (!r) {
+            openads::abi::create_diag::log("client-append-fail", r.error().code,
+                "wire-append", r.error().sub_code);
+            return fail(r.error());
+        }
         // Fresh appends auto-lock (non-exclusive tables): pooled reuse
-        // must not resurrect a locked handle.
+        // must not resurrect a locked handle. The ack carries no
+        // recno, so the ledger cannot name the auto-lock -- mark the
+        // lock state uncertain until a full UnlockTable proves clear.
         rt->ever_locked = true;
+        rt->locks_uncertain = true;
         rt->write_dirty = true;
+        openads::abi::create_diag::log("client-append-ok");
         return ok();
     }
 #if defined(OPENADS_WITH_FIREBIRD)
@@ -12887,6 +13682,13 @@ UNSIGNED32 ENTRYPOINT AdsAppendRecord(ADSHANDLE hTable) {
 UNSIGNED32 ENTRYPOINT AdsWriteRecord(ADSHANDLE hTable) {
     arc2_trace("AdsWriteRecord");
     if (auto* rt = get_remote_table(hTable)) {
+        // Snapshot dirtiness before remote_flush_pending drains the
+        // buffered sets: a commit with nothing written since the last
+        // flush (rddads DBCOMMITALL touches every open workarea) owes
+        // the server no frame at all -- it would only fsync unchanged
+        // pages, 1 RTT each, 16 of them after a Vouch voucher save.
+        const bool had_writes =
+            !rt->pending_sets.empty() || rt->write_dirty;
         if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         rt->row_valid = false;                      // M12.17 cache invalidation
         // A write can move the row in/out of a conditional order or
@@ -12900,9 +13702,18 @@ UNSIGNED32 ENTRYPOINT AdsWriteRecord(ADSHANDLE hTable) {
         // instead of serving a stale current_keyno.
         rt->keyno_valid = false;
         rt->invalidate_prefetch();
+        if (!had_writes) {
+            cli_trace_tbl(rt, "AdsWriteRecord", "clean: flush skipped");
+            return ok();
+        }
         auto r = rt->conn->flush_table(rt->id);
         if (!r) return fail(r.error());
-        rt->write_dirty = true;
+        // kCapFlushTableDurable servers run the full file-buffers
+        // flush inside the FlushTable handler, so the commit is
+        // durable right here and a trailing AdsFlushFileBuffers owes
+        // nothing (1 RTT saved per commit). Old servers keep the
+        // classic two-frame pair.
+        rt->write_dirty = !rt->conn->server_flush_table_durable();
         return ok();
     }
 #if defined(OPENADS_WITH_FIREBIRD)
@@ -14061,6 +14872,13 @@ UNSIGNED32 ENTRYPOINT AdsLockRecord(ADSHANDLE hTable, UNSIGNED32 ulRecord) {
         auto r = rt->conn->lock_record(rt->id, ulRecord);
         if (!r) return fail(r.error());
         rt->ever_locked = true;
+        // ulRecord == 0 -> the current record (ACE convention). With
+        // no valid cursor the recno is unknowable client-side, so the
+        // ledger marks itself uncertain rather than guessing.
+        const std::uint32_t lrec = (ulRecord == 0)
+            ? (rt->row_valid ? rt->current_recno : 0) : ulRecord;
+        if (lrec == 0) rt->locks_uncertain = true;
+        else rt->held_recs.insert(lrec);
         return ok();
     }
 #if defined(OPENADS_WITH_FIREBIRD)
@@ -14137,6 +14955,11 @@ UNSIGNED32 ENTRYPOINT AdsUnlockRecord(ADSHANDLE hTable, UNSIGNED32 ulRecord) {
         if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         auto r = rt->conn->unlock_record(rt->id, ulRecord);
         if (!r) return fail(r.error());
+        const std::uint32_t urec = (ulRecord == 0)
+            ? (rt->row_valid ? rt->current_recno : 0) : ulRecord;
+        if (urec != 0) rt->held_recs.erase(urec);
+        // locks_uncertain survives: only a full UnlockTable (or the
+        // close) proves the append auto-lock is gone.
         return ok();
     }
 #if defined(OPENADS_WITH_FIREBIRD)
@@ -14209,6 +15032,7 @@ UNSIGNED32 ENTRYPOINT AdsLockTable(ADSHANDLE hTable) {
         auto r = rt->conn->lock_table(rt->id);
         if (!r) return fail(r.error());
         rt->ever_locked = true;
+        rt->table_lock_held = true;
         return ok();
     }
 #if defined(OPENADS_WITH_FIREBIRD)
@@ -14279,8 +15103,24 @@ UNSIGNED32 ENTRYPOINT AdsUnlockTable(ADSHANDLE hTable) {
     arc2_trace("AdsUnlockTable");
     if (auto* rt = get_remote_table(hTable)) {
         if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
+        // Lock ledger: with nothing held on the server, the frame
+        // would release zero locks. Harbour rddads dbUnlock() has no
+        // client-side lock list and calls this blindly before every
+        // lock/append -- that blind call is most of the UnlockTable
+        // traffic in a Vouch save.
+        if (rt->held_recs.empty() && !rt->table_lock_held &&
+            !rt->locks_uncertain) {
+            cli_trace_tbl(rt, "AdsUnlockTable", "skipped: no locks held");
+            return ok();
+        }
         auto r = rt->conn->unlock_table(rt->id);
         if (!r) return fail(r.error());
+        // SAP ACE semantics: AdsUnlockTable releases ALL locks (table
+        // AND record, including the append auto-lock), so the ledger
+        // is provably empty again.
+        rt->held_recs.clear();
+        rt->table_lock_held = false;
+        rt->locks_uncertain = false;
         return ok();
     }
 #if defined(OPENADS_WITH_FIREBIRD)
@@ -14399,6 +15239,8 @@ struct IndexBinding {
     std::string                             tag_name;
     std::unique_ptr<openads::drivers::IIndex> parked;  // nullptr when this is the active binding
     std::string                             path;     // resolved index file path (M9.14)
+    openads::engine::Scope parked_scope{};
+    std::optional<bool> parked_descending{};
 };
 
 std::unordered_map<ADSHANDLE, IndexBinding>& index_bindings() {
@@ -14430,6 +15272,10 @@ void park_active_order(Table* t) {
     auto& m = index_bindings();
     auto bit = m.find(act_it->second);
     if (bit != m.end()) {
+        if (auto* o = t->order()) {
+            bit->second.parked_scope = o->scope();
+            bit->second.parked_descending = o->descending_traverse();
+        }
         auto taken = t->take_order();
         openads::drivers::IIndex* raw = taken.get();
         bit->second.parked = std::move(taken);
@@ -14499,6 +15345,10 @@ openads::util::Result<void> activate_binding(ADSHANDLE h) {
     if (act_it != act.end()) {
         auto prev = m.find(act_it->second);
         if (prev != m.end()) {
+            if (auto* o = t->order()) {
+                prev->second.parked_scope = o->scope();
+                prev->second.parked_descending = o->descending_traverse();
+            }
             auto taken = t->take_order();
             openads::drivers::IIndex* raw = taken.get();
             prev->second.parked = std::move(taken);
@@ -14514,6 +15364,9 @@ openads::util::Result<void> activate_binding(ADSHANDLE h) {
         openads::drivers::IIndex* raw = it->second.parked.get();
         t->unregister_extra_index_view(raw);
         t->set_order(std::move(it->second.parked));
+        t->order()->scope() = it->second.parked_scope;
+        if (it->second.parked_descending.has_value())
+            t->order()->set_descending_traverse(*it->second.parked_descending);
     }
     act[t] = h;
     return {};
@@ -14872,6 +15725,21 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
                 rt->active_index_id = rt->parked_active;
                 rt->indexes_parked = false;
                 rt->close_all_indexes_pending = false;
+                // Restore the nav stamp parked at CloseAll when it still
+                // proves the server cursor: same order coming back, no
+                // cursor-affecting frame since the park (seq gate). The
+                // post-unpark GotoTop(idx) then dedupes locally instead
+                // of paying a refresh RTT for a position the server
+                // never lost.
+                if (rt->parked_nav_which != 0 &&
+                    rt->parked_nav_order == rt->parked_active &&
+                    rt->parked_nav_seq == rt->conn->nav_seq()) {
+                    rt->last_nav       = rt->parked_nav_which;
+                    rt->last_nav_order = rt->parked_nav_order;
+                    rt->last_nav_row   = rt->parked_nav_row;
+                    rt->last_nav_seq   = rt->parked_nav_seq;
+                }
+                rt->parked_nav_which = 0;
                 cli_trace_tbl(rt, "AdsOpenIndex", "unpark hit %.32s",
                               rt->parked_bag_stem.c_str());
                 auto& s = state();
@@ -14965,6 +15833,11 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
             }
             ++count;
             remote_indexes.emplace(gh, std::move(ri));
+            if (cli_trace_on()) {
+                auto& trace = cli_trace_state();
+                std::lock_guard<std::mutex> trace_lk(trace.mu);
+                trace.indexes[{rt->conn, ent.id}] = rt->alias.empty() ? rt->name : rt->alias;
+            }
             // Dedup by tag: production-CDX auto-open and a later explicit
             // AdsOpenIndex on the same bag must not register the order
             // twice, or AdsGetNumIndexes / by-order resolution skew.
@@ -15434,6 +16307,14 @@ UNSIGNED32 ENTRYPOINT AdsCloseAllIndexes(ADSHANDLE hTable) {
             rt->index_handles.clear();
             rt->active_index_id = 0;
             rt->indexes_parked = true;
+            // Park the nav stamp with the bindings: if the same order
+            // comes back via an unpark with no intervening wire nav
+            // (seq-gated), the post-unpark GotoTop dedupes instead of
+            // paying a refresh frame for state the server never lost.
+            rt->parked_nav_which = rt->last_nav;
+            rt->parked_nav_order = rt->last_nav_order;
+            rt->parked_nav_row   = rt->last_nav_row;
+            rt->parked_nav_seq   = rt->last_nav_seq;
             cli_trace_tbl(rt, "AdsCloseAllIndexes", "parked %u tags", ntags);
         } else if (rt->indexes_parked) {
             cli_trace_tbl(rt, "AdsCloseAllIndexes", "repeat clear, park kept");
@@ -15443,6 +16324,8 @@ UNSIGNED32 ENTRYPOINT AdsCloseAllIndexes(ADSHANDLE hTable) {
         // Order belief changed with no frame: expire the nav stamp so a
         // subsequent GotoTop cannot dedupe against the old binding.
         rt->last_nav = 0;
+        rt->pair_valid = false;
+        rt->anchor_ok = false;
         rt->close_all_indexes_pending = true;
         return ok();
     }
@@ -15492,6 +16375,27 @@ UNSIGNED32 ENTRYPOINT AdsCloseAllIndexes(ADSHANDLE hTable) {
     return ok();
 }
 
+// One-off client ABI discriminator for Vouch INDEX ON. Off unless explicitly
+// enabled. Keep this independent of wire_trace: a rejected call never hits wire.
+static void create_index_diag(const char* fmt, ...) {
+    const char* path = std::getenv("OPENADS_CREATE_INDEX_DIAG_FILE");
+    if (!path || !*path) return;
+    static std::mutex mu;
+    std::lock_guard<std::mutex> lock(mu);
+    FILE* f = std::fopen(path, "a");
+    if (!f) return;
+    va_list args;
+    va_start(args, fmt);
+    std::vfprintf(f, fmt, args);
+    va_end(args);
+    std::fputc('\n', f);
+    std::fclose(f);
+}
+
+static const char* create_index_arg(const UNSIGNED8* p) {
+    return p ? reinterpret_cast<const char*>(p) : "<NULL>";
+}
+
 UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
                             UNSIGNED8*  pucFileName,
                             UNSIGNED8*  pucIndexName,
@@ -15502,8 +16406,15 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
                             UNSIGNED16  usPageSize,
                             ADSHANDLE*  phIndex) {
     arc2_trace("AdsCreateIndex61");
+    create_index_diag("61 ENTRY h=%llu file=%.160s tag=%.160s expr=%.160s cond=%.160s keyfilter=%.160s opts=0x%08lx page=%u out=%p",
+        static_cast<unsigned long long>(hTable), create_index_arg(pucFileName),
+        create_index_arg(pucIndexName), create_index_arg(pucExpr),
+        create_index_arg(pucCondition), create_index_arg(pucKeyFilter),
+        static_cast<unsigned long>(ulOptions), static_cast<unsigned>(usPageSize),
+        static_cast<void*>(phIndex));
     if (phIndex == nullptr || pucFileName == nullptr ||
         pucIndexName == nullptr || pucExpr == nullptr) {
+        create_index_diag("61 EXIT null-arg 5000 h=%llu", static_cast<unsigned long long>(hTable));
         return fail(openads::AE_INTERNAL_ERROR, "null arg");
     }
 #if defined(OPENADS_WITH_SQLITE)
@@ -15674,6 +16585,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
     }
 #endif
     if (auto* rt = get_remote_table(hTable)) {
+        create_index_diag("61 ROUTE remote h=%llu table_id=%u", static_cast<unsigned long long>(hTable), static_cast<unsigned>(rt->id));
         std::string path = openads::abi::to_internal(pucFileName, 0);
         path = normalize_index_path(std::move(path));
         std::string tag  = openads::abi::to_internal(pucIndexName, 0);
@@ -15682,10 +16594,19 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
             ? openads::abi::to_internal(pucCondition, 0) : std::string();
         std::string kf   = pucKeyFilter
             ? openads::abi::to_internal(pucKeyFilter, 0) : std::string();
+        create_index_diag("61 WIRE 0x94 h=%llu table_id=%u path=%.160s tag=%.160s",
+            static_cast<unsigned long long>(hTable), static_cast<unsigned>(rt->id),
+            path.c_str(), tag.c_str());
         auto r = rt->conn->create_index(rt->id, path, tag, expr,
                                          cond, kf,
                                          ulOptions, usPageSize);
-        if (!r) return fail(r.error());
+        if (!r) {
+            create_index_diag("61 WIRE error h=%llu code=%u (no success ACK)",
+                static_cast<unsigned long long>(hTable), static_cast<unsigned>(r.error().code));
+            return fail(r.error());
+        }
+        create_index_diag("61 WIRE ACK success h=%llu index_id=%u (0x95)",
+            static_cast<unsigned long long>(hTable), static_cast<unsigned>(r.value()));
         // Creating a tag opens EVERY tag in the bag (ADS semantics -- the
         // server-side create binds siblings as parked views), so refresh
         // the client registry from the server: OrdCount() (AdsGetNumIndexes)
@@ -15758,7 +16679,30 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
             rt->index_by_tag  = std::move(keep_tags);
             rt->index_handles = std::move(keep_handles);
         }
-        if (rt->active_index_id == 0) rt->active_index_id = r.value();
+        rt->created_order_focus = true;
+        // OpenIndex can replace the just-created local binding and its
+        // tag spelling (native ADI uses the expression field name). Use
+        // the fresh wire id from that bag rather than the stale create id.
+        std::uint32_t created_focus = r.value();
+        if (refr) {
+            for (const auto& ent : refr.value()) {
+                if (ent.tag == tag || refr.value().size() == 1) {
+                    created_focus = ent.id;
+                    break;
+                }
+            }
+        }
+        // The returned handle must reference the re-opened bag binding too.
+        if (auto* created = get_remote_index(*phIndex)) created->id = created_focus;
+        for (auto& mapping : rt->index_by_tag) {
+            if (mapping.second == r.value()) mapping.second = created_focus;
+        }
+        rt->active_index_id = created_focus;
+        auto focus_result = rt->conn->set_order(rt->id, created_focus);
+        if (!focus_result) return fail(focus_result.error());
+        rt->server_order_id = created_focus;
+        rt->pending_order = false;
+        rt->invalidate_prefetch();
         // Structural change: the bag gained a tag, so a parked snapshot
         // predates it — drop the park (the maps above were rebuilt fresh
         // from the server). The pending flag stays: the next flush sends
@@ -15770,8 +16714,11 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
     }
     Table* t = get_table(hTable);
     if (!t) {
+        create_index_diag("61 EXIT unknown-handle 5000 h=%llu remote_lookup_missed=1",
+            static_cast<unsigned long long>(hTable));
         return fail(openads::AE_INTERNAL_ERROR, "unknown table");
     }
+    create_index_diag("61 ROUTE native h=%llu", static_cast<unsigned long long>(hTable));
     // Settle any coalesced dirty record first: the build loop below reads
     // rows straight from disk, so a pending buffer edit would be indexed
     // from its stale on-disk image (and silently dropped by
@@ -16458,6 +17405,10 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
     if (prev != act.end()) {
         auto pit = m.find(prev->second);
         if (pit != m.end()) {
+            if (auto* o = t->order()) {
+                pit->second.parked_scope = o->scope();
+                pit->second.parked_descending = o->descending_traverse();
+            }
             auto displaced = t->take_order();
             pit->second.parked = std::move(displaced);
             t->register_extra_index_view(pit->second.parked.get());
@@ -16466,6 +17417,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
     t->set_order(std::move(idx_owner));
     m[h] = IndexBinding{t, tag, nullptr, p.string()};
     act[t] = h;
+    t->set_created_order_focus(true);
     // Clipper / Harbour: a fresh CREATE INDEX leaves the cursor
     // positioned at the new order's TOP key.
     (void)t->goto_top();
@@ -16478,11 +17430,18 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex(ADSHANDLE hTable, UNSIGNED8* pucFile,
                           UNSIGNED8* pucCondition, UNSIGNED32 ulOptions,
                           UNSIGNED16 usKeyType, ADSHANDLE* phIndex) {
     arc2_trace("AdsCreateIndex");
+    create_index_diag("legacy ENTRY h=%llu file=%.160s tag=%.160s expr=%.160s cond=%.160s opts=0x%08lx keytype=%u out=%p",
+        static_cast<unsigned long long>(hTable), create_index_arg(pucFile),
+        create_index_arg(pucTag), create_index_arg(pucExpr),
+        create_index_arg(pucCondition), static_cast<unsigned long>(ulOptions),
+        static_cast<unsigned>(usKeyType), static_cast<void*>(phIndex));
     if (phIndex == nullptr) {
+        create_index_diag("legacy EXIT null-out 5000 h=%llu", static_cast<unsigned long long>(hTable));
         return fail(openads::AE_INTERNAL_ERROR, "null index out-param");
     }
     // Legacy API: remote tables route through AdsCreateIndex61 (M12.16).
     if (get_remote_table(hTable) != nullptr) {
+        create_index_diag("legacy ROUTE 61 h=%llu", static_cast<unsigned long long>(hTable));
         return AdsCreateIndex61(hTable, pucFile, pucTag, pucExpr, pucCondition,
                                 nullptr, ulOptions,
                                 usKeyType ? usKeyType
@@ -16491,8 +17450,10 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex(ADSHANDLE hTable, UNSIGNED8* pucFile,
     }
     Table* t = get_table(hTable);
     if (!t) {
+        create_index_diag("legacy EXIT unknown-handle 5000 h=%llu", static_cast<unsigned long long>(hTable));
         return fail(openads::AE_INTERNAL_ERROR, "unknown table or null out");
     }
+    create_index_diag("legacy ROUTE native h=%llu", static_cast<unsigned long long>(hTable));
     // Settle any coalesced dirty record first (see AdsCreateIndex61).
     if (auto cr = t->commit_dirty_record(); !cr) return fail(cr.error());
     auto file = normalize_index_path(
@@ -16633,6 +17594,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex(ADSHANDLE hTable, UNSIGNED8* pucFile,
         m[h] = IndexBinding{t, tag, std::move(idx), file};
         t->register_extra_index_view(raw);
     }
+    t->set_created_order_focus(true);
     *phIndex = h;
     return ok();
 }
@@ -16954,6 +17916,26 @@ UNSIGNED32 ENTRYPOINT AdsGetAllLocks(ADSHANDLE hTable, UNSIGNED32* paRecnos,
                           UNSIGNED16* pusCount) {
     arc2_trace("AdsGetAllLocks");
     if (auto* rt = get_remote_table(hTable)) {
+        // The client lock ledger is complete unless an append
+        // auto-lock or an unresolvable current-record lock made it
+        // uncertain (and a table lock shadows the record list, so
+        // that case stays on the wire too). rddads polls this after
+        // every commit -- answering locally saves 1 RTT each time.
+        if (pusCount != nullptr && !rt->locks_uncertain &&
+            !rt->table_lock_held) {
+            cli_trace_tbl(rt, "AdsGetAllLocks",
+                          "served from client lock ledger");
+            const UNSIGNED16 lcap = *pusCount;
+            UNSIGNED16 li = 0;
+            if (paRecnos != nullptr) {
+                for (std::uint32_t lrn : rt->held_recs) {
+                    if (li >= lcap) break;
+                    paRecnos[li++] = lrn;
+                }
+            }
+            *pusCount = static_cast<UNSIGNED16>(rt->held_recs.size());
+            return ok();
+        }
         // M12.36 â€” remote record locks are server-managed; the
         // GetAllLocks wire opcode returns this connection's held list.
         if (pusCount == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
@@ -17001,6 +17983,8 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrder(ADSHANDLE hTable, UNSIGNED8* pucName) {
         if (UNSIGNED32 frc = remote_flush_teardown(rt); frc != 0) return frc;
         std::string name = pucName
             ? openads::abi::to_internal(pucName, 0) : std::string();
+        rt->explicit_order_focus = !name.empty();
+        rt->created_order_focus = false;
         // Resolve the target locally (case-insensitive, like the mirror
         // block below). Unmapped names stay kOrderUnknown and always go
         // out on the wire: the server resolves those, and a wrong local
@@ -17193,6 +18177,7 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrder(ADSHANDLE hTable, UNSIGNED8* pucName) {
         // into its slot so a subsequent AdsSetIndexOrder picks the
         // current Table::order_ up cleanly.
         park_active_order(t);
+        t->set_explicit_order_focus(false);
         return ok();
     }
     auto upper_eq = [](const std::string& a, const std::string& b) {
@@ -17213,6 +18198,7 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrder(ADSHANDLE hTable, UNSIGNED8* pucName) {
         if (b.table == t && upper_eq(b.tag_name, name)) {
             auto r = activate_binding(h);
             if (!r) return fail(r.error());
+            t->set_explicit_order_focus(true);
             return ok();
         }
     }
@@ -17227,6 +18213,8 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrderByHandle(ADSHANDLE hTable, ADSHANDLE hInde
         // (overwritten below — see ByName).
         if (UNSIGNED32 frc = remote_flush_sets(rt); frc != 0) return frc;
         if (UNSIGNED32 frc = remote_flush_teardown(rt); frc != 0) return frc;
+        rt->explicit_order_focus = hIndex != 0;
+        rt->created_order_focus = false;
         if (hIndex == 0) {
             // "Back to natural order" via the explicit API: send the reset
             // frame so the server drops its ordered_tables_ entry (it used
@@ -17305,6 +18293,7 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrderByHandle(ADSHANDLE hTable, ADSHANDLE hInde
         // Natural order (rddads' patched DbSetOrder(0) calls this): park
         // the active order back into its binding slot.
         park_active_order(t);
+        t->set_explicit_order_focus(false);
         return ok();
     }
     auto& m = index_bindings();
@@ -17317,6 +18306,7 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrderByHandle(ADSHANDLE hTable, ADSHANDLE hInde
     }
     auto r = activate_binding(hIndex);
     if (!r) return fail(r.error());
+    t->set_explicit_order_focus(true);
     return ok();
 }
 
@@ -19555,7 +20545,11 @@ UNSIGNED32 ENTRYPOINT AdsGetIndexHandle(ADSHANDLE hTable, UNSIGNED8* pucName,
     // Storm fix: reader must hold index_bindings_mu (binds are unlocked now).
     std::lock_guard<std::recursive_mutex> _rh_lk(index_bindings_mu());
     for (auto& [h, b] : index_bindings()) {
-        if (b.table == t && b.tag_name == name) { *phIndex = h; return ok(); }
+        if (b.table == t && b.tag_name.size() == name.size() &&
+            std::equal(b.tag_name.begin(), b.tag_name.end(), name.begin(),
+                [](unsigned char a, unsigned char z) {
+                    return std::toupper(a) == std::toupper(z);
+                })) { *phIndex = h; return ok(); }
     }
     return fail(openads::AE_INTERNAL_ERROR, "index name not found");
 }
@@ -19803,6 +20797,7 @@ static UNSIGNED32 ads_seek_local(ADSHANDLE hIndex,
                    UNSIGNED16* pbFound,
                    bool find_last) {
     Table* t = table_for_index(hIndex);
+    if (t) t->set_created_order_focus(false);
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown index");
     std::string key;
     (void)u16KeyType;
@@ -20100,6 +21095,7 @@ UNSIGNED32 ENTRYPOINT AdsSeek(ADSHANDLE hIndex,
     }
 #endif
     if (auto* ri = get_remote_index(hIndex)) {
+        if (ri->parent) ri->parent->created_order_focus = false;
         std::string key(reinterpret_cast<const char*>(pucKey),
                         u16KeyLen);
         if (ri->parent) {
@@ -20114,8 +21110,18 @@ UNSIGNED32 ENTRYPOINT AdsSeek(ADSHANDLE hIndex,
             // -- nothing on the network to make it look wrong -- and the wire skip
             // after that sent (step + a lag that no longer applied).
             ri->parent->invalidate_prefetch();
-            cli_trace_tbl(ri->parent, "AdsSeek", "key=%.24s",
-                          key.c_str());
+            cli_trace_tbl(ri->parent, "AdsSeek", "key_len=%u",
+                          static_cast<unsigned>(u16KeyLen));
+        }
+        if (ri->parent != nullptr && remote_empty_window(ri->parent)) {
+            cli_trace_tbl(ri->parent, "AdsSeek",
+                          "empty window: not found (local)");
+            remote_empty_restamp(ri->parent);
+            ri->parent->found_cached  = true;
+            ri->parent->current_found = false;
+            if (pbFound) *pbFound = 0;
+            (void)u16KeyType;
+            return ok();
         }
         // RCB 07/14/2026: M12.24 -- pass the parent so the SeekAck's row trailer
         // lands straight in the row cache. Without it row_valid stays false and
@@ -20281,6 +21287,7 @@ UNSIGNED32 ENTRYPOINT AdsSeekLast(ADSHANDLE hIndex,
     }
 #endif
     if (auto* ri = get_remote_index(hIndex)) {
+        if (ri->parent) ri->parent->created_order_focus = false;
         std::string key(reinterpret_cast<const char*>(pucKey),
                         u16KeyLen);
         if (ri->parent) {
@@ -20289,8 +21296,8 @@ UNSIGNED32 ENTRYPOINT AdsSeekLast(ADSHANDLE hIndex,
             // RCB 07/14/2026: same stale-queue bug as AdsSeek -- see the note
             // there for why dropping the block is mandatory after a seek.
             ri->parent->invalidate_prefetch();
-            cli_trace_tbl(ri->parent, "AdsSeekLast", "key=%.24s",
-                          key.c_str());
+            cli_trace_tbl(ri->parent, "AdsSeekLast", "key_len=%u",
+                          static_cast<unsigned>(u16KeyLen));
         }
         auto r = ri->conn->seek(ri->id, key,
             /*soft=*/0,
@@ -20777,6 +21784,8 @@ UNSIGNED32 ENTRYPOINT AdsSetAOF(ADSHANDLE hTable, UNSIGNED8* pucCondition,
         // Replacement filter can narrow to empty or widen to rows:
         // expire the nav stamp, proven-false answers and cached answers.
         rt->last_nav = 0;
+        rt->pair_valid = false;
+        rt->anchor_ok = false;
         rt->nav_not_bof = false;
         rt->nav_not_eof = false;
         remote_nav_bound_clear(rt);
@@ -20948,6 +21957,8 @@ UNSIGNED32 ENTRYPOINT AdsClearAOF(ADSHANDLE hTable) {
         // cached boundary answers (the wire frame already expired the
         // seq-gated state; this covers the seq-blind sticky).
         rt->last_nav = 0;
+        rt->pair_valid = false;
+        rt->anchor_ok = false;
         rt->nav_not_bof = false;
         rt->nav_not_eof = false;
         remote_nav_bound_clear(rt);
@@ -20968,6 +21979,8 @@ UNSIGNED32 ENTRYPOINT AdsClearFilter(ADSHANDLE hTable) {
     if (auto* rt = get_remote_table(hTable)) {
         rt->filter_expr.clear();
         rt->last_nav = 0;  // local visibility change: expire nav stamp
+        rt->pair_valid = false;
+        rt->anchor_ok = false;
         rt->nav_not_bof = false;  // widening-safe to keep; uniformity wins
         rt->nav_not_eof = false;
         remote_nav_bound_clear(rt);
@@ -37059,6 +38072,16 @@ UNSIGNED32 ENTRYPOINT AdsGetNumLocks(ADSHANDLE hTable, UNSIGNED16* p) {
     // Remote: route through the wire GetAllLocks op and count (was a stub
     // returning 0 â€” lock introspection on remote tables reported nothing).
     if (auto* rt = get_remote_table(hTable)) {
+        // Same ledger fast path as AdsGetAllLocks: while the ledger is
+        // provably complete (no append auto-lock outstanding, no table
+        // lock), the count is the ledger size. rddads polls this after
+        // every commit -- answering locally saves 1 RTT each time.
+        if (!rt->locks_uncertain && !rt->table_lock_held) {
+            cli_trace_tbl(rt, "AdsGetNumLocks",
+                          "served from client lock ledger");
+            *p = static_cast<UNSIGNED16>(rt->held_recs.size());
+            return ok();
+        }
         auto r = rt->conn->get_all_locks(rt->id);
         if (!r) return fail(r.error());
         *p = static_cast<UNSIGNED16>(r.value().size());
@@ -37537,21 +38560,38 @@ UNSIGNED32 ENTRYPOINT AdsIsRecordInAOF(ADSHANDLE, UNSIGNED32, UNSIGNED16* p)
     {
     arc2_trace("AdsIsRecordInAOF"); if (p) *p = 1; return openads::AE_SUCCESS; }
 // ulRecord == 0 means "the current record" (ACE convention). Reports
-// whether this table handle owns the lock (its own record locks or its
-// table lock), not whether another user does. Remote handles go over the
-// wire (M12.36 IsRecordLocked opcode); the server answers atomically from
-// the calling session's own state - the engine Table's table lock plus
-// the ABI twin's record locks, which include append auto-locks - and
-// translates recno 0 to the current record on its side.
+// whether this table handle owns the lock, not whether another user does.
+// The global OS byte probe remains separately in Table::is_record_locked_any.
 UNSIGNED32 ENTRYPOINT AdsIsRecordLocked(ADSHANDLE hTable, UNSIGNED32 ulRecord,
                              UNSIGNED16* pbLocked) {
     arc2_trace("AdsIsRecordLocked");
     if (pbLocked == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
     *pbLocked = 0;
     if (auto* rt = get_remote_table(hTable)) {
-        auto r = rt->conn->is_record_locked(rt->id, ulRecord);
+        const std::uint32_t rec = ulRecord == 0
+            ? (rt->row_valid ? rt->current_recno : 0) : ulRecord;
+        // A held file lock or an explicit recno in the client ledger is
+        // positive proof of ownership, even if an append also made the
+        // ledger incomplete. A negative answer is safe only when complete.
+        if (rt->table_lock_held ||
+            (rec != 0 && rt->held_recs.count(rec) != 0)) {
+            *pbLocked = 1;
+            return ok();
+        }
+        if (rec != 0 && !rt->locks_uncertain) return ok();
+        // Append auto-locks and unknown current recnos need the server's
+        // GetAllLocks, which enumerates this wire table's owning ABI handle.
+        auto r = rt->conn->get_all_locks(rt->id);
         if (!r) return fail(r.error());
-        *pbLocked = r.value();
+        std::uint32_t target = rec;
+        if (target == 0) {
+            auto rn = rt->conn->get_record_num(rt->id);
+            if (!rn) return fail(rn.error());
+            target = rn.value();
+        }
+        const auto& held = r.value();
+        *pbLocked = rt->table_lock_held ||
+            std::find(held.begin(), held.end(), target) != held.end();
         return ok();
     }
     Table* t = get_table(hTable);
@@ -37847,6 +38887,8 @@ UNSIGNED32 ENTRYPOINT AdsSetFilter(ADSHANDLE hTable, UNSIGNED8* pucFilter) {
         // nav stamp, proven-false answers and cached answers — the
         // wire-seq rule cannot see any of them.
         rt->last_nav = 0;
+        rt->pair_valid = false;
+        rt->anchor_ok = false;
         rt->nav_not_bof = false;
         rt->nav_not_eof = false;
         remote_nav_bound_clear(rt);
@@ -37885,6 +38927,10 @@ UNSIGNED32 ENTRYPOINT AdsSetRecord(ADSHANDLE hTable, UNSIGNED8* pucRecord,
         auto r = rt->conn->set_record(rt->id, pucRecord,
                                       static_cast<std::size_t>(ulLen));
         if (!r) return fail(r.error());
+        // Full-record write: mark dirty so the commit's FlushTable and
+        // the FlushFileBuffers gate see it (the write_dirty snapshot in
+        // AdsWriteRecord depends on this).
+        rt->write_dirty = true;
         return ok();
     }
     Table* t = get_table(hTable);
@@ -38680,9 +39726,17 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex90(ADSHANDLE hObj, UNSIGNED8* pucFileName,
                             UNSIGNED32 ulOptions, UNSIGNED32 ulPageSize,
                             UNSIGNED8* /*pucCollation*/, ADSHANDLE* phIndex) {
     arc2_trace("AdsCreateIndex90");
-    return AdsCreateIndex61(hObj, pucFileName, pucTag, pucExpr, pucCondition,
+    create_index_diag("90 ENTRY h=%llu file=%.160s tag=%.160s expr=%.160s cond=%.160s while=%.160s opts=0x%08lx page=%lu out=%p",
+        static_cast<unsigned long long>(hObj), create_index_arg(pucFileName),
+        create_index_arg(pucTag), create_index_arg(pucExpr),
+        create_index_arg(pucCondition), create_index_arg(pucWhile),
+        static_cast<unsigned long>(ulOptions), static_cast<unsigned long>(ulPageSize),
+        static_cast<void*>(phIndex));
+    auto rc = AdsCreateIndex61(hObj, pucFileName, pucTag, pucExpr, pucCondition,
                             pucWhile, ulOptions,
                             static_cast<UNSIGNED16>(ulPageSize), phIndex);
+    create_index_diag("90 EXIT h=%llu rc=%lu", static_cast<unsigned long long>(hObj), static_cast<unsigned long>(rc));
+    return rc;
 }
 
 UNSIGNED32 ENTRYPOINT AdsDDAddTable90(ADSHANDLE hConnect, UNSIGNED8* pucAlias,

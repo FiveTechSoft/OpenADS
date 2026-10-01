@@ -103,13 +103,13 @@ generated baseline; OpenADS clears every line of the regenerated
 ADS-flavoured baseline. The session that closed the last gap is
 recorded across 28 incremental commits ending at `28be1be`.
 
-**Current release: [v1.8.4](https://github.com/FiveTechSoft/OpenADS/releases/tag/v1.8.4) (2026-07-09).**
-Harbour `rddads` + FiveWin `TDataBase` / `xBrowse` over `tcp://` is
-production-ready: remote scope (`OrdScope`), index navigation, key counts,
-date fields, and field I/O by ordinal all work end-to-end. Full Data
-Dictionary enforcement, Studio web console, SAP DD import, SQL backends
-(PostgreSQL / MariaDB / MSSQL / ODBC / SQLite), and CDX bulk-load index
-build are in production. `openads_serverd` serves the OpenADS wire
+**Current release: [v1.09.68](https://github.com/FiveTechSoft/OpenADS/releases/tag/v1.09.68) (2026-09-20).**
+OpenADS has broad compatibility coverage, but support varies by API and
+backend. Before production deployment, review [`TODO.parity.md`](TODO.parity.md)
+and [`docs/known-issues.md`](docs/known-issues.md), test the exact workload,
+and apply normal database security and backup controls. In particular,
+documented Data Dictionary and access-control parity gaps make untrusted or
+multi-user deployments experimental until those gaps are closed. `openads_serverd` serves the OpenADS wire
 protocol; clients connect with
 `AdsConnect60("tcp://host:port/path.add", ...)` and no application code
 changes. Docs:
@@ -120,9 +120,10 @@ including [migrating from ADS](https://fivetechsoft.github.io/OpenADS/en/migrati
 (CDX rollback / error 7017 caveat). `docs/wire-protocol.md` is the
 formal spec for non-C++ clients (Python, Go, Rust, Harbour AEP).
 
-Cross-platform CI is **green on all three runners**
-(`ubuntu-24.04 / ninja-clang`, `macos-14 / default`,
-`windows-2022 / msvc-x64`).
+Cross-platform CI runs on Ubuntu, macOS, and Windows. Check the current
+[Actions results](https://github.com/FiveTechSoft/OpenADS/actions/workflows/ci.yml)
+before relying on a branch or release; this document does not claim that the
+latest run is green.
 
 Release timeline:
 

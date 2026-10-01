@@ -168,7 +168,8 @@ TEST_CASE("Pooled re-USE: close/reopen skips OpenTable+CloseTable frames") {
     srv.stop();
 }
 
-TEST_CASE("Pooled re-USE skipped after a lock (real close)") {    ow_wipe();
+TEST_CASE("Pooled re-USE after a released lock still parks") {
+    ow_wipe();
     auto dir = ow_tmp_dir();
     seed_ow_fixture(dir);
 
@@ -194,12 +195,14 @@ TEST_CASE("Pooled re-USE skipped after a lock (real close)") {    ow_wipe();
     REQUIRE(AdsUnlockRecord(hTable, 0) == AE_SUCCESS);
     REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
 
-    // Locked once: pool-ineligible, so the reopen is a full wire open.
+    // Locked then fully released: still poolable (mtfix8) -- the close
+    // parks the handle and the reopen is a park hit, no wire open. Only
+    // outstanding locks (locks_held) force a real close now.
     const std::uint64_t open_before = op_count(0x20);
     REQUIRE(AdsOpenTable(hConn, tname, nullptr, ADS_CDX, ADS_ANSI, ADS_SHARED,
                          ADS_COMPATIBLE_LOCKING, ADS_DEFAULT, &hTable)
             == AE_SUCCESS);
-    CHECK(op_count(0x20) == open_before + 1);
+    CHECK(op_count(0x20) == open_before);
     CHECK(ow_get(hTable, "NM") == "alpha");
 
     REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);

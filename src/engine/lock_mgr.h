@@ -66,6 +66,15 @@ public:
                              TableTypeForLock t, LockingMode m,
                              std::uint32_t recno);
 
+    // Non-destructive "held by any owner" queries (mtfix11): compute the
+    // same scheme-aware byte offsets as the lock ops and ask the OS. The
+    // caller's own registrations are invisible to the query - check them
+    // first (Table::is_record_locked_any does).
+    util::Result<bool> probe_record(platform::File& f, TableTypeForLock t,
+                                    LockingMode m, std::uint32_t recno);
+    util::Result<bool> probe_file  (platform::File& f, TableTypeForLock t,
+                                    LockingMode m);
+
     // Decrement the per-key refcount. Returns true when the refcount reached
     // zero so the caller should release the OS-level byte lock held in its
     // LockHandle; false when nested acquires remain and the OS lock must stay.
@@ -82,6 +91,17 @@ public:
 
     static std::uint64_t file_lock_offset(TableTypeForLock t, LockingMode m);
     static std::uint64_t file_lock_length(TableTypeForLock t);
+
+    // True when the scheme's FLock range spans every record-lock byte
+    // (Cdx/Vfp: FLock covers 0x40000001..0x7FFFFFFE, records live inside
+    // it). There a record-byte probe already reports another owner's
+    // FLock, and probing the file-lock range would false-positive on any
+    // record lock. Ntx/Adt keep the FLock byte outside the record
+    // region, so they need a separate file-lock probe for FLock
+    // visibility.
+    static bool file_lock_covers_records(TableTypeForLock t) noexcept {
+        return t == TableTypeForLock::Cdx || t == TableTypeForLock::Vfp;
+    }
 
     // VFP-scheme record locks mirror the record's physical position, so
     // the manager needs the table geometry. Set right after the driver

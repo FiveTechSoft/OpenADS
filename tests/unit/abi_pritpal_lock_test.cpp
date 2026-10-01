@@ -134,9 +134,9 @@ TEST_CASE("Remote: record lock contention — B's lock fails, does not hang") {
     // Must have returned promptly (~30ms max), NOT hung forever
     CHECK(elapsed < 2000);
 
-    // Restore defaults
+    // Restore the default single-attempt policy (mtfix6).
     REQUIRE(AdsSetLockCycle(0, 100) == 0);
-    REQUIRE(AdsSetLockRetryCount(0, 10) == 0);
+    REQUIRE(AdsSetLockRetryCount(0, 0) == 0);
 
     // Cleanup
     REQUIRE(AdsUnlockRecord(hTblA, 1) == 0);
@@ -255,9 +255,9 @@ TEST_CASE("Remote: FLock contention — B's FLock fails after retries") {
     CHECK(rc != 0);  // Must NOT succeed
     CHECK(elapsed < 2000);  // Must return promptly
 
-    // Restore defaults
+    // Restore the default single-attempt policy (mtfix6).
     REQUIRE(AdsSetLockCycle(0, 100) == 0);
-    REQUIRE(AdsSetLockRetryCount(0, 10) == 0);
+    REQUIRE(AdsSetLockRetryCount(0, 0) == 0);
 
     // Cleanup
     REQUIRE(AdsUnlockTable(hTblA) == 0);

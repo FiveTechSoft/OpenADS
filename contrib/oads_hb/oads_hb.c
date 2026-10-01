@@ -29,11 +29,12 @@
  *   hbmk2 myproject.hbp oads_hb.c -L/path/to/openads/importlib -lace64
  *
  * Connection management:
- *   OAds_SetConnection( hConn )  -- set default connection for this thread
- *   OAds_GetConnection()         -> hConn  -- get current default connection
+ *   OAds_SetConnection( hConn )  -- set the shared OAds default handle
+ *   OAds_GetConnection()         -> hConn  -- read the shared OAds default
  *
  * All OAds_F* functions accept hConn as the first (optional) parameter.
- * When omitted, the thread-local default connection is used:
+ * When omitted, the handle set by OAds_SetConnection is used. If none
+ * has been set, the ACE default connection is used for compatibility:
  *   OAds_FOpen( cFileName, nMode )             -- uses default connection
  *   OAds_FOpen( hConn, cFileName, nMode )      -- uses explicit connection
  */
@@ -44,6 +45,48 @@
 #include "ace.h"
 #include <string.h>
 
+/* The no-handle OAds_* overloads belong to this Harbour glue, not to
+ * rddads. ACE's default is thread-local; the app can set it on its login
+ * thread then make an OAds_* call on a different thread, accidentally
+ * falling back to ACE's local cwd connection. Keep an OAds-specific shared
+ * handle as the source of truth once OAds_SetConnection has been called.
+ * Atomic access protects MT Harbour callers; explicit-handle overloads
+ * bypass this value. An app with multiple independent connections must pass
+ * the handle explicitly rather than relying on one process-wide default.
+ */
+#if defined( _WIN32 )
+#  include <windows.h>
+static volatile LONG s_oads_conn = 0;
+static void oads_store_default( ADSHANDLE hConn )
+{
+    InterlockedExchange( &s_oads_conn, ( LONG ) hConn );
+}
+static ADSHANDLE oads_load_default( void )
+{
+    return ( ADSHANDLE ) InterlockedCompareExchange( &s_oads_conn, 0, 0 );
+}
+#else
+static ADSHANDLE s_oads_conn = 0;
+static void oads_store_default( ADSHANDLE hConn )
+{
+    __atomic_store_n( &s_oads_conn, hConn, __ATOMIC_RELEASE );
+}
+static ADSHANDLE oads_load_default( void )
+{
+    return __atomic_load_n( &s_oads_conn, __ATOMIC_ACQUIRE );
+}
+#endif
+
+static ADSHANDLE oads_default_connection( void )
+{
+    ADSHANDLE hConn = 0;
+    hConn = oads_load_default();
+    if( hConn != 0 )
+        return hConn;
+    AdsGetDefaultConnection( &hConn );
+    return hConn;
+}
+
 /* AdsGetServerVersion is an OpenADS extension (v1.09.28+). Declared
    here as well so this file still compiles against an older ace.h;
    an identical redeclaration is legal C when the new ace.h is used. */
@@ -53,23 +96,30 @@ extern UNSIGNED32 ENTRYPOINT AdsGetServerVersion( ADSHANDLE   hConnect,
 
 /* ------------------------------------------------------------------ */
 /*  OADS_SETCONNECTION( hConn ) -> lOk                                 */
-/*  Set the default connection for the calling thread.                 */
+/*  Set both the ACE current-thread default and the shared OAds default. */
 /* ------------------------------------------------------------------ */
 HB_FUNC( OADS_SETCONNECTION )
 {
     ADSHANDLE hConn = ( ADSHANDLE ) hb_parnint( 1 );
-    hb_retl( AdsSetDefaultConnection( hConn ) == 0 );
+    UNSIGNED32 rc;
+    if( hConn == 0 )
+    {
+        hb_retl( 0 );
+        return;
+    }
+    rc = AdsSetDefaultConnection( hConn );
+    if( rc == 0 )
+        oads_store_default( hConn );
+    hb_retl( rc == 0 );
 }
 
 /* ------------------------------------------------------------------ */
 /*  OADS_GETCONNECTION() -> hConn                                      */
-/*  Get the current default connection for the calling thread.         */
+/*  Report the same handle that no-handle OAds_* calls will use.        */
 /* ------------------------------------------------------------------ */
 HB_FUNC( OADS_GETCONNECTION )
 {
-    ADSHANDLE hConn = 0;
-    AdsGetDefaultConnection( &hConn );
-    hb_retnint( ( HB_MAXINT ) hConn );
+    hb_retnint( ( HB_MAXINT ) oads_default_connection() );
 }
 
 /* ------------------------------------------------------------------ */
@@ -103,7 +153,7 @@ HB_FUNC( OADS_FCREATE )
     }
     else
     {
-        AdsGetDefaultConnection( &hConn );
+        hConn = oads_default_connection();
         szName = hb_parc( 1 );
         usAttr = ( UNSIGNED16 ) hb_parni( 2 );
     }
@@ -133,7 +183,7 @@ HB_FUNC( OADS_FOPEN )
     }
     else
     {
-        AdsGetDefaultConnection( &hConn );
+        hConn = oads_default_connection();
         szName = hb_parc( 1 );
         usMode = ( UNSIGNED16 ) hb_parni( 2 );
     }
@@ -248,7 +298,7 @@ HB_FUNC( OADS_CHECKEXISTENCE )
     }
     else
     {
-        AdsGetDefaultConnection( &hConn );
+        hConn = oads_default_connection();
         szName = hb_parc( 1 );
     }
 
@@ -274,7 +324,7 @@ HB_FUNC( OADS_DELETEFILE )
     }
     else
     {
-        AdsGetDefaultConnection( &hConn );
+        hConn = oads_default_connection();
         szName = hb_parc( 1 );
     }
 
@@ -302,7 +352,7 @@ HB_FUNC( OADS_RENAMEFILE )
     }
     else
     {
-        AdsGetDefaultConnection( &hConn );
+        hConn = oads_default_connection();
         szOld = hb_parc( 1 );
         szNew = hb_parc( 2 );
     }
@@ -330,7 +380,7 @@ HB_FUNC( OADS_GETFILESIZE )
     }
     else
     {
-        AdsGetDefaultConnection( &hConn );
+        hConn = oads_default_connection();
         szName = hb_parc( 1 );
     }
 
@@ -357,7 +407,7 @@ HB_FUNC( OADS_GETFILEDATE )
     }
     else
     {
-        AdsGetDefaultConnection( &hConn );
+        hConn = oads_default_connection();
         szName = hb_parc( 1 );
     }
 
@@ -384,7 +434,7 @@ HB_FUNC( OADS_GETFILETIME )
     }
     else
     {
-        AdsGetDefaultConnection( &hConn );
+        hConn = oads_default_connection();
         szName = hb_parc( 1 );
     }
 
@@ -410,7 +460,7 @@ HB_FUNC( OADS_DIRMAKE )
     }
     else
     {
-        AdsGetDefaultConnection( &hConn );
+        hConn = oads_default_connection();
         szPath = hb_parc( 1 );
     }
 
@@ -436,7 +486,7 @@ HB_FUNC( OADS_DIRREMOVE )
     }
     else
     {
-        AdsGetDefaultConnection( &hConn );
+        hConn = oads_default_connection();
         szPath = hb_parc( 1 );
     }
 
@@ -462,7 +512,7 @@ HB_FUNC( OADS_DIREXIST )
     }
     else
     {
-        AdsGetDefaultConnection( &hConn );
+        hConn = oads_default_connection();
         szPath = hb_parc( 1 );
     }
 
@@ -498,7 +548,7 @@ HB_FUNC( OADS_DIRECTORY )
     }
     else
     {
-        AdsGetDefaultConnection( &hConn );
+        hConn = oads_default_connection();
         szMask = hb_parc( 1 );
         usAttr = ( UNSIGNED16 ) hb_parni( 2 );
     }
@@ -601,7 +651,7 @@ HB_FUNC( OADS_FEXIST )
     }
     else
     {
-        AdsGetDefaultConnection( &hConn );
+        hConn = oads_default_connection();
         szName = hb_parc( 1 );
     }
 
@@ -632,7 +682,7 @@ HB_FUNC( OADS_MUTEXCREATE )
     }
     else
     {
-        AdsGetDefaultConnection( &hConn );
+        hConn = oads_default_connection();
         szName = hb_parc( 1 );
     }
 
@@ -661,7 +711,7 @@ HB_FUNC( OADS_MUTEXLOCK )
     }
     else
     {
-        AdsGetDefaultConnection( &hConn );
+        hConn = oads_default_connection();
         szName    = hb_parc( 1 );
         ulTimeOut = ( UNSIGNED32 ) hb_parnint( 2 );
     }
@@ -689,7 +739,7 @@ HB_FUNC( OADS_MUTEXTRYLOCK )
     }
     else
     {
-        AdsGetDefaultConnection( &hConn );
+        hConn = oads_default_connection();
         szName = hb_parc( 1 );
     }
 
@@ -716,7 +766,7 @@ HB_FUNC( OADS_MUTEXUNLOCK )
     }
     else
     {
-        AdsGetDefaultConnection( &hConn );
+        hConn = oads_default_connection();
         szName = hb_parc( 1 );
     }
 
@@ -742,7 +792,7 @@ HB_FUNC( OADS_MUTEXDESTROY )
     }
     else
     {
-        AdsGetDefaultConnection( &hConn );
+        hConn = oads_default_connection();
         szName = hb_parc( 1 );
     }
 
@@ -806,7 +856,7 @@ HB_FUNC( OADS_SERVERVERSION )
     if( hb_pcount() >= 1 )
         hConn = ( ADSHANDLE ) hb_parnint( 1 );
     else
-        AdsGetDefaultConnection( &hConn );
+        hConn = oads_default_connection();
 
     ulRc = AdsGetServerVersion( hConn, ( UNSIGNED8 * ) szVer, &usLen );
     szVer[ sizeof( szVer ) - 1 ] = '\0';
@@ -928,7 +978,7 @@ HB_FUNC( OADS_ZIP )
     }
     else
     {
-        AdsGetDefaultConnection( &hConn );
+        hConn = oads_default_connection();
         base = 0;
     }
     if( hb_pcount() < base + 4 )
@@ -1023,7 +1073,7 @@ HB_FUNC( OADS_UNZIP )
     }
     else
     {
-        AdsGetDefaultConnection( &hConn );
+        hConn = oads_default_connection();
         base = 0;
     }
     if( hb_pcount() < base + 1 )
@@ -1089,7 +1139,7 @@ HB_FUNC( OADS_ZIPFILECOUNT )
     }
     else
     {
-        AdsGetDefaultConnection( &hConn );
+        hConn = oads_default_connection();
         szZip = hb_parc( 1 );
     }
 
@@ -1179,7 +1229,7 @@ HB_FUNC( OADS_ZIPFILELIST )
     }
     else
     {
-        AdsGetDefaultConnection( &hConn );
+        hConn = oads_default_connection();
         base = 0;
     }
     if( hb_pcount() < base + 1 )

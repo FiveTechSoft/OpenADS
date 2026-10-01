@@ -172,12 +172,17 @@ TEST_CASE("Nav batching: duplicate GotoTop/GotoBottom skip their frame") {
     REQUIRE(AdsGotoTop(hTable) == AE_SUCCESS);
     CHECK(nb_op(kOpGotoTop) == top0);
 
-    // Bottom twice: one frame, then suppressed.
+    // The warm open did not certify a pair, so the first bottom wires;
+    // the duplicate stays local.
     REQUIRE(AdsGotoBottom(hTable) == AE_SUCCESS);
     REQUIRE(AdsGotoBottom(hTable) == AE_SUCCESS);
     CHECK(nb_op(kOpGotoBottom) == bot0 + 1);
 
-    // A wire nav in between invalidates: top goes out again.
+    // Restored pair certification: bottom's ack certifies top, so this
+    // call consumes the pair without another wire frame.
+    REQUIRE(AdsGotoTop(hTable) == AE_SUCCESS);
+    CHECK(nb_op(kOpGotoTop) == top0);
+    REQUIRE(AdsGotoRecord(hTable, 2) == AE_SUCCESS);
     REQUIRE(AdsGotoTop(hTable) == AE_SUCCESS);
     CHECK(nb_op(kOpGotoTop) == top0 + 1);
 
@@ -292,6 +297,8 @@ TEST_CASE("Nav batching: order context defeats duplicate suppression") {    nb_w
     REQUIRE(AdsGotoTop(hOrd) == AE_SUCCESS);
     CHECK(nb_op(kOpGotoTop) == top0 + 1);
 
+    // Explicit focus keeps table-handle navigation indexed.
+    REQUIRE(AdsSetIndexOrderByHandle(hTable, hOrd) == AE_SUCCESS);
     // Table-handle top with the order still bound: same position,
     // suppressed as well.
     REQUIRE(AdsGotoTop(hTable) == AE_SUCCESS);
@@ -454,11 +461,19 @@ TEST_CASE("Nav batching: deferred SetOrder fuses into GotoTop") {    nb_wipe();
     REQUIRE(AdsGetRecordNum(hTable, 0, &rec) == AE_SUCCESS);
     CHECK(rec == 2u);
 
-    // Same pair to the bottom: fused the same way.
+    // Same pattern to the bottom: fused the same way. mtfix12 R1
+    // notes: the fused GotoTop above certified the bottom in the same
+    // visit, so a plain ordered GotoBottom here would be pair-served
+    // and exercise nothing. A pending order blocks the pair serve (the
+    // certified order no longer provably matches), so defer a natural
+    // switch first — the bottom on the TABLE handle fuses it into one
+    // frame exactly like leg one. (ByHandle(hOrd) can't be the second
+    // switch: with the acked binding still hOrd it reads as a
+    // same-order no-op and would leave the natural switch pending.)
+    REQUIRE(AdsSetIndexOrderByHandle(hTable, 0) == AE_SUCCESS);
     const std::uint64_t bot0 = nb_op(kOpGotoBottom);
-    REQUIRE(AdsSetIndexOrderByHandle(hTable, hOrd) == AE_SUCCESS);
     CHECK(nb_op(kOpSetOrder) == so0);
-    REQUIRE(AdsGotoBottom(hOrd) == AE_SUCCESS);
+    REQUIRE(AdsGotoBottom(hTable) == AE_SUCCESS);
     CHECK(nb_op(kOpSetOrder) == so0);
     CHECK(nb_op(kOpGotoBottom) == bot0 + 1);
 

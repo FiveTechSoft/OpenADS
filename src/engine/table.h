@@ -341,6 +341,15 @@ public:
     // exposing the LockMgr internals.
     std::vector<std::uint32_t> held_record_locks() const;
 
+    // Locked-by-any-owner query (mtfix11, SAP AdsIsRecordLocked
+    // semantics): this table's own registrations first, then a
+    // non-destructive OS probe of the record's lock byte and of the
+    // table's file-lock byte - a record also reads locked while ANOTHER
+    // owner holds the file lock (FLock covers every record). Read-only
+    // tables and tables without a driver file answer from the own-list
+    // only: they cannot hold locks and (Win32) cannot probe either.
+    util::Result<bool> is_record_locked_any(std::uint32_t recno);
+
     // Recno-sequence cursor (M10.6). When non-empty, goto_top /
     // goto_bottom / skip walk this list of recnos in order instead of
     // the natural append order or any active index. Used by SQL
@@ -542,6 +551,11 @@ public:
     // Order + scope surface (M3).
     void               set_order(std::unique_ptr<drivers::IIndex> idx);
     void               clear_order();
+    // Explicit ACE focus permits ordered table-handle navigation. Merely
+    // navigating an index handle must not change the table-handle contract.
+    bool explicit_order_focus() const noexcept { return explicit_order_focus_ || created_order_focus_; }
+    void set_explicit_order_focus(bool focused) noexcept { explicit_order_focus_ = focused; created_order_focus_ = false; }
+    void set_created_order_focus(bool focused) noexcept { created_order_focus_ = focused; }
     // Take ownership of the active index back from the Table, leaving
     // it without an order. Returns nullptr if no order was set.
     std::unique_ptr<drivers::IIndex> take_order();
@@ -667,6 +681,8 @@ private:
     std::unordered_map<std::uint32_t, LockHandle> recno_locks_;
     std::optional<LockHandle>                     table_lock_;
     std::optional<Order>                          order_;
+    bool                                         explicit_order_focus_ = false;
+    bool                                         created_order_focus_ = false;
     std::vector<drivers::IIndex*>                 extra_index_views_;
     State                                         state_  = State::Bof;
     std::uint32_t                                 recno_  = 0;

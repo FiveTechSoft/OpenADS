@@ -123,7 +123,8 @@ TEST_CASE("M9.14 NTX multi-tag binding: two .ntx files coexist on one table") {
     REQUIRE(AdsGetRecordNum(hTable, 0, &recno) == 0);
     CHECK(recno == 2);
 
-    // After SEQ activated, GotoTop now walks SEQ order → "01"(rec2).
+    REQUIRE(AdsSetIndexOrderByHandle(hTable, h_seq) == 0);
+    // After explicit SEQ focus, GotoTop walks SEQ order → "01"(rec2).
     REQUIRE(AdsGotoTop(hTable) == 0);
     REQUIRE(AdsGetRecordNum(hTable, 0, &recno) == 0);
     CHECK(recno == 2);  // SEQ "01" is rec2
@@ -150,7 +151,8 @@ TEST_CASE("M9.14 NTX multi-tag binding: two .ntx files coexist on one table") {
     REQUIRE(AdsGetRecordNum(hTable, 0, &recno) == 0);
     CHECK(recno == 4);
 
-    // GotoTop on TAGORD → AAAA(rec2) again.
+    REQUIRE(AdsSetIndexOrderByHandle(hTable, h_first) == 0);
+    // GotoTop on TAGORD -> AAAA(rec2) again.
     REQUIRE(AdsGotoTop(hTable) == 0);
     REQUIRE(AdsGetRecordNum(hTable, 0, &recno) == 0);
     CHECK(recno == 2);
@@ -216,7 +218,8 @@ TEST_CASE("M9.14 NTX multi-tag: AdsOpenIndex re-binds two pre-existing files") {
     REQUIRE(AdsGetNumIndexes(hTable, &nidx) == 0);
     CHECK(nidx == 2);
 
-    // First-opened binding is the active order: TAG(AAAA) is rec2.
+    REQUIRE(AdsSetIndexOrderByHandle(hTable, arr1[0]) == 0);
+    // Explicit focus on first binding: TAG(AAAA) is rec2.
     REQUIRE(AdsGotoTop(hTable) == 0);
     UNSIGNED32 recno = 0;
     REQUIRE(AdsGetRecordNum(hTable, 0, &recno) == 0);

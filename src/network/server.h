@@ -213,6 +213,17 @@ private:
     // sessions_mu_.
     std::unordered_map<std::uint64_t, std::thread> session_threads_;
     std::vector<std::uint64_t>                     finished_threads_;
+
+    // mtfix11 - exclusive-open registry (see try_register_open above).
+    struct OpenRegEntry {
+        // Non-exclusive opens per session (a session may hold several).
+        std::unordered_map<std::uint64_t, std::uint32_t> shared;
+        // Exclusive holder: owning session + handle multiplicity.
+        std::uint64_t                                  exclusive_sid = 0;
+        std::uint32_t                                  exclusive_opens = 0;
+    };
+    std::mutex                                    open_reg_mu_;
+    std::unordered_map<std::string, OpenRegEntry> open_reg_;
     std::atomic<std::uint64_t>                     thread_seq_{1};
     // Enterprise step 3 — when the sharded-reactor pool is enabled
     // (OPENADS_SERVER_POOL), accept_loop hands each accepted socket to this
@@ -271,6 +282,31 @@ public:
     void          add_session_table(std::uint64_t id,
                                      std::int32_t delta,
                                      const std::string& table_name = std::string());
+
+    // mtfix11 - SAP exclusive-open enforcement across wire sessions.
+    // The drivers map DriverOpenMode::Exclusive to a plain open (POSIX
+    // has no share modes), so without this registry an ADS_EXCLUSIVE
+    // open was a silent no-op: any other session could open the same
+    // table, where SAP ADS denies both directions (reindex/pack
+    // workflows rely on that denial to keep newcomers out).
+    //
+    // Keyed by the engine table's resolved absolute path. An open is
+    // denied when another session holds the path exclusive, or when the
+    // request is exclusive and another session holds the path open in
+    // any mode. Same-session reopens always pass (a connection may USE
+    // the same table in several workareas; the wire dual-handle twin is
+    // opened through the local ABI connection and never lands here).
+    // Engine-internal opens (SQL cursors, replication apply, mgmt)
+    // bypass the registry by construction - they never reach the wire
+    // OpenTable handler.
+    //
+    // try_register_open registers and returns true when allowed, false
+    // when denied (nothing registered). unregister_open drops one
+    // previously-registered open.
+    bool try_register_open(std::uint64_t id, const std::string& canon_path,
+                           bool exclusive);
+    void unregister_open(std::uint64_t id, const std::string& canon_path,
+                         bool exclusive);
 
     // studio.web.0.11 — drop a single session by id (closes its
     // socket; the session_loop's next read_frame returns and the

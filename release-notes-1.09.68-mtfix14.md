@@ -1,0 +1,9 @@
+Built for Pritpal Bedi - bedipritpal/OpenADS, forked from FiveTechSoft/OpenADS.
+
+## v1.09.68-mtfix14 - B_BIG boundary-pair diagnostic
+
+This is a diagnostic test build, not a performance fix. Pritpal's 10-thread B_BIG trace on mtfix13 showed that ten GotoTop requests took roughly 0.9-1.2 seconds apiece, while 100 appends and field writes were individually fast. All worker traffic used one TCP lane. The mtfix12 boundary-pair feature makes each GotoTop also visit the opposite end of the table and count index keys, and it is the leading unproven source of the delay.
+
+This build disables only boundary-pair negotiation and requests on both sides of the wire. It retains mtfix13's index-bag existence correction, client lane pinning for detached-workarea lock identity, write/commit behavior and other navigation optimizations. It works with an existing server or client: a diagnostic client will not request a pair even from an older server advertising it, and a diagnostic server will not advertise pairs to older clients. The opposite-boundary call simply falls back to its normal wire request.
+
+**What to test:** Replace only the x86 client `ace32.dll` with the DLL in the Windows x86 archive, keeping the mtfix13 server unchanged. With no client trace enabled, run the same 10-thread, 100-record B_BIG job under the same conditions as the 185 ms upstream and 8.4 s mtfix13 comparisons. Record the job time and whether the first browse appears while workers are still running. A short trace on a separate run can confirm GotoTop returns without the 0x02 pair request; trace I/O itself can change timings. Back up the original DLL and restore it afterward. If this closes the gap, the boundary-pair server subphases need timing before a permanent fix is chosen. A remaining delay would point back to lane pinning or another interaction. Do not deploy this diagnostic build as a production fix.

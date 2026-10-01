@@ -383,6 +383,9 @@ TEST_CASE("Editing an indexed field moves the key and keeps order with duplicate
     UNSIGNED16 nidx = 8;
     REQUIRE(AdsOpenIndex(hTbl, (UNSIGNED8*)"big.cdx", idxs, &nidx) == 0);
 
+    // This test walks via the table handle after an index seek; opt in
+    // explicitly. Stock rddads uses the index handle until focus is zero.
+    REQUIRE(AdsSetIndexOrderByHandle(hTbl, idxs[0]) == 0);
     // "Edward" now has 3 keys; "Zzztop" exactly 1, at the end of the order.
     UNSIGNED16 found = 0;
     REQUIRE(AdsSeek(idxs[0], (UNSIGNED8*)"Edward", 6, ADS_STRINGKEY,

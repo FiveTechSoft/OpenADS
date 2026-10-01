@@ -46,6 +46,19 @@ struct AggregateBatch {
 
 struct RemoteTable;
 
+// Diagnostics only: optional per-frame hook, called after every
+// completed request/reply round trip (wire_trace). nullptr = off, which
+// is the default; the request path then pays one relaxed atomic load.
+// Arguments: connection, request opcode, first u32 of the request
+// payload (the table id for table-scoped opcodes; meaningless for
+// Hello/Connect/OpenTable), request payload bytes, reply opcode, reply
+// payload bytes, microseconds spent in send+receive.
+using FrameTraceHook = void (*)(const void* conn, std::uint8_t op,
+                                std::uint32_t tid, std::size_t req_bytes,
+                                std::uint8_t rep_op, std::size_t rep_bytes,
+                                long long us);
+void set_frame_trace_hook(FrameTraceHook hook) noexcept;
+
 // M12.5 — wire client used by ace64.dll's dual-mode dispatch.
 // `RemoteConnection` opens a TCP socket to an OpenADS server,
 // sends a Connect frame for the data_dir, and exposes a small
@@ -106,12 +119,44 @@ public:
         return (server_caps_ & kCapNavOrderFuse) != 0;
     }
 
+    // Server's FlushTable handler does the full file-buffers flush
+    // (see kCapFlushTableDurable): a commit needs no trailing
+    // FlushFileBuffers frame.
+    bool server_flush_table_durable() const noexcept {
+        return (server_caps_ & kCapFlushTableDurable) != 0;
+    }
+
+    // Server certifies the opposite boundary on GotoTop/GotoBottom
+    // (see kCapNavBoundaryPair): one frame proves both ends, so a
+    // back-to-back dbGoTop(); dbGoBottom() ritual costs one RTT.
+    bool server_nav_boundary_pair() const noexcept {
+        return (server_caps_ & kCapNavBoundaryPair) != 0;
+    }
+
     // Current cursor-generation sequence (see nav_seq_). Relaxed load
     // is enough: it only orders the ABI layer's own duplicate
     // detection, never data.
     std::uint64_t nav_seq() const noexcept {
         return nav_seq_.load(std::memory_order_relaxed);
     }
+
+    // mtfix12 — per-table generations (R1 pair guard / R2 per-table
+    // envelope). Keyed by wire table id, bumped inside request() for
+    // every cursor/visibility-affecting frame (nav) and
+    // content-affecting frame (write) — central by construction, so no
+    // ABI call site can miss one. Index-keyed ops (Seek/SeekLast/
+    // SkipUnique/SetScope/ClearScope) and the connection-wide
+    // ShowDeleted bump through note_tbl_nav/note_all_tables_nav from
+    // the methods that know the binding. Table-id reuse after a close
+    // only starts a new table's counter higher — conservative, never
+    // stale-accepting.
+    std::uint64_t tbl_nav_seq(std::uint32_t id);
+    std::uint64_t tbl_write_gen(std::uint32_t id);
+    // Index-keyed cursor op whose parent table the caller resolved.
+    void note_tbl_nav(std::uint32_t id);
+    // Connection-wide visibility change (ShowDeleted) or an
+    // index-keyed op with no resolved parent: expire every table.
+    void note_all_tables_nav();
 
     // Server version from the HelloAck handshake ("openads/1.09.27";
     // pre-1.8.14 servers answer the literal "openads/0.3.2"). Empty
@@ -355,15 +400,9 @@ public:
     util::Result<void>          drop_table(const std::string& name,
                                             std::uint16_t delete_files);
 
-    // Server filesystem (EnableFileFunc on server).
-    // Positive-only existence cache (rddads probes the same production
-    // bags every USE): a "true" answer is served locally until any
-    // file-mutating op on this connection (erase/rename/drop/create,
-    // via file_exists_invalidate) clears it. Negatives always go to
-    // the wire — caching "missing" would hide a concurrently created
-    // table, while a stale "present" degrades to a clean open error.
+    // Server filesystem (EnableFileFunc on server). External state is never
+    // cached: other sessions and host operations can change it at any time.
     util::Result<bool>          file_exists(const std::string& path);
-    void                        file_exists_invalidate();
     util::Result<void>          file_erase(const std::string& path);
     util::Result<void>          file_rename(const std::string& old_p,
                                             const std::string& new_p);
@@ -452,6 +491,13 @@ public:
     // and skips the round-trip).
     util::Result<void>          apply_open_row(RemoteTable* rt,
         const std::vector<std::uint8_t>& trailer);
+    // mtfix12 R1 — apply the certified opposite-boundary landing
+    // (pair_blob, row-trailer format) exactly as that boundary's wire
+    // ack would have: same row-trailer parse (row cache, prefetch
+    // reset, lag re-anchor), then the certified bound values and the
+    // scoped key count. Caller has already verified freshness
+    // (pair_seq/pair_write_gen) via remote_nav_pair.
+    util::Result<void>          apply_pair_blob(RemoteTable* rt);
     // M12.6 — remote write surface.
     util::Result<void>          append_blank(std::uint32_t id);
     util::Result<void>          set_field(std::uint32_t id,
@@ -532,6 +578,40 @@ public:
     util::Result<void> mutex_unlock(const std::string& name);
     util::Result<void> mutex_destroy(const std::string& name);
 
+    // Count of wire round trips issued on this connection (every
+    // request(), reads included). Unlike nav_seq() this also moves on
+    // locks, fetches and counts, so "no frame since X" means nothing at
+    // all reached the server in between (used by AdsRefreshRecord to
+    // serve the row a GotoRecord ack just delivered).
+    std::uint64_t frame_seq() const noexcept {
+        return frame_seq_.load(std::memory_order_relaxed);
+    }
+
+    // Count of frames that can ADD rows or change row contents on the
+    // server (append, field writes, recall, SQL, pack/zap/reindex) sent on
+    // this connection. The empty-table window (see AdsSeek) closes as soon
+    // as this moves, so this station never misses its own new record.
+    std::uint64_t data_epoch() const noexcept {
+        return data_epoch_.load(std::memory_order_relaxed);
+    }
+
+    // Per-connection record-length memo for re-opens of the same table.
+    // Keyed by lowercased table name + the full schema (names, types,
+    // widths, decimals) from the open ack, so any restructure changes
+    // the key and misses. Thread-safe.
+    bool recall_record_length(const std::string& key,
+                              std::uint32_t& out) {
+        std::lock_guard<std::mutex> lk(reclen_mu_);
+        auto it = reclen_memo_.find(key);
+        if (it == reclen_memo_.end()) return false;
+        out = it->second;
+        return true;
+    }
+    void remember_record_length(const std::string& key, std::uint32_t v) {
+        std::lock_guard<std::mutex> lk(reclen_mu_);
+        if (reclen_memo_.size() < 4096) reclen_memo_[key] = v;
+    }
+
 private:
     util::Result<Frame> request(const Frame& f);
 
@@ -545,6 +625,10 @@ private:
 
     std::unique_ptr<ITransport> transport_;
     std::mutex                  mu_;
+    // mtfix12 per-table generations (see tbl_nav_seq/tbl_write_gen).
+    // Guarded by mu_ (bumped inside request(), which already holds it).
+    std::unordered_map<std::uint32_t, std::uint64_t> tbl_nav_seqs_;
+    std::unordered_map<std::uint32_t, std::uint64_t> tbl_write_gens_;
     // Server caps echoed in ConnectAck (0 when the server predates caps).
     std::uint32_t               server_caps_ = 0;
     // Monotonic cursor-generation counter. Bumped ONLY by frames that
@@ -558,16 +642,16 @@ private:
     // staleness is impossible by construction: observing a change
     // requires a cursor-affecting frame, which is exactly what bumps.
     std::atomic<std::uint64_t>  nav_seq_{0};
+    // See frame_seq(): bumped by every request().
+    std::atomic<std::uint64_t>  frame_seq_{0};
+    std::atomic<std::uint64_t>  data_epoch_{0};
+    std::mutex                  reclen_mu_;
+    std::unordered_map<std::string, std::uint32_t> reclen_memo_;
     // Raw HelloAck payload (see above). Written once during
     // connect_with_transport, read afterwards without mu_ (the
     // connection is fully established before any other thread
     // can hold its handle).
     std::string                 server_version_;
-    // Positive-only file-existence cache (see file_exists). Guarded
-    // by its own mutex: consulted on the read path, cleared by
-    // file-mutating ops, never held across wire calls.
-    std::set<std::string>       file_exists_cache_;
-    std::mutex                  file_exists_mu_;
 
 public:
     // Deferred disconnect (MT shared connections). AdsDisconnect on a
@@ -604,6 +688,8 @@ public:
                       std::vector<std::unique_ptr<RemoteTable>>& evicted);
     // Drain everything (disconnect). Caller really-closes each entry.
     void parked_flush(std::vector<std::unique_ptr<RemoteTable>>& out);
+    // Diagnostics (wire_trace): is an unexpired entry parked under key?
+    bool parked_contains(const std::string& key) const;
 
 private:
     std::vector<ParkedTable> parked_;
@@ -613,6 +699,11 @@ private:
 // Per-handle wrapper for a remote table. Stores back-pointer to
 // the connection plus the server-side table id.
 struct RemoteTable {
+    // Only an explicit SetIndexOrder opts table-handle navigation into an order.
+    bool explicit_order_focus = false;
+    bool created_order_focus = false;
+    // A boundary blob changed the logical cursor without moving the server.
+    bool pair_local_position = false;
     RemoteConnection* conn = nullptr;
     std::uint32_t     id   = 0;
     // True when this table was counted in conn->deferred_open_tables at
@@ -649,6 +740,20 @@ struct RemoteTable {
     bool          open_exclusive = false;  // mapped mode (never pooled)
     bool          ever_locked = false;     // AppendBlank/LockRecord/Table
     bool          scope_touched = false;   // SetScope (server state unclear)
+    // Client-side lock ledger (WAN chattiness): mirrors the record and
+    // table locks this connection is known to hold on the server. Lets
+    // AdsUnlockTable skip the frame when nothing is held (rddads
+    // dbUnlock() calls it blindly before every lock/append), lets
+    // AdsGetAllLocks answer locally, and lets the close path park a
+    // table whose locks were all released (the blunt ever_locked flag
+    // alone used to force a real close + 7-frame reopen per save).
+    // locks_uncertain covers locks the ledger cannot name: the append
+    // auto-lock (AppendBlankAck carries no recno) and LockRecord(0)
+    // with no valid cursor. Only a wire UnlockTable (or close) clears
+    // it. Conservative throughout: doubt always goes to the wire.
+    std::set<std::uint32_t> held_recs;
+    bool          table_lock_held = false;
+    bool          locks_uncertain = false;
     // M12.18 — recno + deleted flag arrive together with the row
     // bytes so AdsGetRecordNum / AdsIsRecordDeleted can serve from
     // cache instead of a separate RTT each.
@@ -708,6 +813,11 @@ struct RemoteTable {
     std::uint32_t            count_bound    = 0;
     bool                     count_bound_ok = false;
     std::uint64_t            count_bound_seq = 0;
+    // Wall time of the last bound tail (server certification) and the
+    // connection data_epoch() at that moment. Drive the short "still
+    // empty" window for physically empty tables (AdsSeek/AdsGotoRecord).
+    std::chrono::steady_clock::time_point bound_at{};
+    std::uint64_t            bound_data_epoch = 0;
     // Last wire nav op on this table (0 = none/other, 1 = GotoTop,
     // 2 = GotoBottom), whether it produced a row, and the connection
     // nav_seq_ at the time. Serves two WAN-chattiness kills with one
@@ -726,6 +836,56 @@ struct RemoteTable {
     // A top in order A says nothing about order B, so the duplicate
     // check requires the context to match, not just the op.
     std::uint32_t            last_nav_order = 0;
+
+    // mtfix12 R1 — boundary-pair certification. A GotoTop/GotoBottom ack
+    // on a kCapNavBoundaryPair server carries the OPPOSITE boundary's
+    // complete landing state, read by the server in the same atomic
+    // visit: the row blob in row-trailer format (pack_row_trailer
+    // bytes, lookahead depth 0), that landing's bound values, and the
+    // scoped key count. While the conn-wide nav_seq holds (identical
+    // envelope to remote_nav_duplicate) and no write touched this table
+    // since (write_gen), a back-to-back opposite-boundary call applies
+    // the blob exactly as the wire ack would have: same parser, same
+    // bound application, same keyno sync — byte-identical state, one
+    // RTT saved. pair_which is the boundary this certifies (1 = top,
+    // 2 = bottom), i.e. the OPPOSITE of the nav that carried it.
+    bool                     pair_valid     = false;
+    int                      pair_which     = 0;
+    std::uint32_t            pair_order     = 0;
+    std::uint64_t            pair_seq       = 0;
+    std::uint64_t            pair_write_gen = 0;
+    std::vector<std::uint8_t> pair_blob;
+    bool                     pair_bof       = false;
+    bool                     pair_eof       = false;
+    std::uint32_t            pair_recno     = 0;
+    bool                     pair_has_count    = false;
+    std::uint32_t            pair_reccount     = 0;
+    bool                     pair_has_keycount = false;
+    std::uint32_t            pair_keycount     = 0;
+    // Write generation snapshot: RemoteConnection::tbl_write_gen(id)
+    // at certification time (the conn bumps the live counter inside
+    // request() for every content-affecting frame, so no call site can
+    // miss it). The pair blob was read before any such change, so it
+    // must not overwrite fresher row state — guard on equality at
+    // serve time.
+    // mtfix12 R2 — certified server-cursor anchor. Set whenever a wire
+    // nav ack (or the open warm row) lands this handle's cursor on a
+    // row: the server cursor IS anchor_recno at that instant (lag is
+    // 0 by ack contract). Conn-wide envelope: valid while
+    // anchor_seq == conn nav_seq. Per-table opt-in envelope
+    // (OPENADS_NAV_SELF_GOTO=table): valid while anchor_tbl_seq ==
+    // tbl_change_seq — server cursors are per handle, so only THIS
+    // handle's frames can move it. Position-only certification; row
+    // bytes come from the existing row cache.
+    std::uint32_t            anchor_recno   = 0;
+    bool                     anchor_ok      = false;
+    std::uint64_t            anchor_seq     = 0;
+    std::uint64_t            anchor_tbl_seq = 0;
+    // anchor_tbl_seq snapshots RemoteConnection::tbl_nav_seq(id) — the
+    // per-table cursor/visibility generation bumped centrally in
+    // request(). Purely-local visibility mutations (filter/scope/order
+    // set+clear — the sites that reset last_nav) must also expire the
+    // anchor: they clear anchor_ok directly.
     // M12.19 — cached record count. Serves AdsGetRecordCount and
     // AdsGetRelKeyPos (scrollbar) without an extra RTT. Invalidated
     // on writes that may change the row count: AppendBlank /
@@ -855,6 +1015,15 @@ struct RemoteTable {
     std::uint16_t            cached_table_type = 0;
     bool                     record_length_cached = false;
     std::uint32_t            cached_record_length = 0;
+    // Set by a wire AdsGotoRecord that landed on a row: the connection
+    // frame_seq() right after the ack and the recno it delivered. While
+    // no other frame has gone out and the cursor still sits on that row,
+    // an AdsRefreshRecord would re-read the very row that ack carried
+    // (the server's GotoRecord already re-read it from disk), so the
+    // refresh is served from it with no round trip.
+    bool                     goto_row_fresh     = false;
+    std::uint64_t            goto_row_frame_seq = 0;
+    std::uint32_t            goto_row_recno     = 0;
     // Deferred teardown (WAN chattiness: rddads issues FlushFileBuffers
     // + CloseAllIndexes before every CloseTable — 2 wasted frames per
     // USE, since the server close flushes data and purges index
@@ -888,6 +1057,15 @@ struct RemoteTable {
     // adopt-or-emit decision, so a parked snapshot can never reference
     // dead server ids.
     bool indexes_parked = false;
+    // Nav stamp parked alongside the index snapshot: the CloseAll ->
+    // OpenIndex (unpark) cycle sends no frames, so a stamp taken just
+    // before the park still describes the live server cursor as long as
+    // nav_seq is unchanged when the same order is restored. Zeroed
+    // whenever the parked snapshot dies for real.
+    int                      parked_nav_which = 0;
+    std::uint32_t            parked_nav_order = 0;
+    bool                     parked_nav_row   = false;
+    std::uint64_t            parked_nav_seq   = 0;
     std::vector<std::pair<std::string, std::uint32_t>> parked_by_tag;
     std::vector<std::uint64_t> parked_handles;
     std::uint32_t parked_active = 0;

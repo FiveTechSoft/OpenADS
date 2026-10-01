@@ -5,6 +5,8 @@
 #include "openads/error.h"
 
 #include <algorithm>
+#include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstring>
 #include <thread>
@@ -152,17 +154,21 @@ std::size_t parse_row_trailer_into(RemoteTable* rt,
     // Returns the offset where trailer parsing stopped, so callers
     // can read trailing sections (reposition-bound piggyback).
     if (rt == nullptr || pos >= pl.size()) {
-        if (rt) rt->row_valid = false;
+        if (rt) { rt->row_valid = false; rt->anchor_ok = false; }
         return pos;
     }
     rt->prefetch_queue.clear();
     // M12.21 option C — every nav ack re-anchors the server cursor to the
     // client's logical position, so the lag resets to zero.
     rt->cursor_lag   = 0;
+    rt->pair_local_position = false;
     rt->prefetch_dir = 0;
     std::uint8_t has_row = pl[pos++];
     if (has_row == 0) {
         rt->row_valid = false;
+        // Landed on no row: the server cursor is at a phantom, which
+        // certifies no recno anchor for the R2 self-goto check.
+        rt->anchor_ok = false;
         // Lookahead count is always 0 when has_row=0, but the 2 bytes
         // are still on the wire: consume them so the returned offset
         // points past the trailer (trailing sections key off it).
@@ -172,10 +178,19 @@ std::size_t parse_row_trailer_into(RemoteTable* rt,
     auto end = parse_one_row(pl, pos,
         rt->current_recno, rt->current_deleted, rt->current_row);
     if (end == static_cast<std::size_t>(-1)) {
-        rt->row_valid = false; return pos;
+        rt->row_valid = false; rt->anchor_ok = false; return pos;
     }
     pos = end;
     rt->row_valid = true;
+    // mtfix12 R2 — every server-shipped landing certifies the cursor
+    // anchor: the server cursor IS current_recno right now (the ack
+    // contract resets cursor_lag to 0 above). Serves self-GotoRecord
+    // and GetRecordNum while the freshness seq holds.
+    rt->anchor_recno   = rt->current_recno;
+    rt->anchor_ok      = true;
+    rt->anchor_seq     = rt->conn != nullptr ? rt->conn->nav_seq() : 0;
+    rt->anchor_tbl_seq =
+        rt->conn != nullptr ? rt->conn->tbl_nav_seq(rt->id) : 0;
     // M12.21 lookahead block. [u16 count] then count rows.
     if (pos + 2 > pl.size()) return pos;     // M12.18 server (no lookahead) — done.
     std::uint16_t la = read_u16_le(&pl[pos]); pos += 2;
@@ -233,8 +248,89 @@ bool parse_tls_uri(const std::string& uri,
     return parse_scheme_uri(uri, "tls://", host, port, data_dir);
 }
 
+namespace {
+std::atomic<FrameTraceHook> g_frame_trace_hook{nullptr};
+} // namespace
+
+void set_frame_trace_hook(FrameTraceHook hook) noexcept {
+    g_frame_trace_hook.store(hook, std::memory_order_relaxed);
+}
+
+std::uint64_t RemoteConnection::tbl_nav_seq(std::uint32_t id) {
+    std::lock_guard<std::mutex> lk(mu_);
+    const auto it = tbl_nav_seqs_.find(id);
+    return it != tbl_nav_seqs_.end() ? it->second : 0;
+}
+
+std::uint64_t RemoteConnection::tbl_write_gen(std::uint32_t id) {
+    std::lock_guard<std::mutex> lk(mu_);
+    const auto it = tbl_write_gens_.find(id);
+    return it != tbl_write_gens_.end() ? it->second : 0;
+}
+
+void RemoteConnection::note_tbl_nav(std::uint32_t id) {
+    std::lock_guard<std::mutex> lk(mu_);
+    ++tbl_nav_seqs_[id];
+}
+
+void RemoteConnection::note_all_tables_nav() {
+    std::lock_guard<std::mutex> lk(mu_);
+    for (auto& [id, v] : tbl_nav_seqs_) ++v;
+}
+
 util::Result<Frame> RemoteConnection::request(const Frame& f) {
     std::lock_guard<std::mutex> lk(mu_);
+    frame_seq_.fetch_add(1, std::memory_order_relaxed);
+    switch (f.opcode) {
+        case Opcode::AppendBlank: case Opcode::SetField:
+        case Opcode::SetFields:   case Opcode::RecallRecord:
+        case Opcode::ExecuteSQL:  case Opcode::Reindex:
+        case Opcode::PackTable:   case Opcode::ZapTable:
+            data_epoch_.fetch_add(1, std::memory_order_relaxed);
+            break;
+        default:
+            break;
+    }
+    // mtfix12 — per-table generations. Every frame funnels through
+    // here, so classifying by opcode is exhaustive by construction.
+    // nav: cursor/visibility-affecting (mirrors note_nav_frame per
+    // table; FlushTable/FlushFileBuffers intentionally excluded —
+    // they move no cursor, and dropping them is exactly the widening
+    // the per-table envelope opts into). write: content-affecting
+    // (row bytes may differ after it lands). Index-keyed ops
+    // (Seek/SeekLast/SkipUnique/SetScope/ClearScope) and the
+    // conn-wide ShowDeleted are bumped by their methods, which know
+    // the binding.
+    if (f.payload.size() >= 4) {
+        const std::uint32_t tid = read_u32_le(f.payload.data());
+        switch (f.opcode) {
+            case Opcode::GotoTop:        case Opcode::GotoBottom:
+            case Opcode::GotoRecord:     case Opcode::Skip:
+            case Opcode::AppendBlank:    case Opcode::PackTable:
+            case Opcode::ZapTable:       case Opcode::Reindex:
+            case Opcode::SetAOF:         case Opcode::ClearAOFRemote:
+            case Opcode::CustomizeAOF:   case Opcode::SetOrder:
+            case Opcode::SetOrderByName:
+                ++tbl_nav_seqs_[tid];
+                break;
+            default: break;
+        }
+        switch (f.opcode) {
+            case Opcode::AppendBlank:    case Opcode::SetField:
+            case Opcode::SetFields:      case Opcode::SetRecord:
+            case Opcode::DeleteRecord:   case Opcode::RecallRecord:
+            case Opcode::PackTable:      case Opcode::ZapTable:
+            case Opcode::Reindex:
+                ++tbl_write_gens_[tid];
+                break;
+            default: break;
+        }
+    }
+    const FrameTraceHook trace_hook =
+        g_frame_trace_hook.load(std::memory_order_relaxed);
+    const auto trace_t0 = trace_hook != nullptr
+        ? std::chrono::steady_clock::now()
+        : std::chrono::steady_clock::time_point{};
     // Fail fast on a disconnected handle. rddads hands us connection
     // handles that AdsDisconnect already tore down (its "current
     // connection" can point at a handle another thread just closed);
@@ -264,6 +360,17 @@ util::Result<Frame> RemoteConnection::request(const Frame& f) {
         // Poison instead: fail fast with 5036 like a dropped connection.
         transport_->close();
         return rep.error();
+    }
+    if (trace_hook != nullptr) {
+        const long long us = static_cast<long long>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - trace_t0).count());
+        const std::uint32_t tid =
+            f.payload.size() >= 4 ? read_u32_le(f.payload.data()) : 0u;
+        trace_hook(this, static_cast<std::uint8_t>(f.opcode), tid,
+                   f.payload.size(),
+                   static_cast<std::uint8_t>(rep.value().opcode),
+                   rep.value().payload.size(), us);
     }
     // M12.10 — Error frame payload prefixed with [u32 LE ace_code].
     // Parse it back into the util::Error so callers see the real ACE
@@ -312,7 +419,8 @@ void connect_pack_payload(std::vector<std::uint8_t>& payload,
     // to a client that only understands forward ones (see kCapPrefetchBackward).
     std::uint32_t caps = kCapPrefetchConsume | kCapPrefetchBackward
                        | kCapOpenTableMode | kCapSetFieldsBatch
-                       | kCapFlushInCloseAll | kCapNavOrderFuse;
+                       | kCapFlushInCloseAll | kCapNavOrderFuse
+                       | kCapNavBoundaryPair;
     for (int i = 0; i < 4; ++i)
         payload.push_back(static_cast<std::uint8_t>((caps >> (8 * i)) & 0xFFu));
 }
@@ -445,6 +553,18 @@ void RemoteConnection::parked_store(std::string key,
         evicted.push_back(std::move(parked_.front().table));
         parked_.erase(parked_.begin());
     }
+}
+
+bool RemoteConnection::parked_contains(const std::string& key) const {
+    std::lock_guard<std::mutex> lk(park_mu_);
+    const auto now = std::chrono::steady_clock::now();
+    for (const auto& e : parked_) {
+        const auto age =
+            std::chrono::duration_cast<std::chrono::seconds>(now - e.parked_at);
+        if (age.count() > static_cast<long long>(kParkedTtlSec)) continue;
+        if (e.key == key && e.table) return true;
+    }
+    return false;
 }
 
 void RemoteConnection::parked_flush(
@@ -587,6 +707,7 @@ util::Result<void> RemoteConnection::apply_open_row(RemoteTable* rt,
     return {};
 }
 
+
 util::Result<void> RemoteConnection::close_table(std::uint32_t id) {
     Frame req;
     req.opcode = Opcode::CloseTable;
@@ -625,6 +746,8 @@ static void apply_bound_trailer(RemoteTable* rt, bool bof, bool eof,
     rt->recno_bound     = recno;
     rt->recno_bound_ok  = true;
     rt->recno_bound_seq = seq;
+    rt->bound_at         = std::chrono::steady_clock::now();
+    rt->bound_data_epoch = rt->conn->data_epoch();
     if (has_count) {
         rt->count_bound     = reccount;
         rt->count_bound_ok  = true;
@@ -645,6 +768,94 @@ static bool apply_bound_tail(RemoteTable* rt,
                         has_count ? read_u32_le(pl.data() + tend + 6) : 0u,
                         has_count);
     return true;
+}
+
+// mtfix12 R1 — pair-requested acks carry an explicit [u8 ack_flags]
+// byte right after the row trailer so section offsets are deterministic
+// (the plain length-inference in apply_bound_tail cannot tell a 6-byte
+// bound followed by a pair section from a 10-byte bound). ack_flags
+// bit 0x01: the main bound tail carries reccount (10 bytes). Applies
+// the bound exactly like apply_bound_tail and returns the offset just
+// past it. Missing/short tail: nothing applied, returns tend (the
+// server declined pair entirely; no certification, wire fallback).
+static std::size_t pair_ack_bound_end(RemoteTable* rt,
+                                      const std::vector<std::uint8_t>& pl,
+                                      std::size_t tend) {
+    if (rt == nullptr || pl.size() < tend + 1) return tend;
+    const std::uint8_t af = pl[tend];
+    const std::size_t blen = (af & 0x01) ? 10 : 6;
+    if (pl.size() < tend + 1 + blen) return tend;
+    apply_bound_trailer(rt, pl[tend + 1] != 0, pl[tend + 2] != 0,
+                        read_u32_le(pl.data() + tend + 3),
+                        (af & 0x01) ? read_u32_le(pl.data() + tend + 7) : 0u,
+                        (af & 0x01) != 0);
+    return tend + 1 + blen;
+}
+
+// mtfix12 R1 — boundary-pair tail (see kCapNavBoundaryPair in wire.h).
+// Layout at [off, ...):
+//   [u8 flags][u32 trailer_len][trailer][bound 6|10][u32 keycount?]
+// flags: 0x02 = bound carries reccount (10 bytes), 0x04 = keycount
+// present (ordered tables). The trailer is row-trailer format
+// (pack_row_trailer bytes at lookahead depth 0) describing the OPPOSITE
+// boundary's landing, read by the server in the same atomic visit as
+// the nav that carried it. Stored for the ABI layer to apply verbatim
+// if the adjacent opposite-boundary call arrives while the conn-wide
+// freshness envelope holds (same rule as remote_nav_duplicate) and no
+// write touched the table since (write_gen). Absent/malformed tail =
+// no certification: pair_valid stays false and the next
+// opposite-boundary call goes to the wire exactly as before.
+static bool apply_pair_tail(RemoteTable* rt, int opp_which,
+                            std::uint32_t order,
+                            const std::vector<std::uint8_t>& pl,
+                            std::size_t off) {
+    if (rt == nullptr || pl.size() < off + 5) return false;
+    const std::uint8_t flags = pl[off];
+    const std::uint32_t tlen = read_u32_le(pl.data() + off + 1);
+    const std::size_t bound_len = (flags & 0x02) ? 10 : 6;
+    const std::size_t need =
+        5 + static_cast<std::size_t>(tlen) + bound_len +
+        ((flags & 0x04) ? 4 : 0);
+    if (pl.size() < off + need) return false;
+    std::size_t p = off + 5;
+    rt->pair_blob.assign(pl.begin() + static_cast<std::ptrdiff_t>(p),
+                             pl.begin() + static_cast<std::ptrdiff_t>(p + tlen));
+    p += tlen;
+    rt->pair_bof   = pl[p] != 0;
+    rt->pair_eof   = pl[p + 1] != 0;
+    rt->pair_recno = read_u32_le(pl.data() + p + 2);
+    rt->pair_has_count = (flags & 0x02) != 0;
+    rt->pair_reccount  = rt->pair_has_count
+                             ? read_u32_le(pl.data() + p + 6) : 0u;
+    p += bound_len;
+    rt->pair_has_keycount = (flags & 0x04) != 0;
+    rt->pair_keycount = rt->pair_has_keycount
+                            ? read_u32_le(pl.data() + p) : 0u;
+    rt->pair_which     = opp_which;
+    rt->pair_order     = order;
+    rt->pair_seq       = rt->conn != nullptr ? rt->conn->nav_seq() : 0;
+    rt->pair_write_gen =
+        rt->conn != nullptr ? rt->conn->tbl_write_gen(rt->id) : 0;
+    rt->pair_valid     = true;
+    return true;
+}
+
+util::Result<void> RemoteConnection::apply_pair_blob(RemoteTable* rt) {
+    if (rt == nullptr || !rt->pair_valid) {
+        return util::Error{5000, 0, "apply_pair_blob: no certification", ""};
+    }
+    // Same byte path a wire ack for the opposite boundary would take:
+    // the stored trailer parse re-anchors lag and resets prefetch,
+    // then the certified bound values land through the shared trailer
+    // application so every bound/recno/count stamp matches.
+    parse_row_trailer_into(rt, rt->pair_blob, 0);
+    rt->pair_local_position = true;
+    apply_bound_trailer(rt, rt->pair_bof, rt->pair_eof, rt->pair_recno,
+                        rt->pair_reccount, rt->pair_has_count);
+    if (rt->pair_has_keycount) {
+        rt->key_counts[rt->pair_order] = rt->pair_keycount;
+    }
+    return {};
 }
 
 util::Result<void> RemoteConnection::goto_top(std::uint32_t id) {
@@ -684,6 +895,12 @@ util::Result<void> RemoteConnection::goto_top(RemoteTable* rt) {
         static_cast<std::uint8_t>(rt->cache_records_hint & 0xFFu));
     req.payload.push_back(
         static_cast<std::uint8_t>((rt->cache_records_hint >> 8) & 0xFFu));
+    // mtfix12 R1: ask for the opposite boundary's certification (the
+    // back-to-back dbGoTop(); dbGoBottom() ritual). Caps-gated: old
+    // servers never see the byte (flag 0x02, no order section).
+    const bool want_pair = server_nav_boundary_pair();
+    if (want_pair) req.payload.push_back(0x02);
+    rt->pair_valid = false;
     auto rep = request(req);
     if (!rep) return rep.error();
     if (rep.value().opcode != Opcode::GotoTopAck) {
@@ -693,7 +910,14 @@ util::Result<void> RemoteConnection::goto_top(RemoteTable* rt) {
         parse_row_trailer_into(rt, rep.value().payload, 0);
     // Reposition-bound piggyback (see goto_record): trailing
     // [u8 bof][u8 eof][u32 recno], length-gated.
-    apply_bound_tail(rt, rep.value().payload, tend);
+    if (want_pair) {
+        const std::size_t off =
+            pair_ack_bound_end(rt, rep.value().payload, tend);
+        apply_pair_tail(rt, 2, rt->server_order_id,
+                        rep.value().payload, off);
+    } else {
+        apply_bound_tail(rt, rep.value().payload, tend);
+    }
     return {};
 }
 
@@ -1074,6 +1298,10 @@ util::Result<void> RemoteConnection::goto_bottom(RemoteTable* rt) {
     Frame req;
     req.opcode = Opcode::GotoBottom;
     write_u32_le(rt->id, req.payload);
+    // mtfix12 R1: opposite-boundary certification (see goto_top).
+    const bool want_pair = server_nav_boundary_pair();
+    if (want_pair) req.payload.push_back(0x02);
+    rt->pair_valid = false;
     auto rep = request(req);
     if (!rep) return rep.error();
     if (rep.value().opcode != Opcode::GotoBottomAck) {
@@ -1083,7 +1311,14 @@ util::Result<void> RemoteConnection::goto_bottom(RemoteTable* rt) {
         parse_row_trailer_into(rt, rep.value().payload, 0);
     // Reposition-bound piggyback (see goto_record): trailing
     // [u8 bof][u8 eof][u32 recno], length-gated.
-    apply_bound_tail(rt, rep.value().payload, tend);
+    if (want_pair) {
+        const std::size_t off =
+            pair_ack_bound_end(rt, rep.value().payload, tend);
+        apply_pair_tail(rt, 1, rt->server_order_id,
+                        rep.value().payload, off);
+    } else {
+        apply_bound_tail(rt, rep.value().payload, tend);
+    }
     return {};
 }
 
@@ -1101,8 +1336,11 @@ util::Result<void> RemoteConnection::goto_top_fused(RemoteTable* rt,
         static_cast<std::uint8_t>(rt->cache_records_hint & 0xFFu));
     req.payload.push_back(
         static_cast<std::uint8_t>((rt->cache_records_hint >> 8) & 0xFFu));
-    req.payload.push_back(0x01);
+    const bool want_pair = server_nav_boundary_pair();
+    req.payload.push_back(static_cast<std::uint8_t>(
+        0x01 | (want_pair ? 0x02 : 0x00)));
     write_u32_le(order_id, req.payload);
+    rt->pair_valid = false;
     auto rep = request(req);
     if (!rep) return rep.error();
     if (rep.value().opcode != Opcode::GotoTopAck) {
@@ -1110,13 +1348,23 @@ util::Result<void> RemoteConnection::goto_top_fused(RemoteTable* rt,
     }
     const std::size_t tend =
         parse_row_trailer_into(rt, rep.value().payload, 0);
-    // Reposition-bound piggyback (see goto_record): trailing
-    // [u8 bof][u8 eof][u32 recno](+[u32 reccount]), length-gated.
-    apply_bound_tail(rt, rep.value().payload, tend);
-    // Fused switch only: the server certified the new order's key
-    // count past the bound tail ([u32]). Rotation visits ask it
-    // next; serve from the per-order map instead of a frame.
-    {
+    if (want_pair) {
+        // Pair-requested fused ack: [rowtrailer][u8 ack_flags][bound]
+        // [u32 fused key count][pair section].
+        const std::size_t off =
+            pair_ack_bound_end(rt, rep.value().payload, tend);
+        const auto& pl = rep.value().payload;
+        if (pl.size() >= off + 4) {
+            rt->key_counts[order_id] = read_u32_le(pl.data() + off);
+        }
+        apply_pair_tail(rt, 2, order_id, pl, off + 4);
+    } else {
+        // Reposition-bound piggyback (see goto_record): trailing
+        // [u8 bof][u8 eof][u32 recno](+[u32 reccount]), length-gated.
+        apply_bound_tail(rt, rep.value().payload, tend);
+        // Fused switch only: the server certified the new order's key
+        // count past the bound tail ([u32]). Rotation visits ask it
+        // next; serve from the per-order map instead of a frame.
         const auto& pl = rep.value().payload;
         if (pl.size() >= tend + 14) {
             rt->key_counts[order_id] = read_u32_le(pl.data() + tend + 10);
@@ -1131,8 +1379,11 @@ util::Result<void> RemoteConnection::goto_bottom_fused(RemoteTable* rt,
     Frame req;
     req.opcode = Opcode::GotoBottom;
     write_u32_le(rt->id, req.payload);
-    req.payload.push_back(0x01);
+    const bool want_pair = server_nav_boundary_pair();
+    req.payload.push_back(static_cast<std::uint8_t>(
+        0x01 | (want_pair ? 0x02 : 0x00)));
     write_u32_le(order_id, req.payload);
+    rt->pair_valid = false;
     auto rep = request(req);
     if (!rep) return rep.error();
     if (rep.value().opcode != Opcode::GotoBottomAck) {
@@ -1140,11 +1391,19 @@ util::Result<void> RemoteConnection::goto_bottom_fused(RemoteTable* rt,
     }
     const std::size_t tend =
         parse_row_trailer_into(rt, rep.value().payload, 0);
-    // Reposition-bound piggyback (see goto_record): trailing
-    // [u8 bof][u8 eof][u32 recno](+[u32 reccount]), length-gated.
-    apply_bound_tail(rt, rep.value().payload, tend);
-    // Fused switch only: certified key count past the bound tail.
-    {
+    if (want_pair) {
+        const std::size_t off =
+            pair_ack_bound_end(rt, rep.value().payload, tend);
+        const auto& pl = rep.value().payload;
+        if (pl.size() >= off + 4) {
+            rt->key_counts[order_id] = read_u32_le(pl.data() + off);
+        }
+        apply_pair_tail(rt, 1, order_id, pl, off + 4);
+    } else {
+        // Reposition-bound piggyback (see goto_record): trailing
+        // [u8 bof][u8 eof][u32 recno](+[u32 reccount]), length-gated.
+        apply_bound_tail(rt, rep.value().payload, tend);
+        // Fused switch only: certified key count past the bound tail.
         const auto& pl = rep.value().payload;
         if (pl.size() >= tend + 14) {
             rt->key_counts[order_id] = read_u32_le(pl.data() + tend + 10);
@@ -2449,12 +2708,10 @@ std::uint64_t read_u64_le(const std::uint8_t* p) {
 
 } // namespace
 
+// File state can change on another connection or directly on the host.
+// Every existence probe must reach the server, just like DirExist.
 util::Result<bool>
 RemoteConnection::file_exists(const std::string& path) {
-    {
-        std::lock_guard<std::mutex> lk(file_exists_mu_);
-        if (file_exists_cache_.count(path) != 0) return true;
-    }
     Frame req;
     req.opcode = Opcode::FileExists;
     push_lp_str(req.payload, path);
@@ -2463,17 +2720,7 @@ RemoteConnection::file_exists(const std::string& path) {
     if (rep.value().opcode != Opcode::FileExistsAck ||
         rep.value().payload.empty())
         return fs_wire_err(rep.value(), "FileExists");
-    bool exists = rep.value().payload[0] != 0;
-    if (exists) {
-        std::lock_guard<std::mutex> lk(file_exists_mu_);
-        file_exists_cache_.insert(path);
-    }
-    return exists;
-}
-
-void RemoteConnection::file_exists_invalidate() {
-    std::lock_guard<std::mutex> lk(file_exists_mu_);
-    file_exists_cache_.clear();
+    return rep.value().payload[0] != 0;
 }
 
 util::Result<void>
@@ -2485,7 +2732,6 @@ RemoteConnection::file_erase(const std::string& path) {
     if (!rep) return rep.error();
     if (rep.value().opcode != Opcode::FileEraseAck)
         return fs_wire_err(rep.value(), "FileErase");
-    file_exists_invalidate();
     return {};
 }
 
@@ -2500,7 +2746,6 @@ RemoteConnection::file_rename(const std::string& old_p,
     if (!rep) return rep.error();
     if (rep.value().opcode != Opcode::FileRenameAck)
         return fs_wire_err(rep.value(), "FileRename");
-    file_exists_invalidate();
     return {};
 }
 
@@ -2709,6 +2954,10 @@ RemoteConnection::zip_list(const std::string& zip) {
     return o;
 }
 
+// Directory state may change through other sessions or on the server host.
+// Do not cache existence or skip an idempotent mkdir: a stale positive answer
+// can make a fresh organization fail its first CreateTable after its directory
+// was removed outside this connection.
 util::Result<bool>
 RemoteConnection::dir_exist(const std::string& path) {
     Frame req;
@@ -2842,6 +3091,7 @@ util::Result<void>
 RemoteConnection::skip_unique(std::uint32_t index_id,
                                std::int32_t  direction) {
     note_nav_frame();
+    note_all_tables_nav();  // index-keyed, no parent resolved here
     Frame req; req.opcode = Opcode::SkipUnique;
     write_u32_le(index_id, req.payload);
     write_u32_le(static_cast<std::uint32_t>(direction), req.payload);
@@ -2859,6 +3109,7 @@ RemoteConnection::set_scope(std::uint32_t index_id,
                              const std::string& key,
                              std::uint16_t data_type) {
     note_nav_frame();
+    note_all_tables_nav();  // index-keyed visibility change
     // Payload: u32 index_id | u16 which | u16 data_type | bytes key.
     // Key length is the trailing byte count (payload.size() - 8).
     Frame req; req.opcode = Opcode::SetScope;
@@ -2916,6 +3167,7 @@ RemoteConnection::fetch_current_row(RemoteTable* rt) {
 
 void RemoteConnection::show_deleted(bool visible) noexcept {
     note_nav_frame();
+    note_all_tables_nav();  // conn-wide visibility change
     if (!transport_ || !transport_->valid()) return;
     Frame req;
     req.opcode = Opcode::ShowDeleted;
@@ -2929,6 +3181,7 @@ util::Result<void>
 RemoteConnection::clear_scope(std::uint32_t index_id,
                                std::uint16_t which) {
     note_nav_frame();
+    note_all_tables_nav();  // index-keyed visibility change
     Frame req; req.opcode = Opcode::ClearScope;
     write_u32_le(index_id, req.payload);
     write_u16_le(which, req.payload);
@@ -2947,6 +3200,9 @@ RemoteConnection::seek(std::uint32_t index_id,
                         std::uint8_t last,
                         RemoteTable* parent) {
     note_nav_frame();
+    // Index-keyed op: request() cannot map it to a table, so the
+    // binding the caller resolved bumps the per-table generation here.
+    if (parent != nullptr) note_tbl_nav(parent->id);
     Frame req;
     req.opcode = last ? Opcode::SeekLast : Opcode::Seek;
     write_u32_le(index_id, req.payload);

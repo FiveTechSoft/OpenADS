@@ -648,6 +648,37 @@ inline constexpr std::uint32_t kCapFlushInCloseAll = 0x00000020u;
 // never emit it.
 inline constexpr std::uint32_t kCapNavOrderFuse = 0x00000040u;
 
+// Durable FlushTable: the server's FlushTable handler already performs
+// the full file-buffers flush (ABI twin via AdsFlushFileBuffers, then
+// the engine table), i.e. exactly the work of a standalone
+// FlushFileBuffers frame. A client that sees this bit clears its dirty
+// flag when its own FlushTable lands and skips the trailing
+// FlushFileBuffers -- one frame per commit instead of two. Same
+// two-way gating as kCapFlushInCloseAll; old servers never echo it, so
+// the client keeps sending both frames there.
+inline constexpr std::uint32_t kCapFlushTableDurable = 0x00000080u;
+
+// Boundary-pair certification (mtfix12 R1): a GotoTop/GotoBottom request
+// may carry one more trailing flag bit (see the flag bytes below) asking
+// the server to read the OPPOSITE boundary in the same atomic visit and
+// append its full landing state to the ack (row blob + bound values +
+// scoped key count). The client stamps that certification and serves a
+// back-to-back opposite-boundary call (the dbGoTop(); dbGoBottom()
+// ritual) with zero frames between proof and serve -- the same
+// conn-wide freshness envelope the shipped duplicate-suppression uses.
+// Same two-way gating as kCapNavOrderFuse: the client only sets the
+// flag when the ConnectAck echo carries this bit, so old servers never
+// see it and old clients never emit it.
+//
+// Request layouts (new server parses bits, old layouts stay valid):
+//   GotoTop:    [u32 id][u16 depth][u8 flags]([u32 order])
+//   GotoBottom: [u32 id][u8 flags]([u32 order])
+//   flags bit 0x01 = fused order section present (kCapNavOrderFuse)
+//   flags bit 0x02 = boundary-pair certification requested (this bit)
+// Pre-mtfix12 clients send flags == 0x01 exactly when fusing, which the
+// new server reads as "fused, no pair" -- bit-exact with the old parse.
+inline constexpr std::uint32_t kCapNavBoundaryPair = 0x00000100u;
+
 // Warm OpenTableAck sections (USE latency). After the fixed
 // `[u32 id][u16 bag_len][bag]` prefix, the ack carries
 // `[u8 section_count]` then that many TLVs:

@@ -69,7 +69,14 @@ ADSHANDLE open_shared(ADSHANDLE hConn, const char* name) {
     UNSIGNED8 tname[64] = {};
     std::memcpy(tname, name, std::strlen(name) + 1);  // NOLINT
     ADSHANDLE hT = 0;
-    REQUIRE(AdsOpenTable(hConn, tname, tname, ADS_CDX, 1, 1, 0, 1, &hT) == 0);
+    // usMode ADS_SHARED: this helper always opened exclusive (usMode=1),
+    // which only "worked" while exclusive opens were a silent no-op. With
+    // mtfix11's SAP-faithful enforcement a second connection's exclusive
+    // open of the same table is correctly denied, so open what the name
+    // says. (Argument order: usLockType, usCheckRights, usMode.)
+    REQUIRE(AdsOpenTable(hConn, tname, tname, ADS_CDX, ADS_ANSI,
+                         ADS_COMPATIBLE_LOCKING, ADS_IGNORERIGHTS,
+                         ADS_SHARED, &hT) == 0);
     return hT;
 }
 
@@ -373,7 +380,14 @@ TEST_CASE("lockfull remote: threads on a shared connection don't leak locks") {
             ADSHANDLE hT = handles[t];
             for (int c = 0; c < kCycles; ++c) {
                 const UNSIGNED32 rec = 1 + (c % 5);
-                UNSIGNED32 rc = AdsLockRecord(hT, rec);
+                // mtfix6: locks are single-attempt; the application owns
+                // the retry loop under contention.
+                UNSIGNED32 rc = 1;
+                for (int a = 0; a < 500 && rc != 0; ++a) {
+                    rc = AdsLockRecord(hT, rec);
+                    if (rc != 0)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                }
                 if (rc != 0) { fprintf(stderr, "[lockfull] lock rc=%u\n", rc); ++failures; break; }
                 UNSIGNED8 f[] = "VAL";
                 rc = AdsSetLong(hT, f, c);

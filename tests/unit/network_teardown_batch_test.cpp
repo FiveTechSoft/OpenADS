@@ -6,8 +6,8 @@
 //  - Flush/CloseAll defer to the close that absorbs them (server close
 //    flushes via its shadow handle and purges index bindings); any
 //    other intervening wire op flushes them first, in order.
-//  - CheckExistence serves positive answers locally until a
-//    file-mutating op clears the cache (negatives always go out).
+//  - CheckExistence always probes the server; external file/dir changes
+//    can occur outside this connection.
 //  - SetOrder to the ack-confirmed binding skips its frame (SetOrder
 //    never moves the cursor).
 //  - Order-handle key counts ride the parent's order cache.
@@ -234,7 +234,7 @@ TEST_CASE("Teardown batching: merged flush survives for unparked closes") {
     srv.stop();
 }
 
-TEST_CASE("Teardown batching: existence positives cache until mutation") {
+TEST_CASE("Teardown batching: existence probes reflect external changes") {
     tb_wipe();
     auto dir = tb_tmp_dir();
     tb_seed(dir);
@@ -253,14 +253,13 @@ TEST_CASE("Teardown batching: existence positives cache until mutation") {
     CHECK(ex == 1u);
     REQUIRE(AdsCheckExistence(hConn, fn, &ex) == AE_SUCCESS);
     CHECK(ex == 1u);
-    CHECK(tb_op(kOpFileExists) == fe0 + 1);
+    CHECK(tb_op(kOpFileExists) == fe0 + 3);
 
-    // A file-mutating op clears the cache: the next check goes out and
-    // reports the drop.
+    // A file-mutating op also changes the next live answer.
     REQUIRE(AdsDropTable(hConn, fn, 1) == AE_SUCCESS);
     REQUIRE(AdsCheckExistence(hConn, fn, &ex) == AE_SUCCESS);
     CHECK(ex == 0u);
-    CHECK(tb_op(kOpFileExists) == fe0 + 2);
+    CHECK(tb_op(kOpFileExists) == fe0 + 4);
 
     REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
     srv.stop();
@@ -359,7 +358,9 @@ TEST_CASE("Teardown batching: immutable metadata caches per handle") {
     }
     CHECK(tt == 2u);  // ADS_CDX
     CHECK(rl > 0u);
-    CHECK(tb_op(0x6A) == tt0 + 1);
+    // Table type: answered from the opened name's extension (0 frames)
+    // when it has one; at most one frame otherwise.
+    CHECK(tb_op(0x6A) <= tt0 + 1);
     CHECK(tb_op(0x6C) == rl0 + 1);
 
     REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
@@ -586,7 +587,7 @@ TEST_CASE("Index park: CreateIndex invalidates the snapshot") {
     srv.stop();
 }
 
-TEST_CASE("Teardown batching: open bags answer existence locally") {
+TEST_CASE("Teardown batching: open bags do not hide filesystem changes") {
     tb_wipe();
     auto dir = tb_tmp_dir();
     tb_seed(dir);
@@ -597,28 +598,20 @@ TEST_CASE("Teardown batching: open bags answer existence locally") {
     ADSHANDLE hConn = tb_connect_remote(dir, srv.port());
     ADSHANDLE hTable = tb_open(hConn);
 
-    // The production bag is bound by this open table: existence is
-    // trivially true (any spelling that stems the same, including
-    // the .z01 production alias) with zero frames.
+    // A live table or bag cannot establish existence for a differently
+    // spelled path. The exact spelling must be checked on the server.
     const std::uint64_t fe0 = tb_op(kOpFileExists);
     UNSIGNED16 ex = 0;
-    UNSIGNED8 bag1[] = "TB.CDX";
-    REQUIRE(AdsCheckExistence(hConn, bag1, &ex) == AE_SUCCESS);
+    UNSIGNED8 bag[] = "TB.CDX";
+    REQUIRE(AdsCheckExistence(hConn, bag, &ex) == AE_SUCCESS);
     CHECK(ex == 1u);
-    UNSIGNED8 bag2[] = "tb.cdx";
-    REQUIRE(AdsCheckExistence(hConn, bag2, &ex) == AE_SUCCESS);
-    CHECK(ex == 1u);
-    UNSIGNED8 bag3[] = "TB.z01";
-    REQUIRE(AdsCheckExistence(hConn, bag3, &ex) == AE_SUCCESS);
-    CHECK(ex == 1u);
-    CHECK(tb_op(kOpFileExists) == fe0);
-
-    // A genuinely missing file still goes to the wire (negatives are
-    // never cached: the file may appear at any time).
+    UNSIGNED8 alias[] = "TB.z01";
+    REQUIRE(AdsCheckExistence(hConn, alias, &ex) == AE_SUCCESS);
+    CHECK(ex == 0u);
     UNSIGNED8 missing[] = "NOPE.CDX";
     REQUIRE(AdsCheckExistence(hConn, missing, &ex) == AE_SUCCESS);
     CHECK(ex == 0u);
-    CHECK(tb_op(kOpFileExists) == fe0 + 1);
+    CHECK(tb_op(kOpFileExists) == fe0 + 3);
 
     REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
     REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
@@ -665,6 +658,77 @@ TEST_CASE("KeyCount: rotation revisits ride the per-order map") {
     REQUIRE(AdsGetKeyCount(hOrd1, 0, &kc) == AE_SUCCESS);
     CHECK(kc == 5u);
     CHECK(tb_op(kOpKeyCount) == kc0 + 2);
+
+    REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
+    REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
+    srv.stop();
+}
+
+TEST_CASE("Parked nav stamp survives CloseAll/OpenIndex unpark") {
+    tb_wipe();
+    auto dir = tb_tmp_dir();
+    tb_seed(dir);
+
+    openads::network::Server srv;
+    REQUIRE(srv.start("127.0.0.1", 0).has_value());
+    ADSHANDLE hConn = tb_connect_remote(dir, srv.port());
+    ADSHANDLE hTable = tb_open(hConn);
+
+    // Bind the bag and take the order to its top: one wire GotoTop that
+    // stamps (top, order) on the client.
+    UNSIGNED8 bag[] = "TB.CDX";
+    ADSHANDLE hIdx = 0;
+    UNSIGNED16 nidx = 1;
+    REQUIRE(AdsOpenIndex(hTable, bag, &hIdx, &nidx) == AE_SUCCESS);
+    REQUIRE(nidx >= 1);
+    REQUIRE(AdsGotoTop(hIdx) == AE_SUCCESS);
+
+    // The rddads rotation pattern: OrdListClear (parked, no frame) then
+    // the same bag reopened (unpark hit, no frame).
+    const std::uint64_t gt_before = tb_op(kOpGotoTop);
+    REQUIRE(AdsCloseAllIndexes(hTable) == AE_SUCCESS);
+    ADSHANDLE hIdx2 = 0;
+    nidx = 1;
+    REQUIRE(AdsOpenIndex(hTable, bag, &hIdx2, &nidx) == AE_SUCCESS);
+    // The post-unpark GotoTop(idx) must dedupe against the parked stamp:
+    // the server never moved, so no refresh frame is owed.
+    REQUIRE(AdsGotoTop(hIdx2) == AE_SUCCESS);
+    CHECK(tb_op(kOpGotoTop) == gt_before);
+    UNSIGNED32 rec = 0;
+    REQUIRE(AdsGetRecordNum(hTable, ADS_IGNOREFILTERS, &rec) == AE_SUCCESS);
+    CHECK(rec == 1u);
+
+    REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
+    REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
+    srv.stop();
+}
+
+TEST_CASE("Parked nav stamp does not survive an intervening wire nav") {
+    tb_wipe();
+    auto dir = tb_tmp_dir();
+    tb_seed(dir);
+
+    openads::network::Server srv;
+    REQUIRE(srv.start("127.0.0.1", 0).has_value());
+    ADSHANDLE hConn = tb_connect_remote(dir, srv.port());
+    ADSHANDLE hTable = tb_open(hConn);
+
+    UNSIGNED8 bag[] = "TB.CDX";
+    ADSHANDLE hIdx = 0;
+    UNSIGNED16 nidx = 1;
+    REQUIRE(AdsOpenIndex(hTable, bag, &hIdx, &nidx) == AE_SUCCESS);
+    REQUIRE(AdsGotoTop(hIdx) == AE_SUCCESS);
+
+    REQUIRE(AdsCloseAllIndexes(hTable) == AE_SUCCESS);
+    // A wire nav inside the window bumps the cursor seq: the parked
+    // stamp no longer proves anything and must be ignored.
+    REQUIRE(AdsGotoBottom(hTable) == AE_SUCCESS);
+    ADSHANDLE hIdx2 = 0;
+    nidx = 1;
+    REQUIRE(AdsOpenIndex(hTable, bag, &hIdx2, &nidx) == AE_SUCCESS);
+    const std::uint64_t gt_before = tb_op(kOpGotoTop);
+    REQUIRE(AdsGotoTop(hIdx2) == AE_SUCCESS);
+    CHECK(tb_op(kOpGotoTop) == gt_before + 1);
 
     REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
     REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);

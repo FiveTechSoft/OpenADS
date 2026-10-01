@@ -24,6 +24,7 @@ add_library(openads_core STATIC
     platform/proc.cpp
     engine/server_fs.cpp
     abi/ace_exports.cpp
+    abi/runtime.cpp
     abi/ace_stubs.cpp
     abi/adsfunc.c
     abi/openads_sql_c.cpp

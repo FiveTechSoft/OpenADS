@@ -25,6 +25,15 @@ public:
                                               std::uint64_t length,
                                               LockKind kind);
 
+    // Non-destructive conflict query (mtfix11): true when any byte of the
+    // range is locked by ANOTHER owner (another handle/OFD/process).
+    // Never takes or removes a lock. Callers must consult their own lock
+    // registrations first: POSIX OFD queries cannot see the querying fd's
+    // own locks, and a Win32 same-handle overlap also reports a conflict -
+    // neither layer can distinguish "mine".
+    static util::Result<bool> probe(File& f, std::uint64_t offset,
+                                    std::uint64_t length);
+
     util::Result<void> release();
 
     // Internal: construct from a native handle and the locked range.

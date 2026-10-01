@@ -396,6 +396,57 @@ void Server::add_session_table(std::uint64_t id, std::int32_t delta,
     }
 }
 
+bool Server::try_register_open(std::uint64_t id,
+                               const std::string& canon_path,
+                               bool exclusive) {
+    std::lock_guard<std::mutex> lk(open_reg_mu_);
+    auto it = open_reg_.find(canon_path);
+    if (it != open_reg_.end()) {
+        auto& e = it->second;
+        // Another session's exclusive hold denies every open mode.
+        if (e.exclusive_sid != 0 && e.exclusive_sid != id) return false;
+        if (exclusive) {
+            // An exclusive request needs the path free of OTHER sessions.
+            for (const auto& [sid, n] : e.shared) {
+                if (sid != id && n > 0) return false;
+            }
+            if (e.exclusive_sid != 0 && e.exclusive_sid != id) return false;
+            e.exclusive_sid = id;
+            ++e.exclusive_opens;
+        } else {
+            ++e.shared[id];
+        }
+        return true;
+    }
+    auto& e = open_reg_[canon_path];
+    if (exclusive) {
+        e.exclusive_sid   = id;
+        e.exclusive_opens = 1;
+    } else {
+        e.shared[id] = 1;
+    }
+    return true;
+}
+
+void Server::unregister_open(std::uint64_t id,
+                             const std::string& canon_path,
+                             bool exclusive) {
+    std::lock_guard<std::mutex> lk(open_reg_mu_);
+    auto it = open_reg_.find(canon_path);
+    if (it == open_reg_.end()) return;
+    auto& e = it->second;
+    if (exclusive) {
+        if (e.exclusive_sid == id && e.exclusive_opens > 0) {
+            if (--e.exclusive_opens == 0) e.exclusive_sid = 0;
+        }
+    } else {
+        if (auto sit = e.shared.find(id); sit != e.shared.end()) {
+            if (--sit->second == 0) e.shared.erase(sit);
+        }
+    }
+    if (e.shared.empty() && e.exclusive_opens == 0) open_reg_.erase(it);
+}
+
 void Server::install_session_socket(std::uint64_t id, Socket s) {
     std::lock_guard<std::mutex> lk(info_mu_);
     sockets_[id] = s;

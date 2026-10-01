@@ -10,6 +10,17 @@
 #include <thread>
 #include <unistd.h>
 
+// OFD (open-file-description) locks are used only where they are proven
+// to work. The macOS SDK defines F_OFD_SETLK, but there they made the
+// engine wait on its own handles (a fresh table refused its first
+// append lock and CI sat on it), so macOS keeps the process-scoped
+// F_SETLK/F_SETLKW locks the engine was written for.
+#if defined(F_OFD_SETLK) && !defined(__APPLE__)
+#define OPENADS_USE_OFD_LOCKS 1
+#else
+#define OPENADS_USE_OFD_LOCKS 0
+#endif
+
 namespace openads::platform {
 
 namespace {
@@ -28,7 +39,7 @@ util::Error os_error(const char* op) {
 // should still contend (Win32 LockFile is fd-scoped). OFD locks
 // are tied to the open file description, matching the Win32
 // semantics used by the engine.
-#ifdef F_OFD_SETLK
+#if OPENADS_USE_OFD_LOCKS
 constexpr int kSetLk  = F_OFD_SETLK;
 [[maybe_unused]] constexpr int kSetLkW = F_OFD_SETLKW;
 #else
@@ -103,14 +114,13 @@ void ByteLock::release_() noexcept {
 
 util::Result<ByteLock> ByteLock::acquire(File& f, std::uint64_t offset,
                                          std::uint64_t length, LockKind kind) {
-#if defined(F_OFD_SETLK) && !defined(__APPLE__)
+#if OPENADS_USE_OFD_LOCKS
     return do_lock(f, offset, length, kind, kSetLkW);
 #else
-    // macOS: its SDK defines the OFD commands, but a blocking F_OFD_SETLKW
-    // waits forever when a leaked holder lives in this same process (CI
-    // test runs sat on it until the job timeout). Poll the non-blocking
-    // command and give up after a bounded wait, so a stall becomes a lock
-    // error instead of a hang.
+    // Process-scoped locks (macOS) can still wait forever on a stale
+    // holder in another process. Poll the non-blocking command and give
+    // up after a bounded wait, so a stall becomes a lock error instead of
+    // a hang.
     const auto deadline =
         std::chrono::steady_clock::now() + std::chrono::seconds(30);
     for (;;) {
@@ -128,21 +138,20 @@ util::Result<ByteLock> ByteLock::acquire(File& f, std::uint64_t offset,
             int fd = static_cast<int>(
                 reinterpret_cast<intptr_t>(f.native_handle()) - 1);
             long holder = -1;
-#ifdef F_OFD_GETLK
-            q.l_pid = 0;
-            const int kGetLk = F_OFD_GETLK;
-#else
-            const int kGetLk = F_GETLK;
-#endif
-            if (::fcntl(fd, kGetLk, &q) == 0 && q.l_type != F_UNLCK) {
+            const int get_rc   = ::fcntl(fd, F_GETLK, &q);
+            const int get_errn = (get_rc == -1) ? errno : 0;
+            if (get_rc == 0 && q.l_type != F_UNLCK) {
                 holder = static_cast<long>(q.l_pid);
             }
             std::fprintf(stderr,
                 "openads: byte lock wait timed out (offset=%llu len=%llu "
-                "holder_pid=%ld self_pid=%ld)\n",
+                "set_errno=%d get_rc=%d get_errno=%d get_type=%d "
+                "holder_pid=%ld self_pid=%ld fd=%d)\n",
                 static_cast<unsigned long long>(offset),
-                static_cast<unsigned long long>(length), holder,
-                static_cast<long>(::getpid()));
+                static_cast<unsigned long long>(length),
+                r.error().sub_code, get_rc, get_errn,
+                static_cast<int>(q.l_type), holder,
+                static_cast<long>(::getpid()), fd);
             return r;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -154,6 +163,29 @@ util::Result<ByteLock> ByteLock::try_acquire(File& f, std::uint64_t offset,
                                              std::uint64_t length,
                                              LockKind kind) {
     return do_lock(f, offset, length, kind, kSetLk);
+}
+
+util::Result<bool> ByteLock::probe(File& f, std::uint64_t offset,
+                                   std::uint64_t length) {
+    struct flock fl{};
+    fl.l_type   = F_WRLCK;
+    fl.l_whence = SEEK_SET;
+    fl.l_start  = static_cast<off_t>(fold_lock_offset(offset));
+    fl.l_len    = static_cast<off_t>(length);
+    fl.l_pid    = 0;
+    // native_handle() stores (fd + 1) to avoid the nullptr/fd-0 collision.
+    int fd = static_cast<int>(reinterpret_cast<intptr_t>(f.native_handle()) - 1);
+#if OPENADS_USE_OFD_LOCKS
+    // F_OFD_GETLK reports conflicts against OTHER open file descriptions -
+    // exactly "another handle/session holds this byte". The querying fd's
+    // own locks are invisible to it; callers check their own list first.
+    if (::fcntl(fd, F_OFD_GETLK, &fl) == -1) return os_error("fcntl(F_OFD_GETLK)");
+#else
+    // Pre-3.15 fallback: process-scoped GETLK reports other PROCESSES only;
+    // same-process conflicts stay invisible (degraded, never wrong-safe).
+    if (::fcntl(fd, F_GETLK, &fl) == -1) return os_error("fcntl(F_GETLK)");
+#endif
+    return fl.l_type != F_UNLCK;
 }
 
 util::Result<void> ByteLock::release() {

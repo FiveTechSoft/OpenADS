@@ -1,3 +1,4 @@
+#include <cstdio>
 #include "engine/lock_mgr.h"
 
 namespace openads::engine {
@@ -148,6 +149,18 @@ LockMgr::try_lock_record_excl(platform::File& f, TableTypeForLock t, LockingMode
     if (!bl) return bl.error();
     held_[k] = 1;
     return LockHandle{std::move(bl).value(), off, 1};
+}
+
+util::Result<bool> LockMgr::probe_record(platform::File& f,
+                                         TableTypeForLock t, LockingMode m,
+                                         std::uint32_t recno) {
+    return platform::ByteLock::probe(f, record_lock_offset(t, m, recno), 1);
+}
+
+util::Result<bool> LockMgr::probe_file(platform::File& f, TableTypeForLock t,
+                                       LockingMode m) {
+    return platform::ByteLock::probe(f, file_lock_offset(t, m),
+                                     file_lock_length(t));
 }
 
 bool LockMgr::unlock_table(platform::File& f, TableTypeForLock t, LockingMode m) {

@@ -8,6 +8,10 @@
 #include "network/server.h"
 
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <iterator>
 #include <cstring>
 #include <filesystem>
 #include <string>
@@ -132,5 +136,123 @@ TEST_CASE("remote AdsCreateTable with drive-rooted name still under data dir") {
     CHECK_FALSE(fs::exists(fs::path(abs_name)));
 
     REQUIRE(AdsDisconnect(hConn) == 0);
+    fs::remove_all(data, ec);
+}
+
+TEST_CASE("CreateTable diagnostic isolates post-write reopen failure") {
+    using openads::network::Server;
+    auto data = fs::temp_directory_path() / "openads_create_diag_post_open";
+    auto diag = data / "create-diag.log";
+    std::error_code ec;
+    fs::remove_all(data, ec);
+    fs::create_directories(data);
+#if defined(_WIN32)
+    // Windows MAX_PATH cannot express this long-path reopen fixture. Instead
+    // force failure at companion memo creation, still after the DBF write.
+    const std::string rel = "probe.dbf";
+    fs::create_directories(data / "probe.fpt");
+    // Keep the directory non-empty so the server's pre-create remove()
+    // cannot erase it; the memo create must then fail on Windows.
+    std::ofstream(data / "probe.fpt" / "occupy") << "x";
+#else
+    // The server's ABI create writes the requested relative path, but its
+    // fixed 260-byte post-create name buffer truncates a longer path. This
+    // deterministically fails the reopen after the DBF has been written.
+    std::string rel;
+    for (int i = 0; i < 55; ++i) rel += "nest/";
+    rel += "probe.dbf";
+    fs::create_directories(data / fs::path(rel).parent_path());
+#endif
+#if defined(_WIN32)
+    _putenv_s("OPENADS_CREATE_TABLE_DIAG_FILE", diag.string().c_str());
+    _putenv_s("OPENADS_CREATE_TABLE_DIAG_FILTER", "probe.dbf");
+#else
+    setenv("OPENADS_CREATE_TABLE_DIAG_FILE", diag.string().c_str(), 1);
+    setenv("OPENADS_CREATE_TABLE_DIAG_FILTER", "probe.dbf", 1);
+#endif
+    Server srv;
+    REQUIRE(srv.start("127.0.0.1", 0).has_value());
+    ADSHANDLE conn = remote_connect(data, srv.port());
+    std::vector<UNSIGNED8> name(rel.begin(), rel.end());
+    name.push_back(0);
+#if defined(_WIN32)
+    UNSIGNED8 fields[] = "ID,Numeric,4,0;NOTE,Memo";
+#else
+    UNSIGNED8 fields[] = "ID,Numeric,4,0";
+#endif
+    ADSHANDLE table = 0;
+    const UNSIGNED32 rc = AdsCreateTable(conn, name.data(), nullptr, ADS_CDX, ADS_ANSI,
+                                         0, 0, 0, fields, &table);
+    const UNSIGNED32 reported = rc;
+    UNSIGNED32 last = 0;
+    UNSIGNED8 message[512]{};
+    UNSIGNED16 message_len = sizeof(message);
+    REQUIRE(AdsGetLastError(&last, message, &message_len) == 0);
+    CHECK(rc != 0);
+    CHECK(last == reported);
+    CHECK(fs::exists(data / rel));
+    std::ifstream log(diag);
+    std::string content((std::istreambuf_iterator<char>(log)),
+                        std::istreambuf_iterator<char>());
+    CHECK(content.find("stage=dbf-write-ok") != std::string::npos);
+#if defined(_WIN32)
+    CHECK(content.find("stage=memo-create-fail code=" +
+                       std::to_string(reported)) != std::string::npos);
+#else
+    CHECK(content.find("stage=server-abi-reopen-fail code=" +
+                       std::to_string(reported)) != std::string::npos);
+#endif
+    CHECK(content.find("stage=client-wire-fail code=" +
+                       std::to_string(reported)) != std::string::npos);
+    CHECK(content.find("NOTE") == std::string::npos);
+    (void)AdsDisconnect(conn);
+#if defined(_WIN32)
+    _putenv_s("OPENADS_CREATE_TABLE_DIAG_FILE", "");
+    _putenv_s("OPENADS_CREATE_TABLE_DIAG_FILTER", "");
+#else
+    unsetenv("OPENADS_CREATE_TABLE_DIAG_FILE");
+    unsetenv("OPENADS_CREATE_TABLE_DIAG_FILTER");
+#endif
+    fs::remove_all(data, ec);
+}
+
+TEST_CASE("CreateTable broad diagnostic records first-user open and append") {
+    using openads::network::Server;
+    auto data = fs::temp_directory_path() / "openads_create_diag_first_user";
+    auto diag = data / "create-diag.log";
+    std::error_code ec;
+    fs::remove_all(data, ec);
+    fs::create_directories(data);
+#if defined(_WIN32)
+    _putenv_s("OPENADS_CREATE_TABLE_DIAG_FILE", diag.string().c_str());
+    _putenv_s("OPENADS_CREATE_TABLE_DIAG_FILTER", "");
+#else
+    setenv("OPENADS_CREATE_TABLE_DIAG_FILE", diag.string().c_str(), 1);
+    unsetenv("OPENADS_CREATE_TABLE_DIAG_FILTER");
+#endif
+    Server srv;
+    REQUIRE(srv.start("127.0.0.1", 0).has_value());
+    ADSHANDLE conn = remote_connect(data, srv.port());
+    UNSIGNED8 name[] = "USERCFG.dbf";
+    UNSIGNED8 fields[] = "ID,Numeric,4,0";
+    ADSHANDLE table = 0;
+    REQUIRE(AdsCreateTable(conn, name, nullptr, ADS_CDX, ADS_ANSI,
+                           0, 0, 0, fields, &table) == 0);
+    REQUIRE(AdsAppendRecord(table) == 0);
+    REQUIRE(AdsCloseTable(table) == 0);
+    REQUIRE(AdsDisconnect(conn) == 0);
+    std::ifstream log(diag);
+    std::string content((std::istreambuf_iterator<char>(log)),
+                        std::istreambuf_iterator<char>());
+    CHECK(content.find("table=USERCFG.dbf stage=dbf-write-ok") != std::string::npos);
+    CHECK(content.find("table=USERCFG.dbf stage=server-open-ok") != std::string::npos);
+    CHECK(content.find("table=USERCFG.dbf stage=client-append-enter") != std::string::npos);
+    CHECK(content.find("table=USERCFG.dbf stage=client-append-ok") != std::string::npos);
+    CHECK(content.find("table=USERCFG.dbf stage=server-first-append-ok") != std::string::npos);
+#if defined(_WIN32)
+    _putenv_s("OPENADS_CREATE_TABLE_DIAG_FILE", "");
+#else
+    unsetenv("OPENADS_CREATE_TABLE_DIAG_FILE");
+#endif
     fs::remove_all(data, ec);
 }

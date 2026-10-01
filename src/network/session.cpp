@@ -17,6 +17,8 @@
 #include "openads/ace.h"
 #include "openads/error.h"
 #include "abi/lock_retry_policy.h"
+#include "abi/create_table_diag.h"
+#include "abi/last_error.h"
 #include "engine/server_fs.h"
 #include "platform/fs_sandbox.h"
 #include "platform/path.h"
@@ -544,7 +546,11 @@ void Session::cleanup() {
     //    else still references the path, and skips LockRegistry cleanup).
     if (sess_conn_) {
         for (auto& [id, h] : tbls_) {
-            (void)id;
+            if (auto rit = tbl_open_reg_.find(id);
+                rit != tbl_open_reg_.end()) {
+                srv_->unregister_open(sid_, rit->second.first,
+                                      rit->second.second);
+            }
             if (auto* t = sess_conn_->lookup_table(h)) {
                 (void)t->flush();
                 openads::mgmt::LockRegistry::instance().remove_all_for_table(t);
@@ -555,6 +561,7 @@ void Session::cleanup() {
     }
     tbls_.clear();
     tbl_open_paths_.clear();
+    tbl_open_reg_.clear();
 
     // 5) oads_FOpen / AdsFOpen files for this session.
     files_.clear();
@@ -1143,6 +1150,79 @@ void Session::pack_bound_trailer(Frame& reply, std::uint32_t id) {
     }
 }
 
+// mtfix12 R1 (kCapNavBoundaryPair) — see session.h. The pair section:
+//   [u8 flags][u32 trailer_len][trailer][bound 6|10]
+// flags bit 0x02 = pair bound carries reccount. Bit 0x04 (optional key
+// count) remains unset: counting all scoped index keys on every GoTop
+// made B_BIG's 10-thread job 8.4 s instead of ~220 ms. If an opposite
+// GoBottom is actually consumed, the client asks for its key count only
+// when its per-order cache is cold, preserving scoped key-number truth.
+// The trailer is pack_row_trailer output at lookahead depth 0 for the
+// OPPOSITE boundary, read inside this same visit, so
+// the client's adjacent opposite-boundary call applies it verbatim.
+void Session::pack_boundary_pair(Frame& reply, std::uint32_t id,
+                                 int which, ADSHANDLE hord,
+                                 openads::engine::Table* tbl) {
+    const bool to_bottom = (which == 1);  // certify the opposite end
+    std::uint8_t flags = 0;
+    Frame blob;
+    blob.opcode = reply.opcode;
+    Frame bnd;
+    bnd.opcode = reply.opcode;
+    bool granted = false;
+    if (hord != 0) {
+        // Ordered table: navigate the ABI twin (it carries the order
+        // and scope), restore the requested boundary exactly after.
+        UNSIGNED32 save_rec = 0;
+        UNSIGNED16 sb = 0, se = 0;
+        (void)AdsGetRecordNum(hord, 0, &save_rec);
+        (void)AdsAtBOF(hord, &sb);
+        (void)AdsAtEOF(hord, &se);
+        const bool empty_landing = (sb != 0 && se != 0);
+        const UNSIGNED32 grc =
+            to_bottom ? AdsGotoBottom(hord) : AdsGotoTop(hord);
+        if (grc == 0) {
+            pack_row_trailer(blob, id, 0);
+            pack_bound_trailer(bnd, id);
+            if (bnd.payload.size() >= 10) flags |= 0x02;
+            granted = true;
+        }
+        if (empty_landing) {
+            (void)(which == 1 ? AdsGotoTop(hord) : AdsGotoBottom(hord));
+        } else {
+            (void)AdsGotoRecord(hord, save_rec);
+        }
+    } else if (tbl != nullptr) {
+        const std::uint32_t save_rec = tbl->recno();
+        const bool empty_landing = tbl->bof() && tbl->eof();
+        auto gr = to_bottom ? tbl->goto_bottom() : tbl->goto_top();
+        if (gr) {
+            pack_row_trailer(blob, id, 0);
+            pack_bound_trailer(bnd, id);
+            if (bnd.payload.size() >= 10) flags |= 0x02;
+            granted = true;
+        }
+        if (empty_landing) {
+            if (which == 1) (void)tbl->goto_top();
+            else            (void)tbl->goto_bottom();
+        } else {
+            (void)tbl->goto_record(save_rec);
+        }
+    }
+    if (!granted) return;  // client falls back to a plain second frame
+    reply.payload.push_back(flags);
+    const std::uint32_t tlen =
+        static_cast<std::uint32_t>(blob.payload.size());
+    reply.payload.push_back(static_cast<std::uint8_t>( tlen        & 0xFFu));
+    reply.payload.push_back(static_cast<std::uint8_t>((tlen >>  8) & 0xFFu));
+    reply.payload.push_back(static_cast<std::uint8_t>((tlen >> 16) & 0xFFu));
+    reply.payload.push_back(static_cast<std::uint8_t>((tlen >> 24) & 0xFFu));
+    reply.payload.insert(reply.payload.end(),
+                         blob.payload.begin(), blob.payload.end());
+    reply.payload.insert(reply.payload.end(),
+                         bnd.payload.begin(), bnd.payload.end());
+}
+
 // M12.22/M12.23 — read-ahead depth for one forward Skip.
 //
 // `hint` is what the client asked for via AdsCacheRecords, or
@@ -1721,7 +1801,9 @@ DispatchResult Session::dispatch(const Frame& f) {
                 const std::uint32_t scaps =
                     openads::network::kCapSetFieldsBatch |
                     openads::network::kCapFlushInCloseAll |
-                    openads::network::kCapNavOrderFuse;
+                    openads::network::kCapNavOrderFuse |
+                    openads::network::kCapFlushTableDurable |
+                    openads::network::kCapNavBoundaryPair;
                 reply.payload.push_back(
                     static_cast<std::uint8_t>( scaps        & 0xFFu));
                 reply.payload.push_back(
@@ -1877,7 +1959,7 @@ DispatchResult Session::dispatch(const Frame& f) {
             std::string rel;
             auto open_mode = openads::engine::OpenMode::Shared;
             if (client_open_table_mode_ok_ && f.payload.size() >= 2) {
-                // M12.x extended payload: [u16 LE mode][table_name_bytes]
+                // M12.x extended payload: [u16 mode][table_name_bytes]
                 std::uint16_t mode_u16 = static_cast<std::uint16_t>(
                     static_cast<std::uint16_t>(f.payload[0]) |
                     (static_cast<std::uint16_t>(f.payload[1]) << 8));
@@ -1899,10 +1981,14 @@ DispatchResult Session::dispatch(const Frame& f) {
                     if (!stripped.empty()) rel = std::move(stripped);
                 }
             }
+            openads::abi::create_diag::Scope open_diag(rel,
+                std::to_string(sid_) + "." + openads::abi::create_diag::new_id());
             auto th = sess_conn_->open_table(rel,
                 openads::engine::TableType::Cdx,
                 open_mode);
             if (!th) {
+                openads::abi::create_diag::log("server-open-fail", th.error().code,
+                                              "table-open", th.error().sub_code);
                 std::fprintf(stderr, "[srv] OpenTable FAILED rel='%s' code=%d msg='%s'\n",
                              rel.c_str(), th.error().code,
                              th.error().message.c_str());
@@ -1911,8 +1997,32 @@ DispatchResult Session::dispatch(const Frame& f) {
                 break;
             }
             std::uint32_t id = next_id_++;
+            // mtfix11 - enforce ADS_EXCLUSIVE across wire sessions (SAP
+            // semantics; the drivers alone treat Exclusive as a plain
+            // open, so a reindex/pack exclusive hold never kept a second
+            // instance's opens out). Open-then-register keeps the
+            // registry key canonical (the engine's resolved path); a
+            // denied open is closed again and answered with 7040
+            // AE_FILE_IN_USE - the same code this codebase maps Win32
+            // sharing violations to.
+            if (auto* tbl = sess_conn_->lookup_table(th.value())) {
+                const std::string& canon = tbl->path();
+                const bool excl =
+                    (open_mode == openads::engine::OpenMode::Exclusive);
+                if (!canon.empty()) {
+                    if (!srv_->try_register_open(sid_, canon, excl)) {
+                        sess_conn_->close_table(th.value());
+                        openads::abi::create_diag::log("server-open-exclusive-fail", 7040);
+                        reply = err("OpenTable: table in use exclusively",
+                                    7040);
+                        break;
+                    }
+                    tbl_open_reg_.emplace(id, std::make_pair(canon, excl));
+                }
+            }
             tbls_.emplace(id, th.value());
             tbl_open_paths_.emplace(id, rel);
+            openads::abi::create_diag::log("server-open-ok");
             srv_->add_session_table(sid_, +1, rel);
             reply.opcode = Opcode::OpenTableAck;
             write_u32_le(id, reply.payload);
@@ -2000,6 +2110,12 @@ DispatchResult Session::dispatch(const Frame& f) {
             if (it != tbls_.end()) {
                 sess_conn_->close_table(it->second);
                 tbls_.erase(it);
+                if (auto rit = tbl_open_reg_.find(id);
+                    rit != tbl_open_reg_.end()) {
+                    srv_->unregister_open(sid_, rit->second.first,
+                                          rit->second.second);
+                    tbl_open_reg_.erase(rit);
+                }
                 std::string tname;
                 if (auto pit = tbl_open_paths_.find(id); pit != tbl_open_paths_.end())
                     tname = pit->second;
@@ -2048,12 +2164,21 @@ DispatchResult Session::dispatch(const Frame& f) {
             // navigating, collapsing SetOrder+GotoTop into one frame.
             // Length-gated (old clients stop at byte 6); cursor tables
             // above ignore it (their orders are query-fixed).
+            // mtfix12 R1: byte 6 is a flags byte on new clients —
+            // bit 0x01 fused order section (kCapNavOrderFuse, same
+            // wire shape as before: old clients send exactly 0x01),
+            // bit 0x02 boundary-pair request (kCapNavBoundaryPair).
             bool fused_order = false;
-            if (f.payload.size() >= 11 && f.payload[6] == 0x01) {
-                std::uint32_t oiid = read_u32_le(f.payload.data() + 7);
-                UNSIGNED32 oorc = install_table_order(id, oiid);
-                if (oorc != 0) { reply = err("SetOrder", oorc); break; }
-                fused_order = true;
+            bool want_pair = false;
+            if (f.payload.size() >= 7) {
+                const std::uint8_t fl = f.payload[6];
+                want_pair = (fl & 0x02) != 0;
+                if ((fl & 0x01) != 0 && f.payload.size() >= 11) {
+                    std::uint32_t oiid = read_u32_le(f.payload.data() + 7);
+                    UNSIGNED32 oorc = install_table_order(id, oiid);
+                    if (oorc != 0) { reply = err("SetOrder", oorc); break; }
+                    fused_order = true;
+                }
             }
             auto it = tbls_.find(id);
             if (it == tbls_.end() || !sess_conn_) {
@@ -2101,7 +2226,21 @@ DispatchResult Session::dispatch(const Frame& f) {
             }
             pack_row_trailer(reply, id, next_lookahead(id, gt_hint));
             // Reposition truth rides after the trailer (see GotoRecord).
-            pack_bound_trailer(reply, id);
+            // mtfix12 R1: pair-requested acks carry an explicit
+            // [u8 ack_flags] first (bit 0x01 = bound has reccount) so
+            // the client parses section offsets deterministically.
+            if (want_pair) {
+                Frame bnd;
+                bnd.opcode = reply.opcode;
+                pack_bound_trailer(bnd, id);
+                reply.payload.push_back(
+                    bnd.payload.size() >= 10 ? 1 : 0);
+                reply.payload.insert(reply.payload.end(),
+                                     bnd.payload.begin(),
+                                     bnd.payload.end());
+            } else {
+                pack_bound_trailer(reply, id);
+            }
             // Fused switch only: the app almost always asks this
             // order's key count next (scrollbar setup), so certify it
             // now ([u32] after the bound tail) instead of paying a
@@ -2117,6 +2256,11 @@ DispatchResult Session::dispatch(const Frame& f) {
                 reply.payload.push_back(static_cast<std::uint8_t>((fkc >>  8) & 0xFFu));
                 reply.payload.push_back(static_cast<std::uint8_t>((fkc >> 16) & 0xFFu));
                 reply.payload.push_back(static_cast<std::uint8_t>((fkc >> 24) & 0xFFu));
+            }
+            // mtfix12 R1: the opposite boundary's landing state,
+            // read and packed inside this same visit.
+            if (want_pair) {
+                pack_boundary_pair(reply, id, 1, hord, tbl);
             }
             // Sync AFTER packing — pack_row_trailer walks the ABI cursor
             // through the block and restores it, so the engine cursor has to be
@@ -2583,12 +2727,20 @@ DispatchResult Session::dispatch(const Frame& f) {
             // Fused nav+order: trailing [u8 0x01][u32 order_id].
             // (GotoBottom carries no depth hint, so the section starts
             // at byte 4.)
+            // mtfix12 R1: byte 4 is a flags byte on new clients (see
+            // GotoTop): bit 0x01 fused order section, bit 0x02
+            // boundary-pair request.
             bool fused_order = false;
-            if (f.payload.size() >= 9 && f.payload[4] == 0x01) {
-                std::uint32_t oiid = read_u32_le(f.payload.data() + 5);
-                UNSIGNED32 oorc = install_table_order(id, oiid);
-                if (oorc != 0) { reply = err("SetOrder", oorc); break; }
-                fused_order = true;
+            bool want_pair = false;
+            if (f.payload.size() >= 5) {
+                const std::uint8_t fl = f.payload[4];
+                want_pair = (fl & 0x02) != 0;
+                if ((fl & 0x01) != 0 && f.payload.size() >= 9) {
+                    std::uint32_t oiid = read_u32_le(f.payload.data() + 5);
+                    UNSIGNED32 oorc = install_table_order(id, oiid);
+                    if (oorc != 0) { reply = err("SetOrder", oorc); break; }
+                    fused_order = true;
+                }
             }
             auto it = tbls_.find(id);
             if (it == tbls_.end() || !sess_conn_) {
@@ -2610,7 +2762,18 @@ DispatchResult Session::dispatch(const Frame& f) {
             }
             reply.opcode = Opcode::GotoBottomAck;
             pack_row_trailer(reply, id);
-            pack_bound_trailer(reply, id);
+            if (want_pair) {
+                Frame bnd;
+                bnd.opcode = reply.opcode;
+                pack_bound_trailer(bnd, id);
+                reply.payload.push_back(
+                    bnd.payload.size() >= 10 ? 1 : 0);
+                reply.payload.insert(reply.payload.end(),
+                                     bnd.payload.begin(),
+                                     bnd.payload.end());
+            } else {
+                pack_bound_trailer(reply, id);
+            }
             // Fused switch only: certify the new order's key count
             // (see GotoTop).
             if (fused_order) {
@@ -2624,6 +2787,9 @@ DispatchResult Session::dispatch(const Frame& f) {
                 reply.payload.push_back(static_cast<std::uint8_t>((fkc >>  8) & 0xFFu));
                 reply.payload.push_back(static_cast<std::uint8_t>((fkc >> 16) & 0xFFu));
                 reply.payload.push_back(static_cast<std::uint8_t>((fkc >> 24) & 0xFFu));
+            }
+            if (want_pair) {
+                pack_boundary_pair(reply, id, 2, hord, tbl);
             }
             break;
         }
@@ -3523,16 +3689,26 @@ DispatchResult Session::dispatch(const Frame& f) {
             auto nb = to_cbuf(name);
             auto fb = to_cbuf(fields);
             ADSHANDLE hTable = 0;
+            openads::abi::create_diag::Scope cd_scope(name,
+                std::to_string(sid_) + "." + openads::abi::create_diag::new_id());
+            openads::abi::create_diag::log("server-wire-begin");
             UNSIGNED32 rrc = AdsCreateTable(
                 abi_conn_, nb.data(), nullptr,
                 table_type, char_type, 0, 0, memo_bs,
                 fb.data(), &hTable);
             if (rrc != 0) {
+                const auto captured = openads::abi::last_error_code();
+                openads::abi::create_diag::log("server-abi-fail", rrc,
+                    captured == static_cast<std::int32_t>(rrc) ? "last-error-matches" : "last-error-differs");
                 reply = err("CreateTable", rrc); break;
             }
+            openads::abi::create_diag::log("server-abi-ok");
             // Files are on disk under the data dir; release the local
             // handle so the client's subsequent OpenTable can take Shared.
-            if (hTable != 0) (void)AdsCloseTable(hTable);
+            if (hTable != 0) {
+                const auto close_rc = AdsCloseTable(hTable);
+                openads::abi::create_diag::log(close_rc ? "server-close-fail" : "server-close-ok", close_rc);
+            }
             reply.opcode = Opcode::CreateTableAck;
             break;
         }
@@ -4223,6 +4399,10 @@ DispatchResult Session::dispatch(const Frame& f) {
             }
             auto* tbl = sess_conn_->lookup_table(it->second);
             if (!tbl) { reply = err("AppendBlank: lookup failed"); break; }
+            auto diag_name = tbl_open_paths_.find(id);
+            openads::abi::create_diag::Scope append_diag(
+                diag_name == tbl_open_paths_.end() ? std::string() : diag_name->second,
+                std::to_string(sid_) + ".append." + std::to_string(id));
             // M12.16 dual-handle: CreateIndex/OpenIndex bind bags on the
             // parallel ABI Table (tbls_h_), not on the engine Table used by
             // the historical write path. Writing only through the engine
@@ -4231,7 +4411,12 @@ DispatchResult Session::dispatch(const Frame& f) {
             // exists so sync_all_indexes_ updates every bound tag.
             if (auto hit = tbls_h_.find(id); hit != tbls_h_.end()) {
                 UNSIGNED32 rrc = AdsAppendRecord(hit->second);
-                if (rrc != 0) { reply = err("AppendBlank", rrc); break; }
+                if (rrc != 0) {
+                    const auto captured = openads::abi::last_error_code();
+                    openads::abi::create_diag::log("server-append-abi-fail", rrc,
+                        captured == static_cast<std::int32_t>(rrc) ? "last-error-matches" : "last-error-differs");
+                    reply = err("AppendBlank", rrc); break;
+                }
                 // Storm fix — the client commits with DbCommit→FlushTable
                 // (which flushes this same handle); a per-append flush here
                 // multiplied CDX page writes ~9x under the 700-storm and
@@ -4241,9 +4426,17 @@ DispatchResult Session::dispatch(const Frame& f) {
                 tbl->set_pending_append(true);
             } else {
                 auto r = tbl->append_record();
-                if (!r) { reply = err("AppendBlank: append_record failed"); break; }
+                if (!r) {
+                    openads::abi::create_diag::log("server-append-engine-fail", r.error().code,
+                                                  "append-record", r.error().sub_code);
+                    reply = err("AppendBlank: append_record failed"); break;
+                }
                 tbl->set_pending_append(true);
             }
+            if (openads::abi::create_diag::enabled(
+                    diag_name == tbl_open_paths_.end() ? std::string() : diag_name->second) &&
+                diag_first_append_.insert(id).second)
+                openads::abi::create_diag::log("server-first-append-ok");
             reply.opcode = Opcode::AppendBlankAck;
             break;
         }
@@ -4973,6 +5166,20 @@ DispatchResult Session::dispatch(const Frame& f) {
             if (!tbl) { reply = err("Reindex: lookup failed"); break; }
             auto r = tbl->reindex();
             if (!r) { reply = err("Reindex: reindex failed"); break; }
+            // The table's bags (production .cdx/.z01 and any OpenIndex
+            // bag) are bound on the ABI twin (tbls_h_), not on the engine
+            // table, so the engine reindex above finds no index and is a
+            // no-op. Rebuild the twin's bags too, as Pack/Zap already do.
+            // Flush first so the rebuild reads every committed row;
+            // AdsGotoTop refreshes the twin's cached record count.
+            if (auto hit = tbls_h_.find(id); hit != tbls_h_.end()) {
+                if (auto fl = tbl->flush(); !fl) {
+                    reply = err("Reindex: flush failed"); break;
+                }
+                (void)AdsGotoTop(hit->second);
+                UNSIGNED32 rrc = AdsReindex(hit->second);
+                if (rrc != 0) { reply = err("Reindex", rrc); break; }
+            }
             reply.opcode = Opcode::ReindexAck;
             break;
         }

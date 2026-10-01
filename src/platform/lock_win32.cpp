@@ -77,6 +77,27 @@ util::Result<ByteLock> ByteLock::try_acquire(File& f, std::uint64_t offset,
     return do_lock(f, offset, length, kind, LOCKFILE_FAIL_IMMEDIATELY);
 }
 
+util::Result<bool> ByteLock::probe(File& f, std::uint64_t offset,
+                                   std::uint64_t length) {
+    // Win32 has no query API: a non-blocking take-and-release is the only
+    // conflict probe. A same-handle overlap also fails with
+    // ERROR_LOCK_VIOLATION, so callers must exclude their own
+    // registrations before probing.
+    OVERLAPPED ov{};
+    ov.Offset     = static_cast<DWORD>(offset & 0xFFFFFFFFu);
+    ov.OffsetHigh = static_cast<DWORD>(offset >> 32);
+    DWORD lo = static_cast<DWORD>(length & 0xFFFFFFFFu);
+    DWORD hi = static_cast<DWORD>(length >> 32);
+    HANDLE h = reinterpret_cast<HANDLE>(f.native_handle());
+    if (::LockFileEx(h, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                     0, lo, hi, &ov)) {
+        ::UnlockFileEx(h, 0, lo, hi, &ov);
+        return false;
+    }
+    if (::GetLastError() == ERROR_LOCK_VIOLATION) return true;
+    return os_error("LockFileEx probe");
+}
+
 util::Result<void> ByteLock::release() {
     release_();
     return {};

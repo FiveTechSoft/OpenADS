@@ -1,0 +1,13 @@
+Built for Pritpal Bedi - bedipritpal/OpenADS, forked from FiveTechSoft/OpenADS.
+
+## v1.09.68-mtfix18 - fresh-organization existence fix candidate
+
+This is a test build, not a production recommendation. Keep mtfix15 as the recommended working build while checking this candidate against a fresh Vouch organization. mtfix17 was superseded before its package release: it fixed directory probes but missed the separate file-existence cache that Vouch's guard may use. The empty mtfix17 pre-release and tag were removed, and its packaging workflow was cancelled. mtfix18 includes both fixes and retains the opt-in table-create diagnostics from mtfix16.
+
+Remote DirExist, DirMake, and CheckExistence now reach the server every time. This removes both positive and negative directory and file-existence caches, plus the shortcut that inferred file existence from an open table or similarly named index bag. A folder or file created or removed outside the current connection should no longer be hidden by a stale answer. Server-side DirExist treats a missing path as a normal false answer. Each formerly cached existence call may add one network round trip; no file format, locking, or retry behavior changes here.
+
+Tests cover DirExist true -> server-side removal -> DirExist false -> DirMake recreates, and file existence in both directions after external server-side changes on the same connection. They also check that an open table or bag does not bypass an exact FileExists probe. The observed first-create error (`uxxyyzza.dbf`: exclusive open saw a missing parent directory) is consistent with a stale existence answer, but the earlier diagnostic trace did not prove the full raw table path or every Vouch folder step. A successful fresh-org Vouch run is still needed to validate this candidate.
+
+**What to test:** Use mtfix18 client and server from this same build for one new Vouch organization, including its first table create. Report the organization-create result, any `uxxyyzza.dbf` or other missing-folder error, and the client and server diagnostic logs if it still fails. Check whether Vouch's `OAds_FileExist()` wrapper reaches OpenADS's `oads_CheckExistence` export; the fork's Harbour helpers are named `OADS_CHECKEXISTENCE` and `OADS_FEXIST`, and it does not ship an `OADS_FILEEXIST` helper by that exact name. Return to mtfix15 for regular work until mtfix18 is validated.
+
+**CI:** Windows x86/x64 and Linux (including TLS) passed, along with Harbour smoke. macOS configured and built, but its test step was cancelled at the CI timeout, so macOS tests remain unverified. This timeout occurred on earlier builds too; it is not evidence that mtfix18's macOS tests passed. Strict no-symlink enforcement is separate and not in this test build.

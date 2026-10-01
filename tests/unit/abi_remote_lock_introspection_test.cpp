@@ -5,10 +5,9 @@
 // remote handles (ace_exports.cpp returned early for get_remote_table()),
 // so Harbour dbRecordInfo(DBRI_LOCKED) and dbRLockList() under ADSCDX
 // always answered .F./{} — Vouch's IsLogged() thread bailed out.
-// AdsIsRecordLocked (0x13) answers own-handle state server-side: the
-// engine Table's table lock plus the session ABI twin's record locks,
-// which include append auto-locks. Whether ANOTHER handle owns a lock is
-// deliberately out of scope (that would be a separate global-state API).
+// AdsIsRecordLocked answers from the client lock ledger when complete;
+// GetAllLocks (0x15) falls back to the server's own-handle list for append
+// auto-locks that the client cannot name. The global OS probe stays internal.
 #include "doctest.h"
 #include "openads/ace.h"
 #include "openads/error.h"
@@ -81,8 +80,9 @@ TEST_CASE("M12.36 remote AdsIsRecordLocked reflects this connection's locks") {
 
     UNSIGNED8 tname[] = "li.dbf";
     ADSHANDLE hTable  = 0;
-    REQUIRE(AdsOpenTable(hConn, tname, nullptr, ADS_CDX, ADS_ANSI, ADS_SHARED,
-                         ADS_COMPATIBLE_LOCKING, ADS_DEFAULT, &hTable)
+    REQUIRE(AdsOpenTable(hConn, tname, nullptr, ADS_CDX, ADS_ANSI,
+ADS_COMPATIBLE_LOCKING, ADS_IGNORERIGHTS,
+ADS_SHARED, &hTable)
             == AE_SUCCESS);
 
     // Nothing locked yet.
@@ -128,8 +128,9 @@ TEST_CASE("M12.36 remote AdsGetAllLocks enumerates held record locks") {
 
     UNSIGNED8 tname[] = "li.dbf";
     ADSHANDLE hTable  = 0;
-    REQUIRE(AdsOpenTable(hConn, tname, nullptr, ADS_CDX, ADS_ANSI, ADS_SHARED,
-                         ADS_COMPATIBLE_LOCKING, ADS_DEFAULT, &hTable)
+    REQUIRE(AdsOpenTable(hConn, tname, nullptr, ADS_CDX, ADS_ANSI,
+ADS_COMPATIBLE_LOCKING, ADS_IGNORERIGHTS,
+ADS_SHARED, &hTable)
             == AE_SUCCESS);
 
     REQUIRE(AdsLockRecord(hTable, 2) == AE_SUCCESS);

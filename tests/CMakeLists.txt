@@ -209,6 +209,7 @@ add_executable(openads_unit_tests
     unit/abi_remote_index_reopen_test.cpp
     unit/abi_remote_zombie_lock_test.cpp
     unit/network_skip_depth_test.cpp
+    unit/abi_index_focus_contract_test.cpp
     unit/abi_remote_index_nav_test.cpp
     unit/abi_remote_date_index_scope_test.cpp
     unit/abi_remote_prodcdx_test.cpp
@@ -268,6 +269,7 @@ add_executable(openads_unit_tests
     unit/abi_adt_smoke_test.cpp
     unit/abi_adt_create_test.cpp
     unit/abi_adt_append_exclusive_test.cpp
+    unit/abi_adt_append_exclusive_upstream_test.cpp
     unit/abi_adt_wide_numeric_test.cpp
     unit/abi_adi_create_test.cpp
     unit/abi_adi_separate_bag_test.cpp
@@ -333,12 +335,19 @@ add_executable(openads_unit_tests
     unit/network_version_test.cpp
     unit/network_nav_batch_test.cpp
     unit/network_use_budget_test.cpp
+    unit/network_local_answers_test.cpp
+    unit/network_empty_window_test.cpp
+    unit/network_remote_reindex_test.cpp
+    unit/network_frame_trace_test.cpp
+    unit/network_boundary_pair_test.cpp
+    unit/network_commit_slimming_test.cpp
     unit/network_teardown_batch_test.cpp
     unit/network_pool_mt_test.cpp
     unit/network_mutex_release_test.cpp
     unit/network_lock_exclusion_test.cpp
     unit/network_login_gate_stress_test.cpp
     unit/abi_remote_lock_introspection_test.cpp
+    unit/network_exclusive_open_test.cpp
     unit/backend_tier1_test.cpp
     unit/abi_oads_file_funcs_test.cpp
     unit/abi_create_index_path_test.cpp
@@ -489,6 +498,13 @@ endif()
 # around the filter value (they mangle args on Windows under ctest).
 add_test(NAME openads_unit_tests COMMAND openads_unit_tests -tce=*[slow]*,*flaky*)
 add_test(NAME openads_unit_tests_slow COMMAND openads_unit_tests -tc=*[slow]* -tce=*flaky*)
+
+# Session-pool MT stress: the pool test in 30 fresh processes (each run
+# already repeats its 4-thread phase 25x). Catches rare races that one
+# in-suite pass misses. Every patch must keep this green.
+if(UNIX)
+    add_test(NAME network_pool_mt_repeat COMMAND sh -c "i=0; while [ $i -lt 30 ]; do \"$0\" -tc=\"Session pool: MT*\" >/dev/null 2>&1 || { echo \"pool MT test failed on run $i\"; \"$0\" -tc=\"Session pool: MT*\"; exit 1; }; i=$((i+1)); done; echo \"pool MT test: 30 clean runs\"" $<TARGET_FILE:openads_unit_tests>)
+endif()
 
 # SQL URI backend smoke (sqlite://): runs a focused doctest subset in CI.
 if(OPENADS_WITH_POSTGRESQL)
