@@ -1,0 +1,49 @@
+name: macos-diag
+
+# Manual diagnostic only: builds the unit tests on macOS, runs them with
+# per-assertion output and, if they stall, dumps thread stacks.
+on:
+  workflow_dispatch:
+
+jobs:
+  diag:
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-tags: true
+          fetch-depth: 0
+      - uses: seanmiddleditch/gha-setup-ninja@v6
+      - name: Configure
+        run: cmake --preset default
+      - name: Build
+        run: cmake --build build/default --config Release --target openads_unit_tests
+      - name: Run unit tests with stall dump
+        shell: bash
+        run: |
+          BIN=$(find build -name openads_unit_tests -type f -perm -u+x | head -1)
+          echo "binary: $BIN"
+          cd "$(dirname "$BIN")"
+          script -q "$GITHUB_WORKSPACE/run.log" ./openads_unit_tests -tce='*[slow]*,*flaky*' -s --no-colors > /dev/null 2>&1 &
+          SP=$!
+          for i in $(seq 1 56); do
+            sleep 10
+            if ! kill -0 $SP 2>/dev/null; then echo "finished early at ~$((i*10))s"; break; fi
+          done
+          if kill -0 $SP 2>/dev/null; then
+            echo "=== STILL RUNNING after ~560s: stall dump"
+            PID=$(pgrep -f 'openads_unit_tests' | grep -v "^$SP$" | tail -1)
+            echo "test pid: $PID"
+            ps -o pid,stat,%cpu,etime,command -p "$PID" || true
+            echo "=== last 60 lines of output"
+            tail -n 60 "$GITHUB_WORKSPACE/run.log" || true
+            echo "=== lldb backtraces"
+            lldb -p "$PID" -b -o 'thread backtrace all' 2>&1 | head -150 || true
+            echo "=== sample"
+            sample "$PID" 5 2>&1 | head -120 || true
+            kill -9 "$PID" || true
+          else
+            echo "=== finished; tail of output"
+            tail -n 30 "$GITHUB_WORKSPACE/run.log" || true
+          fi
