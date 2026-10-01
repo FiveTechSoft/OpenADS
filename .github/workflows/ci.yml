@@ -4,7 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-  workflow_dispatch:
 
 jobs:
   build-and-test:
@@ -42,12 +41,10 @@ jobs:
           # tag refs a main-branch checkout reports a bare SHA (no
           # dots) and network_version_test fails everywhere. Releases
           # check out the tag itself so they never hit this.
-          # fetch-depth: 0 is also needed: in a shallow (depth 1) clone
-          # the tag's commit is not connected to HEAD, so describe
-          # still falls back to a bare SHA on any untagged commit
-          # (PR merge refs, main between releases).
-          fetch-depth: 0
+          # fetch-tags alone stays shallow (default fetch-depth: 1), so
+          # describe still can't see v* tags - fetch the full history.
           fetch-tags: true
+          fetch-depth: 0
 
       - name: Install Ninja (Linux / macOS)
         if: runner.os != 'Windows'
