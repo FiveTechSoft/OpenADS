@@ -30,10 +30,10 @@ util::Error os_error(const char* op) {
 // semantics used by the engine.
 #ifdef F_OFD_SETLK
 constexpr int kSetLk  = F_OFD_SETLK;
-constexpr int kSetLkW = F_OFD_SETLKW;
+[[maybe_unused]] constexpr int kSetLkW = F_OFD_SETLKW;
 #else
 constexpr int kSetLk  = F_SETLK;
-constexpr int kSetLkW = F_SETLKW;
+[[maybe_unused]] constexpr int kSetLkW = F_SETLKW;
 #endif
 
 // off_t is signed: lock offsets at or above 2^63 (the ADT lock base is
