@@ -1,6 +1,7 @@
 #ifndef _WIN32
 
 #include "platform/file.h"
+#include "platform/lock.h"
 
 #include <cerrno>
 #include <cstdint>
@@ -89,6 +90,9 @@ File::~File() { close_(); }
 
 void File::close_() noexcept {
     if (native_ != nullptr) {
+#ifdef __APPLE__
+        forget_byte_locks(native_);
+#endif
         ::close(fd_from_native(native_));
         native_ = nullptr;
     }
