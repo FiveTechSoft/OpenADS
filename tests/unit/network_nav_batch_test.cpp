@@ -297,6 +297,8 @@ TEST_CASE("Nav batching: order context defeats duplicate suppression") {    nb_w
     REQUIRE(AdsGotoTop(hOrd) == AE_SUCCESS);
     CHECK(nb_op(kOpGotoTop) == top0 + 1);
 
+    // Explicit focus keeps table-handle navigation indexed.
+    REQUIRE(AdsSetIndexOrderByHandle(hTable, hOrd) == AE_SUCCESS);
     // Table-handle top with the order still bound: same position,
     // suppressed as well.
     REQUIRE(AdsGotoTop(hTable) == AE_SUCCESS);

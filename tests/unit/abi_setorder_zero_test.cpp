@@ -88,7 +88,9 @@ void exercise_setorder_zero(ADSHANDLE hConn) {
     REQUIRE(AdsGetIndexHandleByOrder(hT, 1, &hOrd) == 0);
     REQUIRE(hOrd != 0);
 
-    // Activate the order via index-handle navigation (the rddads pattern).
+    // Explicit focus opts table-handle navigation into indexed order.
+    // Stock rddads implicit focus is covered by abi_index_focus_contract_test.
+    REQUIRE(AdsSetIndexOrderByHandle(hT, hOrd) == 0);
     REQUIRE(AdsGotoTop(hOrd) == 0);
     CHECK(walk_recnos(hT) == std::vector<std::string>(
         std::begin(kIndexed), std::end(kIndexed)));

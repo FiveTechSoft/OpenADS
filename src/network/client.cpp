@@ -161,6 +161,7 @@ std::size_t parse_row_trailer_into(RemoteTable* rt,
     // M12.21 option C — every nav ack re-anchors the server cursor to the
     // client's logical position, so the lag resets to zero.
     rt->cursor_lag   = 0;
+    rt->pair_local_position = false;
     rt->prefetch_dir = 0;
     std::uint8_t has_row = pl[pos++];
     if (has_row == 0) {
@@ -848,6 +849,7 @@ util::Result<void> RemoteConnection::apply_pair_blob(RemoteTable* rt) {
     // then the certified bound values land through the shared trailer
     // application so every bound/recno/count stamp matches.
     parse_row_trailer_into(rt, rt->pair_blob, 0);
+    rt->pair_local_position = true;
     apply_bound_trailer(rt, rt->pair_bof, rt->pair_eof, rt->pair_recno,
                         rt->pair_reccount, rt->pair_has_count);
     if (rt->pair_has_keycount) {

@@ -551,6 +551,11 @@ public:
     // Order + scope surface (M3).
     void               set_order(std::unique_ptr<drivers::IIndex> idx);
     void               clear_order();
+    // Explicit ACE focus permits ordered table-handle navigation. Merely
+    // navigating an index handle must not change the table-handle contract.
+    bool explicit_order_focus() const noexcept { return explicit_order_focus_ || created_order_focus_; }
+    void set_explicit_order_focus(bool focused) noexcept { explicit_order_focus_ = focused; created_order_focus_ = false; }
+    void set_created_order_focus(bool focused) noexcept { created_order_focus_ = focused; }
     // Take ownership of the active index back from the Table, leaving
     // it without an order. Returns nullptr if no order was set.
     std::unique_ptr<drivers::IIndex> take_order();
@@ -676,6 +681,8 @@ private:
     std::unordered_map<std::uint32_t, LockHandle> recno_locks_;
     std::optional<LockHandle>                     table_lock_;
     std::optional<Order>                          order_;
+    bool                                         explicit_order_focus_ = false;
+    bool                                         created_order_focus_ = false;
     std::vector<drivers::IIndex*>                 extra_index_views_;
     State                                         state_  = State::Bof;
     std::uint32_t                                 recno_  = 0;

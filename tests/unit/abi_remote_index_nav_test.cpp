@@ -914,6 +914,10 @@ TEST_CASE("remote AdsSetScope constrains GotoTop/Skip walk") {
     };
 
     CHECK(visible_count(hOrd) == 3);
+    // A table handle after implicit index focus is natural, even while
+    // that index retains scopes. Explicit focus opts table navigation in.
+    CHECK(visible_count(hRT) == 4);
+    REQUIRE(AdsSetIndexOrderByHandle(hRT, hOrd) == 0);
     CHECK(visible_count(hRT) == 3);
 
     REQUIRE(AdsClearScope(hOrd, ADS_TOP) == 0);

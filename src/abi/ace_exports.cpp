@@ -11596,6 +11596,7 @@ UNSIGNED32 ENTRYPOINT AdsCloseTable(ADSHANDLE hTable) {
 UNSIGNED32 ENTRYPOINT AdsGotoTop(ADSHANDLE hTable) {
     arc2_trace("AdsGotoTop");
     if (auto* ri = get_remote_index(hTable)) {
+        if (ri->parent) ri->parent->created_order_focus = false;
         // Sets + teardown flush here, but NOT a deferred order switch:
         // that absorbs into the nav below (fused frame) when it targets
         // this order, or flushes plainly inside remote_index_goto_top's
@@ -11667,6 +11668,15 @@ UNSIGNED32 ENTRYPOINT AdsGotoTop(ADSHANDLE hTable) {
         return ok();
     }
     if (auto* rt = get_remote_table(hTable)) {
+        // Stock rddads sets focus 0 by switching from index to table handle,
+        // without a SetOrder call. Drop only an implicitly inherited order.
+        if (!rt->explicit_order_focus && !rt->created_order_focus &&
+            (rt->active_index_id != 0 ||
+             (rt->server_order_id != 0 && rt->server_order_id != openads::network::RemoteTable::kOrderUnknown) ||
+             (rt->pending_order && rt->pending_order_id != 0))) {
+            if (UNSIGNED32 rc = AdsSetIndexOrderByHandle(hTable, 0); rc != 0)
+                return rc;
+        }
         // Sets + teardown flush here; a deferred order switch absorbs
         // into the nav below (fused frame) instead of going out alone.
         if (UNSIGNED32 frc = remote_flush_sets(rt); frc != 0) return frc;
@@ -11737,6 +11747,11 @@ UNSIGNED32 ENTRYPOINT AdsGotoTop(ADSHANDLE hTable) {
     }
     Table* t = get_table(hTable);
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
+    if (lookup_table_by_index(hTable) != nullptr) t->set_created_order_focus(false);
+    if (state().registry.lookup<Table>(hTable, HandleKind::Table) != nullptr &&
+        !t->explicit_order_focus()) {
+        park_active_order(t);
+    }
     auto r = t->goto_top();
     if (!r) return fail(r.error());
     snapshot_ri_pks(t);
@@ -11747,6 +11762,7 @@ UNSIGNED32 ENTRYPOINT AdsGotoTop(ADSHANDLE hTable) {
 UNSIGNED32 ENTRYPOINT AdsGotoBottom(ADSHANDLE hTable) {
     arc2_trace("AdsGotoBottom");
     if (auto* ri = get_remote_index(hTable)) {
+        if (ri->parent) ri->parent->created_order_focus = false;
         // Sets + teardown flush here, but NOT a deferred order switch:
         // that absorbs into the nav below (fused frame) when it targets
         // this order, or flushes plainly otherwise.
@@ -11813,6 +11829,15 @@ UNSIGNED32 ENTRYPOINT AdsGotoBottom(ADSHANDLE hTable) {
         return ok();
     }
     if (auto* rt = get_remote_table(hTable)) {
+        // Stock rddads sets focus 0 by switching from index to table handle,
+        // without a SetOrder call. Drop only an implicitly inherited order.
+        if (!rt->explicit_order_focus && !rt->created_order_focus &&
+            (rt->active_index_id != 0 ||
+             (rt->server_order_id != 0 && rt->server_order_id != openads::network::RemoteTable::kOrderUnknown) ||
+             (rt->pending_order && rt->pending_order_id != 0))) {
+            if (UNSIGNED32 rc = AdsSetIndexOrderByHandle(hTable, 0); rc != 0)
+                return rc;
+        }
         // Sets + teardown flush here; a deferred order switch absorbs
         // into the nav below (fused frame) instead of going out alone.
         if (UNSIGNED32 frc = remote_flush_sets(rt); frc != 0) return frc;
@@ -11874,6 +11899,11 @@ UNSIGNED32 ENTRYPOINT AdsGotoBottom(ADSHANDLE hTable) {
     }
     Table* t = get_table(hTable);
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
+    if (lookup_table_by_index(hTable) != nullptr) t->set_created_order_focus(false);
+    if (state().registry.lookup<Table>(hTable, HandleKind::Table) != nullptr &&
+        !t->explicit_order_focus()) {
+        park_active_order(t);
+    }
     auto r = t->goto_bottom();
     if (!r) return fail(r.error());
     snapshot_ri_pks(t);
@@ -11885,6 +11915,7 @@ UNSIGNED32 ENTRYPOINT AdsSkip(ADSHANDLE hTable, SIGNED32 lRows) {
     arc2_trace("AdsSkip");
     seek_last_retry_latch() = false;
     if (auto* ri = get_remote_index(hTable)) {
+        if (ri->parent) ri->parent->created_order_focus = false;
         cli_trace_tbl(ri->parent, "AdsSkip(idx)", "rows=%d", (int)lRows);
         openads::network::RemoteTable* rt = ri->parent;
         if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
@@ -11903,7 +11934,26 @@ UNSIGNED32 ENTRYPOINT AdsSkip(ADSHANDLE hTable, SIGNED32 lRows) {
         return ok();
     }
     if (auto* rt = get_remote_table(hTable)) {
+        // Stock rddads sets focus 0 by switching from index to table handle,
+        // without a SetOrder call. Drop only an implicitly inherited order.
+        const bool natural_transition = !rt->explicit_order_focus && !rt->created_order_focus &&
+            (rt->active_index_id != 0 ||
+             (rt->server_order_id != 0 && rt->server_order_id != openads::network::RemoteTable::kOrderUnknown) ||
+             (rt->pending_order && rt->pending_order_id != 0));
+        const std::uint32_t natural_anchor = rt->row_valid ? rt->current_recno : 0;
+        if (natural_transition) {
+            if (UNSIGNED32 rc = AdsSetIndexOrderByHandle(hTable, 0); rc != 0)
+                return rc;
+        }
         if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
+        // Cached boundary landings/read-ahead can leave the physical server
+        // cursor elsewhere. Clearing the order also drops their lag, so
+        // anchor a direct natural Skip at the client-visible physical row.
+        if ((natural_transition || (rt->server_order_id == 0 && rt->pair_local_position)) &&
+            natural_anchor != 0) {
+            auto r = rt->conn->goto_record(rt, natural_anchor);
+            if (!r) return fail(r.error());
+        }
         if (UNSIGNED32 frc = remote_close_parked_indexes(rt); frc != 0) {
             return frc;
         }
@@ -11956,6 +12006,11 @@ UNSIGNED32 ENTRYPOINT AdsSkip(ADSHANDLE hTable, SIGNED32 lRows) {
     }
     Table* t = get_table(hTable);
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
+    if (lookup_table_by_index(hTable) != nullptr) t->set_created_order_focus(false);
+    if (state().registry.lookup<Table>(hTable, HandleKind::Table) != nullptr &&
+        !t->explicit_order_focus()) {
+        park_active_order(t);
+    }
     auto r = t->skip(lRows);
     if (!r) return fail(r.error());
     snapshot_ri_pks(t);
@@ -15184,6 +15239,8 @@ struct IndexBinding {
     std::string                             tag_name;
     std::unique_ptr<openads::drivers::IIndex> parked;  // nullptr when this is the active binding
     std::string                             path;     // resolved index file path (M9.14)
+    openads::engine::Scope parked_scope{};
+    std::optional<bool> parked_descending{};
 };
 
 std::unordered_map<ADSHANDLE, IndexBinding>& index_bindings() {
@@ -15215,6 +15272,10 @@ void park_active_order(Table* t) {
     auto& m = index_bindings();
     auto bit = m.find(act_it->second);
     if (bit != m.end()) {
+        if (auto* o = t->order()) {
+            bit->second.parked_scope = o->scope();
+            bit->second.parked_descending = o->descending_traverse();
+        }
         auto taken = t->take_order();
         openads::drivers::IIndex* raw = taken.get();
         bit->second.parked = std::move(taken);
@@ -15284,6 +15345,10 @@ openads::util::Result<void> activate_binding(ADSHANDLE h) {
     if (act_it != act.end()) {
         auto prev = m.find(act_it->second);
         if (prev != m.end()) {
+            if (auto* o = t->order()) {
+                prev->second.parked_scope = o->scope();
+                prev->second.parked_descending = o->descending_traverse();
+            }
             auto taken = t->take_order();
             openads::drivers::IIndex* raw = taken.get();
             prev->second.parked = std::move(taken);
@@ -15299,6 +15364,9 @@ openads::util::Result<void> activate_binding(ADSHANDLE h) {
         openads::drivers::IIndex* raw = it->second.parked.get();
         t->unregister_extra_index_view(raw);
         t->set_order(std::move(it->second.parked));
+        t->order()->scope() = it->second.parked_scope;
+        if (it->second.parked_descending.has_value())
+            t->order()->set_descending_traverse(*it->second.parked_descending);
     }
     act[t] = h;
     return {};
@@ -16611,7 +16679,30 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
             rt->index_by_tag  = std::move(keep_tags);
             rt->index_handles = std::move(keep_handles);
         }
-        if (rt->active_index_id == 0) rt->active_index_id = r.value();
+        rt->created_order_focus = true;
+        // OpenIndex can replace the just-created local binding and its
+        // tag spelling (native ADI uses the expression field name). Use
+        // the fresh wire id from that bag rather than the stale create id.
+        std::uint32_t created_focus = r.value();
+        if (refr) {
+            for (const auto& ent : refr.value()) {
+                if (ent.tag == tag || refr.value().size() == 1) {
+                    created_focus = ent.id;
+                    break;
+                }
+            }
+        }
+        // The returned handle must reference the re-opened bag binding too.
+        if (auto* created = get_remote_index(*phIndex)) created->id = created_focus;
+        for (auto& mapping : rt->index_by_tag) {
+            if (mapping.second == r.value()) mapping.second = created_focus;
+        }
+        rt->active_index_id = created_focus;
+        auto focus_result = rt->conn->set_order(rt->id, created_focus);
+        if (!focus_result) return fail(focus_result.error());
+        rt->server_order_id = created_focus;
+        rt->pending_order = false;
+        rt->invalidate_prefetch();
         // Structural change: the bag gained a tag, so a parked snapshot
         // predates it — drop the park (the maps above were rebuilt fresh
         // from the server). The pending flag stays: the next flush sends
@@ -17314,6 +17405,10 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
     if (prev != act.end()) {
         auto pit = m.find(prev->second);
         if (pit != m.end()) {
+            if (auto* o = t->order()) {
+                pit->second.parked_scope = o->scope();
+                pit->second.parked_descending = o->descending_traverse();
+            }
             auto displaced = t->take_order();
             pit->second.parked = std::move(displaced);
             t->register_extra_index_view(pit->second.parked.get());
@@ -17322,6 +17417,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
     t->set_order(std::move(idx_owner));
     m[h] = IndexBinding{t, tag, nullptr, p.string()};
     act[t] = h;
+    t->set_created_order_focus(true);
     // Clipper / Harbour: a fresh CREATE INDEX leaves the cursor
     // positioned at the new order's TOP key.
     (void)t->goto_top();
@@ -17498,6 +17594,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex(ADSHANDLE hTable, UNSIGNED8* pucFile,
         m[h] = IndexBinding{t, tag, std::move(idx), file};
         t->register_extra_index_view(raw);
     }
+    t->set_created_order_focus(true);
     *phIndex = h;
     return ok();
 }
@@ -17886,6 +17983,8 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrder(ADSHANDLE hTable, UNSIGNED8* pucName) {
         if (UNSIGNED32 frc = remote_flush_teardown(rt); frc != 0) return frc;
         std::string name = pucName
             ? openads::abi::to_internal(pucName, 0) : std::string();
+        rt->explicit_order_focus = !name.empty();
+        rt->created_order_focus = false;
         // Resolve the target locally (case-insensitive, like the mirror
         // block below). Unmapped names stay kOrderUnknown and always go
         // out on the wire: the server resolves those, and a wrong local
@@ -18078,6 +18177,7 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrder(ADSHANDLE hTable, UNSIGNED8* pucName) {
         // into its slot so a subsequent AdsSetIndexOrder picks the
         // current Table::order_ up cleanly.
         park_active_order(t);
+        t->set_explicit_order_focus(false);
         return ok();
     }
     auto upper_eq = [](const std::string& a, const std::string& b) {
@@ -18098,6 +18198,7 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrder(ADSHANDLE hTable, UNSIGNED8* pucName) {
         if (b.table == t && upper_eq(b.tag_name, name)) {
             auto r = activate_binding(h);
             if (!r) return fail(r.error());
+            t->set_explicit_order_focus(true);
             return ok();
         }
     }
@@ -18112,6 +18213,8 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrderByHandle(ADSHANDLE hTable, ADSHANDLE hInde
         // (overwritten below — see ByName).
         if (UNSIGNED32 frc = remote_flush_sets(rt); frc != 0) return frc;
         if (UNSIGNED32 frc = remote_flush_teardown(rt); frc != 0) return frc;
+        rt->explicit_order_focus = hIndex != 0;
+        rt->created_order_focus = false;
         if (hIndex == 0) {
             // "Back to natural order" via the explicit API: send the reset
             // frame so the server drops its ordered_tables_ entry (it used
@@ -18190,6 +18293,7 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrderByHandle(ADSHANDLE hTable, ADSHANDLE hInde
         // Natural order (rddads' patched DbSetOrder(0) calls this): park
         // the active order back into its binding slot.
         park_active_order(t);
+        t->set_explicit_order_focus(false);
         return ok();
     }
     auto& m = index_bindings();
@@ -18202,6 +18306,7 @@ UNSIGNED32 ENTRYPOINT AdsSetIndexOrderByHandle(ADSHANDLE hTable, ADSHANDLE hInde
     }
     auto r = activate_binding(hIndex);
     if (!r) return fail(r.error());
+    t->set_explicit_order_focus(true);
     return ok();
 }
 
@@ -20440,7 +20545,11 @@ UNSIGNED32 ENTRYPOINT AdsGetIndexHandle(ADSHANDLE hTable, UNSIGNED8* pucName,
     // Storm fix: reader must hold index_bindings_mu (binds are unlocked now).
     std::lock_guard<std::recursive_mutex> _rh_lk(index_bindings_mu());
     for (auto& [h, b] : index_bindings()) {
-        if (b.table == t && b.tag_name == name) { *phIndex = h; return ok(); }
+        if (b.table == t && b.tag_name.size() == name.size() &&
+            std::equal(b.tag_name.begin(), b.tag_name.end(), name.begin(),
+                [](unsigned char a, unsigned char z) {
+                    return std::toupper(a) == std::toupper(z);
+                })) { *phIndex = h; return ok(); }
     }
     return fail(openads::AE_INTERNAL_ERROR, "index name not found");
 }
@@ -20688,6 +20797,7 @@ static UNSIGNED32 ads_seek_local(ADSHANDLE hIndex,
                    UNSIGNED16* pbFound,
                    bool find_last) {
     Table* t = table_for_index(hIndex);
+    if (t) t->set_created_order_focus(false);
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown index");
     std::string key;
     (void)u16KeyType;
@@ -20985,6 +21095,7 @@ UNSIGNED32 ENTRYPOINT AdsSeek(ADSHANDLE hIndex,
     }
 #endif
     if (auto* ri = get_remote_index(hIndex)) {
+        if (ri->parent) ri->parent->created_order_focus = false;
         std::string key(reinterpret_cast<const char*>(pucKey),
                         u16KeyLen);
         if (ri->parent) {
@@ -21176,6 +21287,7 @@ UNSIGNED32 ENTRYPOINT AdsSeekLast(ADSHANDLE hIndex,
     }
 #endif
     if (auto* ri = get_remote_index(hIndex)) {
+        if (ri->parent) ri->parent->created_order_focus = false;
         std::string key(reinterpret_cast<const char*>(pucKey),
                         u16KeyLen);
         if (ri->parent) {

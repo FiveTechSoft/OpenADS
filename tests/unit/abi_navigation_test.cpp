@@ -262,13 +262,15 @@ TEST_CASE("Nav structural CDX auto-open keeps natural order") {
     REQUIRE(AdsCloseTable(hT) == 0);
 }
 
-TEST_CASE("Nav explicit AdsOpenIndex activates the first tag") {
+TEST_CASE("Nav explicit focus after AdsOpenIndex walks the first tag") {
     NavConn c("openads_nav_explidx");
     make_zulu5(c.hConn, "nave.dbf", "nave.cdx");
 
     ADSHANDLE hT = open_table(c.hConn, "nave.dbf");
     ADSHANDLE hI = 0;
-    REQUIRE(AdsOpenIndex(hT, (UNSIGNED8*)"nave.cdx", &hI, nullptr) == 0);
+    UNSIGNED16 capacity = 1;
+    REQUIRE(AdsOpenIndex(hT, (UNSIGNED8*)"nave.cdx", &hI, &capacity) == 0);
+    REQUIRE(AdsSetIndexOrderByHandle(hT, hI) == 0);
     REQUIRE(AdsGotoTop(hT) == 0);
     check_pos(hT, 2, 0, 0, "gotop (alpha, first key)");
     REQUIRE(AdsGotoBottom(hT) == 0);

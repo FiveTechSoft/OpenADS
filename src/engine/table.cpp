@@ -2051,6 +2051,8 @@ void Table::set_order(std::unique_ptr<drivers::IIndex> idx) {
 }
 
 void Table::clear_order() {
+    explicit_order_focus_ = false;
+    created_order_focus_ = false;
     order_.reset();
 }
 

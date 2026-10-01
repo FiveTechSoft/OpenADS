@@ -353,8 +353,13 @@ TEST_CASE("MT: readers always see a consistent walk while writers append [flaky]
                                  ADS_CHECKRIGHTS, ADS_SHARED, &hTbl) != 0) {
                     continue;
                 }
+                UNSIGNED16 capacity = 1;
                 if (AdsOpenIndex(hTbl, (UNSIGNED8*)"mt.cdx", &hIdx,
-                                 nullptr) != 0) {
+                                 &capacity) != 0) {
+                    AdsCloseTable(hTbl);
+                    continue;
+                }
+                if (AdsSetIndexOrderByHandle(hTbl, hIdx) != 0) {
                     AdsCloseTable(hTbl);
                     continue;
                 }

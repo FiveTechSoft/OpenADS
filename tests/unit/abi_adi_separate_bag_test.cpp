@@ -133,6 +133,7 @@ TEST_CASE("ADI separate (non-structural) bag on ADT: reopen and navigate") {
     ADSHANDLE ah[8] = {0};
     UNSIGNED16 n = 8;
     REQUIRE(AdsOpenIndex(hTable2, idxfile, ah, &n) == AE_SUCCESS);
+    REQUIRE(AdsSetIndexOrderByHandle(hTable2, ah[0]) == AE_SUCCESS);
 
     REQUIRE(AdsGotoTop(hTable2) == AE_SUCCESS);
     std::vector<std::string> seen;

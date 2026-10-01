@@ -699,6 +699,11 @@ private:
 // Per-handle wrapper for a remote table. Stores back-pointer to
 // the connection plus the server-side table id.
 struct RemoteTable {
+    // Only an explicit SetIndexOrder opts table-handle navigation into an order.
+    bool explicit_order_focus = false;
+    bool created_order_focus = false;
+    // A boundary blob changed the logical cursor without moving the server.
+    bool pair_local_position = false;
     RemoteConnection* conn = nullptr;
     std::uint32_t     id   = 0;
     // True when this table was counted in conn->deferred_open_tables at
