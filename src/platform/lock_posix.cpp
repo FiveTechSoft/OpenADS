@@ -138,16 +138,20 @@ util::Result<ByteLock> ByteLock::acquire(File& f, std::uint64_t offset,
             int fd = static_cast<int>(
                 reinterpret_cast<intptr_t>(f.native_handle()) - 1);
             long holder = -1;
-            const int kGetLk = F_GETLK;
-            if (::fcntl(fd, kGetLk, &q) == 0 && q.l_type != F_UNLCK) {
+            const int get_rc   = ::fcntl(fd, F_GETLK, &q);
+            const int get_errn = (get_rc == -1) ? errno : 0;
+            if (get_rc == 0 && q.l_type != F_UNLCK) {
                 holder = static_cast<long>(q.l_pid);
             }
             std::fprintf(stderr,
                 "openads: byte lock wait timed out (offset=%llu len=%llu "
-                "holder_pid=%ld self_pid=%ld)\n",
+                "set_errno=%d get_rc=%d get_errno=%d get_type=%d "
+                "holder_pid=%ld self_pid=%ld fd=%d)\n",
                 static_cast<unsigned long long>(offset),
-                static_cast<unsigned long long>(length), holder,
-                static_cast<long>(::getpid()));
+                static_cast<unsigned long long>(length),
+                r.error().sub_code, get_rc, get_errn,
+                static_cast<int>(q.l_type), holder,
+                static_cast<long>(::getpid()), fd);
             return r;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
