@@ -38,6 +38,11 @@ jobs:
             ps -o pid,stat,%cpu,etime,command -p "$PID" || true
             echo "=== last 40 lines of output"
             tail -n 40 "$GITHUB_WORKSPACE/run.log" | tr -d '\r' | cat -v | cut -c1-200 || true
+            echo "=== lock timeouts in output"
+            tr -d '\r' < "$GITHUB_WORKSPACE/run.log" | grep -c 'byte lock wait' || true
+            tr -d '\r' < "$GITHUB_WORKSPACE/run.log" | grep -n -B6 'byte lock wait' | cut -c1-200 | head -40 || true
+            echo "=== tests started"
+            tr -d '\r' < "$GITHUB_WORKSPACE/run.log" | grep -c '^TEST CASE' || true
             echo "=== lsof (tmp files)"
             lsof -p "$PID" 2>/dev/null | grep -i openads | cut -c1-200 | head -40 || true
             echo "=== all processes"
