@@ -5,7 +5,9 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstdio>
+#include <chrono>
 #include <fcntl.h>
+#include <thread>
 #include <unistd.h>
 
 namespace openads::platform {
@@ -28,10 +30,10 @@ util::Error os_error(const char* op) {
 // semantics used by the engine.
 #ifdef F_OFD_SETLK
 constexpr int kSetLk  = F_OFD_SETLK;
-constexpr int kSetLkW = F_OFD_SETLKW;
+[[maybe_unused]] constexpr int kSetLkW = F_OFD_SETLKW;
 #else
 constexpr int kSetLk  = F_SETLK;
-constexpr int kSetLkW = F_SETLKW;
+[[maybe_unused]] constexpr int kSetLkW = F_SETLKW;
 #endif
 
 // off_t is signed: lock offsets at or above 2^63 (the ADT lock base is
@@ -101,7 +103,51 @@ void ByteLock::release_() noexcept {
 
 util::Result<ByteLock> ByteLock::acquire(File& f, std::uint64_t offset,
                                          std::uint64_t length, LockKind kind) {
+#if defined(F_OFD_SETLK) && !defined(__APPLE__)
     return do_lock(f, offset, length, kind, kSetLkW);
+#else
+    // macOS: its SDK defines the OFD commands, but a blocking F_OFD_SETLKW
+    // waits forever when a leaked holder lives in this same process (CI
+    // test runs sat on it until the job timeout). Poll the non-blocking
+    // command and give up after a bounded wait, so a stall becomes a lock
+    // error instead of a hang.
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    for (;;) {
+        auto r = do_lock(f, offset, length, kind, kSetLk);
+        if (r) return r;
+        if (r.error().sub_code != EAGAIN && r.error().sub_code != EACCES) {
+            return r;
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            struct flock q{};
+            q.l_type   = (kind == LockKind::Exclusive) ? F_WRLCK : F_RDLCK;
+            q.l_whence = SEEK_SET;
+            q.l_start  = static_cast<off_t>(fold_lock_offset(offset));
+            q.l_len    = static_cast<off_t>(length);
+            int fd = static_cast<int>(
+                reinterpret_cast<intptr_t>(f.native_handle()) - 1);
+            long holder = -1;
+#ifdef F_OFD_GETLK
+            q.l_pid = 0;
+            const int kGetLk = F_OFD_GETLK;
+#else
+            const int kGetLk = F_GETLK;
+#endif
+            if (::fcntl(fd, kGetLk, &q) == 0 && q.l_type != F_UNLCK) {
+                holder = static_cast<long>(q.l_pid);
+            }
+            std::fprintf(stderr,
+                "openads: byte lock wait timed out (offset=%llu len=%llu "
+                "holder_pid=%ld self_pid=%ld)\n",
+                static_cast<unsigned long long>(offset),
+                static_cast<unsigned long long>(length), holder,
+                static_cast<long>(::getpid()));
+            return r;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+#endif
 }
 
 util::Result<ByteLock> ByteLock::try_acquire(File& f, std::uint64_t offset,
