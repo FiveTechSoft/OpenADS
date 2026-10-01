@@ -38,6 +38,10 @@ jobs:
             ps -o pid,stat,%cpu,etime,command -p "$PID" || true
             echo "=== last 40 lines of output"
             tail -n 40 "$GITHUB_WORKSPACE/run.log" | tr -d '\r' | cat -v | cut -c1-200 || true
+            echo "=== lsof (tmp files)"
+            lsof -p "$PID" 2>/dev/null | grep -i openads | cut -c1-200 | head -40 || true
+            echo "=== all processes"
+            ps -axo pid,ppid,stat,etime,command | grep -i openads | grep -v grep | cut -c1-200 || true
             echo "=== lldb backtraces"
             sudo lldb -p "$PID" -b -o 'thread backtrace all' > "$GITHUB_WORKSPACE/lldb.txt" 2>&1 || true
             tr -d '\r' < "$GITHUB_WORKSPACE/lldb.txt" | cat -v | cut -c1-220 | head -120
