@@ -33,17 +33,20 @@ jobs:
           done
           if kill -0 $SP 2>/dev/null; then
             echo "=== STILL RUNNING after ~560s: stall dump"
-            PID=$(pgrep -f 'openads_unit_tests' | grep -v "^$SP$" | tail -1)
+            PID=$(pgrep -f './openads_unit_tests' | grep -v "^$SP$" | tail -1)
             echo "test pid: $PID"
             ps -o pid,stat,%cpu,etime,command -p "$PID" || true
-            echo "=== last 60 lines of output"
-            tail -n 60 "$GITHUB_WORKSPACE/run.log" || true
+            echo "=== last 40 lines of output"
+            tail -n 40 "$GITHUB_WORKSPACE/run.log" | tr -d '\r' | cat -v | cut -c1-200 || true
             echo "=== lldb backtraces"
-            lldb -p "$PID" -b -o 'thread backtrace all' 2>&1 | head -150 || true
+            sudo lldb -p "$PID" -b -o 'thread backtrace all' > "$GITHUB_WORKSPACE/lldb.txt" 2>&1 || true
+            tr -d '\r' < "$GITHUB_WORKSPACE/lldb.txt" | cat -v | cut -c1-220 | head -120
             echo "=== sample"
-            sample "$PID" 5 2>&1 | head -120 || true
+            sudo sample "$PID" 5 -file "$GITHUB_WORKSPACE/sample.txt" > /dev/null 2>&1 || true
+            tr -d '\r' < "$GITHUB_WORKSPACE/sample.txt" | cat -v | cut -c1-200 | head -100
+            echo "=== end of dump"
             kill -9 "$PID" || true
           else
             echo "=== finished; tail of output"
-            tail -n 30 "$GITHUB_WORKSPACE/run.log" || true
+            tail -n 30 "$GITHUB_WORKSPACE/run.log" | tr -d '\r' | cat -v | cut -c1-200 || true
           fi
