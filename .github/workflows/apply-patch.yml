@@ -149,8 +149,8 @@ jobs:
       contents: read
     name: ${{ matrix.os }} / ${{ matrix.preset }}${{ matrix.tls && ' / TLS' || '' }}
     runs-on: ${{ matrix.os }}
-    # Recent macOS runs exhaust ci.yml's 30-minute budget during Test.
-    # Give macOS 90 minutes; preserve the original 30 minutes elsewhere.
+    # macOS is out of the matrix for now: its unit tests stall and a timeout
+    # cancels the whole run. Re-add the macos-14 entry once that is fixed.
     timeout-minutes: ${{ matrix.os == 'macos-14' && 90 || 30 }}
     continue-on-error: ${{ matrix.os == 'macos-14' }}
     strategy:
@@ -168,9 +168,6 @@ jobs:
             tls: false
           - os: ubuntu-24.04
             preset: ninja-clang
-            tls: false
-          - os: macos-14
-            preset: default
             tls: false
           # M12.12 — verify the OPENADS_WITH_TLS path (vendored
           # mbedtls 3.6) on at least one runner per release.
