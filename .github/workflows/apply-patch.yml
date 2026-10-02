@@ -119,7 +119,10 @@ jobs:
           for path in paths:
               parts = path.split(b"/")
               allowed = (path.startswith(b"src/engine/") or
-                         path.startswith(b"tests/") or path.startswith(b"docs/"))
+                         path.startswith(b"tests/") or path.startswith(b"docs/") or
+                         path.startswith(b"src/network/") or
+                         path.startswith(b"tools/serverd/") or
+                         path == b"roadmap.txt")
               if (not allowed or any(p in (b"", b".", b"..") for p in parts)
                       or any(p.lower() == b".git" for p in parts)):
                   raise SystemExit("Disallowed path: " + repr(path))
