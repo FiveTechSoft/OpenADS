@@ -21,7 +21,7 @@ enum class SqlDdlDialect {
 struct SqlDdlColumn {
     std::string  name;
     char         xbase_type = 'C';
-    std::uint8_t length     = 10;
+    std::uint16_t length    = 10;
     std::uint8_t dec        = 0;
 };
 

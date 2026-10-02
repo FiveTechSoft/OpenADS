@@ -59,6 +59,28 @@ enum class DbfFieldType {
     Unknown
 };
 
+// DBF field descriptor width/decimals (bytes 16/17). Per Harbour DBFCDX
+// (dbf1.c hb_dbfOpen / hb_dbfCreate) a CHARACTER field is C(len) with
+// len = byte16 + byte17*256 and decimals 0; for every other type byte 17
+// is the decimal count and byte 16 the width.
+inline std::uint16_t dbf_descriptor_width(const std::uint8_t* fd) noexcept {
+    if (fd[11] == 'C')
+        return static_cast<std::uint16_t>(fd[16] | (fd[17] << 8));
+    return fd[16];
+}
+// Store width/decimals into a zeroed descriptor whose type byte (fd[11])
+// is already set.
+inline void dbf_descriptor_put_width(std::uint8_t* fd, std::uint16_t length,
+                                     std::uint8_t decimals) noexcept {
+    if (fd[11] == 'C') {
+        fd[16] = static_cast<std::uint8_t>(length & 0xFFu);
+        fd[17] = static_cast<std::uint8_t>((length >> 8) & 0xFFu);
+    } else {
+        fd[16] = static_cast<std::uint8_t>(length);
+        fd[17] = decimals;
+    }
+}
+
 struct DbfField {
     std::string   name;
     DbfFieldType  type          = DbfFieldType::Unknown;

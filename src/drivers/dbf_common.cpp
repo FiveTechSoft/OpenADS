@@ -95,8 +95,15 @@ parse_dbf_fields(const std::uint8_t* data, std::size_t size,
         f.name.assign(raw_name, name_len);
         f.raw_type      = static_cast<char>(data[pos + 11]);
         f.type          = classify_field(f.raw_type);
-        f.length        = data[pos + 16];
-        f.decimals      = data[pos + 17];
+        // CHARACTER: width = byte16 + byte17*256, decimals 0 (same as
+        // Harbour DBFCDX); other types: byte16 width, byte17 decimals.
+        f.length        = dbf_descriptor_width(data + pos);
+        f.decimals      = (f.raw_type == 'C') ? 0 : data[pos + 17];
+        // Harbour dbf1.c hb_dbfOpen normalises these before computing
+        // offsets: LOGICAL is always 1 byte, DATE is 8 unless 3/4 (binary).
+        if (f.raw_type == 'L') f.length = 1;
+        else if (f.raw_type == 'D' && f.length != 3 && f.length != 4)
+            f.length = 8;
         f.record_offset = offset;
         // VFP autoinc descriptor bytes (M10.11). Non-VFP DBFs have
         // these slots zeroed so the read is harmless.

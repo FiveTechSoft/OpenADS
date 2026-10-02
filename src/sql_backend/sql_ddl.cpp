@@ -24,7 +24,7 @@ std::string quote_col(SqlDdlDialect d, const std::string& name) {
 }
 
 std::string sql_type_for(SqlDdlDialect d, const SqlDdlColumn& c) {
-    const std::uint8_t len = c.length > 0 ? c.length : 10;
+    const std::uint16_t len = c.length > 0 ? c.length : 10;
     switch (c.xbase_type) {
         case 'L':
             if (d == SqlDdlDialect::Mssql) return "BIT";
