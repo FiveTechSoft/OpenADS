@@ -40,6 +40,12 @@ private:
     const std::string& src_;
     std::vector<Token> t_;
     std::size_t i_ = 0;
+    std::size_t depth_ = 0;
+    struct DepthGuard {
+        std::size_t& n;
+        explicit DepthGuard(std::size_t& depth) : n(depth) { ++n; }
+        ~DepthGuard() { --n; }
+    };
     bool seen_exec_ = false;   // a non-DECLARE statement has been parsed
 
     const Token& cur() const { return t_[i_]; }
@@ -72,6 +78,8 @@ private:
     // ---- Statements ------------------------------------------------------
 
     Result<Block> parse_block(const std::vector<const char*>& stops) {
+        if (depth_ >= 128) return perr("nesting limit exceeded", cur().pos);
+        DepthGuard guard(depth_);
         Block out;
         while (!at(Tok::End) && !in_stops(stops, cur())) {
             auto s = parse_stmt();
@@ -308,6 +316,8 @@ private:
     }
 
     Result<StmtPtr> parse_if() {
+        if (depth_ >= 128) return perr("nesting limit exceeded", cur().pos);
+        DepthGuard guard(depth_);
         auto s = std::make_unique<Stmt>();
         s->kind = StmtKind::If;
         s->pos = cur().pos;
@@ -446,7 +456,11 @@ private:
 
     // ---- Expressions -----------------------------------------------------
 
-    Result<ExprPtr> parse_expr() { return parse_or(); }
+    Result<ExprPtr> parse_expr() {
+        if (depth_ >= 128) return perr("nesting limit exceeded", cur().pos);
+        DepthGuard guard(depth_);
+        return parse_or();
+    }
 
     Result<ExprPtr> parse_or() {
         auto a = parse_and();
@@ -617,6 +631,8 @@ private:
     }
 
     Result<ExprPtr> parse_unary() {
+        if (depth_ >= 128) return perr("nesting limit exceeded", cur().pos);
+        DepthGuard guard(depth_);
         if (at(Tok::Minus)) {
             std::size_t p = cur().pos;
             advance();
@@ -904,8 +920,10 @@ private:
 }  // namespace
 
 Result<std::shared_ptr<const Program>> compile(const std::string& src) {
+    if (src.size() > 1024u * 1024u) return perr("source size limit exceeded", 0);
     auto toks = lex(src);
     if (!toks) return toks.error();
+    if (toks.value().size() > 4096) return perr("token limit exceeded", 0);
     Parser p(src, std::move(toks).value());
     return p.run();
 }

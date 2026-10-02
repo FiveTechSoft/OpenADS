@@ -585,3 +585,34 @@ TEST_CASE("script S3: nested cursor re-opened per outer row (C27)") {
     CHECK(br.executed[2].find("id >= 2") != std::string::npos);
     CHECK(br.executed[3].find("id >= 3") != std::string::npos);
 }
+
+TEST_CASE("script: execution budget stops empty and caught infinite loops") {
+    CHECK(fails("WHILE TRUE DO END WHILE;"));
+    CHECK(fails("TRY WHILE TRUE DO END WHILE; CATCH ALL END TRY;"));
+    CHECK(fails("WHILE TRUE DO TRY RAISE; CATCH ALL END TRY; END WHILE;"));
+    CHECK(run_ret("DECLARE @i INTEGER; @i = 0; WHILE @i < 100 DO @i = @i + 1; END WHILE; RETURN @i;").i == 100);
+}
+TEST_CASE("script: SQL literal quoting keeps attacker text inside the value") {
+    CHECK(to_sql_literal(Value::character("x'; DROP TABLE users; --")) == "'x''; DROP TABLE users; --'");
+}
+
+TEST_CASE("script: bounded parser nesting and tokens") {
+    CHECK_FALSE(compile("RETURN " + std::string(200, '(') + "1" + std::string(200, ')') + ";").has_value());
+    std::string unary = "RETURN ";
+    for (int i = 0; i < 200; ++i) unary += "- ";
+    CHECK_FALSE(compile(unary + "1;").has_value());
+    std::string blocks;
+    for (int i = 0; i < 200; ++i) blocks += "IF TRUE THEN ";
+    for (int i = 0; i < 200; ++i) blocks += "ENDIF; ";
+    CHECK_FALSE(compile(blocks).has_value());
+    std::string chain = "RETURN 1";
+    for (int i = 0; i < 5000; ++i) chain += "+1";
+    CHECK_FALSE(compile(chain + ";").has_value());
+}
+
+TEST_CASE("script: ELSE IF recursion is bounded") {
+    std::string source = "IF FALSE THEN ";
+    for (int i = 0; i < 200; ++i) source += "ELSE IF FALSE THEN ";
+    for (int i = 0; i <= 200; ++i) source += "ENDIF; ";
+    CHECK_FALSE(compile(source).has_value());
+}

@@ -99,8 +99,10 @@ void Executor::set_param(const std::string& name, Value v) {
 }
 
 Result<ExecResult> Executor::run(const Program& p) {
+    remaining_steps_ = 1000000;
     auto f = exec_block(p.stmts);
     if (!f) return f.error();
+    if (remaining_steps_ == 0) return serr("script execution budget exceeded");
     ExecResult r;
     if (f.value().k == Flow::Return) {
         r.returned = true;
@@ -120,6 +122,8 @@ Result<Executor::Flow> Executor::exec_block(const Block& b) {
 }
 
 Result<Executor::Flow> Executor::exec_stmt(const Stmt& s) {
+    if (remaining_steps_ == 0) return serr("script execution budget exceeded");
+    --remaining_steps_;
     switch (s.kind) {
         case StmtKind::Declare: {
             if (s.is_cursor) {
@@ -159,6 +163,8 @@ Result<Executor::Flow> Executor::exec_stmt(const Stmt& s) {
         }
         case StmtKind::While: {
             for (;;) {
+                if (remaining_steps_ == 0) return serr("script execution budget exceeded");
+                --remaining_steps_;
                 auto c = eval(*s.expr);
                 if (!c) return c.error();
                 if (!truthy(c.value())) break;
@@ -189,6 +195,7 @@ Result<Executor::Flow> Executor::exec_stmt(const Stmt& s) {
             // §11 F-probes: body → matching CATCH → FINALLY; FINALLY runs
             // even when the error is uncaught, before it propagates (F3).
             auto f = exec_block(s.body);
+            if (remaining_steps_ == 0) return serr("script execution budget exceeded");
             if (!f) {
                 // Find a matching CATCH: ALL (empty name) matches
                 // everything; a named clause matches the RAISE name
