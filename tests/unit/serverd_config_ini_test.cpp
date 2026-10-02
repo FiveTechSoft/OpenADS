@@ -184,3 +184,17 @@ TEST_CASE("parse_ini rejects a line with no equals sign") {
     std::string err;
     CHECK_FALSE(parse_ini("port 6262\n", cfg, err));
 }
+
+TEST_CASE("allow_anonymous defaults closed and validates explicit boolean") {
+    IniConfig cfg;
+    std::string err;
+    REQUIRE(parse_ini("", cfg, err));
+    CHECK_FALSE(cfg.has_allow_anonymous);
+    CHECK_FALSE(cfg.allow_anonymous);
+    REQUIRE(parse_ini("allow-anonymous = true\n", cfg, err));
+    CHECK(cfg.has_allow_anonymous);
+    CHECK(cfg.allow_anonymous);
+    REQUIRE(parse_ini("allow_anonymous = false\n", cfg, err));
+    CHECK_FALSE(cfg.allow_anonymous);
+    CHECK_FALSE(parse_ini("allow_anonymous = typo\n", cfg, err));
+}

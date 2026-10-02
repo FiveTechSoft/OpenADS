@@ -127,6 +127,19 @@ bool parse_ini(const std::string& text, IniConfig& out, std::string& error) {
         if (key == "host") {
             out.host = val;
             out.has_host = true;
+        } else if (key == "allow_anonymous") {
+            std::string v = val;
+            for (char& c : v) {
+                if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+            }
+            if (v != "1" && v != "true" && v != "yes" && v != "on" &&
+                v != "0" && v != "false" && v != "no" && v != "off") {
+                error = "line " + std::to_string(lineno) +
+                        ": allow_anonymous must be a boolean";
+                return false;
+            }
+            out.has_allow_anonymous = true;
+            out.allow_anonymous = v == "1" || v == "true" || v == "yes" || v == "on";
         } else if (key == "port") {
             unsigned long n = 0;
             if (!parse_uint(val, 65535, n)) {

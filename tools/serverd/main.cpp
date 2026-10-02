@@ -63,7 +63,7 @@ void usage(const char* argv0) {
         "a phrase are accepted (--http_port == --http-port), but the\n"
         "canonical form is with underscore, matching openads.ini keys and\n"
         "OPENADS_* env variables.\n"
-        "  --host       bind address (default 0.0.0.0)\n"
+        "  --host       bind address (default 127.0.0.1)\n"
         "  --port       TCP wire port (default 6262, 0 = ephemeral)\n"
         "  --backlog    listen() backlog (default: env OPENADS_SERVER_BACKLOG,\n"
         "               else 256; ini: backlog)\n"
@@ -101,6 +101,7 @@ void usage(const char* argv0) {
         "               ini: error_log_max. See docs/en/error-log.md\n"
         "  --http_user  user:password — register a Studio login\n"
         "               (repeatable; if none given, console is open)\n"
+        "  --allow_anonymous  explicitly allow anonymous non-loopback listeners\n"
         "  --auth_user  user:password — require this login for TCP\n"
         "               AdsConnect60 connections (repeatable)\n"
         "  --config     read settings from an openads.ini file (CLI flags\n"
@@ -119,7 +120,8 @@ void usage(const char* argv0) {
 
 // Args parsed from argv. Defaults match the original CLI.
 struct Args {
-    std::string   host        = "0.0.0.0";
+    std::string   host        = "127.0.0.1";
+    bool          allow_anonymous = false;
     std::uint16_t port        = 6262;
     int           backlog     = 16;
     // Cap on concurrent sessions (0 = unlimited). Defaults to 0 here so the
@@ -172,6 +174,8 @@ bool parse_args(int argc, char** argv, Args& out) {
             out.max_sessions = static_cast<std::uint32_t>(std::atoi(argv[++i]));
         else if (flag_eq(a, "http_port") && i + 1 < argc) out.http_port = static_cast<std::uint16_t>(std::atoi(argv[++i]));
         else if (flag_eq(a, "data")      && i + 1 < argc) out.data_dir = argv[++i];
+        else if (flag_eq(a, "allow_anonymous")) out.allow_anonymous = true;
+        else if (flag_eq(a, "disable_anonymous")) out.allow_anonymous = false;
         else if (flag_eq(a, "enable_file_func")) out.enable_file_func = true;
         else if (flag_eq(a, "disable_file_func")) out.enable_file_func = false;
         else if (flag_eq(a, "legacy_paths")) out.legacy_paths = true;
@@ -245,6 +249,7 @@ bool parse_args(int argc, char** argv, Args& out) {
 // defaults (Args ctor) and the command line: defaults < config file < CLI.
 void apply_ini(const openads::serverd::IniConfig& cfg, Args& out) {
     if (cfg.has_host)      out.host      = cfg.host;
+    if (cfg.has_allow_anonymous) out.allow_anonymous = cfg.allow_anonymous;
     if (cfg.has_port)      out.port      = cfg.port;
     if (cfg.has_backlog)   out.backlog   = cfg.backlog;
     if (cfg.has_max_sessions) out.max_sessions = cfg.max_sessions;
@@ -360,6 +365,29 @@ static void probe_ace_dlls(bool console) {
 // Run the actual server. Returns when g_running flips to false
 // (signal handler on POSIX / SCM stop control on Windows).
 int run_server(const Args& args, bool console) {
+    // Only literal loopback addresses are trusted. A hostname can resolve
+    // to a public interface, so fail closed rather than infer its safety.
+    const bool loopback = args.host == "127.0.0.1" || args.host == "::1";
+    if (!loopback) {
+        if (args.auth_users.empty() && !args.allow_anonymous) {
+            std::fprintf(stderr,
+                "Refusing non-loopback anonymous TCP listener. Configure "
+                "auth_user or explicitly pass --allow_anonymous.\n");
+            return 1;
+        }
+        if (args.http_port != 0 && args.http_users.empty() && !args.allow_anonymous) {
+            std::fprintf(stderr,
+                "Refusing non-loopback anonymous Studio listener. Configure "
+                "http_user or explicitly pass --allow_anonymous.\n");
+            return 1;
+        }
+        std::fprintf(stderr,
+            "WARNING: TCP listener has no native TLS. Credentials and data "
+            "travel in cleartext. Use a TLS proxy and firewall the backend.\n");
+        if (args.auth_users.empty() || (args.http_port != 0 && args.http_users.empty()))
+            std::fprintf(stderr, "WARNING: anonymous network access explicitly enabled.\n");
+    }
+
     // Error log configuration must land before Server::start(), whose
     // "server started" entry is the log's first row.
     if (!args.error_log_path.empty())

@@ -333,3 +333,5 @@ Longer-term (1.0.0 final blockers):
   13. Connection multiplexing and session hardening in openads_serverd
   14. Compatibility test matrix vs Advantage 11.x/12.x installations
   15. Server-side TLS termination
+
+SECURITY: [DONE] Loopback default, explicit non-loopback anonymous opt-in and cleartext startup warnings (TCP/Studio). Native server TLS remains pending.

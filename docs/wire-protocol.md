@@ -1325,3 +1325,16 @@ ads_dd_create_trigger($conn,
 
 ads_disconnect($conn);
 ```
+
+
+## Safe listener defaults (security hardening)
+
+`openads_serverd` now binds `127.0.0.1` by default, including the setup
+wizard. Explicit `host` values in existing INI files still override this default. Existing clients and wire payloads are unchanged.
+A non-loopback bind without `auth_user` is rejected unless the operator
+explicitly selects `--allow_anonymous` (`allow_anonymous=true` in INI).
+The same gate applies to an enabled Studio listener without `http_user`.
+All non-loopback TCP listeners emit a cleartext warning, including those
+with authentication. **This is exposure mitigation, not native TLS**:
+use the documented TLS proxy, and firewall its cleartext backend so only
+the proxy can reach it. Do not expose TCP credentials to untrusted networks.

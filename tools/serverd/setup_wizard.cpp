@@ -173,7 +173,7 @@ bool run_setup_wizard(const std::string& exe_path, SetupResult& out) {
         "[default] shown.\n\n");
 
     std::string host, port, data, ini_path;
-    if (!ask("Bind address (0.0.0.0 = all interfaces)", "0.0.0.0", host))
+    if (!ask("Bind address (0.0.0.0 = all interfaces)", "127.0.0.1", host))
         return false;
 
     for (;;) {

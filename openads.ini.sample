@@ -25,10 +25,12 @@
 
 # ------------------------------------------------------------------
 # host — bind address
-# Default: 0.0.0.0
+# Default: 127.0.0.1
 # ------------------------------------------------------------------
 # 0.0.0.0 = all interfaces (LAN-visible); 127.0.0.1 = local machine only.
-host = 0.0.0.0
+host = 127.0.0.1
+# Anonymous non-loopback access requires explicit opt-in (unsafe on untrusted networks).
+allow_anonymous = false
 
 # ------------------------------------------------------------------
 # port — main TCP wire port for AdsConnect60 clients
