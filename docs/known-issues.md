@@ -176,3 +176,10 @@ All non-loopback TCP listeners emit a cleartext warning, including those
 with authentication. **This is exposure mitigation, not native TLS**:
 use the documented TLS proxy, and firewall its cleartext backend so only
 the proxy can reach it. Do not expose TCP credentials to untrusted networks.
+Credential hardening: new DD passwords use salted PBKDF2-SHA256. Existing
+plaintext password entries are verified in constant time and migrated after
+successful named login; unknown or invalid users are never migrated. Password
+property 1101 is now write-only through AdsDDGetUserProperty. This deliberately
+breaks applications that read passwords back. Named logins now require a valid
+password even if LOG_IN_REQUIRED is disabled, preventing AdsSys impersonation.
+Legacy anonymous local dictionary setup still works; it is not a network grant.

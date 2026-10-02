@@ -323,5 +323,7 @@ Longer-term (1.0.0 final blockers):
   15. Server-side TLS termination
 
 SECURITY: [DONE] Loopback default, explicit non-loopback anonymous opt-in and cleartext startup warnings (TCP/Studio). Native server TLS remains pending.
-SECURITY: [DONE] auth_user verifier storage: salted PBKDF2-SHA256 and constant-time comparison. Dictionary credential migration remains pending.
+SECURITY: [DONE] auth_user verifier storage: salted PBKDF2-SHA256 and constant-time comparison. Dictionary credential migration is implemented on successful login.
 SECURITY: [DONE] Network login cooldown and bounded IP/user counters; applies DD MAX_FAILED_ATTEMPTS.
+SECURITY: [DONE] Remote DD mutations and built-in administration require DB:Admin; named logins always verify passwords; native DLL procedure registration requires admin.
+SECURITY: [DONE] DD salted PBKDF2 storage, successful-login legacy migration, write-only password property and hashed AdsSys recovery verification.

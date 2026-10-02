@@ -253,7 +253,10 @@ TEST_CASE("Perms: AdsDDSetUserTableRights / AdsDDGetUserTableRights round-trip")
     fs::remove_all(dir, ec);
     fs::create_directories(dir);
     make_dbf(dir / "tbl.dbf");
-    make_perm_add(dir);  // no TABLEPERM lines
+    make_perm_add(dir,
+        "USER admin\n"
+        "USERPROP admin;prop_1101=adminpw\n"
+        "MEMBER admin=DB:Admin\n");  // no TABLEPERM lines
 
     ADSHANDLE hConn = connect_as(dir / "test.add", "alice", "pw");
     REQUIRE(hConn != 0);
@@ -261,8 +264,16 @@ TEST_CASE("Perms: AdsDDSetUserTableRights / AdsDDGetUserTableRights round-trip")
     UNSIGNED8 tbl[8]  = "tbl";
     UNSIGNED8 user[8] = "alice";
 
-    // Set alice to level 2.
-    REQUIRE(AdsDDSetUserTableRights(hConn, tbl, user, 2) == 0);
+    // Regular users cannot grant themselves rights. Configure through a
+    // distinct DB:Admin connection, then verify alice sees the stored grant.
+    CHECK(AdsDDSetUserTableRights(hConn, tbl, user, 2) == openads::AE_ACCESS_DENIED);
+    ADSHANDLE hAdmin = connect_as(dir / "test.add", "admin", "adminpw");
+    REQUIRE(hAdmin != 0);
+    REQUIRE(AdsDDSetUserTableRights(hAdmin, tbl, user, 2) == 0);
+    REQUIRE(AdsDisconnect(hAdmin) == 0);
+    REQUIRE(AdsDisconnect(hConn) == 0);
+    hConn = connect_as(dir / "test.add", "alice", "pw");
+    REQUIRE(hConn != 0);
 
     UNSIGNED32 lvl = 99;
     REQUIRE(AdsDDGetUserTableRights(hConn, tbl, user, &lvl) == 0);
@@ -320,6 +331,9 @@ TEST_CASE("Perms: AdsDDGetPermissions returns direct or inherited masks") {
         "TABLE tbl=tbl.dbf\n"
         "USER alice\n"
         "USERPROP alice;prop_1101=pw\n"
+        "USER admin\n"
+        "USERPROP admin;prop_1101=adminpw\n"
+        "MEMBER admin=DB:Admin\n"
         "GROUP readers\n"
         "MEMBER alice=readers\n"
         "DBPROP prop_5=1\n");
@@ -331,11 +345,20 @@ TEST_CASE("Perms: AdsDDGetPermissions returns direct or inherited masks") {
     UNSIGNED8 user[] = "alice";
     UNSIGNED8 group[] = "readers";
 
-    REQUIRE(AdsDDGrantPermission(hConn, ADS_DD_TABLE_OBJECT, tbl, nullptr,
+    CHECK(AdsDDGrantPermission(hConn, ADS_DD_TABLE_OBJECT, tbl, nullptr,
+                               group, ADS_PERMISSION_READ) == openads::AE_ACCESS_DENIED);
+    ADSHANDLE hAdmin = connect_as(dir / "test.add", "admin", "adminpw");
+    REQUIRE(hAdmin != 0);
+    REQUIRE(AdsDDGrantPermission(hAdmin, ADS_DD_TABLE_OBJECT, tbl, nullptr,
                                  group,
                                  ADS_PERMISSION_READ | ADS_PERMISSION_INSERT) == 0);
-    REQUIRE(AdsDDGrantPermission(hConn, ADS_DD_TABLE_OBJECT, tbl, nullptr,
+    REQUIRE(AdsDDGrantPermission(hAdmin, ADS_DD_TABLE_OBJECT, tbl, nullptr,
                                  user, ADS_PERMISSION_INHERIT) == 0);
+
+    REQUIRE(AdsDisconnect(hAdmin) == 0);
+    REQUIRE(AdsDisconnect(hConn) == 0);
+    hConn = connect_as(dir / "test.add", "alice", "pw");
+    REQUIRE(hConn != 0);
 
     UNSIGNED32 mask = 0;
     REQUIRE(AdsDDGetPermissions(hConn, user, ADS_DD_TABLE_OBJECT, tbl, nullptr,

@@ -184,3 +184,60 @@ TEST_CASE("DD auth: no DD — plain directory connect always succeeds") {
     if (h) REQUIRE(AdsDisconnect(h) == 0);
     fs::remove_all(dir, ec);
 }
+
+TEST_CASE("DD auth: named login requires password even with optional anonymous access") {
+    auto dir = fs::temp_directory_path() / "openads_auth_optional_named";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+    auto dd = make_auth_add(dir, false);
+    auto denied = connect_dd(dd, "alice", "wrong");
+    CHECK(denied == 0);
+    auto accepted = connect_dd(dd, "alice", "secret");
+    REQUIRE(accepted != 0);
+    UNSIGNED8 intruder[24] = "intruder";
+    UNSIGNED8 pw[24] = "pw";
+    CHECK(AdsDDCreateUser(accepted, nullptr, intruder, pw, nullptr) == openads::AE_ACCESS_DENIED);
+    UNSIGNED16 one = 1;
+    CHECK(AdsDDSetDatabaseProperty(accepted, ADS_DD_LOG_IN_REQUIRED, &one, sizeof(one)) == openads::AE_ACCESS_DENIED);
+    REQUIRE(AdsDisconnect(accepted) == 0);
+    auto reopened = connect_dd(dd, "alice", "secret");
+    REQUIRE(reopened != 0);
+    REQUIRE(AdsDisconnect(reopened) == 0);
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("DD auth: regular user cannot administer through SQL procedures") {
+    auto dir = fs::temp_directory_path() / "openads_auth_sql_admin";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+    auto dd = make_auth_add(dir, true);
+    auto connection = connect_dd(dd, "alice", "secret");
+    REQUIRE(connection != 0);
+    ADSHANDLE statement = 0;
+    REQUIRE(AdsCreateSQLStatement(connection, &statement) == 0);
+    for (const char* text : {
+            "EXECUTE PROCEDURE sp_CreateUser('intruder', 'pw', 'desc')",
+            "EXECUTE PROCEDURE sp_ModifyDatabase('ADMIN_PASSWORD', 'pw')"}) {
+        std::vector<UNSIGNED8> query(text, text + std::strlen(text));
+        query.push_back(0);
+        ADSHANDLE cursor = 0;
+        // AdsExecuteSQLDirect wraps inner errors in the SAP SQL envelope
+        // (7200); the denial must surface inside the last-error message.
+        CHECK(AdsExecuteSQLDirect(statement, query.data(), &cursor) != openads::AE_SUCCESS);
+        CHECK(cursor == 0);
+        UNSIGNED32 last = 0;
+        UNSIGNED8 msg[512] = {};
+        UNSIGNED16 mlen = sizeof(msg) - 1;
+        if (AdsGetLastError(&last, msg, &mlen) == 0) {
+            CHECK(std::string(reinterpret_cast<const char*>(msg)).find(
+                "administrator required") != std::string::npos);
+        }
+    }
+    REQUIRE(AdsCloseSQLStatement(statement) == 0);
+    REQUIRE(AdsDisconnect(connection) == 0);
+    // The denied procedure must not have created the user.
+    CHECK(connect_dd(dd, "intruder", "pw") == 0);
+    fs::remove_all(dir, ec);
+}

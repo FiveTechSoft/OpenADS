@@ -72,6 +72,9 @@ struct DdRemoteFixture {
         UNSIGNED8 alias[16] = "stock";
         UNSIGNED8 path[32]  = "stock.dbf";
         REQUIRE(AdsDDAddTable(hConn, alias, path, 0, 0, nullptr, nullptr) == 0);
+        UNSIGNED8 admin[16] = "adssys";
+        UNSIGNED8 secret[24] = "fixture-secret";
+        REQUIRE(AdsDDCreateUser(hConn, nullptr, admin, secret, nullptr) == 0);
         REQUIRE(AdsDisconnect(hConn) == 0);
 
         REQUIRE(srv.start("127.0.0.1", 0).has_value());
@@ -84,7 +87,9 @@ struct DdRemoteFixture {
         UNSIGNED8 buf[512];
         std::memcpy(buf, uri, std::strlen(uri) + 1);
         ADSHANDLE hConn = 0;
-        REQUIRE(AdsConnect60(buf, ADS_REMOTE_SERVER, nullptr, nullptr, 0,
+        UNSIGNED8 admin[16] = "adssys";
+        UNSIGNED8 secret[24] = "fixture-secret";
+        REQUIRE(AdsConnect60(buf, ADS_REMOTE_SERVER, admin, secret, 0,
                              &hConn) == 0);
         return hConn;
     }

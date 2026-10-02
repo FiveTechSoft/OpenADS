@@ -1789,7 +1789,7 @@ DispatchResult Session::dispatch(const Frame& f) {
                     static_cast<unsigned char>(login_req[1]) == 0);
                 bool require_login = (!login_req.empty() &&
                     login_req != "0" && login_req != "False" && !is_raw_zero);
-                if (require_login) {
+                if (require_login || !user.empty()) {
                     if (user.empty()) {
                         srv_->login_failed(peer_ip_, user, max_attempts);
                         reply = err("Connect: authentication failed",
@@ -1803,7 +1803,7 @@ DispatchResult Session::dispatch(const Frame& f) {
                         break;
                     }
                     std::string stored = dd->get_user_property(user, "prop_1101");
-                    if (stored != pw) {
+                    if (!openads::engine::verify_password(stored, pw)) {
                         srv_->login_failed(peer_ip_, user, max_attempts);
                         reply = err("Connect: authentication failed",
                                     openads::AE_LOGIN_FAILED);
@@ -1811,6 +1811,13 @@ DispatchResult Session::dispatch(const Frame& f) {
                     }
                 }
                 if (!user.empty()) {
+                    const auto old = dd->get_user_property(user, "prop_1101");
+                    if (!openads::engine::password_is_hash(old)) {
+                        if (auto migrated = dd->set_user_property(user, "prop_1101", pw); !migrated) {
+                            reply = err("Connect: credential migration failed", openads::AE_LOGIN_FAILED);
+                            break;
+                        }
+                    }
                     co.value().set_username(user);
                     if (dd->has_any_acl()) dd->build_perm_cache(user);
                 }

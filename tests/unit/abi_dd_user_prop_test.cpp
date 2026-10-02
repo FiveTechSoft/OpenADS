@@ -1,3 +1,4 @@
+#include "openads/error.h"
 #include "doctest.h"
 #include "openads/ace.h"
 #include "openads/error.h"
@@ -23,7 +24,7 @@ fs::path setup_empty_dd(const fs::path& dir) {
 
 } // namespace
 
-TEST_CASE("AdsDDCreateUser stores password and description via GetUserProperty") {
+TEST_CASE("AdsDDCreateUser keeps password write-only and description readable") {
     const auto dir = fs::temp_directory_path() / "openads_dd_uprop_create";
     std::error_code ec;
     fs::remove_all(dir, ec);
@@ -39,11 +40,11 @@ TEST_CASE("AdsDDCreateUser stores password and description via GetUserProperty")
     UNSIGNED8 desc[64] = "Test user Alice";
     REQUIRE(AdsDDCreateUser(hConn, nullptr, user, pwd, desc) == 0);
 
-    // Password readable via property 1101.
+    // Password is write-only, even for local bootstrap.
     UNSIGNED8 outbuf[256] = {};
     UNSIGNED16 len = sizeof(outbuf);
-    REQUIRE(AdsDDGetUserProperty(hConn, user, ADS_DD_USER_PASSWORD, outbuf, &len) == 0);
-    CHECK(std::string(reinterpret_cast<const char*>(outbuf), len) == "secret");
+    CHECK(AdsDDGetUserProperty(hConn, user, ADS_DD_USER_PASSWORD, outbuf, &len) == AE_PROPERTY_NOT_SET);
+    CHECK(len == 0);
 
     // Comment/description readable via property 1 (ADS_DD_COMMENT).
     std::memset(outbuf, 0, sizeof(outbuf));
@@ -81,7 +82,7 @@ TEST_CASE("AdsDDCreateUser with group adds membership") {
     fs::remove_all(dir, ec);
 }
 
-TEST_CASE("AdsDDSetUserProperty — password round-trips") {
+TEST_CASE("AdsDDSetUserProperty: password remains write-only") {
     const auto dir = fs::temp_directory_path() / "openads_dd_uprop_setpwd";
     std::error_code ec;
     fs::remove_all(dir, ec);
@@ -108,8 +109,8 @@ TEST_CASE("AdsDDSetUserProperty — password round-trips") {
 
     UNSIGNED8 outbuf[256] = {};
     UNSIGNED16 len = sizeof(outbuf);
-    REQUIRE(AdsDDGetUserProperty(hConn, user, ADS_DD_USER_PASSWORD, outbuf, &len) == 0);
-    CHECK(std::string(reinterpret_cast<const char*>(outbuf), len) == "newpass");
+    CHECK(AdsDDGetUserProperty(hConn, user, ADS_DD_USER_PASSWORD, outbuf, &len) == AE_PROPERTY_NOT_SET);
+    CHECK(len == 0);
 
     REQUIRE(AdsDisconnect(hConn) == 0);
     fs::remove_all(dir, ec);

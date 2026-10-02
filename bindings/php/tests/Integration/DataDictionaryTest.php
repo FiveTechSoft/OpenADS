@@ -67,9 +67,13 @@ final class DataDictionaryTest extends IntegrationTestCase
 
         $dd->createUser('alice', 'secret123');
         $dd->setUserPassword('alice', 'newpass');
-        // getUserProperty for password should return the stored value.
-        $pwd = $dd->getUserProperty('alice', AceTypes::ADS_DD_USER_PASSWORD);
-        self::assertSame('newpass', $pwd);
+        // Passwords are write-only and must never be exposed by getters.
+        try {
+            $dd->getUserProperty('alice', AceTypes::ADS_DD_USER_PASSWORD);
+            self::fail('Password getter must reject disclosure');
+        } catch (\OpenADS\Exception\OpenAdsException $e) {
+            self::assertSame(5138, $e->aceCode());
+        }
 
         $dd->createUser('bob');
         $dd->addUserToGroup('bob', 'admins');

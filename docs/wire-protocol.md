@@ -1356,3 +1356,13 @@ sets a threshold clamped to 1-100; zero retains the safe default. An attacker
 may still deny login to a known account; this is a trade-off of account lockout.
 Behind a TCP proxy all clients may share the proxy IP. Tune deployment and
 consider dedicated source-IP-preserving proxies; no forwarded-IP header is trusted.
+## Dictionary administration authority
+
+Named dictionary logins must verify their password even when LOG_IN_REQUIRED
+is disabled. Remote dictionary writes (user/group CRUD, property changes,
+permissions and metadata) require verified DB:Admin membership, including
+AdsSys. Mutating built-in stored procedures enforce the same check at dispatch.
+CREATE PROCEDURE registering a native DLL requires administrator authority.
+Anonymous local setup retains compatibility; anonymous remote setup is denied.
+This closes authorization bypasses, not application SQL concatenation: clients
+must still bind values rather than concatenate untrusted strings into SQL.

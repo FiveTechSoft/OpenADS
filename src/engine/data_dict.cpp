@@ -1,4 +1,5 @@
 #include "engine/data_dict.h"
+#include "engine/pbkdf2.h"
 
 #include "platform/file.h"
 
@@ -2619,7 +2620,14 @@ DataDict::set_user_property(const std::string& user,
                             const std::string& value) {
     if (user.empty() || key.empty())
         return util::Error{5000, 0, "DD user-property user / key empty", ""};
-    user_props_[ci_name(user)][key] = value;
+    std::string stored = value;
+    if (key == "prop_1101") {
+        try { stored = hash_password(value); }
+        catch (const std::exception&) {
+            return util::Error{5000, 0, "DD password verifier creation failed", ""};
+        }
+    }
+    user_props_[ci_name(user)][key] = std::move(stored);
     return save();
 }
 

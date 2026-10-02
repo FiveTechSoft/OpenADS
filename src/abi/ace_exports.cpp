@@ -1,4 +1,5 @@
-﻿#include <cstdarg>
+#include "engine/pbkdf2.h"
+#include <cstdarg>
 #include "openads/ace.h"
 #include "openads/error.h"
 #include "openads_version.h"  // OPENADS_VERSION_STR (CMake-generated)
@@ -7555,17 +7556,22 @@ UNSIGNED32 ENTRYPOINT AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 usServerType
                             static_cast<unsigned char>(login_req[1]) == 0);
         bool require_login = (!login_req.empty() && login_req != "0" &&
                               login_req != "False" && !is_raw_zero);
-        if (require_login) {
+        if (require_login || !user.empty()) {
             if (user.empty())
                 return fail(openads::AE_LOGIN_FAILED,
                             "login required but no username supplied");
             if (!dd->has_user(user))
                 return fail(openads::AE_LOGIN_FAILED, "unknown user");
             std::string stored = dd->get_user_property(user, "prop_1101");
-            if (stored != pwd)
+            if (!openads::engine::verify_password(stored, pwd))
                 return fail(openads::AE_LOGIN_FAILED, "invalid password");
         }
         if (!user.empty()) {
+            const auto old = dd->get_user_property(user, "prop_1101");
+            if (!openads::engine::password_is_hash(old)) {
+                if (auto migrated = dd->set_user_property(user, "prop_1101", pwd); !migrated)
+                    return fail(migrated.error());
+            }
             raw->set_username(user);
             // Pre-build effective-permission cache for this user so that
             // subsequent AdsOpenTable / AdsExecuteSQLDirect checks are O(1).
@@ -18405,6 +18411,25 @@ openads::engine::DataDict* dd_from_handle(ADSHANDLE hConn) {
     return c->dd();
 }
 
+bool dictionary_admin(Connection* c) {
+    if (!c) return false;
+    if (!c->remote_server() && c->username().empty()) return true;
+    if (!c->has_dd() || c->username().empty()) return false;
+    auto* dd = c->dd();
+    return dd && dd->has_user(c->username()) &&
+        dd->is_member_of(c->username(), "DB:Admin");
+}
+
+// DD-mutating entrypoints keep the legacy silent-success contract when no
+// live dictionary connection exists (hConn=0 doubles, plain directories):
+// there is no dictionary to mutate, so there is nothing to guard. Enforce
+// administrator authority only when a real DD is attached.
+bool dd_mutation_denied(ADSHANDLE hConn) {
+    Connection* c = conn_from_handle(hConn);
+    return c != nullptr && c->has_dd() && !dictionary_admin(c);
+}
+
+
 }  // namespace
 
 UNSIGNED32 ENTRYPOINT AdsDDAddIndexFile(ADSHANDLE hConn,
@@ -18419,6 +18444,8 @@ UNSIGNED32 ENTRYPOINT AdsDDAddIndexFile(ADSHANDLE hConn,
         if (!r) return fail(r.error());
         return ok();
     }
+    if (dd_mutation_denied(hConn))
+        return fail(openads::AE_ACCESS_DENIED, "dictionary administrator required");
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto tbl  = openads::abi::to_internal(pucTable, 0);
@@ -18441,6 +18468,8 @@ UNSIGNED32 ENTRYPOINT AdsDDRemoveIndexFile(ADSHANDLE hConn,
         if (!r) return fail(r.error());
         return ok();
     }
+    if (dd_mutation_denied(hConn))
+        return fail(openads::AE_ACCESS_DENIED, "dictionary administrator required");
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto tbl = openads::abi::to_internal(pucTable, 0);
@@ -18463,14 +18492,17 @@ UNSIGNED32 ENTRYPOINT AdsDDCreateUser(ADSHANDLE hConn, UNSIGNED8* pucGroup,
         if (!r) return fail(r.error());
         return ok();
     }
+    if (dd_mutation_denied(hConn))
+        return fail(openads::AE_ACCESS_DENIED, "dictionary administrator required");
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto user = openads::abi::to_internal(pucUser, 0);
     auto r = dd->create_user(user);
     if (!r) return fail(r.error());
-    if (pucPwd && pucPwd[0] != '\0') {
-        auto pwd = openads::abi::to_internal(pucPwd, 0);
-        dd->set_user_property(user, "prop_1101", pwd);
+    {
+        const auto pwd = pucPwd ? openads::abi::to_internal(pucPwd, 0) : std::string{};
+        if (auto stored = dd->set_user_property(user, "prop_1101", pwd); !stored)
+            return fail(stored.error());
     }
     if (pucDesc && pucDesc[0] != '\0') {
         auto desc = openads::abi::to_internal(pucDesc, 0);
@@ -18491,6 +18523,8 @@ UNSIGNED32 ENTRYPOINT AdsDDDeleteUser(ADSHANDLE hConn, UNSIGNED8* pucUser) {
         if (!r) return fail(r.error());
         return ok();
     }
+    if (dd_mutation_denied(hConn))
+        return fail(openads::AE_ACCESS_DENIED, "dictionary administrator required");
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto user = openads::abi::to_internal(pucUser, 0);
@@ -18509,6 +18543,8 @@ UNSIGNED32 ENTRYPOINT AdsDDAddUserToGroup(ADSHANDLE hConn,
         if (!r) return fail(r.error());
         return ok();
     }
+    if (dd_mutation_denied(hConn))
+        return fail(openads::AE_ACCESS_DENIED, "dictionary administrator required");
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto group = openads::abi::to_internal(pucGroup, 0);
@@ -18528,6 +18564,8 @@ UNSIGNED32 ENTRYPOINT AdsDDRemoveUserFromGroup(ADSHANDLE hConn,
         if (!r) return fail(r.error());
         return ok();
     }
+    if (dd_mutation_denied(hConn))
+        return fail(openads::AE_ACCESS_DENIED, "dictionary administrator required");
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto group = openads::abi::to_internal(pucGroup, 0);
@@ -18550,6 +18588,8 @@ UNSIGNED32 ENTRYPOINT AdsDDCreateLink(ADSHANDLE hConn, UNSIGNED8* pucAlias,
         if (!r) return fail(r.error());
         return ok();
     }
+    if (dd_mutation_denied(hConn))
+        return fail(openads::AE_ACCESS_DENIED, "dictionary administrator required");
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto alias = openads::abi::to_internal(pucAlias, 0);
@@ -18590,6 +18630,8 @@ UNSIGNED32 ENTRYPOINT AdsDDModifyLink(ADSHANDLE hConn, UNSIGNED8* pucAlias,
         if (!r) return fail(r.error());
         return ok();
     }
+    if (dd_mutation_denied(hConn))
+        return fail(openads::AE_ACCESS_DENIED, "dictionary administrator required");
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto alias = openads::abi::to_internal(pucAlias, 0);
@@ -18619,6 +18661,8 @@ UNSIGNED32 ENTRYPOINT AdsDDCreateRefIntegrity(ADSHANDLE hConn,
         if (!r) return fail(r.error());
         return ok();
     }
+    if (dd_mutation_denied(hConn))
+        return fail(openads::AE_ACCESS_DENIED, "dictionary administrator required");
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     openads::engine::DataDict::RiEntry e;
@@ -18643,6 +18687,8 @@ UNSIGNED32 ENTRYPOINT AdsDDRemoveRefIntegrity(ADSHANDLE hConn, UNSIGNED8* pucNam
         if (!r) return fail(r.error());
         return ok();
     }
+    if (dd_mutation_denied(hConn))
+        return fail(openads::AE_ACCESS_DENIED, "dictionary administrator required");
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto name = openads::abi::to_internal(pucName, 0);
@@ -18699,6 +18745,8 @@ UNSIGNED32 ENTRYPOINT AdsDDSetDatabaseProperty(ADSHANDLE hConn, UNSIGNED16 usPro
         if (!r) return fail(r.error());
         return ok();
     }
+    if (dd_mutation_denied(hConn))
+        return fail(openads::AE_ACCESS_DENIED, "dictionary administrator required");
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     std::string val;
@@ -18789,6 +18837,10 @@ UNSIGNED32 ENTRYPOINT AdsDDGetUserProperty(ADSHANDLE hConn, UNSIGNED8* pucUser,
     if (pBuf != nullptr && cap > 0) std::memset(pBuf, 0, cap);
     if (dd == nullptr) { *pusLen = 0; return ok(); }
     auto user = openads::abi::to_internal(pucUser, 0);
+    if (usProp == ADS_DD_USER_PASSWORD) {
+        *pusLen = 0;
+        return fail(openads::AE_PROPERTY_NOT_SET, "password is write-only");
+    }
 
     // ADS_DD_USER_BAD_LOGINS (1103) -- always 0, returned as uint16.
     if (usProp == 1103) {
@@ -18834,6 +18886,8 @@ UNSIGNED32 ENTRYPOINT AdsDDSetUserProperty(ADSHANDLE hConn, UNSIGNED8* pucUser,
         if (!r) return fail(r.error());
         return ok();
     }
+    if (dd_mutation_denied(hConn))
+        return fail(openads::AE_ACCESS_DENIED, "dictionary administrator required");
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto user = openads::abi::to_internal(pucUser, 0);
@@ -19039,6 +19093,8 @@ UNSIGNED32 ENTRYPOINT AdsDDSetTableProperty(ADSHANDLE hConn, UNSIGNED8* pucTable
         if (!r) return fail(r.error());
         return ok();
     }
+    if (dd_mutation_denied(hConn))
+        return fail(openads::AE_ACCESS_DENIED, "dictionary administrator required");
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto alias = openads::abi::to_internal(pucTable, 0);
@@ -19138,6 +19194,8 @@ UNSIGNED32 ENTRYPOINT AdsDDSetUserTableRights(ADSHANDLE hConn, UNSIGNED8* pucTab
         if (!r) return fail(r.error());
         return ok();
     }
+    if (dd_mutation_denied(hConn))
+        return fail(openads::AE_ACCESS_DENIED, "dictionary administrator required");
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto tbl  = openads::abi::to_internal(pucTable, 0);
@@ -19362,6 +19420,8 @@ UNSIGNED32 ENTRYPOINT AdsDDSetFieldProperty(ADSHANDLE hConn, UNSIGNED8* pucTable
         if (!r) return fail(r.error());
         return ok();
     }
+    if (dd_mutation_denied(hConn))
+        return fail(openads::AE_ACCESS_DENIED, "dictionary administrator required");
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto alias = openads::abi::to_internal(pucTable, 0);
@@ -19543,6 +19603,8 @@ UNSIGNED32 ENTRYPOINT AdsDDCreateTrigger(ADSHANDLE hConn, UNSIGNED8* pucName,
         if (!r) return fail(r.error());
         return ok();
     }
+    if (dd_mutation_denied(hConn))
+        return fail(openads::AE_ACCESS_DENIED, "dictionary administrator required");
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     openads::engine::DataDict::TriggerEntry e;
@@ -19690,6 +19752,8 @@ UNSIGNED32 ENTRYPOINT AdsDDSetTriggerProperty(ADSHANDLE hConn, UNSIGNED8* pucNam
         if (!r) return fail(r.error());
         return ok();
     }
+    if (dd_mutation_denied(hConn))
+        return fail(openads::AE_ACCESS_DENIED, "dictionary administrator required");
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto name = openads::abi::to_internal(pucName, 0);
@@ -19786,6 +19850,8 @@ UNSIGNED32 ENTRYPOINT AdsDDCreateProcedure(ADSHANDLE hConn, UNSIGNED8* pucName,
         if (!r) return fail(r.error());
         return ok();
     }
+    if (dd_mutation_denied(hConn))
+        return fail(openads::AE_ACCESS_DENIED, "dictionary administrator required");
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     openads::engine::DataDict::ProcEntry e;
@@ -19886,6 +19952,8 @@ UNSIGNED32 ENTRYPOINT AdsDDSetProcProperty(ADSHANDLE hConn, UNSIGNED8* pucName,
         if (!r) return fail(r.error());
         return ok();
     }
+    if (dd_mutation_denied(hConn))
+        return fail(openads::AE_ACCESS_DENIED, "dictionary administrator required");
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto name = openads::abi::to_internal(pucName, 0);
@@ -19941,6 +20009,8 @@ UNSIGNED32 ENTRYPOINT AdsDDCreateFunction(ADSHANDLE hConn, UNSIGNED8* pucName,
         if (!r) return fail(r.error());
         return ok();
     }
+    if (dd_mutation_denied(hConn))
+        return fail(openads::AE_ACCESS_DENIED, "dictionary administrator required");
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     openads::engine::DataDict::FunctionEntry e;
@@ -20031,6 +20101,8 @@ UNSIGNED32 ENTRYPOINT AdsDDSetFunctionProperty(ADSHANDLE hConn, UNSIGNED8* pucNa
         if (!r) return fail(r.error());
         return ok();
     }
+    if (dd_mutation_denied(hConn))
+        return fail(openads::AE_ACCESS_DENIED, "dictionary administrator required");
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto name = openads::abi::to_internal(pucName, 0);
@@ -20067,6 +20139,8 @@ UNSIGNED32 ENTRYPOINT AdsDDCreateView(ADSHANDLE hConn, UNSIGNED8* pucName,
         if (!r) return fail(r.error());
         return ok();
     }
+    if (dd_mutation_denied(hConn))
+        return fail(openads::AE_ACCESS_DENIED, "dictionary administrator required");
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     openads::engine::DataDict::ViewEntry e;
@@ -20171,6 +20245,8 @@ UNSIGNED32 ENTRYPOINT AdsDDGrantPermission(ADSHANDLE  hConn,
         if (!r) return fail(r.error());
         return ok();
     }
+    if (dd_mutation_denied(hConn))
+        return fail(openads::AE_ACCESS_DENIED, "dictionary administrator required");
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto objname = openads::abi::to_internal(pucObjectName, 0);
@@ -20247,6 +20323,8 @@ UNSIGNED32 ENTRYPOINT AdsDDSetViewProperty(ADSHANDLE hConn, UNSIGNED8* pucName,
         if (!r) return fail(r.error());
         return ok();
     }
+    if (dd_mutation_denied(hConn))
+        return fail(openads::AE_ACCESS_DENIED, "dictionary administrator required");
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto name = openads::abi::to_internal(pucName, 0);
@@ -20343,6 +20421,8 @@ UNSIGNED32 ENTRYPOINT AdsDDSetRefIntegrityProperty(ADSHANDLE hConn, UNSIGNED8* p
         if (!r) return fail(r.error());
         return ok();
     }
+    if (dd_mutation_denied(hConn))
+        return fail(openads::AE_ACCESS_DENIED, "dictionary administrator required");
     auto* dd = dd_from_handle(hConn);
     if (dd == nullptr) return ok();
     auto name = openads::abi::to_internal(pucName, 0);
@@ -25024,10 +25104,44 @@ extern "C++" bool dispatch_sp_builtin(
             ? static_cast<std::int32_t>(args[i].number) : 0;
     };
 
+    if ((uname == "SP_CREATEUSER" ||
+        uname == "SP_DROPUSER" ||
+        uname == "SP_CREATEGROUP" ||
+        uname == "SP_DROPGROUP" ||
+        uname == "SP_ADDUSERTOGROUP" ||
+        uname == "SP_REMOVEUSERFROMGROUP" ||
+        uname == "SP_MODIFYUSERPROPERTY" ||
+        uname == "SP_MODIFYGROUPPROPERTY" ||
+        uname == "SP_ADDTABLETODATABASE" ||
+        uname == "SP_REMOVETABLEFROMDATABASE" ||
+        uname == "SP_ADDINDEXFILETODATABASE" ||
+        uname == "SP_MODIFYTABLEPROPERTY" ||
+        uname == "SP_MODIFYFIELDPROPERTY" ||
+        uname == "SP_CREATEREFERENTIALINTEGRITY" ||
+        uname == "SP_DROPREFERENTIALINTEGRITY" ||
+        uname == "SP_CREATELINK" ||
+        uname == "SP_DROPLINK" ||
+        uname == "SP_DISABLETRIGGERS" ||
+        uname == "SP_ENABLETRIGGERS" ||
+        uname == "SP_MODIFYDATABASE" ||
+        uname == "SP_RENAMEDDOBJECT" ||
+        uname == "SP_REMOVEINDEXFILE" ||
+        uname == "SP_MODIFYINDEXPROPERTY" ||
+        uname == "SP_MODIFYPROCEDUREPROPERTY" ||
+        uname == "SP_MODIFYVIEWPROPERTY" ||
+        uname == "SP_MODIFYLINK" ||
+        uname == "SP_MGKILLUSER" ||
+        uname == "SP_MGRESETCOMMSTATS") && !dictionary_admin(c)) {
+        *prc = fail(openads::AE_ACCESS_DENIED, "dictionary administrator required");
+        return true;
+    }
+
     if (uname == "SP_CREATEUSER") {
         if (!dd) { *prc = fail(openads::AE_FUNCTION_NOT_AVAILABLE, "no DD"); return true; }
         if (auto r = dd->create_user(arg(0)); !r) { *prc = fail(r.error()); return true; }
-        if (!arg(1).empty()) dd->set_user_property(arg(0), "prop_1101", arg(1));
+        if (auto saved = dd->set_user_property(arg(0), "prop_1101", arg(1)); !saved) {
+            *prc = fail(saved.error()); return true;
+        }
         if (!arg(2).empty()) dd->set_user_property(arg(0), "prop_1",    arg(2));
         *prc = ok(); return true;
     }
@@ -25205,8 +25319,14 @@ extern "C++" bool dispatch_sp_builtin(
         for (auto& ch : upr) ch = static_cast<char>(
             std::toupper(static_cast<unsigned char>(ch)));
         std::string key;
-        if      (upr == "ADMIN_PASSWORD")          key = "prop_1101";
-        else if (upr == "COMMENT")                key = "prop_1";
+        if (upr == "ADMIN_PASSWORD") {
+            if (auto r = dd->set_user_property("adssys", "prop_1101", arg(1)); !r) {
+                *prc = fail(r.error()); return true;
+            }
+            *prc = ok(); return true;
+        }
+        if (upr == "COMMENT") key = "prop_1";
+
         else if (upr == "DEFAULT_TABLE_PATH")     key = "prop_3";
         else if (upr == "LOG_IN_REQUIRED")        key = "prop_5";
         else if (upr == "ENABLE_INTERNET")        key = "prop_6";
@@ -25448,7 +25568,7 @@ extern "C++" bool dispatch_sp_builtin(
             return true;
         }
         std::string current = dd->get_user_property(user, "prop_1101");
-        if (!current.empty() && current != arg(0)) {
+        if (!openads::engine::verify_password(current, arg(0))) {
             *prc = fail(openads::AE_ACCESS_DENIED, "old password mismatch");
             return true;
         }
@@ -28812,7 +28932,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
     // already wired up.
     if (it->second->remote != nullptr) {
         auto sqlstr = openads::abi::to_internal(pucSQL, 0);
-        arc2_log("EXEC remote sql=%.80s", sqlstr.c_str());
+        arc2_log("EXEC remote (SQL text hidden)");
         auto r = it->second->remote->execute_sql(sqlstr);
         if (!r) {
             arc2_log("EXEC remote FAIL code=%d msg=%.80s",
@@ -29301,10 +29421,10 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     if (into_trace)
                         std::fprintf(stderr,
                             "[into] tmp=%s all_images=%d new=%p old=%p "
-                            "sql=%.100s\n",
+                            "(SQL text hidden)\n",
                             tmp_name.c_str(), all_images ? 1 : 0,
                             (const void*)imgs.new_f,
-                            (const void*)imgs.old_f, sql.c_str());
+                            (const void*)imgs.old_f);
                 }
                 if (all_images &&
                     (imgs.new_f != nullptr || imgs.old_f != nullptr)) {
@@ -30090,6 +30210,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
     // Loads the DLL, resolves the symbol, registers the proc on the
     // connection. Returns no cursor.
     if (openads::sql::sql_is_create_procedure(sql)) {
+        if (!dictionary_admin(c))
+            return fail(openads::AE_ACCESS_DENIED, "native procedure registration requires administrator");
         auto& s = state();
         std::lock_guard<std::recursive_mutex> lk(s.mu);
         auto cp = openads::sql::parse_create_procedure(sql);

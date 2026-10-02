@@ -74,9 +74,13 @@ try {
 // 7. Set/get password
 try {
     $dd->setUserPassword('alice', 'newpass');
-    $pwd = $dd->getUserProperty('alice', AceTypes::ADS_DD_USER_PASSWORD);
-    assert($pwd === 'newpass', "expected 'newpass', got '$pwd'");
-    pass("setUserPassword / getUserProperty(PASSWORD) → $pwd");
+    try {
+        $dd->getUserProperty('alice', AceTypes::ADS_DD_USER_PASSWORD);
+        throw new RuntimeException('Password getter must reject disclosure');
+    } catch (\OpenADS\Exception\OpenAdsException $e) {
+        assert($e->aceCode() === 5138);
+    }
+    pass("setUserPassword / write-only password property");
 } catch (Throwable $e) { fail("user password", $e); }
 
 // 8. Group membership

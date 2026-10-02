@@ -1,4 +1,5 @@
 #include "mgmt/mg_collector.h"
+#include "engine/pbkdf2.h"
 #include "engine/data_dict.h"
 
 #include "openads_version.h"  // OPENADS_VERSION_STR (CMake-generated)
@@ -422,7 +423,7 @@ bool is_admin_bypass(openads::engine::DataDict* dd,
     for (auto& ch : lower) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
     if (lower != kAdminBypassUser) return false;
     if (!dd->has_user(user)) return false;
-    return dd->get_user_property(user, "prop_1101") == pwd;
+    return openads::engine::verify_password(dd->get_user_property(user, "prop_1101"), pwd);
 }
 
 }  // namespace openads::mgmt
