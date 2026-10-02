@@ -1,5 +1,7 @@
 #include "doctest.h"
 #include "engine/table.h"
+#include "session/connection.h"
+#include "openads/error.h"
 
 #include <array>
 #include <cstdint>
@@ -310,4 +312,35 @@ TEST_CASE("Dirty buffer: multi-field set_field coalesces until flush") {
         CHECK(v.value().as_string == "C");
     }
     fs::remove(p);
+}
+
+TEST_CASE("Remote-owned engine table caps virtual and append locks before mutation") {
+    const auto path = make_empty_table("remote_lock_cap");
+    {
+        auto connected = openads::session::Connection::open(path.parent_path().string());
+        REQUIRE(connected);
+        auto connection = std::move(connected).value();
+        connection.set_remote_server(true);
+        auto opened = Table::open(path.string(), TableType::Cdx, OpenMode::Shared);
+        REQUIRE(opened);
+        auto table = std::move(opened).value();
+        table.set_owner(&connection);
+        REQUIRE(table.try_lock_table_excl());
+        for (std::uint32_t i = 0; i < 4096; ++i) REQUIRE(table.append_record());
+        CHECK(table.lock_count() == 4096);
+        CHECK(table.record_count() == 4096);
+        auto denied = table.append_record();
+        REQUIRE_FALSE(denied);
+        CHECK(denied.error().code == openads::AE_ACCESS_DENIED);
+        CHECK(table.record_count() == 4096);
+        CHECK(table.lock_count() == 4096);
+        REQUIRE(table.try_lock_record_excl(1)); // existing lock stays idempotent
+        REQUIRE_FALSE(table.try_lock_record_excl(4097));
+        REQUIRE_FALSE(table.lock_record_excl(4097));
+        REQUIRE(table.unlock_record(1));
+        REQUIRE(table.append_record());
+        CHECK(table.record_count() == 4097);
+        CHECK(table.lock_count() == 4096);
+    }
+    fs::remove(path);
 }

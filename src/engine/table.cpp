@@ -1149,6 +1149,11 @@ Table::read_field(std::uint16_t field_index) {
 }
 
 util::Result<void> Table::append_record() {
+    // SQL INSERT and its internal appends do not pass the wire lock ledger.
+    // Guard at the owning table before writing a durable blank record.
+    if (owner_ && owner_->remote_server() && recno_locks_.size() >= 4096 &&
+        (mode_ != OpenMode::Exclusive || type_ != TableType::Adt))
+        return util::Error{openads::AE_ACCESS_DENIED, 0, "remote table record-lock limit", path_};
     bump_live_gen();
     if (mode_ == OpenMode::Read) {
         return util::Error{5000, 0, "table opened read-only", ""};
@@ -1869,6 +1874,8 @@ util::Result<void> Table::lock_record_excl(std::uint32_t recno) {
     // UnlockRecord would leave the OS byte locked forever.
     if (recno_locks_.find(recno) != recno_locks_.end())
         return load_record_(recno);
+    if (owner_ && owner_->remote_server() && recno_locks_.size() >= 4096)
+        return util::Error{openads::AE_ACCESS_DENIED, 0, "remote table record-lock limit", path_};
     if (table_lock_) {
         // xBase semantics (hb_dbfRawLock REC_LOCK): a record lock while the
         // table lock is held is a no-op success — the FLock range already
@@ -1893,6 +1900,8 @@ util::Result<void> Table::try_lock_record_excl(std::uint32_t recno) {
     // one UnlockRecord must release the OS byte even after repeated RLocks.
     if (recno_locks_.find(recno) != recno_locks_.end())
         return load_record_(recno);
+    if (owner_ && owner_->remote_server() && recno_locks_.size() >= 4096)
+        return util::Error{openads::AE_ACCESS_DENIED, 0, "remote table record-lock limit", path_};
     if (table_lock_) {
         recno_locks_.emplace(recno, LockHandle{});
         return load_record_(recno);
