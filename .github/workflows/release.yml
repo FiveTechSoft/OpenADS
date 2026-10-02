@@ -10,11 +10,18 @@ on:
         description: "tag to package (e.g. v1.0.0-rc1)"
         required: true
 
+      repack_only:
+        description: "Repackage existing public assets without rebuilding any binaries"
+        required: false
+        type: boolean
+        default: false
+
 permissions:
   contents: write
 
 jobs:
   build:
+    if: ${{ !inputs.repack_only }}
     name: ${{ matrix.os }} / ${{ matrix.arch }}
     runs-on: ${{ matrix.os }}
     # 90: a cold Harbour SDK build (Linux leg) plus the full tree can
@@ -201,6 +208,9 @@ jobs:
           cp "$BUILD"/tools/serverd/openads_serverd "$STAGE/"
           cp "$BUILD"/tools/bench/openads_bench   "$STAGE/"
           cp LICENSE NOTICE README.md openads.ini.sample "$STAGE/"
+          mkdir -p "$STAGE/include/openads"
+          cp include/openads/ace.h "$STAGE/include/ace.h"
+          cp include/openads/{ace,error,openads_sql,platform,version}.h "$STAGE/include/openads/"
           tar czvf "$STAGE.tar.gz" "$STAGE"
           ls -la "$STAGE.tar.gz"
           echo "ASSET=$STAGE.tar.gz" >> "$GITHUB_ENV"
@@ -260,6 +270,9 @@ jobs:
           Copy-Item "$build/tools/bench/Release/openads_bench.exe"     "$stage/"
           Copy-Item LICENSE,NOTICE,README.md,openads.ini.sample  $stage/
           Copy-Item QUICKSTART.md                              "$stage/" -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory "$stage/include/openads" -Force | Out-Null
+          Copy-Item include/openads/ace.h "$stage/include/ace.h"
+          Copy-Item include/openads/ace.h,include/openads/error.h,include/openads/openads_sql.h,include/openads/platform.h,include/openads/version.h "$stage/include/openads/"
           # Harbour HB_FUNC wrappers for the oads_* VFS API — compiled
           # into the app, not shipped in the DLL. Arch-independent C
           # source: both Windows zips carry it. (Pritpal Bedi.)
@@ -290,7 +303,7 @@ jobs:
     needs: build
     # A cancelled/failed best-effort leg (macOS) must not skip publish;
     # only a genuine workflow-run cancellation should.
-    if: ${{ always() && needs.build.result != 'skipped' }}
+    if: ${{ always() && !inputs.repack_only && needs.build.result != 'skipped' }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
@@ -399,6 +412,49 @@ jobs:
             exit 1
           fi
 
+      - name: Open every archive and verify contents and version
+        env:
+          RELEASE_VERSION: ${{ steps.ver.outputs.version }}
+        shell: bash
+        run: |
+          python3 - <<'PYVERIFY'
+          import os, pathlib, tarfile, zipfile, hashlib
+          version = os.environ['RELEASE_VERSION']
+          assets = list(pathlib.Path('out').glob('*'))
+          assert assets, 'No archives'
+          for path in assets:
+              if path.suffix == '.zip':
+                  with zipfile.ZipFile(path) as z:
+                      assert z.testzip() is None, 'ZIP CRC failure'
+                      files = {n: z.read(n) for n in z.namelist() if not n.endswith('/')}
+              else:
+                  with tarfile.open(path) as t:
+                      files = {m.name: t.extractfile(m).read() for m in t.getmembers() if m.isfile()}
+              byname = {pathlib.PurePosixPath(n).name: data for n, data in files.items()}
+              required = ['LICENSE','NOTICE','README.md','openads.ini.sample']
+              windows = '-windows-' in path.name
+              if windows:
+                  bits = '64' if '-x64.' in path.name else '32'
+                  required += [f'ace{bits}.dll',f'openace{bits}.dll',f'ace{bits}.lib',f'openace{bits}.lib',f'libopenace{bits}.a','openads_serverd.exe','openads_bench.exe','oads_hb.c']
+                  assert byname[f'ace{bits}.dll'] == byname[f'openace{bits}.dll'], 'ACE aliases differ'
+                  binary = byname['openads_serverd.exe']
+              else:
+                  ext = 'dylib' if '-macos-' in path.name else 'so'
+                  required += [f'libace64.{ext}',f'libopenace64.{ext}','openads_serverd','openads_bench']
+                  assert byname[f'libace64.{ext}'] == byname[f'libopenace64.{ext}'], 'ACE aliases differ'
+                  binary = byname['openads_serverd']
+              for name in required:
+                  assert name in byname and byname[name], f'{path}: missing/empty {name}'
+              for header in ['ace','error','openads_sql','platform','version']:
+                  assert any(n.endswith(f'include/openads/{header}.h') for n in files), f'Missing header {header}'
+              assert any(n.endswith('include/ace.h') and data for n, data in files.items()), 'Missing include/ace.h'
+              assert version.encode() in binary, f'{path}: server version stamp absent'
+              assert version.encode() in byname[('openace'+bits+'.dll') if windows else ('libopenace64.'+ext)], f'{path}: ACE version stamp absent'
+              if '-macos-' in path.name:
+                  assert binary[:4] in [bytes.fromhex('cafebabe'),bytes.fromhex('cafebabf')], 'Not a universal server'
+              print(f'VERIFIED {path.name}: {len(files)} files; version {version}; sha256 {hashlib.sha256(path.read_bytes()).hexdigest()}', flush=True)
+          PYVERIFY
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
@@ -422,3 +478,146 @@ jobs:
             echo "Removing leftover duplicate asset: $name"
             gh release delete-asset "$TAG" "$name" --yes
           done
+
+  repack:
+    name: Repackage existing assets (identical binaries)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.repack_only }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag }}
+      - name: Download original release assets and snapshot metadata
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > before.json
+          gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" > tag-before.json
+          mkdir original out
+          gh release download "$TAG" --dir original
+      - name: Add tag headers and prove every original file is unchanged
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          python3 - <<'PYREPACK'
+          import hashlib, io, json, os, pathlib, tarfile, zipfile
+          version = os.environ['TAG'][1:]
+          expected = {f'openads-{version}-{p}.{ext}' for p, ext in [('windows-x64','zip'),('windows-x86','zip'),('linux-x64','tar.gz'),('macos-universal','tar.gz')]}
+          release = json.loads(pathlib.Path('before.json').read_text())
+          assert not release['draft'], 'Only existing public releases can be repackaged'
+          assert {a['name'] for a in release['assets']} == expected, 'Unexpected release assets; refusing replacement'
+          headers = {f'include/openads/{h}.h': pathlib.Path(f'include/openads/{h}.h').read_bytes() for h in ['ace','error','openads_sql','platform','version']}
+          headers['include/ace.h'] = headers['include/openads/ace.h']
+          def members(path):
+              if path.suffix == '.zip':
+                  with zipfile.ZipFile(path) as z:
+                      assert z.testzip() is None
+                      return {i.filename: z.read(i) for i in z.infolist() if not i.is_dir()}
+              with tarfile.open(path) as t:
+                  return {m.name: t.extractfile(m).read() for m in t if m.isfile()}
+          for asset in release['assets']:
+              source = pathlib.Path('original') / asset['name']
+              digest = 'sha256:' + hashlib.sha256(source.read_bytes()).hexdigest()
+              assert asset.get('digest') == digest, f'Original asset digest mismatch: {source}'
+              old = members(source)
+              target = pathlib.Path('out') / source.name
+              prefix = '' if source.suffix == '.zip' else source.name[:-7] + '/'
+              if source.suffix == '.zip':
+                  with zipfile.ZipFile(source) as src, zipfile.ZipFile(target, 'w', compression=zipfile.ZIP_DEFLATED) as dst:
+                      for entry in src.infolist():
+                          dst.writestr(entry, src.read(entry))
+                      for name, data in headers.items():
+                          assert prefix + name not in old, 'Header already exists; stop to avoid silent changes'
+                          dst.writestr(prefix + name, data)
+              else:
+                  with tarfile.open(source) as src, tarfile.open(target, 'w:gz') as dst:
+                      for entry in src:
+                          dst.addfile(entry, src.extractfile(entry) if entry.isfile() else None)
+                      for name, data in headers.items():
+                          assert prefix + name not in old, 'Header already exists; stop to avoid silent changes'
+                          entry = tarfile.TarInfo(prefix + name)
+                          entry.size, entry.mode = len(data), 0o644
+                          dst.addfile(entry, io.BytesIO(data))
+              new = members(target)
+              assert set(new) == set(old) | {prefix + h for h in headers}, 'Unexpected file changes'
+              for name, data in old.items():
+                  assert hashlib.sha256(new[name]).digest() == hashlib.sha256(data).digest(), f'Original file changed: {name}'
+              for name, data in headers.items():
+                  assert new[prefix + name] == data, f'Header mismatch: {name}'
+              print(f'IDENTICAL original files: {source.name} ({len(old)} files); added {sorted(headers)}', flush=True)
+          PYREPACK
+      - name: Open every archive and verify contents and version
+        env:
+          RELEASE_VERSION: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          python3 - <<'PYVERIFY'
+          import os, pathlib, tarfile, zipfile, hashlib
+          version = os.environ['RELEASE_VERSION'].removeprefix('v')
+          assets = list(pathlib.Path('out').glob('*'))
+          assert assets, 'No archives'
+          for path in assets:
+              if path.suffix == '.zip':
+                  with zipfile.ZipFile(path) as z:
+                      assert z.testzip() is None, 'ZIP CRC failure'
+                      files = {n: z.read(n) for n in z.namelist() if not n.endswith('/')}
+              else:
+                  with tarfile.open(path) as t:
+                      files = {m.name: t.extractfile(m).read() for m in t.getmembers() if m.isfile()}
+              byname = {pathlib.PurePosixPath(n).name: data for n, data in files.items()}
+              required = ['LICENSE','NOTICE','README.md','openads.ini.sample']
+              windows = '-windows-' in path.name
+              if windows:
+                  bits = '64' if '-x64.' in path.name else '32'
+                  required += [f'ace{bits}.dll',f'openace{bits}.dll',f'ace{bits}.lib',f'openace{bits}.lib',f'libopenace{bits}.a','openads_serverd.exe','openads_bench.exe','oads_hb.c']
+                  assert byname[f'ace{bits}.dll'] == byname[f'openace{bits}.dll'], 'ACE aliases differ'
+                  binary = byname['openads_serverd.exe']
+              else:
+                  ext = 'dylib' if '-macos-' in path.name else 'so'
+                  required += [f'libace64.{ext}',f'libopenace64.{ext}','openads_serverd','openads_bench']
+                  assert byname[f'libace64.{ext}'] == byname[f'libopenace64.{ext}'], 'ACE aliases differ'
+                  binary = byname['openads_serverd']
+              for name in required:
+                  assert name in byname and byname[name], f'{path}: missing/empty {name}'
+              for header in ['ace','error','openads_sql','platform','version']:
+                  assert any(n.endswith(f'include/openads/{header}.h') for n in files), f'Missing header {header}'
+              assert any(n.endswith('include/ace.h') and data for n, data in files.items()), 'Missing include/ace.h'
+              assert version.encode() in binary, f'{path}: server version stamp absent'
+              assert version.encode() in byname[('openace'+bits+'.dll') if windows else ('libopenace64.'+ext)], f'{path}: ACE version stamp absent'
+              if '-macos-' in path.name:
+                  assert binary[:4] in [bytes.fromhex('cafebabe'),bytes.fromhex('cafebabf')], 'Not a universal server'
+              print(f'VERIFIED {path.name}: {len(files)} files; version {version}; sha256 {hashlib.sha256(path.read_bytes()).hexdigest()}', flush=True)
+          PYVERIFY
+
+      - name: Replace only verified assets and confirm published bytes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > preupload.json
+          python3 - <<'PYCHECK'
+          import json
+          a, b = [json.load(open(p)) for p in ['before.json', 'preupload.json']]
+          for key in ['id', 'tag_name', 'target_commitish', 'name', 'body', 'draft', 'prerelease', 'published_at']:
+              assert a[key] == b[key], f'Release changed during preparation: {key}'
+          stable = lambda r: sorted((x['id'], x['name'], x['size'], x.get('digest'), x['updated_at']) for x in r['assets'])
+          assert stable(a) == stable(b), 'Assets changed during preparation; refusing overwrite'
+          PYCHECK
+          gh release upload "$TAG" out/* --clobber
+          mkdir published
+          gh release download "$TAG" --dir published
+          for file in out/*; do cmp "$file" "published/$(basename "$file")"; done
+          gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" > tag-after.json
+          cmp tag-before.json tag-after.json
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > after.json
+          python3 - <<'PYCHECK'
+          import json
+          a, b = [json.load(open(p)) for p in ['before.json', 'after.json']]
+          for key in ['id', 'tag_name', 'target_commitish', 'name', 'body', 'draft', 'prerelease', 'published_at']:
+              assert a[key] == b[key], f'Release metadata changed: {key}'
+          print('Published bytes verified; tag and release notes unchanged')
+          PYCHECK
