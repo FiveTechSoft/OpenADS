@@ -357,7 +357,7 @@ void stamp_dbf_field_displacements(std::uint8_t* descriptors,
         fd[13] = static_cast<std::uint8_t>((off >>  8) & 0xFFu);
         fd[14] = static_cast<std::uint8_t>((off >> 16) & 0xFFu);
         fd[15] = static_cast<std::uint8_t>((off >> 24) & 0xFFu);
-        off += fd[16];
+        off += openads::drivers::dbf_descriptor_width(fd);
     }
 }
 
@@ -9243,7 +9243,7 @@ static inline std::string apply_where_fn(std::string s,
 // when those aren't explicit in the field-def string.
 struct DbfTypeSpec {
     char         type   = 'C';
-    std::uint8_t length = 0;
+    std::uint16_t length = 0;   // C may exceed 255 (DBFCDX: bLen + bDec*256)
     std::uint8_t dec    = 0;
     bool         needs_memo = false;
 };
@@ -9359,7 +9359,7 @@ std::string trim(std::string s) {
 struct FieldOut {
     std::string  name;
     char         type   = 'C';
-    std::uint8_t length = 0;
+    std::uint16_t length = 0;
     std::uint8_t dec    = 0;
     bool         nullable = false;
     bool         autoinc  = false;
@@ -9434,7 +9434,8 @@ std::vector<FieldOut> parse_rddads_field_defs(const std::string& defs,
                 f.autoinc = true;
             if (parts.size() >= 3) {
                 int n = std::atoi(parts[2].c_str());
-                if (n > 0 && n < 256) f.length = static_cast<std::uint8_t>(n);
+                if (n > 0 && n < (f.type == 'C' ? 65536 : 256))
+                    f.length = static_cast<std::uint16_t>(n);
             }
             if (parts.size() >= 4) {
                 int d = std::atoi(parts[3].c_str());
@@ -9876,8 +9877,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
             std::memcpy(fd.data(), f.name.data(), n);
             fd[11] = static_cast<std::uint8_t>(
                 dbf_descriptor_type_char(f.type));
-            fd[16] = f.length;
-            fd[17] = f.dec;
+            openads::drivers::dbf_descriptor_put_width(fd.data(), f.length, f.dec);
             std::uint8_t flags = 0;
             if (f.nullable) flags |= 0x02u;
             if (f.autoinc) {
@@ -9971,8 +9971,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
         std::memcpy(fd.data(), f.name.data(), n);
         fd[11] = static_cast<std::uint8_t>(
             dbf_descriptor_type_char(f.type));
-        fd[16] = f.length;
-        fd[17] = f.dec;
+        openads::drivers::dbf_descriptor_put_width(fd.data(), f.length, f.dec);
         file.insert(file.end(), fd.begin(), fd.end());
     }
     stamp_dbf_field_displacements(file.data() + 32, fields.size());
@@ -10353,7 +10352,7 @@ UNSIGNED32 ENTRYPOINT AdsRestructureTable(ADSHANDLE   hConnect,
             FieldOut       descriptor;
             bool           from_old      = false;
             std::uint16_t  old_offset    = 0;
-            std::uint8_t   old_length    = 0;
+            std::uint16_t  old_length    = 0;
             char           old_type      = '\0';  // non-'\0' Ã¢â€ â€™ type conversion
             char           new_type      = '\0';  // target raw type
         };
@@ -10364,11 +10363,11 @@ UNSIGNED32 ENTRYPOINT AdsRestructureTable(ADSHANDLE   hConnect,
             PerField p;
             p.descriptor.name   = src.name;
             p.descriptor.type   = src.raw_type;
-            p.descriptor.length = static_cast<std::uint8_t>(src.length);
+            p.descriptor.length = src.length;
             p.descriptor.dec    = src.decimals;
             p.from_old   = true;
             p.old_offset = src.record_offset;
-            p.old_length = static_cast<std::uint8_t>(src.length);
+            p.old_length = src.length;
 
             auto cit = change_map.find(src.name);
             if (cit != change_map.end()) {
@@ -10432,8 +10431,7 @@ UNSIGNED32 ENTRYPOINT AdsRestructureTable(ADSHANDLE   hConnect,
             std::memcpy(fd.data(), f.name.data(), n);
             fd[11] = static_cast<std::uint8_t>(
                 dbf_descriptor_type_char(f.type));
-            fd[16] = f.length;
-            fd[17] = f.dec;
+            openads::drivers::dbf_descriptor_put_width(fd.data(), f.length, f.dec);
             file_bytes.insert(file_bytes.end(), fd.begin(), fd.end());
         }
         stamp_dbf_field_displacements(file_bytes.data() + 32, merged.size());
@@ -10458,7 +10456,7 @@ UNSIGNED32 ENTRYPOINT AdsRestructureTable(ADSHANDLE   hConnect,
                         std::memcpy(old_data.data(),
                                     old_buf.data() + p.old_offset, p.old_length);
                     }
-                    const std::uint8_t nlen = p.descriptor.length;
+                    const std::uint16_t nlen = p.descriptor.length;
                     const std::uint8_t ndec = p.descriptor.dec;
                     if (p.old_type == 'C' && p.new_type == 'N') {
                         auto first = old_data.find_first_not_of(' ');
@@ -10515,14 +10513,14 @@ UNSIGNED32 ENTRYPOINT AdsRestructureTable(ADSHANDLE   hConnect,
                         }
                     } else {
                         // DÃ¢â€ â€C and other pairs: raw copy up to min length.
-                        std::uint8_t copy_len =
-                            std::min<std::uint8_t>(p.old_length, nlen);
+                        std::uint16_t copy_len =
+                            std::min<std::uint16_t>(p.old_length, nlen);
                         std::memcpy(new_buf.data() + out_off,
                                     old_data.data(), copy_len);
                     }
                 } else if (p.from_old) {
-                    std::uint8_t copy_len =
-                        std::min<std::uint8_t>(p.old_length,
+                    std::uint16_t copy_len =
+                        std::min<std::uint16_t>(p.old_length,
                                                p.descriptor.length);
                     if (old_buf.size() >=
                         static_cast<std::size_t>(p.old_offset) +
@@ -21625,8 +21623,7 @@ UNSIGNED32 ENTRYPOINT AdsCopyTable(ADSHANDLE   hHandle,
         std::size_t n = std::min<std::size_t>(f.name.size(), 10);
         std::memcpy(fd.data(), f.name.data(), n);
         fd[11] = static_cast<std::uint8_t>(f.raw_type ? f.raw_type : 'C');
-        fd[16] = static_cast<std::uint8_t>(f.length);
-        fd[17] = f.decimals;
+        openads::drivers::dbf_descriptor_put_width(fd.data(), f.length, f.decimals);
         file.insert(file.end(), fd.begin(), fd.end());
     }
     stamp_dbf_field_displacements(file.data() + 32, src_fields.size());
@@ -33276,7 +33273,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
 
             struct GBCol {
                 std::uint16_t field_index;
-                std::uint8_t  length;
+                std::uint16_t length;
                 std::string   name;
                 std::uint8_t  raw_type;
             };
@@ -33292,7 +33289,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     static_cast<std::uint16_t>(fi));
                 GBCol gc;
                 gc.field_index = static_cast<std::uint16_t>(fi);
-                gc.length      = static_cast<std::uint8_t>(fd.length);
+                gc.length      = fd.length;
                 gc.name        = gname;
                 gc.raw_type    = static_cast<std::uint8_t>(fd.raw_type);
                 gbs.push_back(std::move(gc));
@@ -34126,7 +34123,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         if (!parsed.value().group_by.empty()) {
             struct GBCol {
                 std::uint16_t field_index;
-                std::uint8_t  length;
+                std::uint16_t length;
                 std::string   name;
                 std::uint8_t  raw_type;
             };
@@ -34142,7 +34139,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     static_cast<std::uint16_t>(fi));
                 GBCol gc;
                 gc.field_index = static_cast<std::uint16_t>(fi);
-                gc.length      = static_cast<std::uint8_t>(fd.length);
+                gc.length      = fd.length;
                 gc.name        = gname;
                 gc.raw_type    = static_cast<std::uint8_t>(fd.raw_type);
                 gbs.push_back(std::move(gc));
@@ -34353,7 +34350,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 std::size_t  idx    = 0;   // slot index / gbs index
                 std::string  name;
                 char         type   = 'N';
-                std::uint8_t len    = 20;
+                std::uint16_t len   = 20;
                 std::uint8_t dec    = 0;
             };
             auto ci_eq_g = [](const std::string& x, const std::string& y) {
@@ -34518,7 +34515,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         // padded to gbs[idx].length at accumulation time.
                         std::string kp = o.idx < acc.key_parts.size()
                                        ? acc.key_parts[o.idx] : std::string();
-                        for (std::uint8_t b = 0; b < o.len; ++b)
+                        for (std::uint16_t b = 0; b < o.len; ++b)
                             grows.push_back(b < kp.size()
                                 ? static_cast<std::uint8_t>(kp[b]) : ' ');
                     }
@@ -35912,7 +35909,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         struct OutCol {
             std::string  name;
             char         raw_type = 'C';
-            std::uint8_t length   = 0;
+            std::uint16_t length  = 0;
             std::uint8_t decimals = 0;
             std::int32_t src_field = -1;
             std::int32_t case_idx  = -1;
@@ -35984,7 +35981,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     } else {
                         const auto& fd = tbl->field_descriptor(
                             static_cast<std::uint16_t>(fi));
-                        o.length = static_cast<std::uint8_t>(fd.length ? fd.length : 30);
+                        o.length = fd.length ? fd.length : 30;
                     }
                 } else if (fc.kind == K::ScriptCall) {
                     // SAP names unaliased expression projections EXPR,
@@ -36079,7 +36076,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     static_cast<std::uint16_t>(fi));
                 o.name      = fd.name;
                 o.raw_type  = static_cast<char>(fd.raw_type);
-                o.length    = static_cast<std::uint8_t>(fd.length);
+                o.length    = fd.length;
                 o.src_field = fi;
             }
             outs.push_back(std::move(o));
@@ -36804,7 +36801,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 }
                 if (from_synth) {
                     if (val.size() > o.length) val.resize(o.length);
-                    for (std::uint8_t k = 0; k < o.length; ++k) {
+                    for (std::uint16_t k = 0; k < o.length; ++k) {
                         file.push_back(k < val.size()
                             ? static_cast<std::uint8_t>(val[k]) : ' ');
                     }
@@ -36812,7 +36809,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     auto v = tbl->read_field(
                         static_cast<std::uint16_t>(o.src_field));
                     std::string raw = v ? v.value().as_string : std::string();
-                    for (std::uint8_t k = 0; k < o.length; ++k) {
+                    for (std::uint16_t k = 0; k < o.length; ++k) {
                         file.push_back(k < raw.size()
                             ? static_cast<std::uint8_t>(raw[k]) : ' ');
                     }
@@ -40375,8 +40372,7 @@ UNSIGNED32 ENTRYPOINT AdsCloneTable(ADSHANDLE hTable, ADSHANDLE* phClone) {
         std::size_t n = std::min<std::size_t>(f.name.size(), 10);
         std::memcpy(fd.data(), f.name.data(), n);
         fd[11] = static_cast<std::uint8_t>(f.raw_type ? f.raw_type : 'C');
-        fd[16] = static_cast<std::uint8_t>(f.length);
-        fd[17] = f.decimals;
+        openads::drivers::dbf_descriptor_put_width(fd.data(), f.length, f.decimals);
         file.insert(file.end(), fd.begin(), fd.end());
     }
     stamp_dbf_field_displacements(file.data() + 32, src_fields.size());
@@ -40458,8 +40454,7 @@ UNSIGNED32 ENTRYPOINT AdsCopyTableStructure(ADSHANDLE hTable, UNSIGNED8* pucFile
         std::size_t n = std::min<std::size_t>(f.name.size(), 10);
         std::memcpy(fd.data(), f.name.data(), n);
         fd[11] = static_cast<std::uint8_t>(f.raw_type ? f.raw_type : 'C');
-        fd[16] = static_cast<std::uint8_t>(f.length);
-        fd[17] = f.decimals;
+        openads::drivers::dbf_descriptor_put_width(fd.data(), f.length, f.decimals);
         file.insert(file.end(), fd.begin(), fd.end());
     }
     stamp_dbf_field_displacements(file.data() + 32, src_fields.size());

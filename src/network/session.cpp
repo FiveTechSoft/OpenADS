@@ -885,6 +885,16 @@ bool Session::pack_one_row_abi(std::vector<std::uint8_t>& dst,
         // Non-memo values fit the fixed DBF field width; 4096 covers every
         // scalar type the ABI hands back. Memos are sized from the engine.
         UNSIGNED32 vcap = 4096;
+        if (!fd.is_memo) {
+            // Wide CHARACTER fields (DBFCDX allows up to 64K-1) must not be
+            // clipped by the 4096 default: size from the real field width.
+            UNSIGNED32 flen = 0;
+            if (AdsGetFieldLength(h_abi,
+                    const_cast<UNSIGNED8*>(fd.name.data()), &flen) == 0 &&
+                flen + 1 > vcap) {
+                vcap = flen + 1;
+            }
+        }
         if (fd.is_memo) {
             UNSIGNED32 mlen = 0;
             if (AdsGetMemoLength(h_abi,
@@ -2359,8 +2369,9 @@ DispatchResult Session::dispatch(const Frame& f) {
                               f.payload.size() - 4);
             if (auto cit = cursor_tbls_.find(id); cit != cursor_tbls_.end()) {
                 UNSIGNED8  fbuf[64] = {0};
-                UNSIGNED8  out [4096] = {0};
-                UNSIGNED32 cap = sizeof(out);
+                std::vector<UNSIGNED8> out_v(65536 + 1, 0);
+                UNSIGNED8* out = out_v.data();
+                UNSIGNED32 cap = static_cast<UNSIGNED32>(out_v.size());
                 std::size_t n = std::min<std::size_t>(fname.size(),
                                                       sizeof(fbuf) - 1);
                 std::memcpy(fbuf, fname.data(), n);
@@ -4697,8 +4708,9 @@ DispatchResult Session::dispatch(const Frame& f) {
                 while (atend == 0 && nrows_out < maxrows) {
                     for (auto& cn : cols) {
                         UNSIGNED8  fbuf[64]  = {0};
-                        UNSIGNED8  out [4096] = {0};
-                        UNSIGNED32 cap = sizeof(out);
+                        static thread_local std::vector<UNSIGNED8> out_v(65536 + 1);
+                        UNSIGNED8* out = out_v.data();
+                        UNSIGNED32 cap = static_cast<UNSIGNED32>(out_v.size());
                         std::size_t n = std::min<std::size_t>(
                             cn.size(), sizeof(fbuf) - 1);
                         std::memcpy(fbuf, cn.data(), n);

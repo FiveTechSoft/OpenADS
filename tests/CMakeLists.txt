@@ -39,6 +39,7 @@ add_executable(openads_unit_tests
     unit/platform_thread_test.cpp
     unit/dbf_header_test.cpp
     unit/dbf_field_test.cpp
+    unit/dbf_wide_char_test.cpp
     unit/dbf_record_test.cpp
     unit/dbf_write_test.cpp
     unit/ntx_driver_test.cpp
