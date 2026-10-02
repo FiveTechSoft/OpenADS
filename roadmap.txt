@@ -337,3 +337,5 @@ SECURITY: [DONE] Script execution step budget prevents empty/caught infinite-loo
 SECURITY: [DONE] Remote Aggregate physical-row/spec/expression/reply budgets and cooperative two-second scan deadline. Local/SQL aggregate paths remain separate.
 
 SECURITY: [DONE] Remote-owned engine tables cap record locks, including SQL automatic/virtual append locks, at4096 before durable append; local behavior retained. Connection-wide SQL resource budgets remain under review.
+
+SECURITY: [DONE] Remote SQL input source/token/parenthesis caps and embeddedNUL rejection, including remote-owned ABI reentry. Recursive procedures/query execution budgets remain under review.

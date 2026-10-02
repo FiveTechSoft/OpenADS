@@ -1,3 +1,4 @@
+#include "engine/sql_input_limits.h"
 #include "engine/pbkdf2.h"
 #include <cstdarg>
 #include "openads/ace.h"
@@ -29286,6 +29287,10 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
     Connection* c = it->second->conn;
     if (!c) return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
     auto sql = openads::abi::to_internal(pucSQL, 0);
+    if (c->remote_server()) {
+        if (auto valid = openads::engine::validate_remote_sql_input(sql); !valid)
+            return fail(valid.error());
+    }
 
     // S3 (Ã‚Â§10 mechanism): full multi-statement scripts route through the
     // script engine; the last SELECT's cursor comes back as the statement

@@ -1,6 +1,7 @@
 #include "doctest.h"
 #include "openads/ace.h"
 #include "engine/data_dict.h"
+#include "engine/sql_input_limits.h"
 #include "network/client.h"
 #include "network/server.h"
 #include "network/socket.h"
@@ -1810,6 +1811,58 @@ TEST_CASE("Network aggregate rejects invalid function and excessive specs") {
         const std::string message(response.value().payload.begin() + 4, response.value().payload.end());
         CHECK(message.find("Aggregate:") != std::string::npos);
         CHECK(message.find("bad table id") == std::string::npos);
+    }
+    sock_close(socket);
+    server.stop();
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("Remote SQL input resource shape ignores literals and comments") {
+    using openads::engine::validate_remote_sql_input;
+    CHECK(validate_remote_sql_input("SELECT '" + std::string(1000, '(') + "'"));
+    CHECK(validate_remote_sql_input("SELECT [" + std::string(1000, '(') + "]"));
+    CHECK(validate_remote_sql_input("SELECT 1 /*" + std::string(1000, '(') + "*/"));
+    CHECK(validate_remote_sql_input("SELECT 1 --" + std::string(1000, '(')));
+    CHECK_FALSE(validate_remote_sql_input("SELECT " + std::string(129, '(') + "1" + std::string(129, ')')));
+    CHECK_FALSE(validate_remote_sql_input(std::string(1024u * 1024u + 1, 'x')));
+    CHECK_FALSE(validate_remote_sql_input(std::string("SELECT 1\0DROP TABLE users", 25)));
+    std::string long_query = "SELECT 1";
+    for (int i = 0; i < 3000; ++i) long_query += " + 1";
+    CHECK_FALSE(validate_remote_sql_input(long_query));
+}
+
+TEST_CASE("Network ExecuteSQL rejects embedded NUL and excessive nesting") {
+    namespace fs = std::filesystem;
+    const auto dir = fs::temp_directory_path() / "openads_sql_input_limits";
+    fs::create_directories(dir);
+    Server server;
+    REQUIRE(server.start("127.0.0.1", 0));
+    auto connection = connect_tcp("127.0.0.1", server.port());
+    REQUIRE(connection);
+    Socket socket = connection.value();
+    Frame request;
+    request.opcode = Opcode::Connect;
+    const auto path = dir.string();
+    request.payload = {static_cast<std::uint8_t>(path.size()), static_cast<std::uint8_t>(path.size() >> 8)};
+    request.payload.insert(request.payload.end(), path.begin(), path.end());
+    request.payload.insert(request.payload.end(), {0, 0, 0, 0});
+    REQUIRE(write_frame(socket, request));
+    auto response = read_frame(socket);
+    REQUIRE(response);
+    REQUIRE(response.value().opcode == Opcode::ConnectAck);
+    request.opcode = Opcode::ExecuteSQL;
+    for (const auto& sql : {
+            std::string("SELECT 1\0DROP TABLE users", 25),
+            "SELECT " + std::string(129, '(') + "1" + std::string(129, ')')}) {
+        request.payload.assign(sql.begin(), sql.end());
+        REQUIRE(write_frame(socket, request));
+        response = read_frame(socket);
+        REQUIRE(response);
+        CHECK(response.value().opcode == Opcode::Error);
+        REQUIRE(response.value().payload.size() >= 4);
+        const std::string message(response.value().payload.begin() + 4, response.value().payload.end());
+        CHECK(message.find("SQL ") == 0);
     }
     sock_close(socket);
     server.stop();

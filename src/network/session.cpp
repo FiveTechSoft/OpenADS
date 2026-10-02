@@ -1,5 +1,6 @@
 #include "network/session.h"
 #include "engine/pbkdf2.h"
+#include "engine/sql_input_limits.h"
 
 #include "openads_version.h"  // OPENADS_VERSION_STR (CMake-generated)
 
@@ -4456,6 +4457,10 @@ DispatchResult Session::dispatch(const Frame& f) {
         // wire opcodes.
         case Opcode::ExecuteSQL: {
             if (!sess_conn_) { reply = err("ExecuteSQL: not connected"); break; }
+            const std::string sql_text(f.payload.begin(), f.payload.end());
+            if (auto valid = openads::engine::validate_remote_sql_input(sql_text); !valid) {
+                reply = err(valid.error().message, static_cast<UNSIGNED32>(valid.error().code)); break;
+            }
             if (abi_conn_ == 0) {
                 if (!ensure_abi_conn()) {
                     reply = err("ExecuteSQL: AdsConnect60 failed");
