@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <string_view>
+#include <string>
 
 namespace openads::engine {
 
@@ -11,6 +12,13 @@ std::array<std::uint8_t, 32>
 pbkdf2_sha256(std::string_view password,
               std::string_view salt,
               std::uint32_t iterations);
+
+// Credential format: $openads-pbkdf2-sha256$100000$<16-byte salt hex>$<digest hex>.
+// Legacy plaintext can only be checked when allow_legacy is explicitly true.
+std::string hash_password(std::string_view password);
+bool verify_password(std::string_view stored, std::string_view password,
+                     bool allow_legacy = true);
+bool password_is_hash(std::string_view stored);
 
 // Legacy M11.2 derivation: zero-pad/truncate password to 32 bytes.
 // Retained for tables encrypted with header version 0xC3.

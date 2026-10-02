@@ -2,9 +2,7 @@ OpenADS — Roadmap Status
 As of: 2026-06-26
 Current release: v1.4.0 (2026-06-26)
 
-================================================================================
 PHASES COMPLETED
-================================================================================
 
 Phase 0.1.x — Drop-in for the Harbour read/write path                    DONE
   All M0–M8.11 milestones complete. Final 0.1.0 released.
@@ -19,9 +17,7 @@ Phase 0.3.x — Proprietary formats + advanced SQL                    LARGELY DO
   collation, codepage), M12.x (Phase 2 TCP wire server, TLS client,
   transport abstraction, wire-protocol.md) — all complete.
 
-================================================================================
 CURRENT PHASE: 0.3.x — DEFERRED ITEMS (still open)
-================================================================================
 
 These were explicitly deferred during 0.3.x and carry into 1.0.x planning:
 
@@ -102,9 +98,7 @@ These were explicitly deferred during 0.3.x and carry into 1.0.x planning:
      b. Compile smoke.prg against rddads + OpenADS libace.so on Linux.
      c. Run and capture output in ci.yml (compat.yml leg).
 
-================================================================================
 NEXT MILESTONE: 1.0.0 final
-================================================================================
 
 Currently at: v1.0.0-rc29. The 1.0.x milestone defined in the roadmap requires:
 
@@ -151,9 +145,7 @@ Currently at: v1.0.0-rc29. The 1.0.x milestone defined in the roadmap requires:
    - Build-your-own-Harbour-app section needs updating (todo items 7, 11).
    - Explain bindings/php vs bindings/php_ext difference (todo item 6).
 
-================================================================================
 SAP DD PERMISSION SYSTEM — RESEARCH FINDINGS (2026-06-02)
-================================================================================
 
 This section documents what was learned by reverse-engineering pmsys.add
 (a real SAP Data Architect database) and cross-referencing SAP ARC source code
@@ -253,9 +245,7 @@ This section documents what was learned by reverse-engineering pmsys.add
       their parent table's permission record.
   [x] All SAP object type codes are correct (Group=9, View=6, Field=4, etc.).
 
-================================================================================
 DA-WEB (Data Architect Web) — OPEN BUGS AND FEATURES
-================================================================================
 
 These are tracked in DA-Web/todo.txt. Priority order:
 
@@ -307,9 +297,7 @@ MAINTENANCE 2: Cross-platform build verification
     CMake presets. Fix any platform-specific compilation errors found.
   - Run the unit test suite on each platform and document results.
 
-================================================================================
 SUMMARY — NEXT STEPS IN PRIORITY ORDER
-================================================================================
 
 Immediate (bugs, DA-Web):
   1. Fix RI Objects foreign key tag dropdown (DA-Web BUG 1)
@@ -335,3 +323,5 @@ Longer-term (1.0.0 final blockers):
   15. Server-side TLS termination
 
 SECURITY: [DONE] Loopback default, explicit non-loopback anonymous opt-in and cleartext startup warnings (TCP/Studio). Native server TLS remains pending.
+SECURITY: [DONE] auth_user verifier storage: salted PBKDF2-SHA256 and constant-time comparison. Dictionary credential migration remains pending.
+SECURITY: [DONE] Network login cooldown and bounded IP/user counters; applies DD MAX_FAILED_ATTEMPTS.

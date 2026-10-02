@@ -1,4 +1,5 @@
 #include "network/session.h"
+#include "engine/pbkdf2.h"
 
 #include "openads_version.h"  // OPENADS_VERSION_STR (CMake-generated)
 
@@ -335,6 +336,7 @@ Session::Session(Server& srv, Socket s, std::string default_data_dir,
     Server::SessionInfo init;
     if (auto pa = socket_peer_addr(s_); pa) {
         init.peer_ip   = pa.value().ip;
+        peer_ip_ = pa.value().ip;
         init.peer_port = pa.value().port;
         peer_str_ = pa.value().ip + ":" + std::to_string(pa.value().port);
     }
@@ -1677,10 +1679,19 @@ DispatchResult Session::dispatch(const Frame& f) {
                 client_open_table_mode_ok_ =
                     (caps & openads::network::kCapOpenTableMode) != 0;
             }
+            if (user.size() > 256 || pw.size() > 4096) {
+                reply = err("Connect: credential length limit", openads::AE_LOGIN_FAILED);
+                break;
+            }
+            if (!srv_->login_allowed(peer_ip_, user)) {
+                reply = err("Connect: authentication temporarily blocked", openads::AE_LOGIN_FAILED);
+                break;
+            }
             if (srv_->require_auth()) {
                 std::lock_guard<std::mutex> clk(srv_->creds_mu_);
                 auto cit = srv_->creds_.find(user);
-                if (cit == srv_->creds_.end() || cit->second != pw) {
+                if (cit == srv_->creds_.end() || !openads::engine::verify_password(cit->second, pw, false)) {
+                    srv_->login_failed(peer_ip_, user);
                     reply = err("Connect: authentication failed",
                                 openads::AE_LOGIN_FAILED);
                     break;
@@ -1732,6 +1743,19 @@ DispatchResult Session::dispatch(const Frame& f) {
             // connection all represent the same authenticated DD user.
             if (co.value().has_dd()) {
                 auto* dd = co.value().dd();
+                std::uint32_t max_attempts = 5;
+                const auto max_prop = dd->get_db_property("prop_11");
+                if (!max_prop.empty()) {
+                    const bool decimal = std::all_of(max_prop.begin(), max_prop.end(),
+                        [](char ch) { return ch >= '0' && ch <= '9'; });
+                    if (decimal) {
+                        try { max_attempts = static_cast<std::uint32_t>(std::min<unsigned long>(
+                            std::stoul(max_prop), 100)); } catch (...) { max_attempts = 5; }
+                    } else if (max_prop.size() == 2) {
+                        max_attempts = read_u16_le(reinterpret_cast<const std::uint8_t*>(max_prop.data()));
+                    }
+                }
+                if (max_attempts == 0) max_attempts = 5;
                 // Logins-disabled: a stricter, all-connections-rejected gate
                 // than LOG_IN_REQUIRED below — even a valid user/password
                 // normally can't connect while this is set. Reads the STABLE
@@ -1753,6 +1777,7 @@ DispatchResult Session::dispatch(const Frame& f) {
                     !disabled_raw_zero);
                 if (logins_are_disabled &&
                     !openads::mgmt::is_admin_bypass(dd, user, pw)) {
+                    srv_->login_failed(peer_ip_, user, max_attempts);
                     reply = err("Connect: logins are disabled for this dictionary",
                                 openads::AE_LOGIN_FAILED);
                     break;
@@ -1766,18 +1791,21 @@ DispatchResult Session::dispatch(const Frame& f) {
                     login_req != "0" && login_req != "False" && !is_raw_zero);
                 if (require_login) {
                     if (user.empty()) {
-                        reply = err("Connect: login required but no username supplied",
+                        srv_->login_failed(peer_ip_, user, max_attempts);
+                        reply = err("Connect: authentication failed",
                                     openads::AE_LOGIN_FAILED);
                         break;
                     }
                     if (!dd->has_user(user)) {
-                        reply = err("Connect: unknown user",
+                        srv_->login_failed(peer_ip_, user, max_attempts);
+                        reply = err("Connect: authentication failed",
                                     openads::AE_LOGIN_FAILED);
                         break;
                     }
                     std::string stored = dd->get_user_property(user, "prop_1101");
                     if (stored != pw) {
-                        reply = err("Connect: invalid password",
+                        srv_->login_failed(peer_ip_, user, max_attempts);
+                        reply = err("Connect: authentication failed",
                                     openads::AE_LOGIN_FAILED);
                         break;
                     }
@@ -1787,6 +1815,7 @@ DispatchResult Session::dispatch(const Frame& f) {
                     if (dd->has_any_acl()) dd->build_perm_cache(user);
                 }
             }
+            srv_->login_succeeded(peer_ip_, user);
             sess_conn_ = std::make_unique<openads::session::Connection>(
                 std::move(co).value());
             // M12.34 — propagate server identity for replication loop prevention.

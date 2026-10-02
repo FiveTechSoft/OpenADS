@@ -6,6 +6,7 @@
 #include "openads_version.h"
 
 #include "engine/aof_eval.h"
+#include "engine/pbkdf2.h"
 #include "engine/aof_expr.h"
 #include "engine/table.h"
 #include "mgmt/error_log.h"
@@ -21,6 +22,7 @@
 #include "sql_backend/enterprise_config.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -192,10 +194,59 @@ void Server::ensure_server_id() {
 void Server::add_credential(const std::string& user,
                             const std::string& password) {
     std::lock_guard<std::mutex> lk(creds_mu_);
-    creds_[user] = password;
+    creds_[user] = openads::engine::hash_password(password);
 }
 
-bool Server::require_auth() const noexcept { return !creds_.empty(); }
+bool Server::require_auth() const noexcept {
+    std::lock_guard<std::mutex> lk(creds_mu_);
+    return !creds_.empty();
+}
+
+
+namespace {
+std::string login_user_key(std::string user) {
+    for (char& ch : user) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    return "user:" + user;
+}
+}
+bool Server::login_allowed(const std::string& ip, const std::string& user) {
+    std::lock_guard<std::mutex> lk(login_mu_);
+    const auto now = std::chrono::steady_clock::now();
+    // Expire only genuinely quiet entries. Active attacks cannot reset a
+    // counter by cycling connections or filling the bounded registry.
+    for (auto it = login_attempts_.begin(); it != login_attempts_.end();) {
+        if (now - it->second.updated >= std::chrono::minutes(15))
+            it = login_attempts_.erase(it);
+        else ++it;
+    }
+    for (const auto& key : {"ip:" + ip, login_user_key(user)}) {
+        const auto it = login_attempts_.find(key);
+        if (it != login_attempts_.end() && now < it->second.retry_at) return false;
+        if (it == login_attempts_.end() && login_attempts_.size() >= 4096) return false;
+    }
+    return true;
+}
+void Server::login_failed(const std::string& ip, const std::string& user,
+                          std::uint32_t max_attempts) {
+    std::lock_guard<std::mutex> lk(login_mu_);
+    const auto now = std::chrono::steady_clock::now();
+    max_attempts = std::max<std::uint32_t>(1, std::min<std::uint32_t>(max_attempts, 100));
+    for (const auto& key : {"ip:" + ip, login_user_key(user)}) {
+        if (login_attempts_.count(key) == 0 && login_attempts_.size() >= 4096) continue;
+        auto& state = login_attempts_[key];
+        state.failures = std::min<std::uint32_t>(state.failures + 1, 32);
+        state.updated = now;
+        const auto delay = state.failures >= max_attempts ? 300u :
+            std::min<std::uint32_t>(1u << std::min<std::uint32_t>(state.failures - 1, 6), 60);
+        state.retry_at = now + std::chrono::seconds(delay);
+    }
+}
+void Server::login_succeeded(const std::string& ip, const std::string& user) {
+    std::lock_guard<std::mutex> lk(login_mu_);
+    // A valid account must not reset IP-wide failures against other users.
+    (void)ip;
+    login_attempts_.erase(login_user_key(user));
+}
 
 std::vector<Server::SessionInfo> Server::sessions_snapshot() const {
     std::lock_guard<std::mutex> lk(info_mu_);

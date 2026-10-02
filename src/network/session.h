@@ -71,6 +71,7 @@ private:
     // (resolved once at accept; getpeername per frame would be a
     // syscall on every request).
     std::string   peer_str_;
+    std::string   peer_ip_ = "unknown";
     // Reassembles complete frames from partial non-blocking reads (reactor
     // path). Harmless on the blocking path — each read yields a whole frame.
     FrameReader   reader_;

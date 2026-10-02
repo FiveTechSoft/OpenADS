@@ -1690,3 +1690,16 @@ TEST_CASE("Enterprise pool: Data Dictionary connection + DD-resolved SQL over th
     srv.stop();
     fs::remove_all(dir, ec);
 }
+
+TEST_CASE("Network login throttling survives reconnect and isolates IP/account counters") {
+    Server server;
+    CHECK(server.login_allowed("192.0.2.1", "alice"));
+    server.login_failed("192.0.2.1", "alice", 1);
+    CHECK_FALSE(server.login_allowed("192.0.2.1", "alice"));
+    CHECK_FALSE(server.login_allowed("192.0.2.2", "alice"));
+    CHECK_FALSE(server.login_allowed("192.0.2.1", "bob"));
+    CHECK(server.login_allowed("192.0.2.2", "bob"));
+    server.login_succeeded("192.0.2.1", "alice");
+    CHECK_FALSE(server.login_allowed("192.0.2.1", "alice"));
+    CHECK(server.login_allowed("192.0.2.2", "alice"));
+}

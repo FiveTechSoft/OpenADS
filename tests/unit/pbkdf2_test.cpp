@@ -23,3 +23,15 @@ TEST_CASE("PBKDF2 derives 32-byte key and differs from legacy zero-pad") {
     CHECK(legacy != strong);
     CHECK(strong.size() == 32);
 }
+TEST_CASE("salted credentials verify without accepting damaged hashes") {
+    const auto a = openads::engine::hash_password("secret");
+    const auto b = openads::engine::hash_password("secret");
+    CHECK(a != b);
+    CHECK(openads::engine::password_is_hash(a));
+    CHECK(openads::engine::verify_password(a, "secret"));
+    CHECK_FALSE(openads::engine::verify_password(a, "wrong"));
+    CHECK_FALSE(openads::engine::verify_password(a.substr(0, 40), "secret"));
+    CHECK(openads::engine::verify_password("legacy", "legacy"));
+    CHECK_FALSE(openads::engine::verify_password("legacy", "legacy", false));
+    CHECK_FALSE(openads::engine::verify_password("$openads-bad", "$openads-bad"));
+}

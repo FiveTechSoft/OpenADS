@@ -78,6 +78,11 @@ public:
     void add_credential(const std::string& user,
                         const std::string& password);
     bool require_auth() const noexcept;
+    // Reconnect-resistant login throttling. No sleeps on reactor workers.
+    bool login_allowed(const std::string& ip, const std::string& user);
+    void login_failed(const std::string& ip, const std::string& user,
+                      std::uint32_t max_attempts = 5);
+    void login_succeeded(const std::string& ip, const std::string& user);
 
     // Set the data root directory (or directories). Relative paths from
     // Connect frames are resolved under this directory; a Connect whose
@@ -248,9 +253,16 @@ private:
     // M12.32 — distributed mutex manager.
     MutexManager                                   mutex_mgr_;
 
-    // M12.9 — credential map (user -> password). Protected by creds_mu_
+    // M12.9 — credential map (user -> salted PBKDF2 verifier). Protected by creds_mu_
     // because add_credential() may run while sessions authenticate.
     mutable std::mutex                           creds_mu_;
+    struct LoginAttempts {
+        std::uint32_t failures = 0;
+        std::chrono::steady_clock::time_point retry_at{};
+        std::chrono::steady_clock::time_point updated{};
+    };
+    std::mutex login_mu_;
+    std::unordered_map<std::string, LoginAttempts> login_attempts_;
     std::unordered_map<std::string, std::string> creds_;
 
     // studio.web.0.4 — live session registry. session_loop

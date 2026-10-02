@@ -1338,3 +1338,21 @@ All non-loopback TCP listeners emit a cleartext warning, including those
 with authentication. **This is exposure mitigation, not native TLS**:
 use the documented TLS proxy, and firewall its cleartext backend so only
 the proxy can reach it. Do not expose TCP credentials to untrusted networks.
+## Server credential storage
+
+Credentials supplied with `auth_user` are converted at registration into salted
+PBKDF2-HMAC-SHA256 verifiers (100,000 iterations, 128-bit OS-generated salt).
+Authentication compares the derived fixed-size verifier in constant time.
+The wire protocol is unchanged. This does not hide secrets supplied in argv
+or INI and does not encrypt TCP. Dictionary password migration is separate.
+
+
+Login failures are tracked across connections by peer IP and username in a
+bounded registry. Retrying before the exponential 1-60 second cooldown expires
+is rejected without sleeping a worker. At the configured failure threshold the
+block is 5 minutes; inactive counters expire after 15 minutes. The default is
+5 failures. Dictionary `ADS_DD_MAX_FAILED_ATTEMPTS` (`prop_11`, decimal or u16)
+sets a threshold clamped to 1-100; zero retains the safe default. An attacker
+may still deny login to a known account; this is a trade-off of account lockout.
+Behind a TCP proxy all clients may share the proxy IP. Tune deployment and
+consider dedicated source-IP-preserving proxies; no forwarded-IP header is trusted.
