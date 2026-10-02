@@ -183,3 +183,10 @@ property 1101 is now write-only through AdsDDGetUserProperty. This deliberately
 breaks applications that read passwords back. Named logins now require a valid
 password even if LOG_IN_REQUIRED is disabled, preventing AdsSys impersonation.
 Legacy anonymous local dictionary setup still works; it is not a network grant.
+
+Security hardening limits: network Mutex Lock is now fail-fast on contention,
+not an infinite wait for timeout=0. Applications must retry. Network idle
+sessions expire after 5 minutes; handshake and incomplete frames after 30
+seconds. Maximum 256 tables/cursors and 64 created mutexes per connection.
+
+Explicit and AppendBlank record locks are capped at 4096 per session; SQL-generated append locks remain under review.

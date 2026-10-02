@@ -72,3 +72,39 @@ TEST_CASE("AdsMgGetInstallInfo over the wire reports the SERVER's version") {
     REQUIRE(AdsMgDisconnect(h) == 0);
     srv.stop();
 }
+
+TEST_CASE("Remote management requires configured server credentials") {
+    using openads::network::Server;
+    Server server;
+    server.add_credential("admin", "secret");
+    REQUIRE(server.start("127.0.0.1", 0));
+    std::string address = "127.0.0.1:" + std::to_string(server.port());
+    std::vector<UNSIGNED8> host(address.begin(), address.end());
+    host.push_back(0);
+    UNSIGNED8 user[] = "admin";
+    UNSIGNED8 password[] = "secret";
+    ADSHANDLE management = 0;
+    REQUIRE(AdsMgConnect(host.data(), user, password, &management) == 0);
+    ADS_MGMT_ACTIVITY_INFO activity{};
+    UNSIGNED16 size = sizeof(activity);
+    REQUIRE(AdsMgGetActivityInfo(management, &activity, &size) == 0);
+    CHECK(AdsMgResetCommStats(management) == 0);
+    REQUIRE(AdsMgDisconnect(management) == 0);
+    UNSIGNED8 wrong[] = "wrong";
+    CHECK(AdsMgConnect(host.data(), user, wrong, &management) != 0);
+    server.stop();
+}
+
+TEST_CASE("Unauthenticated loopback management cannot reset statistics") {
+    using openads::network::Server;
+    Server server;
+    REQUIRE(server.start("127.0.0.1", 0));
+    std::string address = "127.0.0.1:" + std::to_string(server.port());
+    std::vector<UNSIGNED8> host(address.begin(), address.end());
+    host.push_back(0);
+    ADSHANDLE management = 0;
+    REQUIRE(AdsMgConnect(host.data(), nullptr, nullptr, &management) == 0);
+    CHECK(AdsMgResetCommStats(management) != 0);
+    REQUIRE(AdsMgDisconnect(management) == 0);
+    server.stop();
+}

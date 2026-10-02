@@ -151,6 +151,7 @@ void WorkerPool::worker_loop(Worker& w) {
         // 4. Service every ready connection through the shared per-frame path.
         std::vector<std::size_t> dead;
         for (std::size_t j = 0; j < w.sessions.size(); ++j) {
+            if (w.sessions[j]->expired()) { dead.push_back(j); continue; }
             if ((items[j + 1].events & (kRead | kErr)) == 0) continue;
             // One poisoned session must not escape into std::terminate and
             // take the reactor worker (and every session it multiplexes) down.

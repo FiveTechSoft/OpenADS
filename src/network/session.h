@@ -9,6 +9,7 @@
 #include "session/connection.h"
 
 #include <cstdint>
+#include <chrono>
 #include <memory>
 #include <optional>
 #include <string>
@@ -57,6 +58,7 @@ public:
 
     // Accessor for the reactor: the connection socket this Session owns.
     Socket socket() const noexcept { return s_; }
+    bool expired() const noexcept;
 
 private:
     // Telemetry + dispatch + reply for one complete frame. Shared by the
@@ -75,6 +77,11 @@ private:
     // Reassembles complete frames from partial non-blocking reads (reactor
     // path). Harmless on the blocking path — each read yields a whole frame.
     FrameReader   reader_;
+    std::chrono::steady_clock::time_point created_ = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point last_read_ = created_;
+    std::chrono::steady_clock::time_point partial_since_ = created_;
+    std::unordered_set<std::string> created_mutexes_;
+    std::unordered_set<std::uint64_t> explicit_record_locks_;
     // Default data directory for this connection, determined by which TCP
     // port the client connected to. Empty means use the server's global
     // data_dir_ (primary listener).
@@ -84,6 +91,8 @@ private:
     // Connect frame; OpenTable allocates a session-scoped 32-bit
     // table id keyed into engine handles.
     std::unique_ptr<openads::session::Connection> sess_conn_;
+    bool mg_connected_ = false;
+    bool mg_admin_ = false;
     std::unordered_map<std::uint32_t, openads::session::Handle> tbls_;
     // Original OpenTable payload (DD alias or relative path). ensure_abi_handle
     // must reopen the same physical file — basename-only breaks subdir tables.

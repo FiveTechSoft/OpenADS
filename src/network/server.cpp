@@ -87,6 +87,8 @@ util::Result<Frame> decode_after_recv(std::uint8_t hdr[5],
     if (n > kMaxFramePayload) {
         return util::Error{5000, 0, "frame payload too large", ""};
     }
+    if (!valid_opcode(hdr[4]))
+        return util::Error{5000, 0, "unknown opcode", ""};
     Frame f;
     f.opcode = static_cast<Opcode>(hdr[4]);
     if (n > 0) {
@@ -846,7 +848,12 @@ void Server::session_loop(Socket s, std::string default_data_dir,
     // The per-frame contract (read → dispatch → reply → telemetry) lives in
     // Session::handle_readable so the reactor WorkerPool shares it verbatim.
     Session sess(*this, s, std::move(default_data_dir), listener_port);
-    while (sess.handle_readable()) {}
+    while (!sess.expired()) {
+        std::vector<PollItem> ready{{s, static_cast<std::uint8_t>(PollEvent::Readable)}};
+        auto polled = socket_poll(ready, 200);
+        if (!polled) break;
+        if (polled.value() != 0 && !sess.handle_readable()) break;
+    }
     sock_close(s);
 }
 

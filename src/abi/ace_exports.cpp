@@ -39325,19 +39325,32 @@ struct MgBackend {
     // round-trip so the mgmt session registers under a real name instead
     // of "(anonymous)". Empty is still valid (pre-existing behavior).
     std::string   mg_user;
+    std::string   mg_password;
 };
 
-// Optional [u16 ulen][user] MgConnect payload -- empty when `user` is empty,
-// matching pre-existing "(anonymous)" behavior for callers that don't know
-// or care which DD user is asking.
-std::vector<std::uint8_t> build_mg_connect_payload(const std::string& user) {
+// MgConnect payload: [u16 user_len][user][u16 password_len][password].
+// The server verifies credentials; empty credentials are loopback read-only.
+std::vector<std::uint8_t> build_mg_connect_payload(const std::string& user, const std::string& password) {
     std::vector<std::uint8_t> out;
-    if (user.empty()) return out;
     auto ulen = static_cast<std::uint16_t>(user.size());
     out.push_back(static_cast<std::uint8_t>(ulen & 0xFFu));
     out.push_back(static_cast<std::uint8_t>((ulen >> 8) & 0xFFu));
     out.insert(out.end(), user.begin(), user.end());
+    auto plen = static_cast<std::uint16_t>(password.size());
+    out.push_back(static_cast<std::uint8_t>(plen & 0xFFu));
+    out.push_back(static_cast<std::uint8_t>((plen >> 8) & 0xFFu));
+    out.insert(out.end(), password.begin(), password.end());
     return out;
+}
+
+bool authenticate_mg_socket(openads::network::Socket& socket, const MgBackend& backend) {
+    if (backend.mg_user.size() > 256 || backend.mg_password.size() > 4096) return false;
+    openads::network::Frame hello;
+    hello.opcode = openads::network::Opcode::MgConnect;
+    hello.payload = build_mg_connect_payload(backend.mg_user, backend.mg_password);
+    if (!openads::network::write_frame(socket, hello)) return false;
+    auto reply = openads::network::read_frame(socket);
+    return reply && reply.value().opcode == openads::network::Opcode::MgConnectAck;
 }
 
 // Registry of open mgmt handles. ADSHANDLE values for mgmt start at a
@@ -39368,13 +39381,9 @@ fetch_mg_snapshot(const MgBackend& be) {
     // "(anonymous)" -- AdsMgConnect's own reachability probe (above) uses a
     // separate, immediately-closed socket, so its username never reaches
     // whichever connection actually ends up carrying the MgRequest.
-    if (!be.mg_user.empty()) {
-        openads::network::Frame hello;
-        hello.opcode  = openads::network::Opcode::MgConnect;
-        hello.payload = build_mg_connect_payload(be.mg_user);
-        if (auto wr = openads::network::write_frame(s, hello); wr.has_value()) {
-            (void)openads::network::read_frame(s);  // drain MgConnectAck
-        }
+    if (!authenticate_mg_socket(s, be)) {
+        openads::network::sock_close(s);
+        return Error{openads::AE_ACCESS_DENIED, 0, "management authentication failed", ""};
     }
 
     openads::network::Frame req;
@@ -39498,12 +39507,18 @@ bool send_mg_mutator(const MgBackend& be,
     auto sock = openads::network::connect_tcp(be.host, be.port);
     if (!sock.has_value()) return false;
     openads::network::Socket s = sock.value();
+    if (!authenticate_mg_socket(s, be)) {
+        openads::network::sock_close(s); return false;
+    }
     openads::network::Frame req;
     req.opcode = openads::network::Opcode::MgRequest;
     std::string body = openads::network::encode_mg_request(kind, arg);
     req.payload.assign(body.begin(), body.end());
     bool ok = openads::network::write_frame(s, req).has_value();
-    if (ok) (void)openads::network::read_frame(s);  // drain the ack
+    if (ok) {
+        auto ack = openads::network::read_frame(s);
+        ok = ack && ack.value().opcode == openads::network::Opcode::MgReplyAck;
+    }
     openads::network::sock_close(s);
     return ok;
 }
@@ -39520,12 +39535,14 @@ bool send_mg_mutator(const MgBackend& be,
 // the form "host" or "host:port" yields a remote backend (default
 // port 16262, the OpenADS server port).
 UNSIGNED32 ENTRYPOINT AdsMgConnect(UNSIGNED8* pucServer, UNSIGNED8* pucUser,
-                        UNSIGNED8* /*pucPwd*/, ADSHANDLE* phMgmt) {
+                        UNSIGNED8* pucPwd, ADSHANDLE* phMgmt) {
     arc2_trace("AdsMgConnect");
     if (phMgmt == nullptr) return openads::AE_INTERNAL_ERROR;
 
     MgBackend be;
     be.mg_user = pucUser ? reinterpret_cast<const char*>(pucUser) : std::string();
+    be.mg_password = pucPwd ? reinterpret_cast<const char*>(pucPwd) : std::string();
+    if (be.mg_user.size() > 256 || be.mg_password.size() > 4096) return openads::AE_LOGIN_FAILED;
     std::string srv = pucServer
         ? reinterpret_cast<const char*>(pucServer) : "";
     // Strip leading / trailing UNC slashes ("\\\\host\\").
@@ -39566,7 +39583,7 @@ UNSIGNED32 ENTRYPOINT AdsMgConnect(UNSIGNED8* pucServer, UNSIGNED8* pucUser,
         openads::network::Socket ps = probe.value();
         openads::network::Frame hello;
         hello.opcode = openads::network::Opcode::MgConnect;
-        hello.payload = build_mg_connect_payload(be.mg_user);
+        hello.payload = build_mg_connect_payload(be.mg_user, be.mg_password);
         if (!openads::network::write_frame(ps, hello).has_value()) {
             openads::network::sock_close(ps);
             return openads::AE_NO_CONNECTION;

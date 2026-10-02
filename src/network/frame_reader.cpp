@@ -3,8 +3,8 @@
 namespace openads::network {
 
 util::Result<std::vector<Frame>> FrameReader::feed(const std::uint8_t* data,
-                                                   std::size_t n) {
-    buf_.insert(buf_.end(), data, data + n);
+                                                   std::size_t n, std::size_t max_frames) {
+    if (n != 0) buf_.insert(buf_.end(), data, data + n);
 
     std::vector<Frame> out;
     std::size_t off = 0;  // bytes consumed from the front of buf_
@@ -18,7 +18,9 @@ util::Result<std::vector<Frame>> FrameReader::feed(const std::uint8_t* data,
             (static_cast<std::uint32_t>(p[1]) << 16) |
             (static_cast<std::uint32_t>(p[2]) <<  8) |
              static_cast<std::uint32_t>(p[3]);
-        if (len > kMaxFramePayload) {
+        if (!valid_opcode(p[4]))
+            return util::Error{5000, 0, "unknown opcode", ""};
+        if (len > payload_limit_ || len > kMaxFramePayload) {
             return util::Error{5000, 0, "frame payload too large", ""};
         }
         if (avail < 5 + static_cast<std::size_t>(len)) break;  // body incomplete
@@ -28,6 +30,7 @@ util::Result<std::vector<Frame>> FrameReader::feed(const std::uint8_t* data,
         if (!fr) return fr.error();
         out.push_back(std::move(fr.value()));
         off += consumed;
+        if (max_frames != 0 && out.size() >= max_frames) break;
     }
 
     // Drop the consumed prefix, keep any partial trailing frame.

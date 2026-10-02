@@ -535,6 +535,9 @@ enum class Opcode : std::uint8_t {
     Error              = 0xFF,
 };
 
+bool valid_opcode(std::uint8_t opcode) noexcept;
+
+
 // M12.29 — object kind discriminator for DDGetProperty/DDSetProperty.
 // Every Get/Set*Property function in the AdsDD* ABI shares the same
 // name[,subName]+propertyId+value shape; this tags which local

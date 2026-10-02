@@ -1366,3 +1366,31 @@ CREATE PROCEDURE registering a native DLL requires administrator authority.
 Anonymous local setup retains compatibility; anonymous remote setup is denied.
 This closes authorization bypasses, not application SQL concatenation: clients
 must still bind values rather than concatenate untrusted strings into SQL.
+
+## Session resource and authentication boundaries
+
+Before successful Connect, frames are limited to 64 KiB and only Hello,
+Connect, MgConnect and Disconnect are accepted. After Connect the existing 16 MiB cap
+remains. Connect rejects embedded NULs, malformed optional capability tails,
+and a second Connect on the same session. Coalesced frames are dispatched
+one by one, so a failed Connect cannot authorize a following operation.
+Handshake deadline is 30 seconds; idle deadline is 5 minutes; an incomplete
+frame has an absolute 30-second deadline, so drip-feeding cannot keep it alive.
+Sessions may open at most 256 tables/cursors and create 64 named mutexes.
+**Compatibility change:** remote Mutex Lock no longer waits on contention:
+it fails immediately (the caller must retry). Even a 30-second wait would
+block a reactor worker and all of its other sessions. Local MutexManager's
+API is unchanged. SetFields counts are validated against remaining bytes
+before reserve and capped at 2048 fields per batch.
+
+Explicit and AppendBlank record locks are capped at 4096 per session; SQL-generated append locks remain under review.
+
+
+Management handshake: MgConnect accepts [u16 user_len][user] followed by
+[u16 password_len][password]. The password tail is required when server
+credentials are configured. Legacy empty/user-only handshakes are restricted
+to loopback read-only snapshots when no server credentials exist. Mutating
+management requests require a verified server credential on that same socket.
+A management connection cannot switch to database operations. New AdsMgConnect
+clients resend the verified credential handshake for each snapshot/mutator.
+Like database Connect, these credentials require TLS protection in transit.

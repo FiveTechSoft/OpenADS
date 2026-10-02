@@ -371,8 +371,8 @@ bool Session::process_frame(const Frame& f) {
     if (f.opcode == Opcode::ExecuteSQL) {
         // Iterator-based ctor: payload.data() may be nullptr when empty,
         // and std::string(nullptr, 0) is UB.
-        std::string sql(f.payload.begin(), f.payload.end());
-        srv_->set_session_sql(sid_, sql);
+        // SQL may contain passwords or other secrets. Do not retain raw text.
+        srv_->set_session_sql(sid_, "[SQL text hidden]");
     }
     srv_->set_session_executing(sid_, true);
     // Stamp the text error log context for this frame so any err() the
@@ -461,7 +461,15 @@ bool Session::process_frame(const Frame& f) {
     return !res.close_session;
 }
 
+bool Session::expired() const noexcept {
+    const auto now = std::chrono::steady_clock::now();
+    return (!sess_conn_ && !mg_connected_ && now - created_ >= std::chrono::seconds(30)) ||
+           now - last_read_ >= std::chrono::minutes(5) ||
+           (reader_.buffered() != 0 && now - partial_since_ >= std::chrono::seconds(30));
+}
+
 bool Session::handle_readable() {
+    if (expired()) return false;
     // Read whatever a single recv yields — a partial frame, one frame, or
     // several — then reassemble and dispatch every complete frame. On a
     // non-blocking socket (reactor pool) an idle or stalled peer returns
@@ -476,11 +484,24 @@ bool Session::handle_readable() {
         return false;                                         // peer reset / error
     }
     if (r.value() == 0) return false;                         // peer closed cleanly
-    auto frames = reader_.feed(buf, r.value());
-    if (!frames) return false;                                // malformed framing
-    for (const auto& f : frames.value()) {
-        if (!process_frame(f)) return false;
+    last_read_ = std::chrono::steady_clock::now();
+    const bool had_partial = reader_.buffered() != 0;
+    reader_.set_payload_limit(sess_conn_ ? kMaxFramePayload : 64 * 1024);
+    auto frames = reader_.feed(buf, r.value(), 1);
+    for (;;) {
+        if (!frames) {
+            if (frames.error().message == "unknown opcode")
+                (void)write_frame(s_, err("unsupported opcode"));
+            return false;
+        }
+        if (frames.value().empty()) break;
+        if (!process_frame(frames.value().front())) return false;
+        // Connect and a subsequent large authenticated frame may arrive in
+        // one TCP read. Change the limit only AFTER Connect actually succeeds.
+        reader_.set_payload_limit(sess_conn_ ? kMaxFramePayload : 64 * 1024);
+        frames = reader_.feed(nullptr, 0, 1);
     }
+    if (!had_partial) partial_since_ = last_read_;
     return true;
 }
 
@@ -1588,6 +1609,16 @@ void Session::append_open_warm_sections(std::vector<std::uint8_t>& out,
 
 DispatchResult Session::dispatch(const Frame& f) {
     Frame reply;
+    if (!sess_conn_ && !mg_connected_ && f.opcode != Opcode::Hello && f.opcode != Opcode::Connect &&
+        f.opcode != Opcode::Disconnect && f.opcode != Opcode::MgConnect)
+        return {err("Connect required", openads::AE_NO_CONNECTION), true};
+    if (mg_connected_ && f.opcode != Opcode::Hello && f.opcode != Opcode::Disconnect &&
+        f.opcode != Opcode::MgRequest)
+        return {err("Management session only", openads::AE_ACCESS_DENIED), true};
+    if (sess_conn_ && f.opcode == Opcode::Connect)
+        return {err("Already connected", openads::AE_ACCESS_DENIED), true};
+    if ((f.opcode == Opcode::OpenTable || f.opcode == Opcode::ExecuteSQL) && tbls_.size() + cursor_tbls_.size() >= 256)
+        return {err("Session table limit", openads::AE_ACCESS_DENIED), false};
     WTRACE("[wire] op=%u\n", (unsigned)f.opcode);
     if (wire_trace_on() && f.payload.size() >= 4) {
         std::uint32_t tid0 = read_u32_le(f.payload.data());
@@ -1656,7 +1687,10 @@ DispatchResult Session::dispatch(const Frame& f) {
             std::uint16_t dl=0, ul=0, pwl=0;
             if (!readlen(dl) || !readstr(dir, dl) ||
                 !readlen(ul) || !readstr(user, ul) ||
-                !readlen(pwl) || !readstr(pw, pwl)) {
+                !readlen(pwl) || !readstr(pw, pwl) ||
+                (pl.size() - p != 0 && pl.size() - p != 4) ||
+                dir.find('\0') != std::string::npos || user.find('\0') != std::string::npos ||
+                pw.find('\0') != std::string::npos) {
                 reply = err("Connect: bad payload");
                 break;
             }
@@ -2140,6 +2174,10 @@ DispatchResult Session::dispatch(const Frame& f) {
         case Opcode::CloseTable: {
             if (f.payload.size() < 4) { reply = err("CloseTable: bad payload"); break; }
             std::uint32_t id = read_u32_le(f.payload.data());
+            for (auto locked = explicit_record_locks_.begin(); locked != explicit_record_locks_.end();) {
+                if ((*locked >> 32) == id) locked = explicit_record_locks_.erase(locked);
+                else ++locked;
+            }
             auto cit = cursor_tbls_.find(id);
             if (cit != cursor_tbls_.end()) {
                 // Drop the cached schema with the handle: AdsCloseTable frees
@@ -3039,6 +3077,11 @@ DispatchResult Session::dispatch(const Frame& f) {
             // lock lands on nonexistent record 0 and the write guard
             // correctly rejects the later write with 5035.
             if (rn == 0) rn = tbl->recno();
+            const auto lock_key = (static_cast<std::uint64_t>(id) << 32) | rn;
+            if (f.opcode == Opcode::LockRecord && explicit_record_locks_.count(lock_key) == 0 &&
+                explicit_record_locks_.size() >= 4096) {
+                reply = err("Session record-lock limit", openads::AE_ACCESS_DENIED); break;
+            }
             openads::mgmt::set_current_lock_owner(
                 session_user_.empty() ? "(anonymous)" : session_user_,
                 srv_->conn_no_for_session(sid_));
@@ -3116,6 +3159,8 @@ DispatchResult Session::dispatch(const Frame& f) {
                        (unsigned)srv_->conn_no_for_session(sid_),
                        tbl_open_paths_.count(id) ? tbl_open_paths_[id].c_str() : "?");
             }
+            if (f.opcode == Opcode::LockRecord) explicit_record_locks_.insert(lock_key);
+            else explicit_record_locks_.erase(lock_key);
             reply.opcode = (f.opcode == Opcode::LockRecord)
                 ? Opcode::LockRecordAck
                 : Opcode::UnlockRecordAck;
@@ -3228,6 +3273,12 @@ DispatchResult Session::dispatch(const Frame& f) {
                     auto r = tbl->unlock_table();
                     if (!r) { reply = err("UnlockTable: failed",
                         static_cast<UNSIGNED32>(r.error().code)); break; }
+                }
+            }
+            if (f.opcode == Opcode::UnlockTable) {
+                for (auto locked = explicit_record_locks_.begin(); locked != explicit_record_locks_.end();) {
+                    if ((*locked >> 32) == id) locked = explicit_record_locks_.erase(locked);
+                    else ++locked;
                 }
             }
             reply.opcode = (f.opcode == Opcode::LockTable)
@@ -4446,6 +4497,9 @@ DispatchResult Session::dispatch(const Frame& f) {
             }
             auto* tbl = sess_conn_->lookup_table(it->second);
             if (!tbl) { reply = err("AppendBlank: lookup failed"); break; }
+            if (explicit_record_locks_.size() >= 4096) {
+                reply = err("Session record-lock limit", openads::AE_ACCESS_DENIED); break;
+            }
             auto diag_name = tbl_open_paths_.find(id);
             openads::abi::create_diag::Scope append_diag(
                 diag_name == tbl_open_paths_.end() ? std::string() : diag_name->second,
@@ -4484,6 +4538,8 @@ DispatchResult Session::dispatch(const Frame& f) {
                     diag_name == tbl_open_paths_.end() ? std::string() : diag_name->second) &&
                 diag_first_append_.insert(id).second)
                 openads::abi::create_diag::log("server-first-append-ok");
+            // Include automatic append locks in the session ledger, not only explicit LockRecord.
+            explicit_record_locks_.insert((static_cast<std::uint64_t>(id) << 32) | tbl->recno());
             reply.opcode = Opcode::AppendBlankAck;
             break;
         }
@@ -4536,6 +4592,9 @@ DispatchResult Session::dispatch(const Frame& f) {
                 (static_cast<std::uint16_t>(f.payload[pos + 1]) << 8));
             pos += 2;
             std::vector<std::pair<std::string, std::string>> pairs;
+            if (n > 2048 || static_cast<std::size_t>(n) > (f.payload.size() - pos) / 6) {
+                reply = err("SetFields: invalid field count"); break;
+            }
             pairs.reserve(n);
             bool truncated = false;
             for (std::uint16_t k = 0; k < n; ++k) {
@@ -4742,6 +4801,7 @@ DispatchResult Session::dispatch(const Frame& f) {
                 UNSIGNED16 atend = 0;
                 AdsAtEOF(hCur, &atend);
                 while (atend == 0 && nrows_out < maxrows) {
+                    if (nrows_out >= 100000) { reply = err("Fetch scan limit exceeded"); parse_ok = false; break; }
                     for (auto& cn : cols) {
                         UNSIGNED8  fbuf[64]  = {0};
                         static thread_local std::vector<UNSIGNED8> out_v(65536 + 1);
@@ -4754,10 +4814,14 @@ DispatchResult Session::dispatch(const Frame& f) {
                         UNSIGNED32 rrc = AdsGetField(hCur, fbuf,
                                                      out, &cap, 0);
                         if (rrc != 0) cap = 0;
+                        if (cap > 65535 || rowbuf.size() + 2 + cap > 16u*1024u*1024u - 16u) {
+                            reply = err("Fetch result exceeds protocol limit"); parse_ok = false; break;
+                        }
                         write_u16_le(rowbuf,
                             static_cast<std::uint16_t>(cap));
                         rowbuf.insert(rowbuf.end(), out, out + cap);
                     }
+                    if (!parse_ok) break;
                     ++nrows_out;
                     if (AdsSkip(hCur, 1) != 0) break;
                     AdsAtEOF(hCur, &atend);
@@ -4767,6 +4831,7 @@ DispatchResult Session::dispatch(const Frame& f) {
                 auto* tbl = sess_conn_->lookup_table(it->second);
                 if (!tbl) { reply = err("Fetch: lookup failed"); break; }
                 while (!tbl->eof() && nrows_out < maxrows) {
+                    if (nrows_out >= 100000) { reply = err("Fetch scan limit exceeded"); parse_ok = false; break; }
                     for (auto& cn : cols) {
                         std::int32_t fi = tbl->field_index(cn);
                         std::string val;
@@ -4775,11 +4840,15 @@ DispatchResult Session::dispatch(const Frame& f) {
                                 static_cast<std::uint16_t>(fi));
                             if (v) val = v.value().as_string;
                         }
+                        if (val.size() > 65535 || rowbuf.size() + 2 + val.size() > 16u*1024u*1024u - 16u) {
+                            reply = err("Fetch result exceeds protocol limit"); parse_ok = false; break;
+                        }
                         write_u16_le(rowbuf,
                             static_cast<std::uint16_t>(val.size()));
                         rowbuf.insert(rowbuf.end(),
                                       val.begin(), val.end());
                     }
+                    if (!parse_ok) break;
                     ++nrows_out;
                     auto sk = tbl->skip(1);
                     if (!sk) break;
@@ -4788,6 +4857,7 @@ DispatchResult Session::dispatch(const Frame& f) {
                 reply = err("Fetch: bad table id"); break;
             }
 
+            if (!parse_ok) break;
             write_u32_le(nrows_out, reply.payload);
             reply.payload.push_back(ncols);
             reply.payload.insert(reply.payload.end(),
@@ -4877,7 +4947,11 @@ DispatchResult Session::dispatch(const Frame& f) {
                 reply.opcode = Opcode::FetchWhereAck;
                 std::vector<std::uint8_t> rowbuf;
                 std::uint32_t nrows_out = 0;
+                std::uint32_t examined = 0;
                 while (!tbl->eof() && nrows_out < maxrows) {
+                    if (++examined > 100000) {
+                        reply = err("FetchWhere scan limit exceeded; use a selective SQL query or smaller pages"); parse_ok = false; break;
+                    }
                     if (openads::engine::evaluate_index_expr_truthy(
                             *tbl, expr)) {
                         if (flags & FetchWhereFlags::WANT_RECNO) {
@@ -4891,17 +4965,22 @@ DispatchResult Session::dispatch(const Frame& f) {
                                     static_cast<std::uint16_t>(fi));
                                 if (v) val = v.value().as_string;
                             }
+                            if (val.size() > 65535 || rowbuf.size() + 2 + val.size() > 16u*1024u*1024u - 16u) {
+                                reply = err("FetchWhere result exceeds protocol limit"); parse_ok = false; break;
+                            }
                             write_u16_le(rowbuf,
                                 static_cast<std::uint16_t>(val.size()));
                             rowbuf.insert(rowbuf.end(),
                                           val.begin(), val.end());
                         }
+                        if (!parse_ok) break;
                         ++nrows_out;
                     }
                     auto sk = tbl->skip(1);
                     if (!sk) break;
                 }
 
+                if (!parse_ok) break;
                 write_u32_le(nrows_out, reply.payload);
                 reply.payload.push_back(ncols);
                 reply.payload.insert(reply.payload.end(),
@@ -5232,30 +5311,53 @@ DispatchResult Session::dispatch(const Frame& f) {
             break;
         }
         case Opcode::MgConnect: {
-            // Management handshake. Optional [u16 ulen][user] payload —
-            // when a caller (e.g. DA-Web's Server Info tab) knows which DD
-            // user it's asking on behalf of, register this mgmt session
-            // under that name so it shows up as (say) "adssys" instead of
-            // "(anonymous)" in AdsMgGetUserNames / the Connected Users grid.
-            // Every accepted socket already gets a session (register_session
-            // in Session::run(), before any opcode is dispatched), so this
-            // mgmt-only connection is already tracked — it just never had a
-            // user name attached to it until now.
-            if (f.payload.size() >= 2) {
-                std::uint16_t ulen = static_cast<std::uint16_t>(
-                    static_cast<unsigned>(f.payload[0]) |
-                    (static_cast<unsigned>(f.payload[1]) << 8));
-                if (f.payload.size() >= static_cast<std::size_t>(2 + ulen) && ulen > 0) {
-                    std::string mgUser(reinterpret_cast<const char*>(f.payload.data() + 2), ulen);
-                    srv_->set_session_user(sid_, mgUser, "");
+            if (sess_conn_ || mg_connected_) {
+                reply = err("Already connected", openads::AE_ACCESS_DENIED); break;
+            }
+            std::size_t pos = 0;
+            std::string user, password;
+            if (!f.payload.empty()) {
+                if (!read_lstr16(f.payload, pos, user) || user.size() > 256 ||
+                    user.find('\0') != std::string::npos) {
+                    reply = err("Management handshake invalid"); break;
+                }
+                if (pos != f.payload.size() && !read_lstr16(f.payload, pos, password)) {
+                    reply = err("Management handshake invalid"); break;
+                }
+                if (pos != f.payload.size() || password.size() > 4096 ||
+                    password.find('\0') != std::string::npos) {
+                    reply = err("Management handshake invalid"); break;
                 }
             }
+            const auto peer = socket_peer_addr(s_);
+            const std::string ip = peer ? peer.value().ip : "unknown";
+            if (!srv_->login_allowed(ip, user)) {
+                reply = err("Management login blocked", openads::AE_LOGIN_FAILED); break;
+            }
+            if (srv_->require_auth()) {
+                std::lock_guard<std::mutex> guard(srv_->creds_mu_);
+                const auto credential = srv_->creds_.find(user);
+                if (credential == srv_->creds_.end() ||
+                    !openads::engine::verify_password(credential->second, password, false)) {
+                    srv_->login_failed(ip, user);
+                    reply = err("Management login failed", openads::AE_LOGIN_FAILED); break;
+                }
+                mg_admin_ = true;
+            } else if (ip != "127.0.0.1" && ip != "::1") {
+                reply = err("Management requires server credentials", openads::AE_ACCESS_DENIED); break;
+            }
+            // Legacy unauthenticated loopback management is read-only.
+            mg_connected_ = true;
+            srv_->set_session_user(sid_, mg_admin_ ? user : "(local read-only)", "");
             reply.opcode = Opcode::MgConnectAck;
-            std::string ok = "mg-ok";
+            const std::string ok = "mg-ok";
             reply.payload.assign(ok.begin(), ok.end());
             break;
         }
         case Opcode::MgRequest: {
+            if (!mg_connected_) {
+                reply = err("Management handshake required", openads::AE_ACCESS_DENIED); break;
+            }
             // Iterator-based ctor: payload.data() may be nullptr when empty,
             // and std::string(nullptr, 0) is UB.
             std::string reqbuf(f.payload.begin(), f.payload.end());
@@ -5263,6 +5365,9 @@ DispatchResult Session::dispatch(const Frame& f) {
             if (!req) {
                 reply = err("bad mg request");
                 break;
+            }
+            if (req.value().kind != MgRequestKind::Snapshot && !mg_admin_) {
+                reply = err("Management administrator required", openads::AE_ACCESS_DENIED); break;
             }
             switch (req.value().kind) {
                 case MgRequestKind::Snapshot: {
@@ -5713,7 +5818,12 @@ DispatchResult Session::dispatch(const Frame& f) {
                     // Record the creating session so its death reaps the
                     // name (release_session in cleanup) instead of wedging
                     // every later MutexCreate until server restart.
+                    if (created_mutexes_.size() >= 64) {
+                        reply = err("Session mutex limit", openads::AE_ACCESS_DENIED);
+                        break;
+                    }
                     bool ok = mm.create(name, owner);
+                    if (ok) created_mutexes_.insert(name);
                     reply.opcode = Opcode::Mutex;
                     reply.payload = { sub_op, static_cast<std::uint8_t>(ok ? 1 : 0) };
                     break;
@@ -5723,7 +5833,10 @@ DispatchResult Session::dispatch(const Frame& f) {
                     if (pos + 4 <= f.payload.size()) {
                         timeout_ms = read_u32_le(f.payload.data() + pos);
                     }
-                    bool ok = mm.lock(name, timeout_ms, owner);
+                    // Reactor workers must never wait on a client-owned mutex.
+                    // Preserve immediate-success behavior; contention fails fast.
+                    (void)timeout_ms;
+                    bool ok = mm.try_lock(name, owner);
                     reply.opcode = Opcode::Mutex;
                     reply.payload = { sub_op, static_cast<std::uint8_t>(ok ? 1 : 0) };
                     break;
@@ -5742,6 +5855,7 @@ DispatchResult Session::dispatch(const Frame& f) {
                 }
                 case MutexOp::Destroy: {
                     bool ok = mm.destroy(name, owner);
+                    if (ok) created_mutexes_.erase(name);
                     reply.opcode = Opcode::Mutex;
                     reply.payload = { sub_op, static_cast<std::uint8_t>(ok ? 1 : 0) };
                     break;

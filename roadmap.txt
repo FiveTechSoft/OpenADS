@@ -327,3 +327,6 @@ SECURITY: [DONE] auth_user verifier storage: salted PBKDF2-SHA256 and constant-t
 SECURITY: [DONE] Network login cooldown and bounded IP/user counters; applies DD MAX_FAILED_ATTEMPTS.
 SECURITY: [DONE] Remote DD mutations and built-in administration require DB:Admin; named logins always verify passwords; native DLL procedure registration requires admin.
 SECURITY: [DONE] DD salted PBKDF2 storage, successful-login legacy migration, write-only password property and hashed AdsSys recovery verification.
+
+SECURITY: [DONE] Pre-auth frame cap, handshake/idle/partial deadlines, pre-Connect gate, table/cursor and mutex caps; remote mutex fail-fast; SetFields reserve validation. Explicit/AppendBlank locks and fetch scan/reply sizes are capped. SQL append locks and other SQL resource surfaces remain under review.
+SECURITY: [DONE] Remote MgConnect password verification; management mutators require server credentials, anonymous loopback is read-only; raw SQL hidden from management telemetry.

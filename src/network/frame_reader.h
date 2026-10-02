@@ -19,13 +19,15 @@ namespace openads::network {
 class FrameReader {
 public:
     util::Result<std::vector<Frame>> feed(const std::uint8_t* data,
-                                          std::size_t n);
+                                          std::size_t n, std::size_t max_frames = 0);
+    void set_payload_limit(std::size_t limit) noexcept { payload_limit_ = limit; }
 
     // Bytes currently held (the prefix of an incomplete frame).
     std::size_t buffered() const noexcept { return buf_.size(); }
 
 private:
     std::vector<std::uint8_t> buf_;
+    std::size_t payload_limit_ = kMaxFramePayload;
 };
 
 } // namespace openads::network

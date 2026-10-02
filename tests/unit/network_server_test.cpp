@@ -1703,3 +1703,77 @@ TEST_CASE("Network login throttling survives reconnect and isolates IP/account c
     CHECK_FALSE(server.login_allowed("192.0.2.1", "alice"));
     CHECK(server.login_allowed("192.0.2.2", "alice"));
 }
+
+TEST_CASE("Network requires Connect before mutex or DD operations") {
+    Server server;
+    REQUIRE(server.start("127.0.0.1", 0));
+    for (auto opcode : {Opcode::Mutex, Opcode::DDCreateUser, Opcode::ExecuteSQL, Opcode::MgRequest}) {
+        auto connection = connect_tcp("127.0.0.1", server.port());
+        REQUIRE(connection);
+        Socket socket = connection.value();
+        Frame req;
+        req.opcode = opcode;
+        REQUIRE(write_frame(socket, req));
+        auto response = read_frame(socket);
+        REQUIRE(response);
+        CHECK(response.value().opcode == Opcode::Error);
+        sock_close(socket);
+    }
+    server.stop();
+}
+
+TEST_CASE("Network management session cannot switch to database operations") {
+    Server server;
+    REQUIRE(server.start("127.0.0.1", 0));
+    auto connection = connect_tcp("127.0.0.1", server.port());
+    REQUIRE(connection);
+    Socket socket = connection.value();
+    Frame request;
+    request.opcode = Opcode::MgConnect;
+    REQUIRE(write_frame(socket, request));
+    auto response = read_frame(socket);
+    REQUIRE(response);
+    REQUIRE(response.value().opcode == Opcode::MgConnectAck);
+    request.opcode = Opcode::Connect;
+    REQUIRE(write_frame(socket, request));
+    response = read_frame(socket);
+    REQUIRE(response);
+    CHECK(response.value().opcode == Opcode::Error);
+    sock_close(socket);
+    server.stop();
+}
+
+TEST_CASE("Network failed Connect does not authorize a coalesced management mutator") {
+    Server server;
+    server.add_credential("admin", "secret");
+    REQUIRE(server.start("127.0.0.1", 0));
+    auto connection = connect_tcp("127.0.0.1", server.port());
+    REQUIRE(connection);
+    Socket socket = connection.value();
+    Frame request;
+    request.opcode = Opcode::Connect;
+    request.payload = {0, 0, 0, 0, 0, 0};
+    auto first = openads::network::encode_frame(request);
+    REQUIRE(first);
+    request.opcode = Opcode::MgRequest;
+    request.payload.clear();
+    auto second = openads::network::encode_frame(request);
+    REQUIRE(second);
+    auto bytes = first.value();
+    bytes.insert(bytes.end(), second.value().begin(), second.value().end());
+    std::size_t sent = 0;
+    while (sent < bytes.size()) {
+        auto result = openads::network::sock_send(socket, bytes.data() + sent, bytes.size() - sent);
+        REQUIRE(result);
+        REQUIRE(result.value() > 0);
+        sent += result.value();
+    }
+    auto response = read_frame(socket);
+    REQUIRE(response);
+    CHECK(response.value().opcode == Opcode::Error);
+    response = read_frame(socket);
+    REQUIRE(response);
+    CHECK(response.value().opcode == Opcode::Error);
+    sock_close(socket);
+    server.stop();
+}
