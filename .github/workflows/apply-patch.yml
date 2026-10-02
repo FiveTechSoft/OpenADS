@@ -123,7 +123,7 @@ jobs:
                          path.startswith(b"src/network/") or
                          path.startswith(b"tools/serverd/") or
                          path.startswith(b"src/abi/") or
-                         path in (b"roadmap.txt", b"src/mgmt/mg_collector.cpp", b"openads.ini.sample"))
+                         path in (b"roadmap.txt", b"src/mgmt/mg_collector.cpp", b"openads.ini.sample", b"bindings/php/tests/Integration/DataDictionaryTest.php", b"bindings/php/tests/dd_smoke.php"))
               if (not allowed or any(p in (b"", b".", b"..") for p in parts)
                       or any(p.lower() == b".git" for p in parts)):
                   raise SystemExit("Disallowed path: " + repr(path))
