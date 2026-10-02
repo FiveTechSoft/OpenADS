@@ -5145,6 +5145,10 @@ DispatchResult Session::dispatch(const Frame& f) {
                     reply = err("Aggregate: missing n_aggs"); break;
                 }
                 std::uint8_t naggs = f.payload[p++];
+                if (flen > 4096 || for_expr.find('\0') != std::string::npos ||
+                    naggs == 0 || naggs > 32) {
+                    reply = err("Aggregate: expression/spec limit"); break;
+                }
                 struct AggReq { std::uint8_t fn; std::string field; };
                 std::vector<AggReq> specs;
                 specs.reserve(naggs);
@@ -5156,6 +5160,9 @@ DispatchResult Session::dispatch(const Frame& f) {
                     }
                     AggReq s;
                     s.fn = f.payload[p++];
+                    if (s.fn > static_cast<std::uint8_t>(openads::engine::AggFn::Max)) {
+                        reply = err("Aggregate: invalid function"); parse_ok = false; break;
+                    }
                     std::uint8_t nlen = f.payload[p++];
                     if (p + nlen > f.payload.size()) {
                         reply = err("Aggregate: truncated field name");
@@ -5168,6 +5175,7 @@ DispatchResult Session::dispatch(const Frame& f) {
                     specs.push_back(std::move(s));
                 }
                 if (!parse_ok) break;
+                if (p != f.payload.size()) { reply = err("Aggregate: trailing payload"); break; }
 
                 // Base tables only — a SQL cursor aggregates via SQL.
                 if (cursor_tbls_.find(id) != cursor_tbls_.end()) {
@@ -5181,6 +5189,11 @@ DispatchResult Session::dispatch(const Frame& f) {
                 }
                 auto* tbl = sess_conn_->lookup_table(it->second);
                 if (!tbl) { reply = err("Aggregate: lookup failed"); break; }
+                // Bound physical work even if a scope or filter would hide most
+                // records. Do not return a plausible partial aggregate.
+                if (tbl->record_count() > 100000) {
+                    reply = err("Aggregate: scan limit exceeded; use SQL aggregates"); break;
+                }
 
                 auto field_is_numeric =
                     [](openads::drivers::DbfFieldType t) {
@@ -5237,7 +5250,13 @@ DispatchResult Session::dispatch(const Frame& f) {
                 std::uint32_t saved   = tbl->recno();
                 bool          was_eof = tbl->eof();
                 tbl->goto_top();
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+                std::uint32_t examined = 0;
+                bool exhausted = false;
                 while (!tbl->eof()) {
+                    if (++examined > 100000 || std::chrono::steady_clock::now() >= deadline) {
+                        exhausted = true; break;
+                    }
                     if (openads::engine::evaluate_index_expr_truthy(
                             *tbl, for_expr)) {
                         for (std::size_t i = 0; i < accs.size(); ++i) {
@@ -5263,6 +5282,7 @@ DispatchResult Session::dispatch(const Frame& f) {
                 else
                     tbl->goto_top();
 
+                if (exhausted) { reply = err("Aggregate: execution budget exceeded"); break; }
                 reply.opcode = Opcode::AggregateAck;
                 auto write_u16 = [](std::vector<std::uint8_t>& out,
                                     std::uint16_t v) {
@@ -5273,6 +5293,9 @@ DispatchResult Session::dispatch(const Frame& f) {
                     static_cast<std::uint8_t>(accs.size()));
                 for (auto& a : accs) {
                     openads::engine::AggValue val = a.finalize();
+                    if (val.bytes.size() > 65535 || reply.payload.size() + 3 + val.bytes.size() > 16u * 1024u * 1024u) {
+                        reply = err("Aggregate: result exceeds protocol limit"); break;
+                    }
                     reply.payload.push_back(
                         static_cast<std::uint8_t>(val.type));
                     write_u16(reply.payload,

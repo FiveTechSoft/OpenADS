@@ -333,3 +333,5 @@ SECURITY: [DONE] Remote MgConnect password verification; management mutators req
 
 
 SECURITY: [DONE] Script execution step budget prevents empty/caught infinite-loop DoS. SQL literal-escaping regression test. Parser source/token/nesting limits enforced. Wall-clock SQL limits remain under review.
+
+SECURITY: [DONE] Remote Aggregate physical-row/spec/expression/reply budgets and cooperative two-second scan deadline. Local/SQL aggregate paths remain separate.

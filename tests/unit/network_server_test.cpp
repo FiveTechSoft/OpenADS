@@ -1777,3 +1777,42 @@ TEST_CASE("Network failed Connect does not authorize a coalesced management muta
     sock_close(socket);
     server.stop();
 }
+
+TEST_CASE("Network aggregate rejects invalid function and excessive specs") {
+    namespace fs = std::filesystem;
+    const auto dir = fs::temp_directory_path() / "openads_aggregate_limits";
+    fs::create_directories(dir);
+    Server server;
+    REQUIRE(server.start("127.0.0.1", 0));
+    auto connection = connect_tcp("127.0.0.1", server.port());
+    REQUIRE(connection);
+    Socket socket = connection.value();
+    Frame request;
+    request.opcode = Opcode::Connect;
+    const auto path = dir.string();
+    request.payload = {static_cast<std::uint8_t>(path.size()), static_cast<std::uint8_t>(path.size() >> 8)};
+    request.payload.insert(request.payload.end(), path.begin(), path.end());
+    request.payload.insert(request.payload.end(), {0, 0, 0, 0});
+    REQUIRE(write_frame(socket, request));
+    auto response = read_frame(socket);
+    REQUIRE(response);
+    REQUIRE(response.value().opcode == Opcode::ConnectAck);
+    request.opcode = Opcode::Aggregate;
+    for (const auto& payload : {
+            std::vector<std::uint8_t>{1, 0, 0, 0, 0, 0, 1, 255, 0},
+            std::vector<std::uint8_t>{1, 0, 0, 0, 0, 0, 33}}) {
+        request.payload = payload;
+        REQUIRE(write_frame(socket, request));
+        response = read_frame(socket);
+        REQUIRE(response);
+        CHECK(response.value().opcode == Opcode::Error);
+        REQUIRE(response.value().payload.size() >= 4);
+        const std::string message(response.value().payload.begin() + 4, response.value().payload.end());
+        CHECK(message.find("Aggregate:") != std::string::npos);
+        CHECK(message.find("bad table id") == std::string::npos);
+    }
+    sock_close(socket);
+    server.stop();
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}

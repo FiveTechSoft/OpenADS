@@ -16,8 +16,10 @@
 #include "network/server.h"
 #include "openads/ace.h"
 
+#include <array>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <string>
 
 namespace fs = std::filesystem;
@@ -245,4 +247,35 @@ TEST_CASE("AdsAggregate remote wire: zero matches -> 0 / 0 / empty") {
     agg_value(hRes, 3, ty);                CHECK(ty == 0u);   // MIN   -> empty
 
     REQUIRE(AdsAggregateClose(hRes) == AE_SUCCESS);
+}
+
+TEST_CASE("AdsAggregate remote rejects oversized scans without moving cursor") {
+    agg_wipe();
+    const auto dir = agg_tmp_dir();
+    seed_agg_fixture(dir);
+    const auto path = dir / "agg.dbf";
+    std::array<unsigned char, 32> header{};
+    {
+        std::fstream file(path, std::ios::in | std::ios::out | std::ios::binary);
+        REQUIRE(file.good());
+        file.read(reinterpret_cast<char*>(header.data()), header.size());
+        const std::uint32_t count = 100001;
+        for (int i = 0; i < 4; ++i) header[4 + i] = static_cast<unsigned char>(count >> (8 * i));
+        file.seekp(0);
+        file.write(reinterpret_cast<const char*>(header.data()), header.size());
+    }
+    const std::uint16_t start = static_cast<std::uint16_t>(header[8] | (header[9] << 8));
+    const std::uint16_t width = static_cast<std::uint16_t>(header[10] | (header[11] << 8));
+    fs::resize_file(path, static_cast<std::uintmax_t>(start) + 100001u * width + 1);
+    RemoteFixture fx;
+    fx.open(dir);
+    REQUIRE(AdsGotoRecord(fx.hTable, 2) == AE_SUCCESS);
+    UNSIGNED8 predicate[] = "";
+    UNSIGNED8 spec[] = "COUNT:";
+    ADSHANDLE result = 0;
+    CHECK(AdsAggregate(fx.hTable, predicate, spec, &result) != AE_SUCCESS);
+    CHECK(result == 0);
+    UNSIGNED32 recno = 0;
+    REQUIRE(AdsGetRecordNum(fx.hTable, ADS_IGNOREFILTERS, &recno) == AE_SUCCESS);
+    CHECK(recno == 2);
 }
