@@ -134,3 +134,45 @@ TEST_CASE("concurrent writers don't shed inserts to SQLITE_BUSY (5001) [slow]") 
 }
 
 #endif  // OPENADS_WITH_SQLITE
+
+#if defined(OPENADS_WITH_SQLITE)
+#include "engine/sql_execution_budget.h"
+TEST_CASE("SQLite shared remote scope cancels VM work and restores local execution") {
+    auto path = std::filesystem::temp_directory_path() / "openads_sqlite_budget.db";
+    DbFileGuard guard(path);
+    auto conn = open_or_fail(sqlite_uri_for(path));
+    const std::string recursive =
+        "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000) SELECT sum(x) FROM n";
+    {
+        openads::engine::SqlExecutionScope remote(true, 1000, 60000);
+        CHECK_FALSE(conn.run_sql(recursive));
+        CHECK(openads::engine::sql_execution_exhausted());
+    }
+    CHECK(scalar(conn, recursive, "sum(x)") == "50005000");
+    {
+        openads::engine::SqlExecutionScope remote(true, 1000, 60000);
+        CHECK_FALSE(conn.exec_sql(recursive));
+        CHECK(openads::engine::sql_execution_exhausted());
+    }
+    REQUIRE(conn.exec_sql("CREATE TABLE restored(x INTEGER)"));
+    conn.disconnect();
+}
+
+TEST_CASE("SQLite remote result memory limit rejects accumulation without partial cursor") {
+    auto path = std::filesystem::temp_directory_path() / "openads_sqlite_result_budget.db";
+    DbFileGuard guard(path);
+    auto conn = open_or_fail(sqlite_uri_for(path));
+    {
+        openads::engine::SqlExecutionScope remote(true, 1000000, 60000);
+        // Seven 10 MiB cells exceed the cumulative result budget, although
+        // each individual SQLite value is below the VM length limit.
+        const std::string query =
+            "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<7) SELECT zeroblob(10485760) FROM n";
+        auto result = conn.run_sql(query);
+        CHECK_FALSE(result);
+        if (!result) CHECK(result.error().code == 7079);
+    }
+    CHECK(scalar(conn, "SELECT 1 AS x", "x") == "1");
+    conn.disconnect();
+}
+#endif

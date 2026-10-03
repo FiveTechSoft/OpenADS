@@ -1,4 +1,5 @@
 #include "sql_backend/sqlite_connection.h"
+#include "engine/sql_execution_budget.h"
 
 #include "openads/ace.h"
 #include "sql_backend/sql_acl_store.h"
@@ -19,6 +20,31 @@ namespace {
 #if defined(OPENADS_WITH_SQLITE)
 
 util::Result<void> load_current_row(sqlite3* db, SqliteTable* tbl);
+
+// Restore connection limits on every return. Callback interrupts SQLite VM
+// work; it is not a promise to interrupt blocked filesystem/busy waits.
+struct RemoteSqliteGuard {
+    sqlite3* db;
+    bool active;
+    int previous_length = 0;
+    explicit RemoteSqliteGuard(sqlite3* database) : db(database),
+        active(engine::sql_execution_budget.active) {
+        if (!active) return;
+        previous_length = sqlite3_limit(db, SQLITE_LIMIT_LENGTH, -1);
+        sqlite3_limit(db, SQLITE_LIMIT_LENGTH,
+                      std::min(previous_length, 64 * 1024 * 1024));
+        sqlite3_progress_handler(db, 1000, [](void*) -> int {
+            return engine::sql_execution_step(1000) ? 0 : 1;
+        }, nullptr);
+    }
+    ~RemoteSqliteGuard() {
+        if (active) {
+            sqlite3_progress_handler(db, 0, nullptr, nullptr);
+            sqlite3_limit(db, SQLITE_LIMIT_LENGTH, previous_length);
+        }
+    }
+};
+
 
 util::Result<void> ensure_colmeta_table(sqlite3* db) {
     const char* ddl =
@@ -756,6 +782,9 @@ util::Result<void>
 SqliteConnection::exec_sql(const std::string& sql) {
 #if defined(OPENADS_WITH_SQLITE)
     if (!valid()) return util::Error{5001, 0, "sqlite connection not open", ""};
+    RemoteSqliteGuard execution_guard(impl_->db);
+    if (!engine::sql_execution_step())
+        return util::Error{7079, 0, "SQLite execution budget exceeded", ""};
     char* err = nullptr;
     const int rc = sqlite3_exec(impl_->db, sql.c_str(), nullptr, nullptr, &err);
     if (rc != SQLITE_OK) {
@@ -774,6 +803,9 @@ util::Result<std::unique_ptr<SqliteTable>>
 SqliteConnection::run_sql(const std::string& sql) {
 #if defined(OPENADS_WITH_SQLITE)
     if (!valid()) return util::Error{5001, 0, "sqlite connection not open", ""};
+    RemoteSqliteGuard execution_guard(impl_->db);
+    if (!engine::sql_execution_step())
+        return util::Error{7079, 0, "SQLite execution budget exceeded", ""};
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(impl_->db, sql.c_str(),
                            static_cast<int>(sql.size()),
@@ -805,8 +837,25 @@ SqliteConnection::run_sql(const std::string& sql) {
     }
     tbl->fields_cached = true;
 
+    std::uint64_t result_bytes = 0;
     int rc;
     while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        if (execution_guard.active &&
+            (tbl->result_rows.size() >= 100000 || !engine::sql_execution_step())) {
+            sqlite3_finalize(stmt);
+            return util::Error{7079, 0, "SQLite result row/work budget exceeded", ""};
+        }
+        // Bound vector/cell overhead and raw cell bytes before copying.
+        std::uint64_t row_bytes = std::uint64_t{64} + static_cast<std::uint64_t>(cols) * std::uint64_t{64};
+        for (int c = 0; c < cols; ++c) {
+            const int length = sqlite3_column_bytes(stmt, c);
+            row_bytes += static_cast<std::uint64_t>(length) + std::uint64_t{32};
+        }
+        if (execution_guard.active && row_bytes > 64ull * 1024ull * 1024ull - result_bytes) {
+            sqlite3_finalize(stmt);
+            return util::Error{7079, 0, "SQLite result memory budget exceeded", ""};
+        }
+        if (execution_guard.active) result_bytes += row_bytes;
         std::vector<std::string> row(static_cast<std::size_t>(cols));
         std::vector<bool>        nul(static_cast<std::size_t>(cols));
         for (int c = 0; c < cols; ++c) {
