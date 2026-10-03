@@ -542,6 +542,23 @@ build_projection_aliases(const openads::sql::SelectStmt& st,
     return names;
 }
 
+// Native schema administration is separate from table DML permission.
+// Internal cursor creation is scoped to one connection and one call; neither
+// user-controlled names nor rights flags grant the exemption.
+static thread_local Connection* internal_cursor_create_connection = nullptr;
+struct InternalCursorCreate {
+    Connection* previous;
+    explicit InternalCursorCreate(Connection* c)
+        : previous(internal_cursor_create_connection) { internal_cursor_create_connection = c; }
+    ~InternalCursorCreate() { internal_cursor_create_connection = previous; }
+};
+bool native_schema_denied(Connection* c) {
+    if (!c || !c->has_dd()) return false;
+    if (!c->remote_server() && c->username().empty()) return false;
+    return c->username().empty() || !c->dd()->has_user(c->username()) ||
+        !c->dd()->is_member_of(c->username(), "DB:Admin");
+}
+
 // Projection-aware variant. Called by Get* entry points that take
 // hTable + pucField; routes ADSFIELD(n) numeric handles through the
 // projection map (n = position within projection, translated to the
@@ -6621,9 +6638,13 @@ UNSIGNED32 materialise_temp_adt_open(Connection* c,
     std::vector<UNSIGNED8> def_buf(defs.size() + 1, 0);
     std::memcpy(def_buf.data(), defs.data(), defs.size());
     ADSHANDLE hNew = 0;
-    UNSIGNED32 crc = AdsCreateTable(conn_h, name_buf.data(), nullptr,
+    UNSIGNED32 crc;
+    {
+        InternalCursorCreate internal_create(c);
+        crc = AdsCreateTable(conn_h, name_buf.data(), nullptr,
                                     ADS_ADT, 0, 0, 0, 0,
                                     def_buf.data(), &hNew);
+    }
     if (crc != openads::AE_SUCCESS) return crc;
     AdsCloseTable(hNew);
 
@@ -9667,7 +9688,9 @@ UNSIGNED32 ENTRYPOINT AdsCreateTable(ADSHANDLE     hConn,
             return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
         }
     }
-    // Same guard as AdsOpenTable: never CREATE a local file silently in
+        if (native_schema_denied(c) && internal_cursor_create_connection != c)
+        return fail(openads::AE_ACCESS_DENIED, "dictionary administrator required for table creation");
+// Same guard as AdsOpenTable: never CREATE a local file silently in
     // a remote-only deployment (OPENADS_REMOTE_ONLY_ACCESS).
     const int roa_mode = remote_only_access_mode();
     if (roa_mode == 1) {
@@ -10136,6 +10159,8 @@ UNSIGNED32 ENTRYPOINT AdsDropTable(ADSHANDLE     hConnect,
             return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
         }
     }
+    if (native_schema_denied(c))
+        return fail(openads::AE_ACCESS_DENIED, "dictionary administrator required for table deletion");
     namespace fs = std::filesystem;
     fs::path full = fs::path(c->data_dir()) / rel;
     if (!full.has_extension()) full.replace_extension(".dbf");
@@ -10329,6 +10354,8 @@ UNSIGNED32 ENTRYPOINT AdsRestructureTable(ADSHANDLE   hConnect,
         return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
     }
 
+    if (native_schema_denied(c))
+        return fail(openads::AE_ACCESS_DENIED, "dictionary administrator required for table restructuring");
     namespace fs = std::filesystem;
     fs::path full = fs::path(c->data_dir()) / rel;
     if (!full.has_extension()) full.replace_extension(".dbf");
@@ -16722,6 +16749,8 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
             static_cast<unsigned long long>(hTable));
         return fail(openads::AE_INTERNAL_ERROR, "unknown table");
     }
+    if (native_schema_denied(t->owner()) && !materialised_cursor_temps().count(hTable))
+        return fail(openads::AE_ACCESS_DENIED, "dictionary administrator required for table maintenance");
     create_index_diag("61 ROUTE native h=%llu", static_cast<unsigned long long>(hTable));
     // Settle any coalesced dirty record first: the build loop below reads
     // rows straight from disk, so a pending buffer edit would be indexed
@@ -21621,6 +21650,8 @@ UNSIGNED32 ENTRYPOINT AdsPackTable(ADSHANDLE hTable) {
     }
     Table* t = get_table(hTable);
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
+    if (native_schema_denied(t->owner()) && !materialised_cursor_temps().count(hTable))
+        return fail(openads::AE_ACCESS_DENIED, "dictionary administrator required for table maintenance");
     auto r = t->pack();
     if (!r) return fail(r.error());
     return ok();
@@ -21653,6 +21684,8 @@ UNSIGNED32 ENTRYPOINT AdsZapTable(ADSHANDLE hTable) {
     }
     Table* t = get_table(hTable);
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
+    if (native_schema_denied(t->owner()) && !materialised_cursor_temps().count(hTable))
+        return fail(openads::AE_ACCESS_DENIED, "dictionary administrator required for table maintenance");
     auto r = t->zap();
     if (!r) return fail(r.error());
     return ok();
@@ -21801,6 +21834,8 @@ UNSIGNED32 ENTRYPOINT AdsReindex(ADSHANDLE hTable) {
     }
     Table* t = get_table(hTable);
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
+    if (native_schema_denied(t->owner()) && !materialised_cursor_temps().count(hTable))
+        return fail(openads::AE_ACCESS_DENIED, "dictionary administrator required for table maintenance");
     auto r = t->reindex();
     if (!r) return fail(r.error());
     return ok();
@@ -37475,9 +37510,13 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             // touch the source table's production index. Only the on-disk
             // format changed (index companion is .adi rather than .cdx), which
             // is transparent through the cursor handle.
-            UNSIGNED32 crc = AdsCreateTable(conn_h, name_buf.data(), nullptr,
+            UNSIGNED32 crc;
+    {
+        InternalCursorCreate internal_create(c);
+        crc = AdsCreateTable(conn_h, name_buf.data(), nullptr,
                                             ADS_ADT, 0, 0, 0, 0,
                                             def_buf.data(), &hNew);
+    }
             if (crc == openads::AE_SUCCESS) {
                 openads::engine::Table* tgt =
                     s.registry.lookup<openads::engine::Table>(

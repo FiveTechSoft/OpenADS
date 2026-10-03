@@ -974,3 +974,56 @@ TEST_CASE("Native SQL column ACLs authorize expressions before materializing") {
     CHECK(AdsDisconnect(connection) == 0);
     fs::remove_all(dir, error);
 }
+
+TEST_CASE("Native DD direct schema APIs deny nonadmin but cursor materialization is private") {
+    const auto dir = fs::temp_directory_path() / "openads_dd_native_schema_api";
+    std::error_code error;
+    fs::remove_all(dir, error); fs::create_directories(dir);
+    make_dbf(dir / "tbl.dbf");
+    {
+        std::fstream file(dir / "tbl.dbf", std::ios::binary | std::ios::in | std::ios::out);
+        const char count[4] = {1, 0, 0, 0};
+        file.seekp(4); file.write(count, 4);
+        file.seekp(65); file.write(" DATA", 5); file.put(static_cast<char>(0x1a));
+    }
+
+    openads_test::make_dd(dir / "test.add",
+        "TABLE tbl=tbl.dbf\nUSER alice\nUSERPROP alice;prop_1101=pw\n"
+        "USER admin\nUSERPROP admin;prop_1101=pw\nMEMBER admin=DB:Admin\n"
+        "DBPROP prop_5=1\nTABLEPERM tbl;alice=4\n");
+    auto connection = connect_as(dir / "test.add", "alice", "pw");
+    REQUIRE(connection != 0);
+    UNSIGNED8 name[] = "tbl", created[] = "_srt_user", defs[] = "ID,Character,4";
+    ADSHANDLE table = 0;
+    CHECK(AdsCreateTable(connection, created, nullptr, ADS_ADT, 0, 0, 0, 0, defs, &table) == 7079);
+    CHECK_FALSE(fs::exists(dir / "_srt_user.dbf"));
+    CHECK(AdsDropTable(connection, name, 1) == 7079);
+    UNSIGNED8 add[] = "EXTRA,Character,4";
+    CHECK(AdsRestructureTable(connection, name, nullptr, 0, 0, 0, 0, add, nullptr, nullptr) == 7079);
+    REQUIRE(AdsOpenTable(connection, name, nullptr, ADS_CDX, 0, 0, 0, ADS_SHARED, &table) == 0);
+    CHECK(AdsPackTable(table) == 7079);
+    CHECK(AdsZapTable(table) == 7079);
+    CHECK(AdsReindex(table) == 7079);
+    UNSIGNED8 bag[] = "tbl.cdx", tag[] = "TEST", expr[] = "ID";
+    ADSHANDLE index = 0;
+    CHECK(AdsCreateIndex61(table, bag, tag, expr, nullptr, nullptr, ADS_COMPOUND, 512, &index) == 7079);
+    CHECK_FALSE(fs::exists(dir / "tbl.cdx"));
+    REQUIRE(AdsCloseTable(table) == 0);
+    ADSHANDLE statement = 0, cursor = 0;
+    REQUIRE(AdsCreateSQLStatement(connection, &statement) == 0);
+    UNSIGNED8 sql[] = "SELECT ID FROM tbl ORDER BY ID";
+    REQUIRE(AdsExecuteSQLDirect(statement, sql, &cursor) == 0);
+    REQUIRE(cursor != 0);
+    CHECK(AdsPackTable(cursor) == 0);
+    CHECK(AdsZapTable(cursor) == 0);
+    REQUIRE(AdsCloseTable(cursor) == 0);
+    REQUIRE(AdsCloseSQLStatement(statement) == 0);
+    REQUIRE(AdsDisconnect(connection) == 0);
+    CHECK(fs::exists(dir / "tbl.dbf"));
+    connection = connect_as(dir / "test.add", "admin", "pw");
+    REQUIRE(connection != 0);
+    REQUIRE(AdsCreateTable(connection, created, nullptr, ADS_ADT, 0, 0, 0, 0, defs, &table) == 0);
+    REQUIRE(AdsCloseTable(table) == 0);
+    REQUIRE(AdsDisconnect(connection) == 0);
+    fs::remove_all(dir, error);
+}
