@@ -33,6 +33,21 @@ util::Error make_error(std::int32_t code, const std::string& msg) {
     return e;
 }
 
+// Read the complete central-directory name. Minizip silently truncates
+// caller buffers; never let a truncated spelling choose an output path.
+bool read_entry_name(unzFile uf, unz_file_info64& info, std::vector<char>& buffer,
+                     std::string& name) {
+    if (unzGetCurrentFileInfo64(uf, &info, nullptr, 0, nullptr, 0, nullptr, 0) != UNZ_OK ||
+        info.size_filename == 0 || info.size_filename > 0xFFFFu) return false;
+    buffer.assign(static_cast<std::size_t>(info.size_filename) + 1, 0);
+    if (unzGetCurrentFileInfo64(uf, &info, buffer.data(),
+        static_cast<uLong>(buffer.size()), nullptr, 0, nullptr, 0) != UNZ_OK) return false;
+    name.assign(buffer.data(), static_cast<std::size_t>(info.size_filename));
+    if (name.find('\0') != std::string::npos) return false;
+    for (auto& ch : name) if (ch == '\\') ch = '/';
+    return true;
+}
+
 // File mtime -> minizip dosDate. Thread-safe localtime.
 uLong file_dos_date(const fs::path& p) {
     std::error_code ec;
@@ -284,14 +299,11 @@ util::Result<Stats> unzip_files(const std::string& archive_abs,
     int go = unzGoToFirstFile(uf);
     while (go == UNZ_OK) {
         unz_file_info64 info{};
-        if (unzGetCurrentFileInfo64(uf, &info, namebuf.data(),
-                                    static_cast<uLong>(namebuf.size()),
-                                    nullptr, 0, nullptr, 0) != UNZ_OK) {
+        std::string entry;
+        if (!read_entry_name(uf, info, namebuf, entry)) {
             fail = "unzip: cannot read entry info";
             break;
         }
-        std::string entry(namebuf.data());
-        entry = to_entry_seps(entry);
         if (!entry_name_ok(entry)) {
             fail = "unzip: refusing entry name: " + entry;
             fail_code = openads::AE_ACCESS_DENIED;
@@ -426,14 +438,13 @@ util::Result<std::vector<std::string>> list_entries(
     int go = unzGoToFirstFile(uf);
     while (go == UNZ_OK) {
         unz_file_info64 info{};
-        if (unzGetCurrentFileInfo64(uf, &info, namebuf.data(),
-                                    static_cast<uLong>(namebuf.size()),
-                                    nullptr, 0, nullptr, 0) != UNZ_OK) {
+        std::string entry;
+        if (!read_entry_name(uf, info, namebuf, entry)) {
             unzClose(uf);
             return make_error(openads::AE_INTERNAL_ERROR,
                               "unzip: cannot read entry info");
         }
-        names.emplace_back(to_entry_seps(std::string(namebuf.data())));
+        names.emplace_back(std::move(entry));
         go = unzGoToNextFile(uf);
     }
     unzClose(uf);

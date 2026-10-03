@@ -197,6 +197,7 @@ TEST_CASE("zip: premature deflate EOF cannot count as successful extraction") {
     // the same early-EOF path observed with random wrong-password bytes.
     // minizip skips CRC verification while remaining uncompressed bytes > 0.
     std::fstream file(archive, std::ios::binary | std::ios::in | std::ios::out);
+    REQUIRE(file.is_open());
     std::string bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
     const auto central = bytes.find(std::string("PK\x01\x02", 4));
     REQUIRE(central != std::string::npos);
@@ -235,4 +236,41 @@ TEST_CASE("zip: existing destination symlinks cannot escape extraction root") {
     result = za::unzip_files(archive, (s.dir / "dst").string(), options);
     CHECK_FALSE(result.has_value());
     CHECK(s.read(outside / "keep.dbf") == "sentinel");
+}
+
+TEST_CASE("zip: complete long entry names are preserved without truncated targets") {
+    Scratch s;
+    const auto archive = (s.dir / "long-name.zip").string();
+    std::string name;
+    for (int i = 0; i < 18; ++i) name += std::string(60, 'a') + "/";
+    name += "a.dbf";
+    zipFile zf = zipOpen64(archive.c_str(), APPEND_STATUS_CREATE);
+    REQUIRE(zf != nullptr); zip_fileinfo zi{};
+    REQUIRE(zipOpenNewFileInZip3_64(zf, name.c_str(), &zi, nullptr, 0, nullptr, 0,
+        nullptr, 0, 0, 0, -MAX_WBITS, DEF_MEM_LEVEL, Z_DEFAULT_STRATEGY, nullptr, 0, 0) == ZIP_OK);
+    REQUIRE(zipWriteInFileInZip(zf, "data", 4) == ZIP_OK);
+    REQUIRE(zipCloseFileInZip(zf) == ZIP_OK); REQUIRE(zipClose(zf, nullptr) == ZIP_OK);
+    auto entries = za::list_entries(archive); REQUIRE(entries.has_value());
+    REQUIRE(entries.value().size() == 1);
+    CHECK(entries.value()[0] == name);
+    UnzipOptions options;
+    auto result = za::unzip_files(archive, (s.dir / "dst").string(), options);
+    REQUIRE(result.has_value());
+    CHECK(s.read(s.dir / "dst" / "a.dbf") == "data");
+}
+
+TEST_CASE("zip: embedded NUL entry names cannot choose a shortened target") {
+    Scratch s;
+    const auto source = s.src("safeXevil.dbf", "data");
+    const auto archive = (s.dir / "embedded-name.zip").string();
+    REQUIRE(za::zip_files({source}, (s.dir / "src").string(), archive, ZipOptions{}).has_value());
+    std::fstream file(archive, std::ios::binary | std::ios::in | std::ios::out);
+    REQUIRE(file.is_open());
+    std::string bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    const auto central = bytes.find(std::string("PK\x01\x02", 4)); REQUIRE(central != std::string::npos);
+    file.clear(); file.seekp(30 + 4); file.put('\0');
+    file.seekp(static_cast<std::streamoff>(central + 46 + 4)); file.put('\0'); file.close();
+    CHECK_FALSE(za::list_entries(archive).has_value());
+    CHECK_FALSE(za::unzip_files(archive, (s.dir / "dst").string(), UnzipOptions{}).has_value());
+    CHECK_FALSE(fs::exists(s.dir / "dst" / "safe"));
 }

@@ -389,3 +389,5 @@ Security: native row/column operations enforce DD ACLs; native copies are jailed
 Security: ZIP extraction requires exact uncompressed byte count before success; premature EOF removes partial output.
 
 Security: ZIP extraction canonicalizes destinations under its root, denying existing symlink escapes.
+
+Security: ZIP extraction and target enumeration preserve full entry names and reject embedded NUL.
