@@ -104,8 +104,7 @@ jobs:
              [ -n "$(find "$HB/install" -name 'libhbvmmt.a' 2>/dev/null | head -1)" ] && \
              [ -n "$(find "$HB/install" -name harbour -type f 2>/dev/null | head -1)" ]; then
             echo "Harbour SDK cached at $HB/install"
-            exit 0
-          fi
+          else
           sudo apt-get update
           sudo apt-get install -y build-essential libncurses-dev libx11-dev
           rm -rf "$HB"
@@ -115,6 +114,7 @@ jobs:
           git -C "$HB/src" checkout "$HARBOUR_REF"
           cd "$HB/src"
           make -j"$(nproc)" install HB_INSTALL_PREFIX="$HB/install" HB_BUILD_3RDEXT=no
+          fi
           # Resolve exact SDK paths (no layout guessing in CMake):
           # headers, MT VM archive, compiler binary.
           HB_INC="$(dirname "$(find "$HB/install" -name hbvm.h | head -1)")"
@@ -160,7 +160,7 @@ jobs:
       # embeds the whole ACE client+engine in the .exe — no ace32.dll /
       # ace64.dll to deploy. Built with MSYS2's matching MinGW toolchain
       # (the MSVC legs above can't produce a GNU archive). Lean config:
-      # no HTTP console, no TLS, no tests. (Requested by Pritpal Bedi.)
+      # no HTTP console or TLS; this sub-build runs its own tests.
       - name: Set up MinGW for the static ACE library
         if: always() && runner.os == 'Windows'
         uses: msys2/setup-msys2@v2
@@ -307,8 +307,7 @@ jobs:
   publish:
     name: Publish GitHub Release
     needs: build
-    # A cancelled/failed best-effort leg (macOS) must not skip publish;
-    # only a genuine workflow-run cancellation should.
+    # Run the gate after all legs, but never upload assets from a failed leg.
     if: ${{ always() && !inputs.repack_only && needs.build.result != 'skipped' }}
     runs-on: ubuntu-24.04
     steps:
