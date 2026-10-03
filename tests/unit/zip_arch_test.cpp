@@ -274,3 +274,60 @@ TEST_CASE("zip: embedded NUL entry names cannot choose a shortened target") {
     CHECK_FALSE(za::unzip_files(archive, (s.dir / "dst").string(), UnzipOptions{}).has_value());
     CHECK_FALSE(fs::exists(s.dir / "dst" / "safe"));
 }
+
+TEST_CASE("zip: explicit budgets bound creation and preserve rejected overwrite") {
+    Scratch s;
+    const auto a = s.src("a.dbf", "aaaa");
+    const auto b = s.src("b.dbf", "bbbb");
+    const auto arc = (s.dir / "budget.zip").string();
+    ZipOptions opt;
+    opt.limits.entries = 1;
+    auto count = za::zip_files({a, b}, (s.dir / "src").string(), arc, opt);
+    REQUIRE_FALSE(count);
+    CHECK(count.error().code == openads::AE_ACCESS_DENIED);
+    CHECK_FALSE(fs::exists(arc));
+    opt.limits.entries = 2;
+    opt.limits.bytes = 7;
+    CHECK_FALSE(za::zip_files({a, b}, (s.dir / "src").string(), arc, opt));
+    opt.limits.bytes = 8;
+    opt.limits.metadata = 9; // two five-byte names
+    CHECK_FALSE(za::zip_files({a, b}, (s.dir / "src").string(), arc, opt));
+    opt.limits.metadata = 10;
+    REQUIRE(za::zip_files({a, b}, (s.dir / "src").string(), arc, opt));
+    const auto before = s.read(arc);
+    opt.overwrite = true;
+    opt.limits.bytes = 7;
+    CHECK_FALSE(za::zip_files({a, b}, (s.dir / "src").string(), arc, opt));
+    CHECK(s.read(arc) == before);
+}
+
+TEST_CASE("zip: extraction and both listings charge entries, bytes and metadata") {
+    Scratch s;
+    const auto a = s.src("a.dbf", std::string(4096, 'A'));
+    const auto arc = (s.dir / "budget.zip").string();
+    REQUIRE(za::zip_files({a}, (s.dir / "src").string(), arc, ZipOptions{}));
+    CHECK(fs::file_size(arc) < 4096);
+    for (int kind = 0; kind < 3; ++kind) {
+        za::Limits limits;
+        if (kind == 0) limits.entries = 0;
+        if (kind == 1) limits.bytes = 4095;
+        if (kind == 2) limits.metadata = 68; // name plus per-entry accounting
+        const auto names = za::list_entries(arc, limits);
+        const auto details = za::list_detailed(arc, limits);
+        CHECK_FALSE(names);
+        CHECK_FALSE(details);
+        UnzipOptions opt;
+        opt.limits = limits;
+        auto result = za::unzip_files(arc, (s.dir / "dst").string(), opt);
+        REQUIRE_FALSE(result);
+        CHECK(result.error().code == openads::AE_ACCESS_DENIED);
+        CHECK_FALSE(fs::exists(s.dir / "dst" / "a.dbf"));
+    }
+    za::Limits exact{1, 4096, 69, 0};
+    REQUIRE(za::list_entries(arc, exact));
+    REQUIRE(za::list_detailed(arc, exact));
+    UnzipOptions opt;
+    opt.limits = exact;
+    REQUIRE(za::unzip_files(arc, (s.dir / "dst").string(), opt));
+    CHECK(s.read(s.dir / "dst" / "a.dbf") == std::string(4096, 'A'));
+}

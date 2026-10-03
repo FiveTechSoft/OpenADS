@@ -1275,6 +1275,17 @@ util::Result<Connection::ZipArchiveResult> Connection::zip_archive(
     }
     // Resolve every source under the source dir (same jail).
     std::vector<std::string> abs;
+    if (remote_server_) {
+        const auto limits = engine::zip_arch::remote_limits();
+        std::uint64_t metadata = 0;
+        if (files.size() > limits.entries)
+            return util::Error{openads::AE_ACCESS_DENIED, 0, "zip: resource budget exceeded", ""};
+        for (const auto& f : files) {
+            if (f.size() > limits.metadata - metadata)
+                return util::Error{openads::AE_ACCESS_DENIED, 0, "zip: resource budget exceeded", ""};
+            metadata += f.size();
+        }
+    }
     abs.reserve(files.size());
     for (const auto& f : files) {
         auto r = platform::resolve_fs_path(*src, f);
@@ -1298,6 +1309,7 @@ util::Result<Connection::ZipArchiveResult> Connection::zip_archive(
         }
     }
     engine::zip_arch::ZipOptions opt;
+    if (remote_server_) opt.limits = engine::zip_arch::remote_limits();
     opt.level = level;
     opt.overwrite = overwrite;
     opt.password = password;
@@ -1393,7 +1405,9 @@ util::Result<engine::zip_arch::Stats> Connection::unzip_archive(
     // Fail-if-open: enumerate targets first; any extraction target
     // open on this connection fails loud (AE_FILE_IN_USE) instead of
     // pulling the file out from under a live handle.
-    auto entries = engine::zip_arch::list_entries(archive);
+    auto entries = engine::zip_arch::list_entries(
+        archive, remote_server_ ? engine::zip_arch::remote_limits()
+                                : engine::zip_arch::Limits{});
     if (!entries) return entries.error();
     for (const auto& e : entries.value()) {
         std::string rel = e;
@@ -1413,6 +1427,7 @@ util::Result<engine::zip_arch::Stats> Connection::unzip_archive(
         }
     }
     engine::zip_arch::UnzipOptions opt;
+    if (remote_server_) opt.limits = engine::zip_arch::remote_limits();
     opt.overwrite = overwrite;
     opt.password = password;
     opt.with_path = with_path;
@@ -1446,7 +1461,9 @@ util::Result<std::vector<engine::zip_arch::ZipEntry>> Connection::zip_list(
                                "ziplist: path outside data directory", zip};
         archive = std::move(*r);
     }
-    return engine::zip_arch::list_detailed(archive);
+    return engine::zip_arch::list_detailed(
+        archive, remote_server_ ? engine::zip_arch::remote_limits()
+                                : engine::zip_arch::Limits{});
 }
 
 void Connection::set_encryption_password(const std::string& password) {

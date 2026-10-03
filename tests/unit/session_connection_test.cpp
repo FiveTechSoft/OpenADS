@@ -525,3 +525,42 @@ TEST_CASE("shared resolve log dedups across twin connections") {
     std::error_code ec;
     fs::remove_all(dir, ec);
 }
+
+TEST_CASE("Connection remote archive listing and extraction enforce engine budgets") {
+    auto dir = tmp_dir("zip_budget");
+    const auto source = dir / "small.bin";
+    std::ofstream(source, std::ios::binary) << "x";
+    const auto archive = dir / "budget.zip";
+    REQUIRE(openads::engine::zip_arch::zip_files(
+        {source.string()}, dir.string(), archive.string(), {}));
+    // Central-directory uncompressed size exceeds the remote byte limit.
+    std::ifstream in(archive, std::ios::binary);
+    std::string bytes((std::istreambuf_iterator<char>(in)), {});
+    in.close();
+    const auto cd = bytes.find(std::string("PK\x01\x02", 4));
+    REQUIRE(cd != std::string::npos);
+    REQUIRE(cd + 28 <= bytes.size());
+    bytes[cd + 24] = 1;
+    bytes[cd + 25] = 0;
+    bytes[cd + 26] = 0;
+    bytes[cd + 27] = 0x40; // 1 GiB + 1
+    {
+        std::ofstream out(archive, std::ios::binary | std::ios::trunc);
+        out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        REQUIRE(out.good());
+    }
+    auto opened = Connection::open(dir.string());
+    REQUIRE(opened);
+    auto c = std::move(opened).value();
+    REQUIRE(c.zip_list("budget.zip")); // local listing remains compatible
+    c.set_remote_server(true);
+    auto listed = c.zip_list("budget.zip");
+    REQUIRE_FALSE(listed);
+    CHECK(listed.error().code == openads::AE_ACCESS_DENIED);
+    auto extracted = c.unzip_archive("out", "budget.zip", "", false, false);
+    REQUIRE_FALSE(extracted);
+    CHECK(extracted.error().code == openads::AE_ACCESS_DENIED);
+    CHECK_FALSE(fs::exists(dir / "out" / "small.bin"));
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}

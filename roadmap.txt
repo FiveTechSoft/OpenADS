@@ -391,3 +391,5 @@ Security: ZIP extraction requires exact uncompressed byte count before success; 
 Security: ZIP extraction canonicalizes destinations under its root, denying existing symlink escapes.
 
 Security: ZIP extraction and target enumeration preserve full entry names and reject embedded NUL.
+
+Security: remote ZIP create/extract/list budgets (100k entries, 1 GiB data, 64 MiB metadata, cooperative 30s engine deadline); local defaults unchanged. Per-request bounds, not aggregate quotas or security-audit completion.

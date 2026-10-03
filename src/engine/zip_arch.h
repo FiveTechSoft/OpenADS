@@ -9,6 +9,7 @@
 #include "util/result.h"
 
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -20,18 +21,34 @@ struct Stats {
     std::uint64_t archive_bytes = 0;  // archive file size on disk
 };
 
+// Zero deadline disables the clock bound. Defaults preserve local operation.
+struct Limits {
+    std::uint64_t entries = std::numeric_limits<std::uint64_t>::max();
+    std::uint64_t bytes = std::numeric_limits<std::uint64_t>::max();
+    std::uint64_t metadata = std::numeric_limits<std::uint64_t>::max();
+    std::uint32_t milliseconds = 0;
+};
+// Remote sessions: 100k entries, 1 GiB source/expanded data, 64 MiB
+// name/comment metadata, and a cooperative 30-second engine deadline.
+inline Limits remote_limits() {
+    return {100000, 1024ull * 1024ull * 1024ull,
+            64ull * 1024ull * 1024ull, 30000};
+}
+
 struct ZipOptions {
     int         level     = 6;     // 0..9 (0 = store)
     bool        overwrite = false;  // replace existing archive
     std::string password;           // empty = none (ZipCrypto when set)
     bool        with_path = false;  // store entry paths (else basenames)
     std::vector<std::string> exclude;  // basename masks, * and ?
+    Limits limits;
 };
 
 struct UnzipOptions {
     bool        overwrite = false;  // replace existing files
     std::string password;           // empty = none
     bool        with_path = false;  // recreate archived dirs (else flat)
+    Limits limits;
 };
 
 // Archive `abs_files` (absolute, jailed) into `archive_abs`.
@@ -56,7 +73,7 @@ util::Result<Stats> unzip_files(const std::string& archive_abs,
 // extracting. Used to pre-check extraction targets (open files).
 // Needs no password (only entry contents are encrypted).
 util::Result<std::vector<std::string>> list_entries(
-    const std::string& archive_abs);
+    const std::string& archive_abs, const Limits& limits = {});
 
 // One central-directory entry with the fields hb_GetFilesInZip's
 // verbose form reports (plus the raw attribute words). Reads the
@@ -76,7 +93,7 @@ struct ZipEntry {
 };
 
 util::Result<std::vector<ZipEntry>> list_detailed(
-    const std::string& archive_abs);
+    const std::string& archive_abs, const Limits& limits = {});
 
 // Packed entry layout shared by the ZipList wire payload and the
 // AdsZipListFiles buffer (all integers little-endian):

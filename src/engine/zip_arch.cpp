@@ -14,6 +14,7 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <unordered_set>
 
 #include "zip.h"
 #include "unzip.h"
@@ -32,6 +33,22 @@ util::Error make_error(std::int32_t code, const std::string& msg) {
     e.message = msg;
     return e;
 }
+
+struct Budget {
+    Limits limits;
+    std::uint64_t entries = 0, bytes = 0, metadata = 0;
+    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+    explicit Budget(const Limits& l) : limits(l) {}
+    bool timed_out() const {
+        return limits.milliseconds && std::chrono::steady_clock::now() - start >=
+            std::chrono::milliseconds(limits.milliseconds);
+    }
+    bool add(std::uint64_t n, std::uint64_t m) {
+        if (timed_out() || entries >= limits.entries || n > limits.bytes - bytes ||
+            m > limits.metadata - metadata) return false;
+        ++entries; bytes += n; metadata += m; return true;
+    }
+};
 
 // Read the complete central-directory name. Minizip silently truncates
 // caller buffers; never let a truncated spelling choose an output path.
@@ -150,11 +167,6 @@ util::Result<Stats> zip_files(const std::vector<std::string>& abs_files,
             return make_error(openads::AE_INTERNAL_ERROR,
                               "zip: archive exists (overwrite off): " +
                                   archive_abs);
-        fs::remove(archive_abs, ec);
-        if (ec)
-            return make_error(openads::AE_INTERNAL_ERROR,
-                              "zip: cannot remove existing archive: " +
-                                  archive_abs);
     }
     // Stage files first (existence + entry names) so a missing file
     // fails BEFORE any archive is created.
@@ -164,6 +176,7 @@ util::Result<Stats> zip_files(const std::vector<std::string>& abs_files,
         std::uint64_t size = 0;
     };
     std::vector<Job> jobs;
+    Budget budget(opt.limits);
     for (const auto& f : abs_files) {
         if (excluded(f, opt.exclude)) continue;
         if (!fs::is_regular_file(f, ec) || ec)
@@ -178,12 +191,21 @@ util::Result<Stats> zip_files(const std::vector<std::string>& abs_files,
         if (ec)
             return make_error(openads::AE_INTERNAL_ERROR,
                               "zip: cannot size source: " + f);
+        if (!budget.add(sz, entry.size()))
+            return make_error(openads::AE_ACCESS_DENIED, "zip: resource budget exceeded");
         jobs.push_back({f, entry, sz});
     }
     if (jobs.empty())
         return make_error(openads::AE_NO_MATCHING_FILE,
                           "zip: nothing left after excludes");
 
+    // Do not destroy an existing archive for a rejected staging budget.
+    if (fs::exists(archive_abs, ec) && !ec) {
+        fs::remove(archive_abs, ec);
+        if (ec)
+            return make_error(openads::AE_INTERNAL_ERROR,
+                              "zip: cannot remove existing archive: " + archive_abs);
+    }
     zipFile zf = zipOpen64(archive_abs.c_str(), APPEND_STATUS_CREATE);
     if (zf == nullptr)
         return make_error(openads::AE_INTERNAL_ERROR,
@@ -192,6 +214,7 @@ util::Result<Stats> zip_files(const std::vector<std::string>& abs_files,
     std::vector<char> buf(kChunk);
     std::string fail;
     for (const auto& j : jobs) {
+        if (budget.timed_out()) { fail = "zip: execution deadline"; break; }
         zip_fileinfo zi{};
         zi.dosDate = file_dos_date(j.abs);
         const char* pwd = opt.password.empty() ? nullptr
@@ -207,10 +230,14 @@ util::Result<Stats> zip_files(const std::vector<std::string>& abs_files,
                 break;
             }
             uLong running = crc32(0L, Z_NULL, 0);
+            std::uint64_t seen = 0;
             while (crc_in) {
+                if (budget.timed_out()) { fail = "zip: execution deadline"; break; }
                 crc_in.read(buf.data(),
                             static_cast<std::streamsize>(buf.size()));
                 const std::streamsize got = crc_in.gcount();
+                if (got > 0) seen += static_cast<std::uint64_t>(got);
+                if (seen > j.size) { fail = "zip: source grew during archive"; break; }
                 if (got > 0)
                     running = crc32(running,
                                     reinterpret_cast<const Bytef*>(
@@ -221,6 +248,7 @@ util::Result<Stats> zip_files(const std::vector<std::string>& abs_files,
                 fail = "zip: cannot read source: " + j.abs;
                 break;
             }
+            if (!fail.empty()) break;
             crc = running;
         }
         // Zip64 only when the source cannot fit 32 bits (keeps
@@ -241,10 +269,14 @@ util::Result<Stats> zip_files(const std::vector<std::string>& abs_files,
             break;
         }
         bool werr = false;
+        std::uint64_t seen = 0;
         while (in) {
+            if (budget.timed_out()) { werr = true; break; }
             in.read(buf.data(),
                     static_cast<std::streamsize>(buf.size()));
             const std::streamsize got = in.gcount();
+            if (got > 0) seen += static_cast<std::uint64_t>(got);
+            if (seen > j.size) { werr = true; break; }
             if (got > 0 &&
                 zipWriteInFileInZip(zf, buf.data(),
                                     static_cast<unsigned>(got)) != ZIP_OK) {
@@ -295,7 +327,8 @@ util::Result<Stats> unzip_files(const std::string& archive_abs,
     std::vector<char> namebuf(1024);
     std::vector<char> buf(kChunk);
     // Basenames already extracted (flat mode collision guard).
-    std::vector<std::string> flat_seen;
+    std::unordered_set<std::string> flat_seen;
+    Budget budget(opt.limits);
     int go = unzGoToFirstFile(uf);
     while (go == UNZ_OK) {
         unz_file_info64 info{};
@@ -309,6 +342,10 @@ util::Result<Stats> unzip_files(const std::string& archive_abs,
             fail_code = openads::AE_ACCESS_DENIED;
             break;
         }
+        if (!budget.add(info.uncompressed_size, entry.size() + 64ull)) {
+            fail = "unzip: resource budget exceeded";
+            fail_code = openads::AE_ACCESS_DENIED; break;
+        }
         const bool is_dir = !entry.empty() && entry.back() == '/';
         std::string out_rel = entry;
         if (!opt.with_path) {
@@ -316,14 +353,11 @@ util::Result<Stats> unzip_files(const std::string& archive_abs,
                 out_rel.pop_back();
             out_rel = base_name_of(out_rel);
             if (!is_dir) {
-                for (const auto& s : flat_seen) {
-                    if (s == out_rel) {
-                        fail = "unzip: flat-mode name collision: " +
-                               out_rel + " (extract with paths)";
-                        break;
-                    }
+                if (flat_seen.count(out_rel)) {
+                    fail = "unzip: flat-mode name collision: " +
+                           out_rel + " (extract with paths)";
+                    break;
                 }
-                if (!fail.empty()) break;
             }
         }
         // Lexical entry checks alone do not catch an existing destination
@@ -376,6 +410,11 @@ util::Result<Stats> unzip_files(const std::string& archive_abs,
                     break;
                 }
                 for (;;) {
+                    if (budget.timed_out()) {
+                        fail_code = openads::AE_ACCESS_DENIED;
+                        fail = "unzip: execution deadline";
+                        rerr = true; break;
+                    }
                     const int got = unzReadCurrentFile(
                         uf, buf.data(),
                         static_cast<unsigned>(buf.size()));
@@ -402,11 +441,11 @@ util::Result<Stats> unzip_files(const std::string& archive_abs,
             if (unzCloseCurrentFile(uf) != UNZ_OK) rerr = true;
             if (rerr) {
                 fs::remove(out_path, ec);
-                fail = "unzip: entry failed (bad password or "
+                if (fail.empty()) fail = "unzip: entry failed (bad password or "
                        "corrupt data): " + entry;
                 break;
             }
-            if (!opt.with_path) flat_seen.push_back(out_rel);
+            if (!opt.with_path) flat_seen.insert(out_rel);
             ++st.files;
             st.bytes += static_cast<std::uint64_t>(info.uncompressed_size);
         }
@@ -424,7 +463,7 @@ util::Result<Stats> unzip_files(const std::string& archive_abs,
 }
 
 util::Result<std::vector<std::string>> list_entries(
-    const std::string& archive_abs) {
+    const std::string& archive_abs, const Limits& limits) {
     std::error_code ec;
     if (!fs::is_regular_file(archive_abs, ec) || ec)
         return make_error(openads::AE_NO_FILE_FOUND,
@@ -433,6 +472,7 @@ util::Result<std::vector<std::string>> list_entries(
     if (uf == nullptr)
         return make_error(openads::AE_TABLE_CORRUPTED,
                           "unzip: not a readable archive: " + archive_abs);
+    Budget budget(limits);
     std::vector<std::string> names;
     std::vector<char> namebuf(1024);
     int go = unzGoToFirstFile(uf);
@@ -443,6 +483,9 @@ util::Result<std::vector<std::string>> list_entries(
             unzClose(uf);
             return make_error(openads::AE_INTERNAL_ERROR,
                               "unzip: cannot read entry info");
+        }
+        if (!budget.add(info.uncompressed_size, entry.size() + 64ull)) {
+            unzClose(uf); return make_error(openads::AE_ACCESS_DENIED, "ziplist: resource budget exceeded");
         }
         names.emplace_back(std::move(entry));
         go = unzGoToNextFile(uf);
@@ -555,7 +598,7 @@ bool unpack_zip_entry(const std::vector<std::uint8_t>& pl, std::size_t& off,
 }
 
 util::Result<std::vector<ZipEntry>> list_detailed(
-    const std::string& archive_abs) {
+    const std::string& archive_abs, const Limits& limits) {
     std::error_code ec;
     if (!fs::is_regular_file(archive_abs, ec) || ec)
         return make_error(openads::AE_NO_FILE_FOUND,
@@ -564,6 +607,7 @@ util::Result<std::vector<ZipEntry>> list_detailed(
     if (uf == nullptr)
         return make_error(openads::AE_TABLE_CORRUPTED,
                           "ziplist: not a readable archive: " + archive_abs);
+    Budget budget(limits);
     std::vector<ZipEntry> out;
     std::vector<char> namebuf(1024);
     std::vector<char> cmtbuf(256);
@@ -578,6 +622,9 @@ util::Result<std::vector<ZipEntry>> list_detailed(
             unzClose(uf);
             return make_error(openads::AE_INTERNAL_ERROR,
                               "ziplist: cannot read entry info");
+        }
+        if (!budget.add(info.uncompressed_size, info.size_filename + info.size_file_comment + 64ull)) {
+            unzClose(uf); return make_error(openads::AE_ACCESS_DENIED, "ziplist: resource budget exceeded");
         }
         // Names/comments past the working buffers are re-queried at
         // exact size (position is unchanged by a failed-size query);
