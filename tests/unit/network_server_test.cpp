@@ -2183,3 +2183,50 @@ TEST_CASE("remote UNION rejects combined staging even when each member fits; loc
     REQUIRE(AdsDisconnect(connection) == 0);
     fs::remove_all(dir, error);
 }
+
+TEST_CASE("remote predicate subquery preflight rejects quadratic scans before cursor exposure") {
+    namespace fs = std::filesystem;
+    const auto dir = fs::temp_directory_path() / "openads_sql_predicate_budget";
+    std::error_code error;
+    fs::remove_all(dir, error);
+    fs::create_directories(dir);
+    m12_write_dbf(dir / "a.dbf", std::vector<std::string>(1001, "SAME"));
+    m12_write_dbf(dir / "b.dbf", std::vector<std::string>(1001, "SAME"));
+    m12_write_dbf(dir / "small.dbf", {"SAME"});
+    Server server;
+    REQUIRE(server.start("127.0.0.1", 0).has_value());
+    std::string uri = "tcp://127.0.0.1:" + std::to_string(server.port()) + "/" + dir.string();
+    ADSHANDLE connection = 0, statement = 0;
+    REQUIRE(AdsConnect60(reinterpret_cast<UNSIGNED8*>(uri.data()), ADS_REMOTE_SERVER,
+                        nullptr, nullptr, 0, &connection) == 0);
+    REQUIRE(AdsCreateSQLStatement(connection, &statement) == 0);
+    auto execute = [&](const std::string& query, ADSHANDLE* cursor) {
+        std::vector<UNSIGNED8> sql(query.begin(), query.end());
+        sql.push_back(0);
+        return AdsExecuteSQLDirect(statement, sql.data(), cursor);
+    };
+    for (const auto& query : {
+            "SELECT TAG FROM a.dbf WHERE EXISTS (SELECT TAG FROM b.dbf WHERE TAG = 'NONE')",
+            "SELECT TAG FROM a.dbf WHERE TAG IN (SELECT TAG FROM b.dbf)",
+            "SELECT TAG FROM a.dbf WHERE TAG = (SELECT TAG FROM b.dbf)"}) {
+        ADSHANDLE cursor = 0;
+        INFO(std::string(query));
+        CHECK(execute(query, &cursor) == 7200);
+        CHECK(cursor == 0);
+    }
+    ADSHANDLE cursor = 0;
+    REQUIRE(execute("SELECT TAG FROM small.dbf WHERE EXISTS (SELECT TAG FROM b.dbf)", &cursor) == 0);
+    REQUIRE(AdsCloseTable(cursor) == 0);
+    REQUIRE(AdsCloseSQLStatement(statement) == 0);
+    REQUIRE(AdsDisconnect(connection) == 0);
+    server.stop();
+    std::string local = dir.string();
+    REQUIRE(AdsConnect60(reinterpret_cast<UNSIGNED8*>(local.data()), ADS_LOCAL_SERVER,
+                        nullptr, nullptr, 0, &connection) == 0);
+    REQUIRE(AdsCreateSQLStatement(connection, &statement) == 0);
+    REQUIRE(execute("SELECT TAG FROM a.dbf WHERE TAG IN (SELECT TAG FROM b.dbf)", &cursor) == 0);
+    REQUIRE(AdsCloseTable(cursor) == 0);
+    REQUIRE(AdsCloseSQLStatement(statement) == 0);
+    REQUIRE(AdsDisconnect(connection) == 0);
+    fs::remove_all(dir, error);
+}

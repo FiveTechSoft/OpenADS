@@ -34105,6 +34105,74 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
     }
     (void)table_handle;
 
+    // Predicate subqueries below bypass ABI re-entry and may rescan their
+    // source for every outer row. Bound worst-case work before compilation,
+    // while the parsed trees still own all subqueries.
+    if (c->remote_server()) {
+        std::uint64_t visits = 0;
+        constexpr std::uint64_t max_visits = 1000000;
+        std::function<openads::util::Result<void>(
+            const openads::sql::WhereExpr*, std::uint64_t)> check_predicate;
+        check_predicate = [&](const openads::sql::WhereExpr* node,
+                              std::uint64_t outer_rows)
+            -> openads::util::Result<void> {
+            if (!node) return {};
+            for (const auto& child : node->children) {
+                if (auto r = check_predicate(child.get(), outer_rows); !r)
+                    return r.error();
+            }
+            if (auto r = check_predicate(node->child.get(), outer_rows); !r)
+                return r.error();
+            const openads::sql::SelectStmt* sub = node->exists_subquery.get();
+            if (!sub) sub = node->in_clause.subquery.get();
+            if (!sub) sub = node->cmp.subquery.get();
+            if (!sub) return {};
+            // The inline executor only supports a physical single source.
+            // Do not run a derived/join form to estimate its cost.
+            if (!sub->derived_sql.empty() || sub->inner_join ||
+                sub->from_tables.size() > 1 || sub->table.empty())
+                return openads::util::Error{7079, 0,
+                    "remote SQL predicate subquery shape unsupported", ""};
+            auto opened = open_or_sys(sub->table,
+                openads::engine::TableType::Cdx,
+                openads::engine::OpenMode::Read,
+                openads::engine::LockingMode::Compatible);
+            if (!opened) return opened.error();
+            auto* source = c->lookup_table(opened.value());
+            std::uint64_t count = source ? source->record_count() : 0;
+            c->close_table(opened.value());
+            // EXISTS always rescans; IN/scalar may be compile-time, but a
+            // conservative product also covers their correlated forms.
+            if (count != 0 && outer_rows > (max_visits - visits) / count)
+                return openads::util::Error{7079, 0,
+                    "remote SQL predicate subquery work budget exceeded", ""};
+            const auto work = count * outer_rows;
+            visits += work;
+            return check_predicate(sub->where.get(), work);
+        };
+        auto checked = check_predicate(parsed.value().where.get(), tbl->record_count());
+        if (checked) {
+            for (const auto& item : parsed.value().case_items) {
+                for (const auto& branch : item.branches) {
+                    checked = check_predicate(branch.cond.get(), tbl->record_count());
+                    if (!checked) break;
+                }
+                if (!checked) break;
+            }
+        }
+        if (checked) {
+            for (const auto& aggregate : parsed.value().aggregates) {
+                checked = check_predicate(aggregate.filter.get(), tbl->record_count());
+                if (!checked) break;
+            }
+        }
+        if (!checked) {
+            if (table_handle) c->close_table(table_handle);
+            if (derived_cur) AdsCloseTable(derived_cur);
+            return fail(checked.error());
+        }
+    }
+
     // M10.10: aggregate query -- walk matching rows, compute the
     // aggregate accumulators, materialise a 1-row temp DBF with one
     // numeric column per aggregate, and return a cursor on it.
