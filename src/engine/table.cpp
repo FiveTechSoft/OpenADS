@@ -1099,6 +1099,9 @@ Table::read_field(std::uint16_t field_index) {
     auto v = drivers::decode_field(f, record_buf_.data(), record_buf_.size());
     if (!v) return v.error();
 
+    if (memo_) memo_->set_read_limit(owner_ && owner_->remote_server()
+        ? 8u * 1024u * 1024u : std::numeric_limits<std::size_t>::max());
+
     // ADT binary memo/binary reference (9 bytes in record):
     //   uint32 LE block_no | uint32 LE data_len | 0x00
     // Detected by field.length == 9 which is exclusive to ADT memo refs

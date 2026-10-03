@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <limits>
 
 namespace openads::drivers {
 
@@ -27,6 +28,11 @@ enum class MemoBlockType : std::uint32_t {
 class IMemoStore {
 public:
     virtual ~IMemoStore() = default;
+
+    // Limit must be checked by stores before payload allocation or growth.
+    // Local callers retain their existing maximum; remote tables set 8 MiB.
+    void set_read_limit(std::size_t bytes) noexcept { read_limit_ = bytes; }
+
 
     virtual util::Result<void>
         open(const std::string& path, MemoOpenMode mode) = 0;
@@ -68,6 +74,8 @@ public:
     virtual util::Result<void> flush() = 0;
 
     virtual std::uint16_t block_size() const = 0;
+protected:
+    std::size_t read_limit_ = std::numeric_limits<std::size_t>::max();
 };
 
 } // namespace openads::drivers

@@ -67,6 +67,12 @@ util::Result<std::string>
 AdmMemo::read(std::uint32_t block_no, std::uint32_t data_len) {
     if (block_no == 0 || data_len == 0) return std::string{};
     std::uint64_t off = static_cast<std::uint64_t>(block_no) * kBlockSize;
+    if (data_len > read_limit_)
+        return util::Error{7079, 0, "remote memo read budget exceeded", ""};
+    auto size = file_.size();
+    if (!size) return size.error();
+    if (off > size.value() || data_len > size.value() - off)
+        return util::Error{5103, 0, "ADM memo payload truncated", ""};
     std::vector<std::uint8_t> buf(data_len, 0);
     auto got = file_.read_at(off, buf.data(), buf.size());
     if (!got) return got.error();

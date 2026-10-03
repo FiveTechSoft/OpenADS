@@ -71,6 +71,12 @@ FptMemo::read(std::uint32_t block_no) {
     }
     /* uint32_t type = read_u32_be(entry); */
     std::uint32_t length = read_u32_be(entry + 4);
+    if (length > read_limit_)
+        return util::Error{7079, 0, "remote memo read budget exceeded", ""};
+    auto size = file_.size();
+    if (!size) return size.error();
+    if (off + 8 > size.value() || length > size.value() - (off + 8))
+        return util::Error{5103, 0, "FPT memo payload truncated", ""};
     std::vector<std::uint8_t> buf(length, 0);
     if (length > 0) {
         auto rg = file_.read_at(off + 8, buf.data(), buf.size());

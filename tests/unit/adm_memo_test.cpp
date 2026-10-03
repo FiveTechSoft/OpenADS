@@ -204,3 +204,24 @@ TEST_CASE("AdmMemo: open non-existent file fails") {
     AdmMemo memo;
     CHECK_FALSE(memo.open("/nonexistent/path/file.adm", MemoOpenMode::ReadOnly));
 }
+
+TEST_CASE("AdmMemo rejects oversized declared length before allocating") {
+    auto p = adm_path("read_budget");
+    safe_remove(p);
+    {
+        auto created = AdmMemo::create(p.string());
+        REQUIRE(created.has_value());
+        auto& memo = created.value();
+        auto block = memo.write("DATA");
+        REQUIRE(block.has_value());
+        REQUIRE(memo.flush().has_value());
+        memo.set_read_limit(3);
+        CHECK_FALSE(memo.read(block.value(), 4).has_value());
+        memo.set_read_limit(4);
+        REQUIRE(memo.read(block.value(), 4).has_value());
+        // Invalid disk reference must not allocate UINT32_MAX bytes locally either.
+        memo.set_read_limit(std::numeric_limits<std::size_t>::max());
+        CHECK_FALSE(memo.read(block.value(), UINT32_MAX).has_value());
+    }
+    safe_remove(p);
+}

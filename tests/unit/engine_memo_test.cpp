@@ -2,6 +2,7 @@
 #include "drivers/dbt/dbt_memo.h"
 #include "drivers/fpt/fpt_memo.h"
 #include "engine/table.h"
+#include "session/connection.h"
 
 #include <array>
 #include <cstdint>
@@ -123,4 +124,34 @@ TEST_CASE("Table writes + reads M-field through attached DBT memo") {
     }
     fs::remove(dbf);
     fs::remove(dbt);
+}
+
+TEST_CASE("remote table memo cap is checked in store before allocation; local reads remain available") {
+    auto dbf = make_dbf_with_memo("remote_budget");
+    auto fpt = dbf; fpt.replace_extension(".fpt");
+    fs::remove(fpt);
+    {
+        auto opened = Table::open(dbf.string(), TableType::Cdx, OpenMode::Shared);
+        REQUIRE(opened.has_value());
+        Table table = std::move(opened).value();
+        auto created = FptMemo::create(fpt.string(), 64);
+        REQUIRE(created.has_value());
+        table.attach_memo(std::make_unique<FptMemo>(std::move(created).value()));
+        REQUIRE(table.append_record().has_value());
+        REQUIRE(table.set_field(1, std::string(8u * 1024u * 1024u + 1u, 'X')).has_value());
+        REQUIRE(table.flush().has_value());
+        openads::session::Connection owner;
+        owner.set_remote_server(true);
+        table.set_owner(&owner);
+        auto denied = table.read_field(1);
+        REQUIRE_FALSE(denied.has_value());
+        CHECK(denied.error().code == 7079);
+        owner.set_remote_server(false);
+        auto allowed = table.read_field(1);
+        REQUIRE(allowed.has_value());
+        CHECK(allowed.value().as_string.size() == 8u * 1024u * 1024u + 1u);
+        table.set_owner(nullptr);
+    }
+    fs::remove(dbf);
+    fs::remove(fpt);
 }

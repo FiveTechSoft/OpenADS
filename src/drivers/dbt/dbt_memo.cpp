@@ -73,9 +73,13 @@ DbtMemo::read(std::uint32_t block_no) {
                 break;
             }
         }
+        if (terminator > read_limit_ - out.size())
+            return util::Error{7079, 0, "remote memo read budget exceeded", ""};
         out.append(reinterpret_cast<const char*>(buf.data()), terminator);
         if (terminator < got_n) break;
         if (got_n < DBT_BLOCK) break;
+        if (cur == std::numeric_limits<std::uint32_t>::max())
+            return util::Error{5103, 0, "DBT memo block overflow", ""};
         ++cur;
     }
     return out;

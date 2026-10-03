@@ -352,3 +352,6 @@ SECURITY: [DONE] No SQL source/error text retained in SQL error logs; debug conn
 Security hardening 2026-10-03: remote native UPDATE/DELETE/MERGE target
 preflight before locks/indexes/writes, same 100k/64MiB source bound as SELECT.
 EN/ES: docs/{en,es}/security-sql-dml-preflight.md. Memo/runtime budgets remain.
+Security hardening 2026-10-03: native remote memo reads capped at 8MiB before
+store allocation/growth; FPT/ADM declared payload validated against file size.
+EN/ES: docs/{en,es}/security-memo-read-limits.md. Total SQL allocator budget open.

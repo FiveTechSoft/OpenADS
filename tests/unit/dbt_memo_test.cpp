@@ -101,3 +101,23 @@ TEST_CASE("DbtMemo read of block 0 returns empty string") {
     }
     fs::remove(p);
 }
+
+TEST_CASE("DbtMemo bounds multi-block growth before appending") {
+    auto p = fs::temp_directory_path() / "openads_dbt_read_budget.dbt";
+    fs::remove(p);
+    {
+        auto created = DbtMemo::create(p.string());
+        REQUIRE(created.has_value());
+        auto& memo = created.value();
+        auto block = memo.write(std::string(1024, 'X'));
+        REQUIRE(block.has_value());
+        REQUIRE(memo.flush().has_value());
+        memo.set_read_limit(1023);
+        CHECK_FALSE(memo.read(block.value()).has_value());
+        memo.set_read_limit(1024);
+        auto result = memo.read(block.value());
+        REQUIRE(result.has_value());
+        CHECK(result.value().size() == 1024);
+    }
+    fs::remove(p);
+}
