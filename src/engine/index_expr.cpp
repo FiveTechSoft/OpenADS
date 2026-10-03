@@ -1,4 +1,5 @@
 #include "engine/index_expr.h"
+#include "engine/sql_execution_budget.h"
 
 #include "engine/hrb_udf.h"
 #include "engine/oem_collation.h"
@@ -586,6 +587,7 @@ private:
 
 util::Result<std::string>
 evaluate_index_expr(Table& t, const std::string& expr, std::uint16_t key_len) {
+    if (!sql_execution_step()) return util::Error{7079, 0, "SQL execution budget exceeded", ""};
     // RCB 2026-07-10 — publish this table's effective OEM upper table
     // for the whole evaluation (UPPER() deep inside apply_scalar_fn has
     // no Table at hand). Required for per-table ADS_OEM activation.
@@ -1057,6 +1059,7 @@ bool eval_or(Lex& lx, Table& t) {
 } // anonymous namespace
 
 bool evaluate_index_expr_truthy(Table& t, const std::string& expr) {
+    if (!sql_execution_step()) return false;
     // RCB 2026-07-10 — per-table OEM upper scope, same as
     // evaluate_index_expr (FOR clauses can call UPPER too).
     ScopedEvalOemUpper eval_oem_scope(t.oem_upper_table());
@@ -1068,6 +1071,7 @@ bool evaluate_index_expr_truthy(Table& t, const std::string& expr) {
 
 bool evaluate_index_expr_number(Table& t, const std::string& expr,
                                 double& out) {
+    if (!sql_execution_step()) return false;
     // RCB 2026-07-10 — per-table OEM upper scope, same as
     // evaluate_index_expr.
     ScopedEvalOemUpper eval_oem_scope(t.oem_upper_table());

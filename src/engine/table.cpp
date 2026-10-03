@@ -4,6 +4,7 @@
 
 #include "openads/error.h"
 #include "engine/index_expr.h"
+#include "engine/sql_execution_budget.h"
 #include "engine/oem_collation.h"
 
 #include "drivers/adt/adt_driver.h"
@@ -540,6 +541,8 @@ void Table::set_recno_sequence(std::vector<std::uint32_t> seq) {
 }
 
 util::Result<void> Table::goto_top() {
+    if (!sql_execution_step())
+        return util::Error{7079, 0, "SQL execution budget exceeded", ""};
     // Settle any pending field edits before leaving the current row
     // (empty-table paths never call load_record_).
     // If the dirty record cannot be flushed (shared mode + no lock),
@@ -665,6 +668,8 @@ util::Result<void> Table::goto_top() {
 }
 
 util::Result<void> Table::goto_bottom() {
+    if (!sql_execution_step())
+        return util::Error{7079, 0, "SQL execution budget exceeded", ""};
     if (auto r = commit_dirty_record(); !r) return r.error();
     // Absolute reposition: drop any read-ahead block (see goto_top).
     driver_->invalidate_read_cache();
@@ -742,6 +747,8 @@ util::Result<void> Table::goto_bottom() {
 }
 
 util::Result<void> Table::goto_record(std::uint32_t recno) {
+    if (!sql_execution_step())
+        return util::Error{7079, 0, "SQL execution budget exceeded", ""};
     if (auto r = commit_dirty_record(); !r) return r.error();
     // Leaving the record ends the append key-sync window (see
     // append_pending_recno_ in table.h).
@@ -864,6 +871,8 @@ util::Result<void> Table::refresh_record_buffer() {
 }
 
 util::Result<void> Table::skip(std::int32_t delta) {
+    if (!sql_execution_step())
+        return util::Error{7079, 0, "SQL execution budget exceeded", ""};
     // Settle dirty buffer before cursor motion (GoCold). load_record_
     // also commits, but EOF/BOF exits never load.
     if (auto r = commit_dirty_record(); !r) return r.error();
@@ -918,6 +927,7 @@ util::Result<void> Table::skip(std::int32_t delta) {
         // / Eof — not on recno 0. Track the most-recent live we saw.
         std::uint32_t last_live = recno_;
         while (taken < want) {
+            if (!sql_execution_step()) return util::Error{7079, 0, "SQL execution budget exceeded", ""};
             r = effective_forward ? idx->next() : idx->prev();
             if (!r) return r.error();
             if (!r.value().positioned) {
@@ -1030,6 +1040,7 @@ util::Result<void> Table::skip(std::int32_t delta) {
         std::int64_t pos = static_cast<std::int64_t>(recno_);
         std::int64_t taken = 0;
         while (taken < want) {
+            if (!sql_execution_step()) return util::Error{7079, 0, "SQL execution budget exceeded", ""};
             pos += stepdir;
             if (pos < 1) { state_ = State::Bof; recno_ = 0; return {}; }
             refresh_n_if_needed(pos);
@@ -1059,6 +1070,7 @@ util::Result<void> Table::skip(std::int32_t delta) {
     if (skip_deleted || filter_) {
         std::int64_t step = (delta >= 0) ? 1 : -1;
         while (must_skip()) {
+            if (!sql_execution_step()) return util::Error{7079, 0, "SQL execution budget exceeded", ""};
             std::int64_t nt = static_cast<std::int64_t>(recno_) + step;
             if (nt < 1) { state_ = State::Bof; recno_ = 0; return {}; }
             if (nt > static_cast<std::int64_t>(n)) {
@@ -1074,6 +1086,8 @@ util::Result<void> Table::skip(std::int32_t delta) {
 
 util::Result<drivers::DbfFieldValue>
 Table::read_field(std::uint16_t field_index) {
+    if (!sql_execution_step())
+        return util::Error{7079, 0, "SQL execution budget exceeded", ""};
     if (state_ != State::Positioned) {
         // 5068 = AE_NO_CURRENT_RECORD (SAP ADS SDK). Harbour rddads'
         // adsGetValue special-cases this exact code as the graceful
@@ -1152,6 +1166,8 @@ Table::read_field(std::uint16_t field_index) {
 }
 
 util::Result<void> Table::append_record() {
+    if (!sql_execution_step())
+        return util::Error{7079, 0, "SQL execution budget exceeded", ""};
     // SQL INSERT and its internal appends do not pass the wire lock ledger.
     // Guard at the owning table before writing a durable blank record.
     if (owner_ && owner_->remote_server() && recno_locks_.size() >= 4096 &&
@@ -1286,6 +1302,8 @@ util::Result<void> Table::append_record() {
 }
 
 util::Result<void> Table::set_field(std::uint16_t idx, const std::string& v) {
+    if (!sql_execution_step())
+        return util::Error{7079, 0, "SQL execution budget exceeded", ""};
     if (state_ != State::Positioned) {
         // rddads (Harbour contrib RDD) special-cases 5068 (AE_NO_CURRENT_RECORD)
         // to return blank field values at BOF/EOF; 5026 causes a hard error.
@@ -1338,6 +1356,8 @@ util::Result<void> Table::set_field(std::uint16_t idx, const std::string& v) {
 }
 
 util::Result<void> Table::set_field(std::uint16_t idx, double v) {
+    if (!sql_execution_step())
+        return util::Error{7079, 0, "SQL execution budget exceeded", ""};
     if (state_ != State::Positioned) {
         // rddads (Harbour contrib RDD) special-cases 5068 (AE_NO_CURRENT_RECORD)
         // to return blank field values at BOF/EOF; 5026 causes a hard error.
@@ -1356,6 +1376,8 @@ util::Result<void> Table::set_field(std::uint16_t idx, double v) {
 }
 
 util::Result<void> Table::set_field(std::uint16_t idx, bool v) {
+    if (!sql_execution_step())
+        return util::Error{7079, 0, "SQL execution budget exceeded", ""};
     if (state_ != State::Positioned) {
         // rddads (Harbour contrib RDD) special-cases 5068 (AE_NO_CURRENT_RECORD)
         // to return blank field values at BOF/EOF; 5026 causes a hard error.
@@ -2325,6 +2347,8 @@ bool Table::is_field_empty(std::uint16_t field_idx) {
 }
 
 util::Result<void> Table::set_field_null(std::uint16_t field_idx) {
+    if (!sql_execution_step())
+        return util::Error{7079, 0, "SQL execution budget exceeded", ""};
     if (state_ != State::Positioned) {
         // rddads special-cases 5068 to blank out at BOF/EOF; see set_field.
         return util::Error{5068, 0, "no record positioned", ""};

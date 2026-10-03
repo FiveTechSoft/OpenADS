@@ -659,3 +659,36 @@ TEST_CASE("script: direct UDF executor recursion is bounded and cannot be caught
     CHECK(bridge.calls <= 8);
     CHECK(run_ret("RETURN 9;").i == 9);
 }
+
+#include "engine/sql_execution_budget.h"
+
+TEST_CASE("SQL shared budget survives nested scopes and separate script executors") {
+    using namespace openads::engine;
+    {
+        SqlExecutionScope outer(true, 5, 60000);
+        CHECK(sql_execution_step(2));
+        {
+            SqlExecutionScope inner(true, 1000000, 60000);
+            CHECK(sql_execution_step(3));
+            CHECK_FALSE(sql_execution_step());
+        }
+        CHECK(sql_execution_exhausted());
+    }
+    CHECK(sql_execution_step(10000000)); // no active remote SQL scope
+    {
+        SqlExecutionScope outer(true, 8, 60000);
+        auto program = compile("RETURN 1;");
+        REQUIRE(program);
+        Executor first(nullptr), second(nullptr), third(nullptr);
+        REQUIRE(first.run(*program.value()));
+        REQUIRE(second.run(*program.value()));
+        CHECK_FALSE(third.run(*program.value()));
+        CHECK(sql_execution_exhausted());
+    }
+    {
+        SqlExecutionScope expired(true, 1000000, 60000);
+        sql_execution_budget.deadline = std::chrono::steady_clock::now();
+        CHECK_FALSE(sql_execution_step());
+        CHECK(sql_execution_exhausted());
+    }
+}

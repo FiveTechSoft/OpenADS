@@ -2,6 +2,7 @@
 #include "engine/pbkdf2.h"
 #include "engine/data_dict.h"
 #include "engine/sql_input_limits.h"
+#include "engine/sql_execution_budget.h"
 
 #include "openads_version.h"  // OPENADS_VERSION_STR (CMake-generated)
 
@@ -4604,9 +4605,15 @@ DispatchResult Session::dispatch(const Frame& f) {
                             f.payload.size());
             }
             sqlbuf[f.payload.size()] = 0;
+            openads::engine::SqlExecutionScope execution_scope(true);
             ADSHANDLE hCur = 0;
             UNSIGNED32 rrc = AdsExecuteSQLDirect(abi_stmt_,
                                                  sqlbuf.data(), &hCur);
+            if (openads::engine::sql_execution_exhausted()) {
+                if (hCur) AdsCloseTable(hCur);
+                reply = err("ExecuteSQL: execution budget exceeded", openads::AE_ACCESS_DENIED);
+                break;
+            }
             if (rrc != 0) {
                 reply = err("ExecuteSQL: server-side exec failed", rrc);
                 break;

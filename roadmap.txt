@@ -396,3 +396,4 @@ Security: remote ZIP create/extract/list budgets (100k entries, 1 GiB data, 64 M
 Security: validate traditional ZIP password header before output creation, including empty encrypted entries; ignore password on plain entries. ZipCrypto retains an 8-bit check and is not authenticated encryption.
 Security: stage ZIP output and extracted files before publishing; preserve prior destinations on validation/stream/publish failure. Per-file replacement only; crash cleanup and concurrent ancestor/symlink races remain open.
 Security: Fetch/FetchWhere reject field-read errors and unknown columns rather than emitting empty successful cells; regression tests verify existing u16 boundaries from 58a357a2 for tables and SQL cursors.
+Security: shared cooperative remote SQL call-tree budget (1M checkpoints/5s) across native table, script/index evaluation and sort comparisons. Not hard cancellation, full memory quotas or rollback; backend and archive race controls remain open.

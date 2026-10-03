@@ -2416,3 +2416,34 @@ TEST_CASE("Fetch and FetchWhere refuse values beyond u16 without truncation") {
     server.stop();
     fs::remove_all(dir, ec);
 }
+
+#include "engine/sql_execution_budget.h"
+
+TEST_CASE("SQL execution budget returns failure rather than a partial success cursor") {
+    namespace fs = std::filesystem;
+    auto dir = fs::temp_directory_path() / "openads_sql_shared_steps";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+    m12_write_dbf(dir / "data.dbf", {"AAAA", "BBBB", "CCCC"});
+    auto root = dir.string();
+    std::vector<UNSIGNED8> path(root.begin(), root.end());
+    path.push_back(0);
+    ADSHANDLE conn = 0, statement = 0;
+    REQUIRE(AdsConnect60(path.data(), ADS_LOCAL_SERVER, nullptr, nullptr, 0, &conn) == 0);
+    REQUIRE(AdsCreateSQLStatement(conn, &statement) == 0);
+    UNSIGNED8 sql[] = "SELECT TAG FROM data WHERE TAG <> 'NOPE' ORDER BY TAG";
+    ADSHANDLE cursor = 0;
+    {
+        openads::engine::SqlExecutionScope small(true, 2, 60000);
+        CHECK(AdsExecuteSQLDirect(statement, sql, &cursor) != 0);
+        CHECK(cursor == 0);
+        CHECK(openads::engine::sql_execution_exhausted());
+    }
+    REQUIRE(AdsExecuteSQLDirect(statement, sql, &cursor) == 0);
+    REQUIRE(cursor != 0);
+    REQUIRE(AdsCloseTable(cursor) == 0);
+    REQUIRE(AdsCloseSQLStatement(statement) == 0);
+    REQUIRE(AdsDisconnect(conn) == 0);
+    fs::remove_all(dir, ec);
+}

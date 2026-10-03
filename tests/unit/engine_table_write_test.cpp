@@ -344,3 +344,28 @@ TEST_CASE("Remote-owned engine table caps virtual and append locks before mutati
     }
     fs::remove(path);
 }
+
+#include "engine/sql_execution_budget.h"
+
+TEST_CASE("SQL shared budget stops engine reads and appends before mutation") {
+    auto path = make_empty_table("sql_steps");
+    {
+        auto opened = Table::open(path.string(), TableType::Cdx, OpenMode::Exclusive);
+        REQUIRE(opened);
+        auto table = std::move(opened).value();
+        REQUIRE(table.append_record());
+        REQUIRE(table.set_field(0, std::string("old")));
+        REQUIRE(table.flush());
+        {
+            openads::engine::SqlExecutionScope scope(true, 1, 60000);
+            REQUIRE(table.goto_record(1));
+            CHECK_FALSE(table.read_field(0));
+            CHECK_FALSE(table.append_record());
+            CHECK(table.record_count() == 1);
+        }
+        auto read = table.read_field(0);
+        REQUIRE(read);
+        CHECK(read.value().as_string == "old");
+    }
+    fs::remove(path);
+}

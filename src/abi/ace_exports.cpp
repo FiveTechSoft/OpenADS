@@ -1,5 +1,6 @@
 #include "engine/sql_input_limits.h"
 #include "engine/sql_work_limits.h"
+#include "engine/sql_execution_budget.h"
 #include "engine/pbkdf2.h"
 #include <cstdarg>
 #include "openads/ace.h"
@@ -29399,6 +29400,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
 #endif
     Connection* c = it->second->conn;
     if (!c) return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
+    openads::engine::SqlExecutionScope execution_scope(c->remote_server());
+    if (!openads::engine::sql_execution_step())
+        return fail(openads::AE_ACCESS_DENIED, "SQL execution budget exceeded");
     auto sql = openads::abi::to_internal(pucSQL, 0);
     if (c->remote_server()) {
         if (auto valid = openads::engine::validate_remote_sql_input(sql); !valid)
@@ -31937,6 +31941,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 std::stable_sort(rows.begin(), rows.end(),
                     [&](const std::vector<std::uint8_t>& a,
                         const std::vector<std::uint8_t>& b) {
+                (void)openads::engine::sql_execution_step();
                         std::string ka(
                             reinterpret_cast<const char*>(a.data() + off), flen);
                         std::string kb(
@@ -33693,6 +33698,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             }
             std::stable_sort(rows.begin(), rows.end(),
                 [&](const Row& a, const Row& b) {
+                (void)openads::engine::sql_execution_step();
                     for (std::size_t i = 0; i < sks.size(); ++i) {
                         bool less, equal;
                         if (sks[i].numeric) {
@@ -36387,6 +36393,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         }
         std::stable_sort(rows.begin(), rows.end(),
             [&](const Row& a, const Row& b) {
+                (void)openads::engine::sql_execution_step();
                 for (std::size_t i = 0; i < sks.size(); ++i) {
                     bool less, equal;
                     if (sks[i].numeric) {
@@ -36899,6 +36906,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 }
                 std::stable_sort(ents.begin(), ents.end(),
                     [&](const Entry& a, const Entry& b) {
+                (void)openads::engine::sql_execution_step();
                         if (a.pkey != b.pkey) return a.pkey < b.pkey;
                         if (wf.order_by) {
                             return wf.order_by->descending
@@ -37750,10 +37758,14 @@ UNSIGNED32 ENTRYPOINT AdsExecuteSQLDirect(ADSHANDLE hStatement, UNSIGNED8* pucSQ
                                ADSHANDLE* phCursor) {
     arc2_trace("AdsExecuteSQLDirect");
     arc2_trace("AdsExecuteSQLDirect");
+    if (phCursor) *phCursor = 0;
     struct DepthGuard {
         ~DepthGuard() { --sql_exec_depth_; }
     } depth_guard;
     ++sql_exec_depth_;
+    auto* budget_statement = stmt_lookup(hStatement);
+    openads::engine::SqlExecutionScope execution_scope(
+        budget_statement && budget_statement->conn && budget_statement->conn->remote_server());
     // Re-entry from procedures, triggers and scripts shares this thread's
     // call-depth budget. A new Executor must not reset recursion protection.
     UNSIGNED32 rc;
@@ -37762,16 +37774,6 @@ UNSIGNED32 ENTRYPOINT AdsExecuteSQLDirect(ADSHANDLE hStatement, UNSIGNED8* pucSQ
         rc = fail(openads::AE_ACCESS_DENIED, "SQL execution recursion limit exceeded");
     } else {
         rc = exec_sql_direct_impl(hStatement, pucSQL, phCursor);
-    }
-    if (rc != openads::AE_SUCCESS && sql_exec_depth_ == 1) {
-        std::string sql_text = pucSQL != nullptr
-            ? openads::abi::to_internal(pucSQL, 0) : std::string();
-        std::string env = scriptbridge::sql_error_envelope(
-            static_cast<std::int32_t>(rc),
-            openads::abi::last_error_message(), sql_text);
-        openads::abi::set_last_error(openads::util::Error{
-            7200, 0, std::move(env), ""});
-        rc = 7200;
     }
     // RCB 07/15/2026: SAP ADS positions a SQL result cursor ON the first
     // record after execute; OpenADS was leaving the engine Table at BOF, so a
@@ -37785,6 +37787,20 @@ UNSIGNED32 ENTRYPOINT AdsExecuteSQLDirect(ADSHANDLE hStatement, UNSIGNED8* pucSQ
     // *phCursor == 0 and are skipped.
     if (rc == openads::AE_SUCCESS && phCursor != nullptr && *phCursor != 0) {
         (void)AdsGotoTop(*phCursor);
+    }
+    if (openads::engine::sql_execution_exhausted()) {
+        if (phCursor && *phCursor) { AdsCloseTable(*phCursor); *phCursor = 0; }
+        rc = fail(openads::AE_ACCESS_DENIED, "SQL execution budget exceeded");
+    }
+    if (rc != openads::AE_SUCCESS && sql_exec_depth_ == 1) {
+        std::string sql_text = pucSQL != nullptr
+            ? openads::abi::to_internal(pucSQL, 0) : std::string();
+        std::string env = scriptbridge::sql_error_envelope(
+            static_cast<std::int32_t>(rc),
+            openads::abi::last_error_message(), sql_text);
+        openads::abi::set_last_error(openads::util::Error{
+            7200, 0, std::move(env), ""});
+        rc = 7200;
     }
     if (rc != openads::AE_SUCCESS) {
         // Error text can quote SQL literals, connection strings or user RAISE

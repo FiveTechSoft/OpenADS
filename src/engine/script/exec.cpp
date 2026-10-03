@@ -4,6 +4,7 @@
 // results in docs/script-engine.md §10) — strict typing, three-valued
 // logic, LEAVE/CONTINUE, TRY/CATCH ALL with __errcode/__errtext, RAISE.
 #include "engine/script/exec.h"
+#include "engine/sql_execution_budget.h"
 
 #include <cctype>
 #include <chrono>
@@ -28,6 +29,7 @@ thread_local bool execution_exhausted_ = false;
 thread_local std::chrono::steady_clock::time_point execution_deadline_;
 
 bool budget_exhausted() {
+    if (!engine::sql_execution_step()) return true;
     if (remaining_steps_ == 0 || execution_exhausted_) return true;
     if ((remaining_steps_ & 255u) == 0 &&
         std::chrono::steady_clock::now() >= execution_deadline_) {
@@ -131,6 +133,7 @@ Result<ExecResult> Executor::run(const Program& p) {
     auto f = exec_block(p.stmts);
     if (!f) return f.error();
     if (budget_exhausted()) return serr("script execution budget exceeded");
+    if (engine::sql_execution_exhausted()) return serr("SQL execution budget exceeded");
     ExecResult r;
     if (f.value().k == Flow::Return) {
         r.returned = true;
