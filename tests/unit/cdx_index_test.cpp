@@ -478,9 +478,12 @@ TEST_CASE("CdxIndex create resets page allocator tail after recreate at same pat
             REQUIRE(ix.insert(r, k).has_value());
         }
         REQUIRE(ix.flush().has_value());
-        big_sz = fs::file_size(p);
-        REQUIRE(big_sz > 12 * 1024);
     }
+    // NTFS directory metadata used by MinGW filesystem::file_size can stay
+    // stale while the write handle is open. Measure the persisted bag after
+    // close, preserving the allocator-tail size checks on every platform.
+    big_sz = fs::file_size(p);
+    REQUIRE(big_sz > 12 * 1024);
 
     // Same process, same path: CreateRW truncates. Insert a handful of keys.
     std::uintmax_t small_sz = 0;
@@ -494,7 +497,6 @@ TEST_CASE("CdxIndex create resets page allocator tail after recreate at same pat
             REQUIRE(ix.insert(r, k).has_value());
         }
         REQUIRE(ix.flush().has_value());
-        small_sz = fs::file_size(p);
 
         // Key order must be sorted, not erratic.
         REQUIRE(ix.seek_first().has_value());
@@ -514,6 +516,7 @@ TEST_CASE("CdxIndex create resets page allocator tail after recreate at same pat
 
     // Healthy small bag is a few KB. A sticky allocator tail would leave the
     // bag near `big_sz` (pages reserved from the old EOF onward).
+    small_sz = fs::file_size(p);
     MESSAGE("big=" << big_sz << " small=" << small_sz);
     CHECK(small_sz < 8 * 1024);
     CHECK(small_sz * 3 < big_sz);
