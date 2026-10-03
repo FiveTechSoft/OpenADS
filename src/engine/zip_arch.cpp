@@ -50,6 +50,39 @@ struct Budget {
     }
 };
 
+// Bundled minizip does not validate the traditional encryption header.
+// Read it in raw mode, check its verification byte, then reopen normally.
+// This is ZIP's weak 8-bit check, not authenticated encryption.
+bool password_header_ok(unzFile uf, const unz_file_info64& info,
+                        const std::string& password) {
+    if (!(info.flag & 1)) return true;
+    if (password.empty() || (info.flag & 64) || info.compressed_size < 12)
+        return false;
+    if (unzOpenCurrentFile3(uf, nullptr, nullptr, 1, nullptr) != UNZ_OK)
+        return false;
+    unsigned char header[12]{};
+    const int got = unzReadCurrentFile(uf, header, sizeof(header));
+    const int closed = unzCloseCurrentFile(uf);
+    if (got != 12 || closed != UNZ_OK) return false;
+    const z_crc_t* pcrc_32_tab = get_crc_table();
+    std::uint32_t keys[3] = {305419896u, 591751049u, 878082192u};
+    const auto update = [&](unsigned char c) {
+        keys[0] = pcrc_32_tab[(keys[0] ^ c) & 0xff] ^ (keys[0] >> 8);
+        keys[1] = (keys[1] + (keys[0] & 0xff)) * 134775813u + 1u;
+        keys[2] = pcrc_32_tab[(keys[2] ^ (keys[1] >> 24)) & 0xff] ^
+                  (keys[2] >> 8);
+    };
+    for (char c : password) update(static_cast<unsigned char>(c));
+    for (auto& c : header) {
+        const std::uint32_t t = (keys[2] & 0xffff) | 2u;
+        c ^= static_cast<unsigned char>((t * (t ^ 1u)) >> 8);
+        update(c);
+    }
+    const unsigned check = (info.flag & 8) ? (info.dosDate >> 8) & 0xff
+                                          : (info.crc >> 24) & 0xff;
+    return header[11] == check;
+}
+
 // Read the complete central-directory name. Minizip silently truncates
 // caller buffers; never let a truncated spelling choose an output path.
 bool read_entry_name(unzFile uf, unz_file_info64& info, std::vector<char>& buffer,
@@ -389,8 +422,11 @@ util::Result<Stats> unzip_files(const std::string& archive_abs,
                        out_path.parent_path().string();
                 break;
             }
-            const char* pwd = opt.password.empty() ? nullptr
-                                                   : opt.password.c_str();
+            if (!password_header_ok(uf, info, opt.password)) {
+                fail = "unzip: invalid or missing encryption password: " + entry;
+                break;
+            }
+            const char* pwd = (info.flag & 1) ? opt.password.c_str() : nullptr;
             if (unzOpenCurrentFilePassword(uf, pwd) != UNZ_OK) {
                 fail = "unzip: cannot open entry (bad password?): " +
                        entry;

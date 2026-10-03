@@ -393,3 +393,4 @@ Security: ZIP extraction canonicalizes destinations under its root, denying exis
 Security: ZIP extraction and target enumeration preserve full entry names and reject embedded NUL.
 
 Security: remote ZIP create/extract/list budgets (100k entries, 1 GiB data, 64 MiB metadata, cooperative 30s engine deadline); local defaults unchanged. Per-request bounds, not aggregate quotas or security-audit completion.
+Security: validate traditional ZIP password header before output creation, including empty encrypted entries; ignore password on plain entries. ZipCrypto retains an 8-bit check and is not authenticated encryption.

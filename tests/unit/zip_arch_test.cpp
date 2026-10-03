@@ -331,3 +331,80 @@ TEST_CASE("zip: extraction and both listings charge entries, bytes and metadata"
     REQUIRE(za::unzip_files(arc, (s.dir / "dst").string(), opt));
     CHECK(s.read(s.dir / "dst" / "a.dbf") == std::string(4096, 'A'));
 }
+
+TEST_CASE("zip: encrypted empty entries require a valid password header") {
+    Scratch s;
+    const auto a = s.src("empty.bin", "");
+    const auto arc = (s.dir / "empty.zip").string();
+    ZipOptions zip;
+    zip.password = "correct";
+    REQUIRE(za::zip_files({a}, (s.dir / "src").string(), arc, zip));
+    CHECK_FALSE(za::unzip_files(arc, (s.dir / "dst").string(), {}));
+    CHECK_FALSE(fs::exists(s.dir / "dst" / "empty.bin"));
+    UnzipOptions opt;
+    opt.password = "correct";
+    REQUIRE(za::unzip_files(arc, (s.dir / "dst").string(), opt));
+    fs::remove(s.dir / "dst" / "empty.bin");
+    // Change the last ciphertext header byte. With the correct password,
+    // its plaintext verification byte must now differ, even with no payload.
+    auto bytes = s.read(arc);
+    REQUIRE(bytes.size() >= 42);
+    const auto u16 = [&](std::size_t i) {
+        return static_cast<unsigned char>(bytes[i]) |
+            (static_cast<unsigned>(static_cast<unsigned char>(bytes[i+1])) << 8);
+    };
+    const std::size_t header = 30 + u16(26) + u16(28);
+    REQUIRE(header + 12 <= bytes.size());
+    bytes[header + 11] ^= 1;
+    {
+        std::ofstream out(arc, std::ios::binary | std::ios::trunc);
+        out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        REQUIRE(out.good());
+    }
+    CHECK_FALSE(za::unzip_files(arc, (s.dir / "dst").string(), opt));
+    CHECK_FALSE(fs::exists(s.dir / "dst" / "empty.bin"));
+}
+
+TEST_CASE("zip: supplied password does not decrypt unencrypted entries") {
+    Scratch s;
+    const auto a = s.src("plain.bin", "plain content");
+    const auto arc = (s.dir / "plain.zip").string();
+    REQUIRE(za::zip_files({a}, (s.dir / "src").string(), arc, {}));
+    UnzipOptions opt;
+    opt.password = "unused";
+    REQUIRE(za::unzip_files(arc, (s.dir / "dst").string(), opt));
+    CHECK(s.read(s.dir / "dst" / "plain.bin") == "plain content");
+}
+
+TEST_CASE("zip: descriptor flag selects DOS-time password verification byte") {
+    Scratch s;
+    const auto a = s.src("empty.bin", "");
+    const auto arc = (s.dir / "descriptor.zip").string();
+    ZipOptions zip;
+    zip.password = "correct";
+    REQUIRE(za::zip_files({a}, (s.dir / "src").string(), arc, zip));
+    auto bytes = s.read(arc);
+    const auto cd = bytes.find(std::string("PK\x01\x02", 4));
+    REQUIRE(cd != std::string::npos);
+    REQUIRE(cd + 46 <= bytes.size());
+    bytes[6] |= 8;
+    bytes[cd + 8] |= 8;
+    // Empty CRC is zero; the existing header check byte is zero.
+    bytes[11] = 0;
+    bytes[cd + 13] = 0;
+    const auto save = [&] {
+        std::ofstream out(arc, std::ios::binary | std::ios::trunc);
+        out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        REQUIRE(out.good());
+    };
+    save();
+    UnzipOptions opt;
+    opt.password = "correct";
+    REQUIRE(za::unzip_files(arc, (s.dir / "dst").string(), opt));
+    fs::remove(s.dir / "dst" / "empty.bin");
+    bytes[11] = 1;
+    bytes[cd + 13] = 1;
+    save();
+    CHECK_FALSE(za::unzip_files(arc, (s.dir / "dst").string(), opt));
+    CHECK_FALSE(fs::exists(s.dir / "dst" / "empty.bin"));
+}
