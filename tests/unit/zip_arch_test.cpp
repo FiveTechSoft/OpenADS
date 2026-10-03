@@ -208,3 +208,31 @@ TEST_CASE("zip: premature deflate EOF cannot count as successful extraction") {
     CHECK_FALSE(result.has_value());
     CHECK_FALSE(fs::exists(s.dir / "dst" / "a.dbf"));
 }
+
+TEST_CASE("zip: existing destination symlinks cannot escape extraction root") {
+    Scratch s;
+    const auto outside = s.dir / "outside";
+    fs::create_directories(outside);
+    std::ofstream(outside / "keep.dbf") << "sentinel";
+    auto source = s.src("keep.dbf", "replacement");
+    auto archive = (s.dir / "escape.zip").string();
+    REQUIRE(za::zip_files({source}, (s.dir / "src").string(), archive, ZipOptions{}).has_value());
+    std::error_code error;
+    fs::create_symlink(outside / "keep.dbf", s.dir / "dst" / "keep.dbf", error);
+    if (error) { MESSAGE("symlink creation unavailable on this host"); return; }
+    UnzipOptions options; options.overwrite = true;
+    auto result = za::unzip_files(archive, (s.dir / "dst").string(), options);
+    CHECK_FALSE(result.has_value());
+    CHECK(s.read(outside / "keep.dbf") == "sentinel");
+    fs::remove(s.dir / "dst" / "keep.dbf");
+    std::ofstream(outside / "keep.dbf") << "sentinel";
+    fs::create_directory_symlink(outside, s.dir / "dst" / "sub", error);
+    REQUIRE_FALSE(error);
+    source = s.src("sub/keep.dbf", "replacement");
+    ZipOptions zip_options; zip_options.with_path = true; zip_options.overwrite = true;
+    REQUIRE(za::zip_files({source}, (s.dir / "src").string(), archive, zip_options).has_value());
+    options.with_path = true;
+    result = za::unzip_files(archive, (s.dir / "dst").string(), options);
+    CHECK_FALSE(result.has_value());
+    CHECK(s.read(outside / "keep.dbf") == "sentinel");
+}

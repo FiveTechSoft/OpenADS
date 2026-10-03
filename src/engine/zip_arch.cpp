@@ -5,6 +5,7 @@
 
 #include "openads/error.h"
 #include "platform/fs_sandbox.h"
+#include "platform/path.h"
 
 #include <algorithm>
 #include <chrono>
@@ -313,8 +314,16 @@ util::Result<Stats> unzip_files(const std::string& archive_abs,
                 if (!fail.empty()) break;
             }
         }
-        const fs::path out_path =
-            fs::path(dest_dir_abs) / out_rel;
+        // Lexical entry checks alone do not catch an existing destination
+        // symlink (including a symlinked parent). Resolve the actual target
+        // under the extraction root before creating or opening anything.
+        auto jailed = platform::resolve_under_root(dest_dir_abs, out_rel);
+        if (!jailed) {
+            fail = "unzip: target outside extraction directory: " + entry;
+            fail_code = openads::AE_ACCESS_DENIED;
+            break;
+        }
+        const fs::path out_path = *jailed;
         if (is_dir) {
             fs::create_directories(out_path, ec);
             if (ec) {
