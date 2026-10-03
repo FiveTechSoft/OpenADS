@@ -1,4 +1,5 @@
 #include "doctest.h"
+#include "test_dd_make.h"
 #include "openads/ace.h"
 #include "engine/data_dict.h"
 #include "engine/sql_input_limits.h"
@@ -2228,5 +2229,49 @@ TEST_CASE("remote predicate subquery preflight rejects quadratic scans before cu
     REQUIRE(AdsCloseTable(cursor) == 0);
     REQUIRE(AdsCloseSQLStatement(statement) == 0);
     REQUIRE(AdsDisconnect(connection) == 0);
+    fs::remove_all(dir, error);
+}
+
+TEST_CASE("remote SQL DD named-user rights reject ignored-rights join and inline subquery") {
+    namespace fs = std::filesystem;
+    const auto dir = fs::temp_directory_path() / "openads_remote_sql_dd_acl";
+    std::error_code error;
+    fs::remove_all(dir, error);
+    fs::create_directories(dir);
+    m12_write_dbf(dir / "allowed.dbf", {"SAME"});
+    m12_write_dbf(dir / "hidden.dbf", {"SECR"});
+    openads_test::make_dd(dir / "test.add",
+        "TABLE allowed=allowed.dbf\nTABLE hidden=hidden.dbf\n"
+        "USER alice\nUSERPROP alice;prop_1101=pw\nDBPROP prop_5=1\n"
+        "TABLEPERM allowed;alice=1\nTABLEPERM hidden;alice=0\n");
+    Server server;
+    REQUIRE(server.start("127.0.0.1", 0).has_value());
+    std::string uri = "tcp://127.0.0.1:" + std::to_string(server.port()) + "/" + (dir / "test.add").string();
+    UNSIGNED8 user[] = "alice", password[] = "pw";
+    ADSHANDLE connection = 0, statement = 0;
+    REQUIRE(AdsConnect60(reinterpret_cast<UNSIGNED8*>(uri.data()), ADS_REMOTE_SERVER,
+                        user, password, 0, &connection) == 0);
+    REQUIRE(AdsCreateSQLStatement(connection, &statement) == 0);
+    auto execute = [&](const std::string& text, ADSHANDLE* cursor) {
+        std::vector<UNSIGNED8> sql(text.begin(), text.end());
+        sql.push_back(0);
+        return AdsExecuteSQLDirect(statement, sql.data(), cursor);
+    };
+    for (const auto& text : {
+            "SELECT * FROM hidden",
+            "SELECT allowed.TAG FROM allowed INNER JOIN hidden ON allowed.TAG = hidden.TAG",
+            "SELECT TAG FROM allowed WHERE EXISTS (SELECT TAG FROM hidden)",
+            "UPDATE allowed SET TAG = 'EDIT'"}) {
+        ADSHANDLE cursor = 0;
+        INFO(std::string(text));
+        CHECK(execute(text, &cursor) == 7200);
+        CHECK(cursor == 0);
+    }
+    ADSHANDLE cursor = 0;
+    REQUIRE(execute("SELECT TAG FROM allowed", &cursor) == 0);
+    REQUIRE(AdsCloseTable(cursor) == 0);
+    REQUIRE(AdsCloseSQLStatement(statement) == 0);
+    REQUIRE(AdsDisconnect(connection) == 0);
+    server.stop();
     fs::remove_all(dir, error);
 }

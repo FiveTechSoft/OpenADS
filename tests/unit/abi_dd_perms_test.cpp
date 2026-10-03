@@ -780,3 +780,54 @@ TEST_CASE("Perms: column-level SELECT enforcement") {
     REQUIRE(AdsDisconnect(hConn) == 0);
     fs::remove_all(dir);
 }
+
+TEST_CASE("Native SQL DD operation rights cannot be disabled and cover join predicate sources") {
+    auto dir = fs::temp_directory_path() / "openads_sql_dd_all_sources";
+    std::error_code error;
+    fs::remove_all(dir, error);
+    fs::create_directories(dir);
+    make_dbf(dir / "tbl.dbf");
+    make_dbf(dir / "hidden.dbf");
+    make_dbf(dir / "third.dbf");
+    openads_test::make_dd(dir / "test.add",
+        "TABLE tbl=tbl.dbf\nTABLE hidden=hidden.dbf\nTABLE third=third.dbf\n"
+        "USER alice\nUSERPROP alice;prop_1101=pw\nDBPROP prop_5=1\n"
+        "TABLEPERM tbl;alice=1\nTABLEPERM hidden;alice=0\nTABLEPERM third;alice=1\n");
+    auto connection = connect_as(dir / "test.add", "alice", "pw");
+    REQUIRE(connection != 0);
+    ADSHANDLE statement = 0;
+    REQUIRE(AdsCreateSQLStatement(connection, &statement) == 0);
+    REQUIRE(AdsStmtSetTableRights(statement, 0) == 0);
+    auto execute = [&](const std::string& text, ADSHANDLE* cursor) {
+        std::vector<UNSIGNED8> sql(text.begin(), text.end());
+        sql.push_back(0);
+        return AdsExecuteSQLDirect(statement, sql.data(), cursor);
+    };
+    for (const auto& text : {
+            "SELECT * FROM hidden",
+            "SELECT * FROM hidden.dbf",
+            "SELECT tbl.ID FROM tbl INNER JOIN hidden ON tbl.ID = hidden.ID",
+            "SELECT tbl.ID FROM tbl, hidden, third WHERE tbl.ID = hidden.ID AND hidden.ID = third.ID",
+            "SELECT ID FROM tbl WHERE EXISTS (SELECT ID FROM hidden)",
+            "SELECT ID FROM tbl WHERE ID IN (SELECT ID FROM hidden)",
+            "SELECT ID FROM tbl WHERE ID = (SELECT ID FROM hidden)",
+            "UPDATE tbl SET ID = 'EDIT'",
+            "DELETE FROM tbl",
+            "INSERT INTO tbl (ID) VALUES ('EDIT')"}) {
+        ADSHANDLE cursor = 0;
+        INFO(std::string(text));
+        CHECK(execute(text, &cursor) == 7200);
+        CHECK(cursor == 0);
+        UNSIGNED32 code = 0;
+        UNSIGNED8 message[2048]{};
+        UNSIGNED16 length = sizeof(message);
+        REQUIRE(AdsGetLastError(&code, message, &length) == 0);
+        CHECK(std::string(reinterpret_cast<char*>(message)).find("NativeError = 7079") != std::string::npos);
+    }
+    ADSHANDLE cursor = 0;
+    REQUIRE(execute("SELECT ID FROM tbl", &cursor) == 0);
+    REQUIRE(AdsCloseTable(cursor) == 0);
+    REQUIRE(AdsCloseSQLStatement(statement) == 0);
+    REQUIRE(AdsDisconnect(connection) == 0);
+    fs::remove_all(dir, error);
+}

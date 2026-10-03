@@ -29612,6 +29612,38 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         return budget.add_source(table->record_count(), width);
     };
 
+    // Native dictionary ACLs are server authorization, not a caller-selectable
+    // statement option. Resolve aliases and physical paths to the same object.
+    auto sql_acl_object = [c](const std::string& name) {
+        if (!c->has_dd()) return name;
+        auto alias = name_to_alias(c->dd(), name);
+        if (!alias.empty()) return alias;
+        auto normalized = [](std::string path) {
+            std::replace(path.begin(), path.end(), '\\', '/');
+            for (auto& ch : path) ch = static_cast<char>(std::tolower(
+                static_cast<unsigned char>(ch)));
+            return path;
+        };
+        auto type = openads::engine::TableType::Cdx;
+        const auto wanted = normalized(c->resolve_table_file(name, type));
+        for (const auto& entry : c->dd()->tables()) {
+            type = openads::engine::TableType::Cdx;
+            if (normalized(c->resolve_table_file(entry.first, type)) == wanted)
+                return entry.first;
+        }
+        return name;
+    };
+    auto sql_select_allowed = [c, &sql_acl_object](const std::string& name)
+        -> openads::util::Result<void> {
+        if (!c->has_dd() || c->username().empty() || name.empty() ||
+            name[0] == '#' || name.rfind("system.", 0) == 0) return {};
+        auto object = sql_acl_object(name);
+        if (!eff_ops(c, object).select_)
+            return openads::util::Error{7079, 0,
+                "dictionary SELECT permission required: " + object, ""};
+        return {};
+    };
+
     // Open a table by name, transparently resolving "system.*" virtual tables
     // to memory tables materialized from DD state.
     auto open_or_sys_unchecked = [c, &sql](const std::string& tname,
@@ -29692,6 +29724,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                            openads::engine::OpenMode mode,
                            openads::engine::LockingMode locking)
         -> openads::util::Result<Handle> {
+        if (auto allowed = sql_select_allowed(name); !allowed)
+            return allowed.error();
         auto opened = open_or_sys_unchecked(name, type, mode, locking);
         if (!opened) return opened.error();
         openads::engine::RemoteSqlShapeBudget budget;
@@ -29700,8 +29734,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         return opened;
     };
 
-    // Per-operation ACL check for SQL statements when check_rights is set.
-    if (it->second->check_rights != 0 && c->has_dd() && !c->username().empty()) {
+    // Native DD operation rights cannot be disabled by statement flags.
+    if (c->has_dd() && !c->username().empty()) {
         std::string obj_name;
         enum class SqlOp { None, Select, Insert, Update, Delete, Execute } op =
             SqlOp::None;
@@ -29733,7 +29767,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         }
 
         if (!obj_name.empty() && op != SqlOp::None) {
-            auto ops = eff_ops(c, obj_name);
+            auto ops = eff_ops(c, sql_acl_object(obj_name));
             bool denied = false;
             switch (op) {
                 case SqlOp::Select:  denied = !ops.select_;  break;
@@ -31835,6 +31869,39 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             }
         }
     }
+
+    // Authorize every read source before joins or inline predicate compilers
+    // can materialize data. Inline subqueries do not re-enter the public API.
+    std::function<openads::util::Result<void>(const openads::sql::SelectStmt&)> authorize_select;
+    std::function<openads::util::Result<void>(const openads::sql::WhereExpr*)> authorize_predicate;
+    authorize_predicate = [&](const openads::sql::WhereExpr* node)
+        -> openads::util::Result<void> {
+        if (!node) return {};
+        for (const auto& child : node->children)
+            if (auto r = authorize_predicate(child.get()); !r) return r.error();
+        if (auto r = authorize_predicate(node->child.get()); !r) return r.error();
+        for (const auto* sub : {node->exists_subquery.get(),
+                node->in_clause.subquery.get(), node->cmp.subquery.get()})
+            if (sub) if (auto r = authorize_select(*sub); !r) return r.error();
+        return {};
+    };
+    authorize_select = [&](const openads::sql::SelectStmt& select)
+        -> openads::util::Result<void> {
+        if (auto r = sql_select_allowed(select.table); !r) return r.error();
+        for (const auto& from : select.from_tables)
+            if (auto r = sql_select_allowed(from.name); !r) return r.error();
+        if (select.inner_join)
+            if (auto r = sql_select_allowed(select.inner_join->table); !r) return r.error();
+        if (auto r = authorize_predicate(select.where.get()); !r) return r.error();
+        for (const auto& item : select.case_items)
+            for (const auto& branch : item.branches)
+                if (auto r = authorize_predicate(branch.cond.get()); !r) return r.error();
+        for (const auto& aggregate : select.aggregates)
+            if (auto r = authorize_predicate(aggregate.filter.get()); !r) return r.error();
+        return {};
+    };
+    if (auto allowed = authorize_select(parsed.value()); !allowed)
+        return fail(allowed.error());
 
     // ====================================================================
     // ADS dialect -- N-way comma join (3+ tables) with composite keys and

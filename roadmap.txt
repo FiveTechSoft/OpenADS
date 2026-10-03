@@ -362,3 +362,7 @@ EN/ES: docs/{en,es}/security-sql-union-budget.md. Total runtime/allocator budget
 Security hardening 2026-10-03: native single-source remote SELECT predicate
 subqueries preflight additive1M estimated row visits, source100k/64MiB checked.
 EN/ES: docs/{en,es}/security-sql-predicate-work.md. Join/runtime budgets remain.
+
+SECURITY: Native authenticated DD SQL operation ACLs no longer caller-disabled;
+SELECT primary/join/inline predicate sources checked before materialization.
+EN/ES: docs/{en,es}/security-native-sql-permissions.md. Column/backend audit open.
