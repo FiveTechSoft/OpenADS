@@ -123,7 +123,7 @@ jobs:
                          path.startswith(b"src/network/") or
                          path.startswith(b"tools/serverd/") or
                          path.startswith(b"src/abi/") or
-                         path in (b"src/session/connection.cpp", b"src/drivers/adm/adm_memo.cpp", b"src/drivers/dbt/dbt_memo.cpp",
+                         path in (b"src/sql_backend/sqlite_connection.cpp", b"src/session/connection.cpp", b"src/drivers/adm/adm_memo.cpp", b"src/drivers/dbt/dbt_memo.cpp",
                                   b"src/drivers/fpt/fpt_memo.cpp", b"src/drivers/memo_trait.h",
                                   b"roadmap.txt", b"src/mgmt/mg_collector.cpp", b"openads.ini.sample", b"bindings/php/tests/Integration/DataDictionaryTest.php", b"bindings/php/tests/dd_smoke.php"))
               if (not allowed or any(p in (b"", b".", b"..") for p in parts)
