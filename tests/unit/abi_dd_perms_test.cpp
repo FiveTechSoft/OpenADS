@@ -882,3 +882,95 @@ TEST_CASE("Native DD SQL schema changes require administrator rather than DML pe
     REQUIRE(AdsDisconnect(admin) == 0);
     fs::remove_all(dir, error);
 }
+
+
+TEST_CASE("Native SQL column ACLs authorize expressions before materializing") {
+    using DD = openads::engine::DataDict;
+    const auto dir = fs::temp_directory_path() / "openads_sql_column_expressions";
+    std::error_code error;
+    fs::remove_all(dir, error);
+    fs::create_directories(dir);
+    make_dbf4(dir / "tbl.dbf");
+    {
+        std::fstream file(dir / "tbl.dbf", std::ios::binary | std::ios::in | std::ios::out);
+        const char count[4] = {1, 0, 0, 0};
+        file.seekp(4); file.write(count, 4);
+        file.seekp(161); file.write(" ID01SHOWNAMEHIDE", 17);
+        file.put(static_cast<char>(0x1a));
+    }
+    make_dbf4(dir / "other.dbf");
+    openads_test::make_dd(dir / "test.add",
+        "TABLE tbl=tbl.dbf\nTABLE other=other.dbf\n"
+        "USER alice\nUSERPROP alice;prop_1101=pw\nDBPROP prop_5=1\n"
+        "TABLEPERM tbl;alice=1\nTABLEPERM other;alice=1\n");
+    {
+        auto result = DD::open((dir / "test.add").string());
+        REQUIRE(result.has_value());
+        REQUIRE(result.value().grant_column_permission("tbl", "RENT", "alice", DD::DD_PERM_SELECT).has_value());
+        REQUIRE(result.value().grant_column_permission("tbl", "TENANT", "alice", DD::DD_PERM_SELECT).has_value());
+    }
+    const auto connection = connect_as(dir / "test.add", "alice", "pw");
+    REQUIRE(connection != 0);
+    ADSHANDLE statement = 0;
+    REQUIRE(AdsCreateSQLStatement(connection, &statement) == 0);
+    auto execute = [&](const std::string& text, ADSHANDLE* cursor) {
+        std::vector<UNSIGNED8> sql(text.begin(), text.end());
+        sql.push_back(0);
+        return AdsExecuteSQLDirect(statement, sql.data(), cursor);
+    };
+    for (const auto& text : {
+            "SELECT DEPOSIT FROM tbl.dbf",
+            "SELECT COUNT(DEPOSIT) FROM tbl",
+            "SELECT SUM(DEPOSIT) FROM tbl",
+            "SELECT UPPER(DEPOSIT) FROM tbl",
+            "SELECT DEPOSIT + 1 FROM tbl",
+            "SELECT CASE WHEN DEPOSIT = 'hide' THEN 'yes' ELSE 'no' END FROM tbl",
+            "SELECT RENT FROM tbl WHERE DEPOSIT = 'hide'",
+            "SELECT RENT FROM tbl ORDER BY DEPOSIT",
+            "SELECT COUNT(*) FROM tbl GROUP BY DEPOSIT",
+            "SELECT COUNT(*) FROM tbl HAVING SUM(DEPOSIT) > 0",
+            "SELECT COUNT(*) FILTER (WHERE DEPOSIT = 'hide') FROM tbl",
+            "SELECT ROW_NUMBER() OVER (PARTITION BY DEPOSIT ORDER BY RENT) FROM tbl",
+            "SELECT tbl.RENT FROM tbl INNER JOIN other ON tbl.RENT = other.RENT",
+            "SELECT RENT FROM other WHERE RENT IN (SELECT DEPOSIT FROM tbl)",
+            "SELECT RENT FROM tbl WHERE EXISTS (SELECT RENT FROM other)"}) {
+        ADSHANDLE cursor = 0;
+        INFO(std::string(text));
+        CHECK(execute(text, &cursor) == 7200);
+        CHECK(cursor == 0);
+        UNSIGNED32 code = 0;
+        UNSIGNED8 message[2048]{};
+        UNSIGNED16 length = sizeof(message);
+        REQUIRE(AdsGetLastError(&code, message, &length) == 0);
+        CHECK(std::string(reinterpret_cast<char*>(message)).find("NativeError = 7079") != std::string::npos);
+    }
+    for (const auto& text : {"SELECT RENT FROM tbl", "SELECT RENT FROM tbl.dbf",
+            "SELECT COUNT(RENT) FROM tbl", "SELECT UPPER(RENT) FROM tbl",
+            "SELECT RENT + 1 FROM tbl",
+            "SELECT RENT FROM tbl WHERE RENT = 'show' ORDER BY RENT"}) {
+        ADSHANDLE cursor = 0;
+        INFO(std::string(text));
+        REQUIRE(execute(text, &cursor) == 0);
+        REQUIRE(cursor != 0);
+        CHECK(AdsCloseTable(cursor) == 0);
+    }
+    for (const auto& text : {"SELECT * FROM tbl", "SELECT * FROM tbl.dbf"}) {
+        ADSHANDLE cursor = 0;
+        REQUIRE(execute(text, &cursor) == 0);
+        UNSIGNED16 count = 0;
+        REQUIRE(AdsGetNumFields(cursor, &count) == 0);
+        CHECK(count == 2);
+        REQUIRE(AdsGotoTop(cursor) == 0);
+        UNSIGNED8 raw[256]{};
+        UNSIGNED32 raw_length = sizeof(raw);
+        REQUIRE(AdsGetRecord(cursor, raw, &raw_length) == 0);
+        CHECK(std::string(reinterpret_cast<char*>(raw), raw_length).find("HIDE") == std::string::npos);
+        UNSIGNED8 forbidden[] = "DEPOSIT", value[32]{};
+        UNSIGNED32 value_length = sizeof(value);
+        CHECK(AdsGetString(cursor, forbidden, value, &value_length, 0) != 0);
+        CHECK(AdsCloseTable(cursor) == 0);
+    }
+    CHECK(AdsCloseSQLStatement(statement) == 0);
+    CHECK(AdsDisconnect(connection) == 0);
+    fs::remove_all(dir, error);
+}

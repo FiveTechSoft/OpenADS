@@ -31894,13 +31894,143 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             if (auto r = authorize_predicate(child.get()); !r) return r.error();
         if (auto r = authorize_predicate(node->child.get()); !r) return r.error();
         for (const auto* sub : {node->exists_subquery.get(),
-                node->in_clause.subquery.get(), node->cmp.subquery.get()})
-            if (sub) if (auto r = authorize_select(*sub); !r) return r.error();
+                node->in_clause.subquery.get(), node->cmp.subquery.get()}) {
+            if (!sub) continue;
+            if (c->has_dd() && !c->username().empty()) {
+                auto restricted = [&](const std::string& table) {
+                    return c->dd()->permitted_columns(c->username(), sql_acl_object(table),
+                        openads::engine::DataDict::DD_PERM_SELECT).has_value();
+                };
+                bool hidden = restricted(sub->table);
+                for (const auto& from : sub->from_tables)
+                    hidden = hidden || restricted(from.name);
+                if (sub->inner_join) hidden = hidden || restricted(sub->inner_join->table);
+                if (hidden) return openads::util::Error{7079, 0,
+                    "column-restricted SQL inline subquery sources are not supported", ""};
+            }
+            if (auto r = authorize_select(*sub); !r) return r.error();
+        }
         return {};
     };
     authorize_select = [&](const openads::sql::SelectStmt& select)
         -> openads::util::Result<void> {
         if (auto r = sql_select_allowed(select.table); !r) return r.error();
+        // Column ACLs must run before any expression or materialization.
+        // Joins with a restricted source have no trustworthy column lineage
+        // in the current executor, so fail closed rather than copy hidden data.
+        auto columns = [&](const std::string& table) {
+            if (!c->has_dd() || c->username().empty())
+                return std::optional<std::unordered_set<std::string>>{};
+            return c->dd()->permitted_columns(c->username(), sql_acl_object(table),
+                openads::engine::DataDict::DD_PERM_SELECT);
+        };
+        const bool joined = select.inner_join || select.from_tables.size() > 1;
+        if (joined) {
+            bool restricted = columns(select.table).has_value();
+            for (const auto& from : select.from_tables)
+                restricted = restricted || columns(from.name).has_value();
+            if (select.inner_join)
+                restricted = restricted || columns(select.inner_join->table).has_value();
+            if (restricted) return openads::util::Error{7079, 0,
+                "column-restricted SQL joins require explicit lineage support", ""};
+        }
+        if (auto permitted = columns(select.table)) {
+            auto check = [&](std::string column) -> openads::util::Result<void> {
+                if (column.empty()) return {};
+                const auto dot = column.find_last_of('.');
+                if (dot != std::string::npos) column = column.substr(dot + 1);
+                for (auto& ch : column) ch = static_cast<char>(std::tolower(
+                    static_cast<unsigned char>(ch)));
+                if (permitted->count(column)) return {};
+                return openads::util::Error{7079, 0,
+                    "dictionary column SELECT permission required: " + column, ""};
+            };
+            std::function<openads::util::Result<void>(const openads::sql::WhereExpr*)> predicate;
+            predicate = [&](const openads::sql::WhereExpr* node)
+                -> openads::util::Result<void> {
+                if (!node) return {};
+                if (node->exists_subquery || node->in_clause.subquery || node->cmp.subquery ||
+                    node->cmp.is_outer_ref)
+                    return openads::util::Error{7079, 0,
+                        "column-restricted SQL inline subqueries require lineage support", ""};
+                using Kind = openads::sql::WhereExpr::Kind;
+                if (node->kind == Kind::Cmp) {
+                    if (auto r = check(node->cmp.column); !r) return r.error();
+                }
+                if (node->kind == Kind::In) {
+                    if (auto r = check(node->in_clause.column); !r) return r.error();
+                }
+                for (const auto& child : node->children)
+                    if (auto r = predicate(child.get()); !r) return r.error();
+                return predicate(node->child.get());
+            };
+            auto arithmetic = [&](const openads::sql::ArithExpr& expr)
+                -> openads::util::Result<void> {
+                if (auto r = check(expr.lhs_column); !r) return r.error();
+                return expr.rhs_is_literal ? openads::util::Result<void>{} : check(expr.rhs_column);
+            };
+            auto aggregate = [&](const openads::sql::Aggregate& item)
+                -> openads::util::Result<void> {
+                if (auto r = check(item.column); !r) return r.error();
+                if (item.arg_expr)
+                    if (auto r = arithmetic(*item.arg_expr); !r) return r.error();
+                return predicate(item.filter.get());
+            };
+            for (const auto& column : select.projection) {
+                if (!column.empty() && column[0] == '$') continue;
+                if (column == "*" || (column.size() > 2 && column.substr(column.size()-2) == ".*")) {
+                    if (select.projection_complex)
+                        return openads::util::Error{7079, 0,
+                            "column-restricted SQL complex wildcard is not supported", ""};
+                    continue;
+                }
+                if (auto r = check(column); !r) return r.error();
+            }
+            if (auto r = predicate(select.where.get()); !r) return r.error();
+            for (const auto& item : select.case_items)
+                for (const auto& branch : item.branches)
+                    if (auto r = predicate(branch.cond.get()); !r) return r.error();
+            for (const auto& item : select.arith_items)
+                if (auto r = arithmetic(item); !r) return r.error();
+            for (const auto& item : select.aggregates)
+                if (auto r = aggregate(item); !r) return r.error();
+            for (const auto& item : select.fn_items) {
+                using Fn = openads::sql::ScalarFnKind;
+                if (item.kind == Fn::Udf || item.kind == Fn::ScriptCall)
+                    return openads::util::Error{7079, 0,
+                        "column-restricted SQL script expressions are not supported", ""};
+                if (auto r = check(item.column); !r) return r.error();
+                for (const auto& arg : item.args) {
+                    if (arg.is_call) return openads::util::Error{7079, 0,
+                        "column-restricted SQL nested calls are not supported", ""};
+                    if (arg.is_column)
+                        if (auto r = check(arg.column); !r) return r.error();
+                }
+            }
+            for (const auto& item : select.window_items) {
+                for (const auto& column : item.partition_by)
+                    if (auto r = check(column); !r) return r.error();
+                if (item.order_by)
+                    if (auto r = check(item.order_by->column); !r) return r.error();
+            }
+            if (select.order_by)
+                if (auto r = check(select.order_by->column); !r) return r.error();
+            for (const auto& item : select.order_by_extra)
+                if (auto r = check(item.column); !r) return r.error();
+            for (const auto& column : select.group_by)
+                if (auto r = check(column); !r) return r.error();
+            std::function<openads::util::Result<void>(const openads::sql::HavingExpr*)> having;
+            having = [&](const openads::sql::HavingExpr* node)
+                -> openads::util::Result<void> {
+                if (!node) return {};
+                if (node->kind == openads::sql::HavingExpr::Kind::Cmp)
+                    if (auto r = aggregate(node->cmp.agg); !r) return r.error();
+                for (const auto& child : node->children)
+                    if (auto r = having(child.get()); !r) return r.error();
+                return having(node->child.get());
+            };
+            if (auto r = having(select.having.get()); !r) return r.error();
+        }
         for (const auto& from : select.from_tables)
             if (auto r = sql_select_allowed(from.name); !r) return r.error();
         if (select.inner_join)
@@ -37178,7 +37308,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         auto* dd = c->dd();
         if (dd != nullptr && dd->has_any_column_acl()) {
             allowed_cols = dd->permitted_columns(
-                c->username(), parsed.value().table,
+                c->username(), sql_acl_object(parsed.value().table),
                 openads::engine::DataDict::DD_PERM_SELECT);
         }
     }
@@ -37200,7 +37330,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
     // 1..N, its own index space) isolates it from the source: INDEX ON /
     // DBSETORDER behave exactly like DBFCDX / ADS_CDX. Same shape the
     // multi-table / union / aggregate / CASE paths already produce.
-    if (derived_cur == 0 && tbl->has_recno_sequence()) {
+    if (derived_cur == 0 && (tbl->has_recno_sequence() || allowed_cols)) {
         ADSHANDLE conn_h = 0;
         s.registry.for_each_handle([&](Handle h, HandleKind k, void* p) {
             if (k != HandleKind::Connection) return;
@@ -37354,6 +37484,14 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         hNew, HandleKind::Table);
                 if (tgt != nullptr) {
                     std::vector<std::uint32_t> seq = tbl->recno_sequence();
+                    if (!tbl->has_recno_sequence()) {
+                        for (std::uint32_t r = 1; r <= tbl->record_count(); ++r) {
+                            if (auto g = tbl->goto_record(r); !g) continue;
+                            if (!tbl->show_deleted_records() && tbl->is_deleted()) continue;
+                            if (!tbl->passes_filter()) continue;
+                            seq.push_back(r);
+                        }
+                    }
                     for (std::uint32_t r : seq) {
                         if (auto g = tbl->goto_record(r); !g) continue;
                         if (auto ar = tgt->append_record(); !ar) break;
@@ -37419,8 +37557,20 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 *phCursor = gh_srt;
                 return ok();
             }
+            // A restricted source must never fall back to a live physical
+            // cursor: raw-record reads or new filters could reach hidden data.
+            if (allowed_cols) {
+                if (table_handle != 0) c->close_table(table_handle);
+                return fail(static_cast<int>(crc), "restricted cursor materialization failed");
+            }
             // AdsCreateTable failed -> fall through to the live-cursor return.
         }
+    }
+
+    if (allowed_cols && derived_cur == 0) {
+        if (table_handle != 0) c->close_table(table_handle);
+        return fail(openads::AE_ACCESS_DENIED,
+                    "restricted cursor requires physical materialization");
     }
 
     // M10.46 -- when this query was a derived-table outer SELECT,

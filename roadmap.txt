@@ -375,3 +375,8 @@ Seguridad: cambios de esquema SQL con diccionario requieren admin, no solo permi
 Security: named DD direct wire table operations enforce SELECT/INSERT/UPDATE/DELETE;
 restricted whole-row opens fail closed and schema/file/maintenance operations need admin.
 Seguridad: operaciones de tabla wire DD autorizadas antes del motor, sin confiar en rights cliente.
+
+
+Security: native SQL authorizes column references before predicates and materialization;
+restricted join/inline-subquery/script shapes fail closed until column lineage is available.
+Seguridad: autorización de columnas previa a evaluar SQL; formas sin origen fiable se rechazan.
