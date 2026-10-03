@@ -6451,6 +6451,44 @@ materialised_cursor_temps() {
     return temps;
 }
 
+// Native row/index/copy entrypoints authorize against the actual DD path,
+// never the caller's alias or rights flag. SQL preflight owns internal reads.
+UNSIGNED32 native_table_authorize(Table* t, std::uint32_t bit, int field = -1) {
+    if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
+    auto* c = t->owner();
+    if (!c || !c->has_dd() || (!c->remote_server() && c->username().empty())) return 0;
+    for (const auto& temp : materialised_cursor_temps())
+        if (get_table(temp.first) == t) return 0;
+    auto* dd = c->dd();
+    if (c->username().empty() || !dd->has_user(c->username()))
+        return fail(openads::AE_ACCESS_DENIED, "dictionary user required");
+    if (dd->is_member_of(c->username(), "DB:Admin")) return 0;
+    auto alias = ri_alias_for_path(c, t->path());
+    if (alias.empty()) return fail(openads::AE_ACCESS_DENIED, "dictionary table required");
+    const auto ops = dd->get_effective_ops(c->username(), alias);
+    using DD = openads::engine::DataDict;
+    const bool allowed = bit == DD::DD_PERM_SELECT ? ops.select_
+        : bit == DD::DD_PERM_INSERT ? ops.insert_
+        : bit == DD::DD_PERM_UPDATE ? ops.update_ : ops.delete_;
+    if (!allowed) return fail(openads::AE_ACCESS_DENIED, "dictionary operation required");
+    if (auto columns = dd->permitted_columns(c->username(), alias, bit)) {
+        if (field < 0 || field >= t->field_count())
+            return fail(openads::AE_ACCESS_DENIED, "whole-row access requires all columns");
+        auto name = t->field_descriptor(static_cast<std::uint16_t>(field)).name;
+        for (auto& ch : name) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        if (!columns->count(name)) return fail(openads::AE_ACCESS_DENIED, "dictionary column required");
+    }
+    return 0;
+}
+
+UNSIGNED32 native_index_authorize(Table* t) {
+    if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
+    if (!native_schema_denied(t->owner())) return 0;
+    for (const auto& temp : materialised_cursor_temps())
+        if (get_table(temp.first) == t) return 0;
+    return fail(openads::AE_ACCESS_DENIED, "dictionary administrator required for index maintenance");
+}
+
 // Delete the files of a materialised cursor's temp table: the table itself plus
 // any memo / index companion an application created on it (the ERP runs
 // INDEX ON over the result, producing <stem>.cdx or <stem>.adi).
@@ -10645,6 +10683,7 @@ UNSIGNED32 ENTRYPOINT AdsExtractKey(ADSHANDLE hIndex, UNSIGNED8* pucBuf,
     if (pusLen == nullptr) return fail(openads::AE_INTERNAL_ERROR, "null len");
     Table* t = lookup_table_by_index(hIndex);
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown index");
+    if (auto rc = native_table_authorize(t, openads::engine::DataDict::DD_PERM_SELECT)) return rc;
     openads::drivers::IIndex* idx = iindex_for_handle(hIndex);
     if (!idx) return fail(openads::AE_INTERNAL_ERROR, "index not loaded");
     // Return the key in its STORED encoding -- rddads' OrdKeyVal decodes
@@ -12615,6 +12654,7 @@ UNSIGNED32 ENTRYPOINT AdsGetLong(ADSHANDLE hTable, UNSIGNED8* pucField, SIGNED32
     if (!resolve_field_index(t, pucField, &idx)) {
         return fail(openads::AE_COLUMN_NOT_FOUND, "");
     }
+    if (auto rc = native_table_authorize(t, openads::engine::DataDict::DD_PERM_SELECT, idx)) return rc;
     auto v = t->read_field(idx);
     if (!v) return fail(v.error());
     *plVal = static_cast<SIGNED32>(v.value().as_double);
@@ -12668,6 +12708,7 @@ UNSIGNED32 ENTRYPOINT AdsGetDouble(ADSHANDLE hTable, UNSIGNED8* pucField, double
     if (!resolve_field_index(t, pucField, &idx)) {
         return fail(openads::AE_COLUMN_NOT_FOUND, "");
     }
+    if (auto rc = native_table_authorize(t, openads::engine::DataDict::DD_PERM_SELECT, idx)) return rc;
     auto v = t->read_field(idx);
     if (!v) return fail(v.error());
     *pdVal = v.value().as_double;
@@ -12802,6 +12843,7 @@ UNSIGNED32 ENTRYPOINT AdsGetJulian(ADSHANDLE hTable, UNSIGNED8* pucField, SIGNED
     if (!resolve_field_index(t, pucField, &idx)) {
         return fail(openads::AE_COLUMN_NOT_FOUND, "");
     }
+    if (auto rc = native_table_authorize(t, openads::engine::DataDict::DD_PERM_SELECT, idx)) return rc;
     auto v = t->read_field(idx);
     if (!v) return fail(v.error());
     const std::string& s = v.value().as_string;
@@ -13118,6 +13160,7 @@ UNSIGNED32 ENTRYPOINT AdsGetField(ADSHANDLE hTable, UNSIGNED8* pucField,
     if (!resolve_field_index_h(hTable, t, pucField, &idx)) {
         return fail(openads::AE_COLUMN_NOT_FOUND, "");
     }
+    if (auto rc = native_table_authorize(t, openads::engine::DataDict::DD_PERM_SELECT, idx)) return rc;
     auto v = t->read_field(idx);
     if (!v) {
         if (is_no_current_record(v.error())) {
@@ -13699,6 +13742,7 @@ UNSIGNED32 ENTRYPOINT AdsAppendRecord(ADSHANDLE hTable) {
 #endif
     Table* t = get_table(hTable);
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
+    if (auto rc = native_table_authorize(t, openads::engine::DataDict::DD_PERM_INSERT)) return rc;
     auto r = t->append_record();
     if (!r) return fail(r.error());
     // ACE semantics: a freshly-appended record in a non-exclusive table is
@@ -13851,6 +13895,7 @@ UNSIGNED32 ENTRYPOINT AdsWriteRecord(ADSHANDLE hTable) {
 #endif
     Table* t = get_table(hTable);
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
+    if (auto rc = native_table_authorize(t, t->pending_append() ? openads::engine::DataDict::DD_PERM_INSERT : openads::engine::DataDict::DD_PERM_UPDATE)) return rc;
     bool is_insert = t->pending_append();
     std::uint32_t event_mask = is_insert ? 1u : 2u;
 
@@ -14053,6 +14098,7 @@ UNSIGNED32 ENTRYPOINT AdsDeleteRecord(ADSHANDLE hTable) {
 #endif
     Table* t = get_table(hTable);
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
+    if (auto rc = native_table_authorize(t, openads::engine::DataDict::DD_PERM_DELETE)) return rc;
     t->set_pending_append(false);   // abandon any in-flight append
     if (Connection* conn = conn_for_table(t)) {
         if (auto ri = ri_enforce_delete(conn, *t); !ri)
@@ -14122,6 +14168,7 @@ UNSIGNED32 ENTRYPOINT AdsRecallRecord(ADSHANDLE hTable) {
     }
     Table* t = get_table(hTable);
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
+    if (auto rc = native_table_authorize(t, openads::engine::DataDict::DD_PERM_UPDATE)) return rc;
     auto r = t->recall_deleted();
     if (!r) return fail(r.error());
     return ok();
@@ -14274,6 +14321,7 @@ UNSIGNED32 ENTRYPOINT AdsSetString(ADSHANDLE hTable, UNSIGNED8* pucField,
         return fail(openads::AE_COLUMN_NOT_FOUND, "");
     }
     std::string val(reinterpret_cast<const char*>(pucValue), ulLen);
+    if (auto rc = native_table_authorize(t, t->pending_append() ? openads::engine::DataDict::DD_PERM_INSERT : openads::engine::DataDict::DD_PERM_UPDATE, idx)) return rc;
     auto r = t->set_field(idx, val);
     if (!r) return fail(r.error());
     return ok();
@@ -14324,6 +14372,7 @@ UNSIGNED32 ENTRYPOINT AdsSetLogical(ADSHANDLE hTable, UNSIGNED8* pucField,
     if (!resolve_field_index(t, pucField, &idx)) {
         return fail(openads::AE_COLUMN_NOT_FOUND, "");
     }
+    if (auto rc = native_table_authorize(t, t->pending_append() ? openads::engine::DataDict::DD_PERM_INSERT : openads::engine::DataDict::DD_PERM_UPDATE, idx)) return rc;
     auto r = t->set_field(idx, bValue != 0);
     if (!r) return fail(r.error());
     return ok();
@@ -14378,6 +14427,7 @@ UNSIGNED32 ENTRYPOINT AdsSetDouble(ADSHANDLE hTable, UNSIGNED8* pucField,
     if (!resolve_field_index(t, pucField, &idx)) {
         return fail(openads::AE_COLUMN_NOT_FOUND, "");
     }
+    if (auto rc = native_table_authorize(t, t->pending_append() ? openads::engine::DataDict::DD_PERM_INSERT : openads::engine::DataDict::DD_PERM_UPDATE, idx)) return rc;
     auto r = t->set_field(idx, dValue);
     if (!r) return fail(r.error());
     return ok();
@@ -14477,6 +14527,7 @@ UNSIGNED32 ENTRYPOINT AdsGetMemoLength(ADSHANDLE hTable, UNSIGNED8* pucField,
     if (!resolve_field_index(t, pucField, &idx)) {
         return fail(openads::AE_COLUMN_NOT_FOUND, "");
     }
+    if (auto rc = native_table_authorize(t, openads::engine::DataDict::DD_PERM_SELECT, idx)) return rc;
     auto v = t->read_field(idx);
     if (!v) return fail(v.error());
     *pulLen = static_cast<UNSIGNED32>(v.value().as_string.size());
@@ -14575,6 +14626,7 @@ UNSIGNED32 ENTRYPOINT AdsGetString(ADSHANDLE hTable, UNSIGNED8* pucField,
     if (!resolve_field_index(t, pucField, &idx)) {
         return fail(openads::AE_COLUMN_NOT_FOUND, "");
     }
+    if (auto rc = native_table_authorize(t, openads::engine::DataDict::DD_PERM_SELECT, idx)) return rc;
     auto v = t->read_field(idx);
     if (!v) return fail(v.error());
     std::string s = v.value().as_string;
@@ -14726,6 +14778,7 @@ UNSIGNED32 ENTRYPOINT AdsSetStringW(ADSHANDLE hTable, UNSIGNED8* pucField,
     if (!resolve_field_index_w(t, pucField, &idx)) {
         return fail(openads::AE_COLUMN_NOT_FOUND, "");
     }
+    if (auto rc = native_table_authorize(t, t->pending_append() ? openads::engine::DataDict::DD_PERM_INSERT : openads::engine::DataDict::DD_PERM_UPDATE, idx)) return rc;
     auto r = t->set_field(idx, utf8);
     if (!r) return fail(r.error());
     return ok();
@@ -14751,6 +14804,7 @@ UNSIGNED32 ENTRYPOINT AdsGetStringW(ADSHANDLE hTable, UNSIGNED8* pucField,
     if (!resolve_field_index_w(t, pucField, &idx)) {
         return fail(openads::AE_COLUMN_NOT_FOUND, "");
     }
+    if (auto rc = native_table_authorize(t, openads::engine::DataDict::DD_PERM_SELECT, idx)) return rc;
     auto v = t->read_field(idx);
     if (!v) return fail(v.error());
     return emit_utf16(pucBufW, pulLenW, v.value().as_string);
@@ -14798,6 +14852,7 @@ UNSIGNED32 ENTRYPOINT AdsSetJulian(ADSHANDLE hTable, UNSIGNED8* pucField,
     if (!resolve_field_index(t, pucField, &idx)) {
         return fail(openads::AE_COLUMN_NOT_FOUND, "");
     }
+    if (auto rc = native_table_authorize(t, t->pending_append() ? openads::engine::DataDict::DD_PERM_INSERT : openads::engine::DataDict::DD_PERM_UPDATE, idx)) return rc;
     auto r = t->set_field(idx, val);
     if (!r) return fail(r.error());
     return ok();
@@ -17486,6 +17541,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex(ADSHANDLE hTable, UNSIGNED8* pucFile,
         create_index_diag("legacy EXIT unknown-handle 5000 h=%llu", static_cast<unsigned long long>(hTable));
         return fail(openads::AE_INTERNAL_ERROR, "unknown table or null out");
     }
+    if (auto rc = native_index_authorize(t)) return rc;
     create_index_diag("legacy ROUTE native h=%llu", static_cast<unsigned long long>(hTable));
     // Settle any coalesced dirty record first (see AdsCreateIndex61).
     if (auto cr = t->commit_dirty_record(); !cr) return fail(cr.error());
@@ -17644,6 +17700,7 @@ UNSIGNED32 ENTRYPOINT AdsDeleteIndex(ADSHANDLE hIndex) {
         auto it = m.find(hIndex);
         if (it != m.end() &&
             path_ends_with_ci(it->second.path, ".cdx")) {
+            if (auto rc = native_index_authorize(it->second.table)) return rc;
             // Flush the in-memory tree before rewriting the struct leaf.
             if (it->second.parked) (void)it->second.parked->flush();
             else if (it->second.table && it->second.table->order() &&
@@ -17700,6 +17757,7 @@ UNSIGNED32 ENTRYPOINT AdsAddCustomKey(ADSHANDLE hIndex) {
     }
     Table* t = it->second.table;
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
+    if (auto rc = native_index_authorize(t)) return rc;
     auto* idx = iindex_for_binding(it->second);
     if (!idx) return fail(openads::AE_INTERNAL_ERROR, "no IIndex for binding");
 
@@ -17745,6 +17803,7 @@ UNSIGNED32 ENTRYPOINT AdsDeleteCustomKey(ADSHANDLE hIndex) {
     }
     Table* t = it->second.table;
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
+    if (auto rc = native_index_authorize(t)) return rc;
     auto* idx = iindex_for_binding(it->second);
     if (!idx) return fail(openads::AE_INTERNAL_ERROR, "no IIndex for binding");
 
@@ -17870,6 +17929,7 @@ UNSIGNED32 ENTRYPOINT AdsGetLongLong(ADSHANDLE hTable, UNSIGNED8* pucField,
     if (!resolve_field_index(t, pucField, &idx)) {
         return fail(openads::AE_COLUMN_NOT_FOUND, "");
     }
+    if (auto rc = native_table_authorize(t, openads::engine::DataDict::DD_PERM_SELECT, idx)) return rc;
     auto v = t->read_field(idx);
     if (!v) return fail(v.error());
     auto& s = v.value().as_string;
@@ -17906,6 +17966,7 @@ UNSIGNED32 ENTRYPOINT AdsSetFieldRaw(ADSHANDLE hTable, UNSIGNED8* pucField,
     if (!resolve_field_index(t, pucField, &idx)) {
         return fail(openads::AE_COLUMN_NOT_FOUND, "");
     }
+    if (auto rc = native_table_authorize(t, t->pending_append() ? openads::engine::DataDict::DD_PERM_INSERT : openads::engine::DataDict::DD_PERM_UPDATE, idx)) return rc;
     auto r = t->set_field(idx, raw);
     if (!r) return fail(r.error());
     return ok();
@@ -21702,6 +21763,7 @@ UNSIGNED32 ENTRYPOINT AdsCopyTable(ADSHANDLE   hHandle,
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
     if (!t->driver()) return fail(openads::AE_INTERNAL_ERROR, "no driver");
 
+    if (auto rc = native_table_authorize(t, openads::engine::DataDict::DD_PERM_SELECT)) return rc;
     namespace fs = std::filesystem;
     auto raw  = openads::abi::to_internal(pucFile, 0);
     fs::path dst(raw);
@@ -21710,6 +21772,13 @@ UNSIGNED32 ENTRYPOINT AdsCopyTable(ADSHANDLE   hHandle,
         dst = src_dir / dst;
     }
     if (!dst.has_extension()) dst.replace_extension(".dbf");
+    if (auto* owner = t->owner()) {
+        auto jailed = openads::platform::resolve_under_any_root(openads::platform::split_data_roots(owner->data_dir()), dst.string());
+        if (!jailed) return fail(openads::AE_ACCESS_DENIED, "copy path outside data directory");
+        dst = *jailed;
+        if (native_schema_denied(owner))
+            return fail(openads::AE_ACCESS_DENIED, "dictionary administrator required for file copy");
+    }
 
     // Build a new DBF that mirrors the source schema. Copy live
     // records (deleted rows skipped -- filter options beyond
@@ -21793,6 +21862,10 @@ UNSIGNED32 ENTRYPOINT AdsCopyTableContents(ADSHANDLE hSrc, ADSHANDLE hDst,
     Table* src = get_table(hSrc);
     Table* dst = get_table(hDst);
     if (!src || !dst) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
+    if (auto rc = native_table_authorize(src, openads::engine::DataDict::DD_PERM_SELECT)) return rc;
+    if (auto rc = native_table_authorize(dst, openads::engine::DataDict::DD_PERM_INSERT)) return rc;
+    if (dst->open_mode() == openads::engine::OpenMode::Read)
+        return fail(openads::AE_ACCESS_DENIED, "copy destination is read-only");
     if (!src->driver() || !dst->driver()) {
         return fail(openads::AE_INTERNAL_ERROR, "no driver");
     }
@@ -22226,6 +22299,7 @@ UNSIGNED32 ENTRYPOINT AdsGetBinaryLength(ADSHANDLE hTable, UNSIGNED8* pucField,
     if (!resolve_field_index(t, pucField, &idx)) {
         return fail(openads::AE_COLUMN_NOT_FOUND, "");
     }
+    if (auto rc = native_table_authorize(t, openads::engine::DataDict::DD_PERM_SELECT, idx)) return rc;
     auto v = t->read_field(idx);
     if (!v) return fail(v.error());
     *pulLength = static_cast<UNSIGNED32>(v.value().as_string.size());
@@ -22244,6 +22318,7 @@ UNSIGNED32 ENTRYPOINT AdsGetBinary(ADSHANDLE hTable, UNSIGNED8* pucField,
     if (!resolve_field_index(t, pucField, &idx)) {
         return fail(openads::AE_COLUMN_NOT_FOUND, "");
     }
+    if (auto rc = native_table_authorize(t, openads::engine::DataDict::DD_PERM_SELECT, idx)) return rc;
     auto v = t->read_field(idx);
     if (!v) return fail(v.error());
     const std::string& s = v.value().as_string;
@@ -22344,6 +22419,7 @@ UNSIGNED32 ENTRYPOINT AdsSetBinary(ADSHANDLE hTable, UNSIGNED8* pucField,
         if (pucBuf != nullptr && ulBytes > 0) {
             payload.assign(reinterpret_cast<const char*>(pucBuf), ulBytes);
         }
+        if (auto rc = native_table_authorize(t, t->pending_append() ? openads::engine::DataDict::DD_PERM_INSERT : openads::engine::DataDict::DD_PERM_UPDATE, idx)) return rc;
         auto r = t->set_field_binary(idx, payload, type);
         if (!r) return fail(r.error());
         return ok();
@@ -22388,6 +22464,7 @@ UNSIGNED32 ENTRYPOINT AdsSetBinary(ADSHANDLE hTable, UNSIGNED8* pucField,
         std::string payload = std::move(it->second.payload);
         auto pending_type = it->second.type;
         m.erase(it);
+        if (auto rc = native_table_authorize(t, t->pending_append() ? openads::engine::DataDict::DD_PERM_INSERT : openads::engine::DataDict::DD_PERM_UPDATE, idx)) return rc;
         auto r = t->set_field_binary(idx, payload, pending_type);
         if (!r) return fail(r.error());
     }
@@ -22474,6 +22551,7 @@ UNSIGNED32 ENTRYPOINT AdsEncryptTable(ADSHANDLE hTable) {
     std::lock_guard<std::recursive_mutex> lk(s.mu);
     Table* t = s.registry.lookup<Table>(hTable, HandleKind::Table);
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "invalid table handle");
+    if (auto rc = native_index_authorize(t)) return rc;
     Connection* owning = find_owning_connection(t);
     if (!owning) return fail(openads::AE_INVALID_CONNECTION_HANDLE,
                              "table not owned by any connection");
@@ -22505,6 +22583,7 @@ UNSIGNED32 ENTRYPOINT AdsEncryptRecord(ADSHANDLE hTable) {
     std::lock_guard<std::recursive_mutex> lk(s.mu);
     Table* t = s.registry.lookup<Table>(hTable, HandleKind::Table);
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "invalid table handle");
+    if (auto rc = native_index_authorize(t)) return rc;
     if (!t->positioned())
         return fail(openads::AE_NO_CURRENT_RECORD, "no current record");
     Connection* owning = find_owning_connection(t);
@@ -22532,6 +22611,7 @@ UNSIGNED32 ENTRYPOINT AdsDecryptRecord(ADSHANDLE hTable) {
     std::lock_guard<std::recursive_mutex> lk(s.mu);
     Table* t = s.registry.lookup<Table>(hTable, HandleKind::Table);
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "invalid table handle");
+    if (auto rc = native_index_authorize(t)) return rc;
     if (!t->positioned())
         return fail(openads::AE_NO_CURRENT_RECORD, "no current record");
     Connection* owning = find_owning_connection(t);
@@ -38029,6 +38109,10 @@ UNSIGNED32 ENTRYPOINT AdsCopyTableContent(ADSHANDLE hSrc, ADSHANDLE hDst) {
     Table* src = get_table(hSrc);
     Table* dst = get_table(hDst);
     if (!src || !dst) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
+    if (auto rc = native_table_authorize(src, openads::engine::DataDict::DD_PERM_SELECT)) return rc;
+    if (auto rc = native_table_authorize(dst, openads::engine::DataDict::DD_PERM_INSERT)) return rc;
+    if (dst->open_mode() == openads::engine::OpenMode::Read)
+        return fail(openads::AE_ACCESS_DENIED, "copy destination is read-only");
 
     // Build a field-name mapping: for each source field find the
     // matching destination field (by name). Fields that exist only in
@@ -38688,6 +38772,7 @@ UNSIGNED32 ENTRYPOINT AdsGetRecord(ADSHANDLE hTable, UNSIGNED8* pucRecord,
     }
     Table* t = get_table(hTable);
     if (t == nullptr) return fail(openads::AE_INTERNAL_ERROR, "no table");
+    if (auto rc = native_table_authorize(t, openads::engine::DataDict::DD_PERM_SELECT)) return rc;
     if (!t->positioned()) {
         *pulLen = 0;
         return fail(openads::AE_NO_CURRENT_RECORD, "no current record");
@@ -39470,6 +39555,7 @@ UNSIGNED32 ENTRYPOINT AdsSetRecord(ADSHANDLE hTable, UNSIGNED8* pucRecord,
     }
     Table* t = get_table(hTable);
     if (t == nullptr) return fail(openads::AE_INTERNAL_ERROR, "no table");
+    if (auto rc = native_table_authorize(t, t->pending_append() ? openads::engine::DataDict::DD_PERM_INSERT : openads::engine::DataDict::DD_PERM_UPDATE)) return rc;
     auto r = t->set_record_raw(pucRecord, static_cast<std::size_t>(ulLen));
     if (!r) return fail(r.error());
     return ok();
@@ -40980,12 +41066,20 @@ UNSIGNED32 ENTRYPOINT AdsCopyTableStructure(ADSHANDLE hTable, UNSIGNED8* pucFile
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
     if (!t->driver()) return fail(openads::AE_INTERNAL_ERROR, "no driver");
 
+    if (auto rc = native_table_authorize(t, openads::engine::DataDict::DD_PERM_SELECT)) return rc;
     namespace fs = std::filesystem;
     auto raw = openads::abi::to_internal(pucFile, 0);
     fs::path dst(raw);
     if (!dst.is_absolute())
         dst = fs::path(t->path()).parent_path() / dst;
     if (!dst.has_extension()) dst.replace_extension(".dbf");
+    if (auto* owner = t->owner()) {
+        auto jailed = openads::platform::resolve_under_any_root(openads::platform::split_data_roots(owner->data_dir()), dst.string());
+        if (!jailed) return fail(openads::AE_ACCESS_DENIED, "copy path outside data directory");
+        dst = *jailed;
+        if (native_schema_denied(owner))
+            return fail(openads::AE_ACCESS_DENIED, "dictionary administrator required for file copy");
+    }
 
     const auto& src_fields = t->driver()->fields();
     if (src_fields.empty())
@@ -41046,6 +41140,7 @@ UNSIGNED32 ENTRYPOINT AdsGetRecordCRC(ADSHANDLE hTable, UNSIGNED32* pulCRC,
     }
     Table* t = get_table(hTable);
     if (t == nullptr) return fail(openads::AE_INTERNAL_ERROR, "no table");
+    if (auto rc = native_table_authorize(t, openads::engine::DataDict::DD_PERM_SELECT)) return rc;
     if (!t->positioned())
         return fail(openads::AE_NO_CURRENT_RECORD, "no current record");
     *pulCRC = openads::engine::crc32_record(t->record_buffer());
@@ -41141,6 +41236,7 @@ UNSIGNED32 ENTRYPOINT AdsSetNull(ADSHANDLE hObj, UNSIGNED8* pId) {
                 as_field(resolve_field_id(hObj, pId, nm, sizeof(nm))), &idx)) {
             return fail(openads::AE_COLUMN_NOT_FOUND, "");
         }
+        if (auto rc = native_table_authorize(t, t->pending_append() ? openads::engine::DataDict::DD_PERM_INSERT : openads::engine::DataDict::DD_PERM_UPDATE, idx)) return rc;
         auto r = t->set_field_null(idx);
         if (!r) return fail(r.error());
         return ok();

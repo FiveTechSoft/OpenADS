@@ -383,3 +383,5 @@ Seguridad: autorización de columnas previa a evaluar SQL; formas sin origen fia
 
 Security: native DD schema APIs require admin, with narrowly scoped internal cursor creation.
 Seguridad: APIs de esquema nativas DD requieren admin; resultados temporales registrados conservan mantenimiento.
+
+Security: native row/column operations enforce DD ACLs; native copies are jailed and index mutations require admin.
