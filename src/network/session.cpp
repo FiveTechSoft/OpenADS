@@ -1,5 +1,6 @@
 #include "network/session.h"
 #include "engine/pbkdf2.h"
+#include "engine/data_dict.h"
 #include "engine/sql_input_limits.h"
 
 #include "openads_version.h"  // OPENADS_VERSION_STR (CMake-generated)
@@ -27,6 +28,8 @@
 #include "session/connection.h"
 #include "sql_backend/enterprise_config.h"
 
+#include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -1661,6 +1664,89 @@ DispatchResult Session::dispatch(const Frame& f) {
         return {err("Already connected", openads::AE_ACCESS_DENIED), true};
     if ((f.opcode == Opcode::OpenTable || f.opcode == Opcode::ExecuteSQL) && tbls_.size() + cursor_tbls_.size() >= 256)
         return {err("Session table limit", openads::AE_ACCESS_DENIED), false};
+    // Wire table handlers can operate directly on engine handles, without
+    // ABI ACL checks. Enforce authenticated dictionary authority centrally.
+    if (sess_conn_ && sess_conn_->has_dd() && !sess_conn_->username().empty()) {
+        auto* dd = sess_conn_->dd();
+        const auto& user = sess_conn_->username();
+        const bool admin = dd->is_member_of(user, "DB:Admin");
+        auto object = [&](const std::string& name) {
+            auto fold = [](std::string text) {
+                std::replace(text.begin(), text.end(), '\\', '/');
+                for (auto& ch : text) ch = static_cast<char>(std::tolower(
+                    static_cast<unsigned char>(ch)));
+                return text;
+            };
+            auto type = openads::engine::TableType::Cdx;
+            const auto path = fold(sess_conn_->resolve_table_file(name, type));
+            for (const auto& entry : dd->tables()) {
+                type = openads::engine::TableType::Cdx;
+                if (fold(entry.first) == fold(name) ||
+                    fold(sess_conn_->resolve_table_file(entry.first, type)) == path)
+                    return entry.first;
+            }
+            return name;
+        };
+        auto denied = [&]() {
+            return DispatchResult{err("Dictionary permission required", openads::AE_ACCESS_DENIED), false};
+        };
+        switch (f.opcode) {
+            case Opcode::CreateTable: case Opcode::DropTable:
+            case Opcode::CreateIndex: case Opcode::Reindex:
+            case Opcode::PackTable: case Opcode::ZapTable:
+            case Opcode::FileExists: case Opcode::FileErase: case Opcode::FileRename:
+            case Opcode::FileSize: case Opcode::FileMTime: case Opcode::Directory:
+            case Opcode::DirExist: case Opcode::DirMake: case Opcode::DirRemove:
+            case Opcode::FOpen: case Opcode::FCreate: case Opcode::FClose:
+            case Opcode::FRead: case Opcode::FWrite: case Opcode::FSeek:
+            case Opcode::ZipArchive: case Opcode::UnzipArchive: case Opcode::ZipList:
+                if (!admin) return denied();
+                break;
+            default: break;
+        }
+        if (f.opcode == Opcode::OpenTable) {
+            const auto offset = client_open_table_mode_ok_ && f.payload.size() >= 2 ? 2u : 0u;
+            std::string name(f.payload.begin() + offset, f.payload.end());
+            if (name.rfind("tcp://", 0) == 0 || name.rfind("TCP://", 0) == 0) {
+                const auto sep = name.find_last_of("/\\");
+                if (sep != std::string::npos) name = name.substr(sep + 1);
+            }
+            const auto alias = object(name);
+            if (!dd->get_effective_ops(user, alias).select_ ||
+                dd->permitted_columns(user, alias, openads::engine::DataDict::DD_PERM_SELECT))
+                return denied();
+            if (!admin && offset == 2 && read_u16_le(f.payload.data()) ==
+                static_cast<std::uint16_t>(openads::engine::OpenMode::Exclusive))
+                return denied();
+        }
+        enum class Write { None, Insert, Update, Delete } write = Write::None;
+        switch (f.opcode) {
+            case Opcode::AppendBlank: write = Write::Insert; break;
+            case Opcode::SetField: case Opcode::SetFields: case Opcode::SetRecord:
+            case Opcode::RecallRecord: case Opcode::LockRecord: case Opcode::LockTable:
+                write = Write::Update; break;
+            case Opcode::DeleteRecord: write = Write::Delete; break;
+            default: break;
+        }
+        if (write != Write::None && f.payload.size() >= 4) {
+            const auto id = read_u32_le(f.payload.data());
+            auto path = tbl_open_paths_.find(id);
+            if (path == tbl_open_paths_.end()) {
+                // Cursor handles do not retain trustworthy source authority.
+                if (!admin) return denied();
+            } else {
+                const auto alias = object(path->second);
+                const auto ops = dd->get_effective_ops(user, alias);
+                if ((write == Write::Insert && !ops.insert_) ||
+                    (write == Write::Update && !ops.update_) ||
+                    (write == Write::Delete && !ops.delete_)) return denied();
+                const auto bit = write == Write::Insert ? openads::engine::DataDict::DD_PERM_INSERT
+                    : write == Write::Update ? openads::engine::DataDict::DD_PERM_UPDATE
+                    : openads::engine::DataDict::DD_PERM_DELETE;
+                if (dd->permitted_columns(user, alias, bit)) return denied();
+            }
+        }
+    }
     WTRACE("[wire] op=%u\n", (unsigned)f.opcode);
     if (wire_trace_on() && f.payload.size() >= 4) {
         std::uint32_t tid0 = read_u32_le(f.payload.data());

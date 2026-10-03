@@ -370,3 +370,8 @@ EN/ES: docs/{en,es}/security-native-sql-permissions.md. Column/backend audit ope
 Security: native dictionary SQL schema/file changes require dictionary administrator;
 full table DML permission no longer permits DROP/ALTER/CREATE schema operations.
 Seguridad: cambios de esquema SQL con diccionario requieren admin, no solo permiso DML.
+
+
+Security: named DD direct wire table operations enforce SELECT/INSERT/UPDATE/DELETE;
+restricted whole-row opens fail closed and schema/file/maintenance operations need admin.
+Seguridad: operaciones de tabla wire DD autorizadas antes del motor, sin confiar en rights cliente.

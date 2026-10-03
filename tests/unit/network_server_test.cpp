@@ -2281,3 +2281,70 @@ TEST_CASE("remote SQL DD named-user rights reject ignored-rights join and inline
     server.stop();
     fs::remove_all(dir, error);
 }
+
+
+TEST_CASE("wire DD table rights authorize direct engine reads writes and maintenance") {
+    namespace fs = std::filesystem;
+    using DD = openads::engine::DataDict;
+    const auto dir = fs::temp_directory_path() / "openads_wire_dd_table_acl";
+    std::error_code error;
+    fs::remove_all(dir, error);
+    fs::create_directories(dir);
+    m12_write_dbf(dir / "readable.dbf", {"READ"});
+    m12_write_dbf(dir / "hidden.dbf", {"HIDE"});
+    m12_write_dbf(dir / "columns.dbf", {"COLS"});
+    m12_write_dbf(dir / "writable.dbf", {"EDIT"});
+    openads_test::make_dd(dir / "test.add",
+        "TABLE readable=readable.dbf\nTABLE hidden=hidden.dbf\n"
+        "TABLE columns=columns.dbf\nTABLE writable=writable.dbf\n"
+        "USER alice\nUSERPROP alice;prop_1101=pw\nDBPROP prop_5=1\n"
+        "TABLEPERM readable;alice=1\nTABLEPERM hidden;alice=0\n"
+        "TABLEPERM columns;alice=1\nTABLEPERM writable;alice=3\n");
+    {
+        auto result = DD::open((dir / "test.add").string());
+        REQUIRE(result.has_value());
+        REQUIRE(result.value().grant_column_permission("columns", "TAG", "alice", DD::DD_PERM_SELECT).has_value());
+    }
+    Server server;
+    REQUIRE(server.start("127.0.0.1", 0).has_value());
+    std::string uri = "tcp://127.0.0.1:" + std::to_string(server.port()) + "/" + (dir / "test.add").string();
+    UNSIGNED8 user[] = "alice", password[] = "pw";
+    ADSHANDLE connection = 0;
+    REQUIRE(AdsConnect60(reinterpret_cast<UNSIGNED8*>(uri.data()), ADS_REMOTE_SERVER,
+                        user, password, 0, &connection) == 0);
+    auto open = [&](const std::string& name, ADSHANDLE* table) {
+        std::vector<UNSIGNED8> bytes(name.begin(), name.end()); bytes.push_back(0);
+        return AdsOpenTable(connection, bytes.data(), nullptr, ADS_CDX, 0, 0, 0, ADS_SHARED, table);
+    };
+    for (const auto& name : {"hidden", "hidden.dbf", "columns", "columns.dbf"}) {
+        ADSHANDLE table = 0;
+        INFO(std::string(name));
+        CHECK(open(name, &table) == 7079);
+        CHECK(table == 0);
+    }
+    ADSHANDLE table = 0;
+    REQUIRE(open("readable", &table) == 0);
+    REQUIRE(AdsGotoTop(table) == 0);
+    UNSIGNED8 field[] = "TAG", value[] = "FAIL";
+    CHECK(AdsSetString(table, field, value, 4) == 7079);
+    CHECK(AdsAppendRecord(table) == 7079);
+    CHECK(AdsDeleteRecord(table) == 7079);
+    CHECK(AdsLockRecord(table, 1) == 7079);
+    CHECK(AdsZapTable(table) == 7079);
+    CHECK(AdsPackTable(table) == 7079);
+    CHECK(AdsReindex(table) == 7079);
+    REQUIRE(AdsCloseTable(table) == 0);
+    REQUIRE(open("writable", &table) == 0);
+    REQUIRE(AdsGotoTop(table) == 0);
+    REQUIRE(AdsLockRecord(table, 1) == 0);
+    UNSIGNED8 edit[] = "PASS";
+    CHECK(AdsSetString(table, field, edit, 4) == 0);
+    CHECK(AdsFlushFileBuffers(table) == 0);
+    REQUIRE(AdsCloseTable(table) == 0);
+    UNSIGNED8 name[] = "hidden";
+    CHECK(AdsDropTable(connection, name, 1) == 7079);
+    CHECK(fs::exists(dir / "hidden.dbf"));
+    REQUIRE(AdsDisconnect(connection) == 0);
+    server.stop();
+    fs::remove_all(dir, error);
+}
