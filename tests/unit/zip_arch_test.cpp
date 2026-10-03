@@ -408,3 +408,55 @@ TEST_CASE("zip: descriptor flag selects DOS-time password verification byte") {
     CHECK_FALSE(za::unzip_files(arc, (s.dir / "dst").string(), opt));
     CHECK_FALSE(fs::exists(s.dir / "dst" / "empty.bin"));
 }
+
+TEST_CASE("zip: failed CRC overwrite preserves existing destination and cleans staging") {
+    Scratch s;
+    const auto a = s.src("a.dbf", "new contents");
+    const auto arc = (s.dir / "corrupt.zip").string();
+    REQUIRE(za::zip_files({a}, (s.dir / "src").string(), arc, {}));
+    auto bytes = s.read(arc);
+    const auto cd = bytes.find(std::string("PK\x01\x02", 4));
+    REQUIRE(cd != std::string::npos);
+    REQUIRE(cd + 20 <= bytes.size());
+    // Matching local/central wrong CRC permits opening, then fails close/CRC.
+    bytes[14] ^= 1;
+    bytes[cd + 16] ^= 1;
+    {
+        std::ofstream out(arc, std::ios::binary | std::ios::trunc);
+        out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        REQUIRE(out.good());
+    }
+    std::ofstream(s.dir / "dst" / "a.dbf", std::ios::binary) << "original";
+    UnzipOptions opt;
+    opt.overwrite = true;
+    CHECK_FALSE(za::unzip_files(arc, (s.dir / "dst").string(), opt));
+    CHECK(s.read(s.dir / "dst" / "a.dbf") == "original");
+    for (const auto& e : fs::directory_iterator(s.dir / "dst"))
+        CHECK(e.path().filename().string().find(".openads-zip-stage-") != 0);
+}
+
+TEST_CASE("zip: archive can replace a source only after reading its original bytes") {
+    Scratch s;
+    const auto arc = s.src("same.zip", "original archive bytes");
+    ZipOptions opt;
+    opt.overwrite = true;
+    REQUIRE(za::zip_files({arc}, (s.dir / "src").string(), arc, opt));
+    REQUIRE(za::unzip_files(arc, (s.dir / "dst").string(), {}));
+    CHECK(s.read(s.dir / "dst" / "same.zip") == "original archive bytes");
+    for (const auto& e : fs::directory_iterator(s.dir / "src"))
+        CHECK(e.path().filename().string().find(".openads-zip-stage-") != 0);
+}
+
+TEST_CASE("zip: failed publish preserves a nonempty destination directory") {
+    Scratch s;
+    const auto a = s.src("a.dbf", "payload");
+    const auto target = s.dir / "cannot-replace";
+    fs::create_directory(target);
+    std::ofstream(target / "sentinel") << "original";
+    ZipOptions opt;
+    opt.overwrite = true;
+    CHECK_FALSE(za::zip_files({a}, (s.dir / "src").string(), target.string(), opt));
+    CHECK(s.read(target / "sentinel") == "original");
+    for (const auto& e : fs::directory_iterator(s.dir))
+        CHECK(e.path().filename().string().find(".openads-zip-stage-") != 0);
+}

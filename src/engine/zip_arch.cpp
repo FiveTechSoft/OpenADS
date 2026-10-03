@@ -15,6 +15,13 @@
 #include <filesystem>
 #include <fstream>
 #include <unordered_set>
+#include <random>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 #include "zip.h"
 #include "unzip.h"
@@ -33,6 +40,68 @@ util::Error make_error(std::int32_t code, const std::string& msg) {
     e.message = msg;
     return e;
 }
+
+// Keep the old destination untouched until streaming, length and CRC checks
+// finish. An exclusively created sibling directory isolates the staging file.
+struct StagedOutput {
+    fs::path directory, file;
+    bool create(const fs::path& target, std::error_code& ec) {
+        try {
+            std::random_device random;
+            for (int attempt = 0; attempt < 32; ++attempt) {
+                const fs::path parent = target.has_parent_path() ? target.parent_path()
+                                                                 : fs::path(".");
+                const fs::path candidate = parent /
+                    (".openads-zip-stage-" + std::to_string(random()) + "-" +
+                     std::to_string(random()));
+                if (fs::create_directory(candidate, ec)) {
+                    directory = candidate;
+                    fs::permissions(directory, fs::perms::owner_all,
+                                    fs::perm_options::replace, ec);
+                    if (ec) return false;
+                    file = directory / "output";
+                    return true;
+                }
+                if (ec && ec != std::errc::file_exists) return false;
+            }
+        } catch (...) {
+            ec = std::make_error_code(std::errc::io_error);
+        }
+        return false;
+    }
+    ~StagedOutput() {
+        if (!directory.empty()) {
+            std::error_code ignored;
+            fs::remove(file, ignored);
+            fs::remove(directory, ignored);
+        }
+    }
+    bool publish(const fs::path& target, bool overwrite, std::error_code& ec) {
+#ifdef _WIN32
+        const DWORD flags = overwrite ? MOVEFILE_REPLACE_EXISTING : 0;
+        if (!MoveFileExW(file.c_str(), target.c_str(), flags)) {
+            ec = std::error_code(static_cast<int>(GetLastError()),
+                                 std::system_category());
+            return false;
+        }
+        ec.clear();
+#else
+        if (overwrite) {
+            fs::rename(file, target, ec);
+        } else {
+            // rename() on POSIX replaces a concurrently created target.
+            // link() installs the completed inode only when target is absent.
+            fs::create_hard_link(file, target, ec);
+            if (!ec) {
+                std::error_code ignored;
+                fs::remove(file, ignored);
+            }
+        }
+        if (ec) return false;
+#endif
+        return true;
+    }
+};
 
 struct Budget {
     Limits limits;
@@ -232,17 +301,14 @@ util::Result<Stats> zip_files(const std::vector<std::string>& abs_files,
         return make_error(openads::AE_NO_MATCHING_FILE,
                           "zip: nothing left after excludes");
 
-    // Do not destroy an existing archive for a rejected staging budget.
-    if (fs::exists(archive_abs, ec) && !ec) {
-        fs::remove(archive_abs, ec);
-        if (ec)
-            return make_error(openads::AE_INTERNAL_ERROR,
-                              "zip: cannot remove existing archive: " + archive_abs);
-    }
-    zipFile zf = zipOpen64(archive_abs.c_str(), APPEND_STATUS_CREATE);
+    StagedOutput staged;
+    if (!staged.create(fs::path(archive_abs), ec))
+        return make_error(openads::AE_INTERNAL_ERROR,
+                          "zip: cannot create staging directory: " + archive_abs);
+    zipFile zf = zipOpen64(staged.file.string().c_str(), APPEND_STATUS_CREATE);
     if (zf == nullptr)
         return make_error(openads::AE_INTERNAL_ERROR,
-                          "zip: cannot create archive: " + archive_abs);
+                          "zip: cannot create staged archive: " + archive_abs);
     Stats st;
     std::vector<char> buf(kChunk);
     std::string fail;
@@ -329,9 +395,11 @@ util::Result<Stats> zip_files(const std::vector<std::string>& abs_files,
     if (zipClose(zf, nullptr) != ZIP_OK && fail.empty())
         fail = "zip: cannot finalize archive: " + archive_abs;
     if (!fail.empty()) {
-        fs::remove(archive_abs, ec);  // no half archives left behind
         return make_error(openads::AE_INTERNAL_ERROR, fail);
     }
+    if (!staged.publish(fs::path(archive_abs), opt.overwrite, ec))
+        return make_error(openads::AE_INTERNAL_ERROR,
+                          "zip: cannot publish archive: " + archive_abs);
     st.archive_bytes =
         static_cast<std::uint64_t>(fs::file_size(archive_abs, ec));
     if (ec) st.archive_bytes = 0;
@@ -432,12 +500,17 @@ util::Result<Stats> unzip_files(const std::string& archive_abs,
                        entry;
                 break;
             }
-            // Scoped so the stream closes before any cleanup remove()
-            // below — Windows cannot delete an open file.
+            StagedOutput staged;
+            if (!staged.create(out_path, ec)) {
+                unzCloseCurrentFile(uf);
+                fail = "unzip: cannot create staging directory: " + out_path.string();
+                break;
+            }
+            // Close the staging stream before publish/cleanup on Windows.
             bool rerr = false;
             std::uint64_t extracted = 0;
             {
-                std::ofstream out(out_path, std::ios::binary |
+                std::ofstream out(staged.file, std::ios::binary |
                                                 std::ios::trunc);
                 if (!out) {
                     unzCloseCurrentFile(uf);
@@ -468,6 +541,7 @@ util::Result<Stats> unzip_files(const std::string& archive_abs,
                     }
                 }
                 out.close();
+                if (!out) rerr = true;
             }
             // Some bad-password deflate streams end early. minizip checks CRC
             // only when its expected-length counter reaches zero, so a zero
@@ -476,9 +550,20 @@ util::Result<Stats> unzip_files(const std::string& archive_abs,
             // NB: unzCloseCurrentFile surfaces the CRC check.
             if (unzCloseCurrentFile(uf) != UNZ_OK) rerr = true;
             if (rerr) {
-                fs::remove(out_path, ec);
                 if (fail.empty()) fail = "unzip: entry failed (bad password or "
                        "corrupt data): " + entry;
+                break;
+            }
+            // Recheck the destination after reading untrusted contents. This
+            // narrows replacement races but does not pin ancestor directories.
+            auto final_target = platform::resolve_under_root(dest_dir_abs, out_rel);
+            if (!final_target || fs::path(*final_target) != out_path) {
+                fail_code = openads::AE_ACCESS_DENIED;
+                fail = "unzip: target changed during extraction: " + entry;
+                break;
+            }
+            if (!staged.publish(out_path, opt.overwrite, ec)) {
+                fail = "unzip: cannot publish target: " + out_path.string();
                 break;
             }
             if (!opt.with_path) flat_seen.insert(out_rel);
