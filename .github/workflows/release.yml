@@ -27,9 +27,8 @@ jobs:
     # 90: a cold Harbour SDK build (Linux leg) plus the full tree can
     # exceed the old 60-minute cap; cached runs finish far sooner.
     timeout-minutes: 90
-    # The macOS runners can stall in the test step (>60 min);
-    # don't let them block the release while that's investigated.
-    continue-on-error: ${{ startsWith(matrix.os, 'macos') }}
+    # Every release platform must pass; build output stays draft for inspection.
+    continue-on-error: false
     strategy:
       fail-fast: false
       matrix:
@@ -137,6 +136,7 @@ jobs:
           cmake --preset ${{ matrix.preset }} \
                 -DOPENADS_WITH_TLS=ON \
                 -DOPENADS_WITH_HTTP=ON \
+                -DOPENADS_VERSION_FORCE="${{ steps.tag.outputs.version }}" \
                 ${{ matrix.cmake_extra }} \
                 ${{ runner.os == 'Linux' && format('-DOPENADS_WITH_HARBOUR_UDF=ON -DHARBOUR_INCLUDE_DIR={0} -DHARBOUR_LIB_DIR={1} -DHARBOUR_COMPILER={2}', env.HARBOUR_INCLUDE_DIR, env.HARBOUR_LIB_DIR, env.HARBOUR_COMPILER) || '' }}
 
@@ -144,10 +144,9 @@ jobs:
         run: cmake --build build/${{ matrix.preset }} --config Release
 
       - name: Test
-        # The macOS runners can stall here (>60 min); cap them and
-        # let the leg pass anyway so it can't block the release.
+        # Timeouts fail validation rather than publishing untested binaries.
         timeout-minutes: ${{ startsWith(matrix.os, 'macos') && 20 || 30 }}
-        continue-on-error: ${{ startsWith(matrix.os, 'macos') }}
+        continue-on-error: false
         run: ctest --test-dir build/${{ matrix.preset }}
                    --output-on-failure -C Release
 
@@ -181,12 +180,14 @@ jobs:
         run: |
           cmake -S . -B build/mingw-${{ matrix.arch }} -G "MinGW Makefiles" \
                 -DCMAKE_BUILD_TYPE=Release \
-                -DOPENADS_BUILD_TESTS=OFF \
+                -DOPENADS_BUILD_TESTS=ON \
+                -DOPENADS_VERSION_FORCE="${{ steps.tag.outputs.version }}" \
                 -DOPENADS_WITH_HTTP=OFF \
                 -DOPENADS_WITH_TLS=OFF \
                 -DOPENADS_WARNINGS_AS_ERRORS=OFF
           cmake --build build/mingw-${{ matrix.arch }} \
-                --target openads_ace_static -j"$(nproc)"
+                --target openads_ace_static openads_unit_tests -j"$(nproc)"
+          ctest --test-dir build/mingw-${{ matrix.arch }} --output-on-failure -C Release
           ls -la build/mingw-${{ matrix.arch }}/src/libopenace*.a
 
       - name: Stage release files (POSIX)
@@ -369,7 +370,8 @@ jobs:
           for asset in \
             "openads-${V}-windows-x64.zip" \
             "openads-${V}-windows-x86.zip" \
-            "openads-${V}-linux-x64.tar.gz"; do
+            "openads-${V}-linux-x64.tar.gz" \
+            "openads-${V}-macos-universal.tar.gz"; do
             if [ ! -f "out/${asset}" ]; then
               echo "::error::Missing required release asset: ${asset}"
               missing=1
@@ -383,7 +385,8 @@ jobs:
           for leg in \
             "windows-2022 / x64" \
             "windows-2022 / x86" \
-            "ubuntu-24.04 / x64"; do
+            "ubuntu-24.04 / x64" \
+            "macos-14 / universal"; do
             concl=$(gh api "$JOBS_URL" --jq \
               ".jobs[] | select(.name == \"$leg\") | .conclusion")
             if [ "$concl" != "success" ]; then
@@ -459,6 +462,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
+          draft: true
           body_path: ${{ steps.notes.outputs.path }}
           files: out/*
 
