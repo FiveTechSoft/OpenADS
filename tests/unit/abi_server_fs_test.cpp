@@ -191,6 +191,9 @@ TEST_CASE("remote Ads* filesystem: full round-trip under data dir") {
     REQUIRE(AdsDisconnect(h) == 0);
 
     fs::current_path(prev);
+    // Disconnect is asynchronous on the wire. Join the server session before
+    // deleting its data root so Windows has released every file handle.
+    srv.stop();
     fs::remove_all(data);
     fs::remove_all(app);
 }

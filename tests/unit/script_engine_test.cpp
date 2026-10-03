@@ -616,3 +616,46 @@ TEST_CASE("script: ELSE IF recursion is bounded") {
     for (int i = 0; i <= 200; ++i) source += "ENDIF; ";
     CHECK_FALSE(compile(source).has_value());
 }
+
+namespace {
+struct NestedBudgetBridge final : SqlBridge {
+    int calls = 0;
+    bool recursive = false;
+    std::shared_ptr<const Program> inner;
+    explicit NestedBudgetBridge(bool recursion = false) : recursive(recursion) {
+        auto program = compile(recursive ? "RETURN nest();" :
+            "DECLARE @n INTEGER; @n = 0; WHILE @n < 100000 DO @n = @n + 1; END WHILE; RETURN @n;");
+        REQUIRE(program.has_value());
+        inner = std::move(program).value();
+    }
+    bool has_udf(const std::string&) override { return true; }
+    openads::util::Result<Value> call_udf(const std::string&, const std::vector<Value>&) override {
+        ++calls;
+        Executor executor(this);
+        auto result = executor.run(*inner);
+        if (!result) return result.error();
+        return result.value().return_value;
+    }
+    openads::util::Result<std::unique_ptr<SqlCursor>> exec(const std::string&) override {
+        return std::unique_ptr<SqlCursor>{};
+    }
+};
+}
+TEST_CASE("script: nested executors share work and exhaustion escapes outer CATCH") {
+    NestedBudgetBridge bridge;
+    auto program = compile("DECLARE @i INTEGER; DECLARE @v INTEGER; @i = 0; TRY WHILE @i < 10 DO @i = @i + 1; @v = nest(); END WHILE; CATCH ALL END TRY; RETURN 1;");
+    REQUIRE(program.has_value());
+    Executor executor(&bridge);
+    CHECK_FALSE(executor.run(*program.value()).has_value());
+    CHECK(bridge.calls < 10);
+    CHECK(run_ret("RETURN 7;").i == 7);
+}
+TEST_CASE("script: direct UDF executor recursion is bounded and cannot be caught") {
+    NestedBudgetBridge bridge(true);
+    auto program = compile("DECLARE @v INTEGER; TRY @v = nest(); CATCH ALL END TRY; RETURN 1;");
+    REQUIRE(program.has_value());
+    Executor executor(&bridge);
+    CHECK_FALSE(executor.run(*program.value()).has_value());
+    CHECK(bridge.calls <= 8);
+    CHECK(run_ret("RETURN 9;").i == 9);
+}

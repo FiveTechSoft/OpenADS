@@ -345,3 +345,5 @@ SECURITY: [DONE] SQL reentry depth8 across procedures/triggers/scripts; trigger 
 SECURITY: [DONE] Optional native TLS data listeners with nonblocking accepted-socket BIO, certificate/key validation and bounded reply backpressure. Studio HTTPS still requires proxy.
 
 SECURITY: [DONE] Conservative remote SELECT source/fanout/fixed-width preflight (100k rows,64MiB); local unchanged. DML, deadlines, memo payloads and repeated stages still pending.
+
+SECURITY: [DONE] Shared nested script budget1M (including expressions), cooperative5s deadline,8 Executor levels and non-catchable exhaustion. Bridge/native blocking work remains separately bounded.
