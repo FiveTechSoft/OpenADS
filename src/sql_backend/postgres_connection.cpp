@@ -1,4 +1,5 @@
 #include "sql_backend/postgres_connection.h"
+#include "engine/sql_execution_budget.h"
 
 #include "sql_backend/postgres_backend.h"
 #include "sql_backend/sql_acl_store.h"
@@ -6,6 +7,8 @@
 
 #include <algorithm>
 #include <vector>
+#include <cstring>
+#include <thread>
 
 #if defined(OPENADS_WITH_POSTGRESQL)
 #include <libpq-fe.h>
@@ -16,6 +19,114 @@ namespace openads::sql_backend {
 namespace {
 
 #if defined(OPENADS_WITH_POSTGRESQL)
+
+// Remote direct SQL uses libpq's nonblocking single-row mode. Failure drops
+// the connection rather than potentially blocking to drain/cancel a query.
+// This bounds retained application rows, not libpq's largest row/input buffer
+// or server allocations, and is not a server-side cancellation guarantee.
+util::Result<std::unique_ptr<PostgresTable>> remote_query(
+    PGconn*& conn, PostgresConnection* owner, const std::string& sql,
+    bool materialize) {
+    const int previous_mode = PQisnonblocking(conn);
+    auto fail = [&](std::int32_t code, const std::string& message)
+        -> util::Result<std::unique_ptr<PostgresTable>> {
+        PQfinish(conn);
+        conn = nullptr;
+        return util::Error{code, 0, message, "remote postgres connection closed"};
+    };
+    if (!engine::sql_execution_step())
+        return fail(7079, "SQL execution budget exceeded");
+    if (PQsetnonblocking(conn, 1) != 0 ||
+        PQsendQuery(conn, sql.c_str()) != 1 || PQsetSingleRowMode(conn) != 1)
+        return fail(5001, PQerrorMessage(conn));
+    constexpr std::uint64_t max_bytes = 64ULL * 1024ULL * 1024ULL;
+    std::uint64_t bytes = 0, rows = 0;
+    auto account = [&](std::uint64_t amount) {
+        if (amount > max_bytes - bytes) return false;
+        bytes += amount;
+        return true;
+    };
+    std::unique_ptr<PostgresTable> tbl;
+    bool new_result = true;
+    for (;;) {
+        if (!engine::sql_execution_step())
+            return fail(7079, "SQL execution budget exceeded");
+        const int flushed = PQflush(conn);
+        if (flushed < 0)
+            return fail(5001, PQerrorMessage(conn));
+        // Parse pending rows before reading more network input.
+        if ((flushed != 0 || PQisBusy(conn) != 0) && PQconsumeInput(conn) != 1)
+            return fail(5001, PQerrorMessage(conn));
+        if (flushed != 0 || PQisBusy(conn) != 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
+        }
+        PGresult* raw = PQgetResult(conn);
+        if (!raw) break;
+        std::unique_ptr<PGresult, decltype(&PQclear)> res(raw, &PQclear);
+        const auto status = PQresultStatus(raw);
+        if (status != PGRES_SINGLE_TUPLE && status != PGRES_TUPLES_OK &&
+            status != PGRES_COMMAND_OK)
+            return fail(5001, PQresultErrorMessage(raw));
+        if (new_result) {
+            tbl.reset();  // Match PQexec: only the last command result survives.
+            if (materialize && status != PGRES_COMMAND_OK) {
+                tbl = std::make_unique<PostgresTable>();
+                tbl->conn = owner;
+                tbl->name = "(result)";
+                tbl->is_result = true;
+                const int cols = PQnfields(raw);
+                for (int c = 0; c < cols; ++c) {
+                    const char* name = PQfname(raw, c);
+                    if (!account(sizeof(PostgresTable::FieldDesc) +
+                                 (name ? std::strlen(name) : 0)))
+                        return fail(7079, "SQL result byte budget exceeded");
+                    tbl->fields.push_back(map_pg_column(
+                        name ? name : "", "text", true, 0, 0, 0));
+                }
+                tbl->fields_cached = true;
+            }
+            new_result = false;
+        }
+        if (status == PGRES_SINGLE_TUPLE) {
+            if (++rows > 100000)
+                return fail(7079, "SQL result row budget exceeded");
+            const auto cols = static_cast<std::size_t>(PQnfields(raw));
+            if (!account(2 * sizeof(std::vector<std::string>) +
+                         cols * (sizeof(std::string) + 1)))
+                return fail(7079, "SQL result byte budget exceeded");
+            // Check raw lengths before any string copy, including discarded
+            // exec_sql results. Cumulative across all commands in this call.
+            for (std::size_t c = 0; c < cols; ++c)
+                if (!account(static_cast<std::uint64_t>(
+                        PQgetlength(raw, 0, static_cast<int>(c)))))
+                    return fail(7079, "SQL result byte budget exceeded");
+            if (tbl) {
+                std::vector<std::string> row(cols);
+                std::vector<bool> nul(cols);
+                for (std::size_t c = 0; c < cols; ++c) {
+                    bool is_null = false;
+                    row[c] = format_pg_value(raw, 0, static_cast<int>(c), is_null);
+                    nul[c] = is_null;
+                }
+                tbl->result_rows.push_back(std::move(row));
+                tbl->result_nulls.push_back(std::move(nul));
+            }
+        } else {
+            new_result = true;
+        }
+    }
+    if (PQsetnonblocking(conn, previous_mode) != 0)
+        return fail(5001, PQerrorMessage(conn));
+    if (tbl) {
+        tbl->cached_rec_count = static_cast<std::uint32_t>(tbl->result_rows.size());
+        tbl->rec_count_cached = true;
+        tbl->positioned = false;
+        tbl->pos = 0;
+        tbl->row_valid = false;
+    }
+    return tbl;
+}
 
 util::Result<void> reload_pk_snapshot(PGconn* conn, PostgresTable* tbl);
 
@@ -304,6 +415,11 @@ util::Result<void>
 PostgresConnection::exec_sql(const std::string& sql) {
 #if defined(OPENADS_WITH_POSTGRESQL)
     if (!valid()) return util::Error{5001, 0, "postgres connection not open", ""};
+    if (engine::sql_execution_budget.active) {
+        auto result = remote_query(impl_->conn, this, sql, false);
+        if (!result) return result.error();
+        return util::Result<void>{};
+    }
     PGresult* res = PQexec(impl_->conn, sql.c_str());
     const auto status = PQresultStatus(res);
     if (status != PGRES_COMMAND_OK && status != PGRES_TUPLES_OK) {
@@ -325,6 +441,8 @@ PostgresConnection::run_sql(const std::string& sql) {
     if (!valid()) {
         return util::Error{5001, 0, "postgres connection not open", ""};
     }
+    if (engine::sql_execution_budget.active)
+        return remote_query(impl_->conn, this, sql, true);
     PGresult* res = PQexec(impl_->conn, sql.c_str());
     const auto status = PQresultStatus(res);
     if (status != PGRES_TUPLES_OK && status != PGRES_COMMAND_OK) {

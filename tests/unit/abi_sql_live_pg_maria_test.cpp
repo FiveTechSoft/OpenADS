@@ -2,6 +2,9 @@
 // Skips unless the matching OPENADS_TEST_* env var reaches a server/DB.
 #include "doctest.h"
 #include "openads/ace.h"
+#include "engine/sql_execution_budget.h"
+#include "sql_backend/postgres_connection.h"
+#include "sql_backend/maria_connection.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -30,6 +33,66 @@ int sql_count(ADSHANDLE hConn, const char* sql) {
 }  // namespace
 
 #if defined(OPENADS_WITH_POSTGRESQL)
+
+TEST_CASE("SQL live PG: remote streamed budgets and connection failure") {
+    using namespace openads;
+    const char* uri = std::getenv("OPENADS_TEST_PG_URI");
+    if (uri == nullptr || uri[0] == '\0') {
+        MESSAGE("skip: OPENADS_TEST_PG_URI not set");
+        return;
+    }
+    sql_backend::PostgresUri parsed;
+    REQUIRE(sql_backend::parse_postgres_uri(uri, parsed));
+    SUBCASE("stream and final command result") {
+        auto opened = sql_backend::PostgresConnection::open(parsed);
+        REQUIRE(opened);
+        auto& conn = opened.value();
+        {
+            engine::SqlExecutionScope scope(true);
+            auto result = conn.run_sql("SELECT 'first'; SELECT 'last'");
+            REQUIRE(result);
+            REQUIRE(result.value());
+            REQUIRE(result.value()->result_rows.size() == 1);
+            CHECK(result.value()->result_rows[0][0] == "last");
+            REQUIRE(conn.exec_sql("SELECT generate_series(1, 10)"));
+        }
+        CHECK(conn.valid());
+        REQUIRE(conn.run_sql("SELECT 1"));
+    }
+    SUBCASE("row cap closes only affected connection") {
+        auto opened = sql_backend::PostgresConnection::open(parsed);
+        REQUIRE(opened);
+        auto& conn = opened.value();
+        engine::SqlExecutionScope scope(true);
+        auto result = conn.run_sql("SELECT generate_series(1, 100001)");
+        REQUIRE_FALSE(result);
+        CHECK(result.error().code == 7079);
+        CHECK_FALSE(conn.valid());
+    }
+    SUBCASE("byte cap before retained copies") {
+        auto opened = sql_backend::PostgresConnection::open(parsed);
+        REQUIRE(opened);
+        auto& conn = opened.value();
+        engine::SqlExecutionScope scope(true);
+        auto result = conn.run_sql(
+            "SELECT repeat('x', 10 * 1024 * 1024) FROM generate_series(1, 7)");
+        REQUIRE_FALSE(result);
+        CHECK(result.error().code == 7079);
+        CHECK_FALSE(conn.valid());
+    }
+    SUBCASE("busy server exceeds shared deadline") {
+        auto opened = sql_backend::PostgresConnection::open(parsed);
+        REQUIRE(opened);
+        auto& conn = opened.value();
+        const auto start = std::chrono::steady_clock::now();
+        engine::SqlExecutionScope scope(true, 1000000, 30);
+        auto result = conn.exec_sql("SELECT pg_sleep(2)");
+        REQUIRE_FALSE(result);
+        CHECK(result.error().code == 7079);
+        CHECK_FALSE(conn.valid());
+        CHECK(std::chrono::steady_clock::now() - start < std::chrono::seconds(1));
+    }
+}
 
 TEST_CASE("SQL live PG: prepared INSERT + system.tables AdsOpenTable") {
     const char* uri = std::getenv("OPENADS_TEST_PG_URI");
@@ -80,6 +143,65 @@ TEST_CASE("SQL live PG: prepared INSERT + system.tables AdsOpenTable") {
 #endif
 
 #if defined(OPENADS_WITH_MARIADB)
+
+TEST_CASE("SQL live Maria: remote streamed budgets and connection failure") {
+    using namespace openads;
+    const char* uri = std::getenv("OPENADS_TEST_MARIADB_URI");
+    if (uri == nullptr || uri[0] == '\0') {
+        MESSAGE("skip: OPENADS_TEST_MARIADB_URI not set");
+        return;
+    }
+    sql_backend::MariaUri parsed;
+    REQUIRE(sql_backend::parse_maria_uri(uri, parsed));
+    SUBCASE("streaming and subsequent local query") {
+        auto opened = sql_backend::MariaConnection::open(parsed);
+        REQUIRE(opened);
+        auto& conn = opened.value();
+        {
+            engine::SqlExecutionScope scope(true);
+            auto result = conn.run_sql("SELECT 'last'");
+            REQUIRE(result);
+            REQUIRE(result.value());
+            REQUIRE(result.value()->result_rows.size() == 1);
+            CHECK(result.value()->result_rows[0][0] == "last");
+            REQUIRE(conn.exec_sql("SELECT 1"));
+        }
+        CHECK(conn.valid());
+        REQUIRE(conn.run_sql("SELECT 1"));
+    }
+    SUBCASE("row cap closes connection") {
+        auto opened = sql_backend::MariaConnection::open(parsed);
+        REQUIRE(opened);
+        auto& conn = opened.value();
+        engine::SqlExecutionScope scope(true);
+        auto result = conn.run_sql("SELECT seq FROM seq_1_to_100001");
+        REQUIRE_FALSE(result);
+        CHECK(result.error().code == 7079);
+        CHECK_FALSE(conn.valid());
+    }
+    SUBCASE("byte cap before retained copies") {
+        auto opened = sql_backend::MariaConnection::open(parsed);
+        REQUIRE(opened);
+        auto& conn = opened.value();
+        engine::SqlExecutionScope scope(true);
+        auto result = conn.run_sql("SELECT REPEAT('x', 10 * 1024 * 1024) FROM seq_1_to_7");
+        REQUIRE_FALSE(result);
+        CHECK(result.error().code == 7079);
+        CHECK_FALSE(conn.valid());
+    }
+    SUBCASE("busy server exceeds shared deadline") {
+        auto opened = sql_backend::MariaConnection::open(parsed);
+        REQUIRE(opened);
+        auto& conn = opened.value();
+        const auto start = std::chrono::steady_clock::now();
+        engine::SqlExecutionScope scope(true, 1000000, 30);
+        auto result = conn.exec_sql("SELECT SLEEP(2)");
+        REQUIRE_FALSE(result);
+        CHECK(result.error().code == 7079);
+        CHECK_FALSE(conn.valid());
+        CHECK(std::chrono::steady_clock::now() - start < std::chrono::seconds(1));
+    }
+}
 
 TEST_CASE("SQL live Maria: prepared INSERT + system.columns SQL") {
     const char* uri = std::getenv("OPENADS_TEST_MARIADB_URI");
