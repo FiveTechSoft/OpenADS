@@ -343,3 +343,5 @@ SECURITY: [DONE] Remote SQL input source/token/parenthesis caps and embeddedNUL 
 SECURITY: [DONE] SQL reentry depth8 across procedures/triggers/scripts; trigger traces hide SQL. Query execution deadlines remain pending.
 
 SECURITY: [DONE] Optional native TLS data listeners with nonblocking accepted-socket BIO, certificate/key validation and bounded reply backpressure. Studio HTTPS still requires proxy.
+
+SECURITY: [DONE] Conservative remote SELECT source/fanout/fixed-width preflight (100k rows,64MiB); local unchanged. DML, deadlines, memo payloads and repeated stages still pending.

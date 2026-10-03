@@ -2,6 +2,7 @@
 #include "openads/ace.h"
 #include "engine/data_dict.h"
 #include "engine/sql_input_limits.h"
+#include "engine/sql_work_limits.h"
 #include "network/client.h"
 #include "network/server.h"
 #include "network/socket.h"
@@ -1999,3 +2000,63 @@ TEST_CASE("native TLS single-worker pool serves a client while another handshake
     sock_close(listener.value());
 }
 #endif
+
+TEST_CASE("remote SQL shape budget checks overflow and conservative outer-join fanout") {
+    using Budget = openads::engine::RemoteSqlShapeBudget;
+    Budget boundary;
+    CHECK(boundary.add_source(100000, 16).has_value());
+    Budget too_many;
+    CHECK_FALSE(too_many.add_source(100001, 16).has_value());
+    Budget join;
+    REQUIRE(join.add_source(1000, 16).has_value());
+    CHECK_FALSE(join.add_source(1000, 16).has_value());
+    Budget wide;
+    CHECK_FALSE(wide.add_source(100000, 1024).has_value());
+    Budget empty_outer;
+    REQUIRE(empty_outer.add_source(0, 16).has_value());
+    CHECK_FALSE(empty_outer.add_source(100001, 16).has_value());
+    Budget huge;
+    CHECK_FALSE(huge.add_source(UINT64_MAX, UINT64_MAX).has_value());
+}
+
+TEST_CASE("remote SQL join preflight rejects fanout before materialization; local unchanged") {
+    namespace fs = std::filesystem;
+    const auto dir = fs::temp_directory_path() / "openads_sql_join_budget";
+    std::error_code error;
+    fs::remove_all(dir, error);
+    fs::create_directories(dir);
+    m12_write_dbf(dir / "a.dbf", std::vector<std::string>(400, "SAME"));
+    m12_write_dbf(dir / "b.dbf", std::vector<std::string>(400, "SAME"));
+    Server server;
+    REQUIRE(server.start("127.0.0.1", 0).has_value());
+    std::string uri = "tcp://127.0.0.1:" + std::to_string(server.port()) + "/" + dir.string();
+    ADSHANDLE connection = 0, statement = 0;
+    REQUIRE(AdsConnect60(reinterpret_cast<UNSIGNED8*>(uri.data()), ADS_REMOTE_SERVER,
+                        nullptr, nullptr, 0, &connection) == 0);
+    REQUIRE(AdsCreateSQLStatement(connection, &statement) == 0);
+    auto execute = [&](const std::string& query, ADSHANDLE* cursor) {
+        std::vector<UNSIGNED8> sql(query.begin(), query.end());
+        sql.push_back(0);
+        return AdsExecuteSQLDirect(statement, sql.data(), cursor);
+    };
+    ADSHANDLE cursor = 0;
+    CHECK(execute("SELECT a.TAG FROM a.dbf a INNER JOIN b.dbf b ON a.TAG = b.TAG", &cursor) != 0);
+    CHECK(cursor == 0);
+    REQUIRE(execute("SELECT COUNT(*) FROM a.dbf", &cursor) == 0);
+    REQUIRE(cursor != 0);
+    REQUIRE(AdsCloseTable(cursor) == 0);
+    REQUIRE(AdsCloseSQLStatement(statement) == 0);
+    REQUIRE(AdsDisconnect(connection) == 0);
+    server.stop();
+    // Direct local SQL remains available for larger trusted batch work.
+    std::string local = dir.string();
+    REQUIRE(AdsConnect60(reinterpret_cast<UNSIGNED8*>(local.data()), ADS_LOCAL_SERVER,
+                        nullptr, nullptr, 0, &connection) == 0);
+    REQUIRE(AdsCreateSQLStatement(connection, &statement) == 0);
+    REQUIRE(execute("SELECT COUNT(*) FROM a.dbf a INNER JOIN b.dbf b ON a.TAG = b.TAG", &cursor) == 0);
+    REQUIRE(cursor != 0);
+    REQUIRE(AdsCloseTable(cursor) == 0);
+    REQUIRE(AdsCloseSQLStatement(statement) == 0);
+    REQUIRE(AdsDisconnect(connection) == 0);
+    fs::remove_all(dir, error);
+}

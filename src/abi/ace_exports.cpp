@@ -1,4 +1,5 @@
 #include "engine/sql_input_limits.h"
+#include "engine/sql_work_limits.h"
 #include "engine/pbkdf2.h"
 #include <cstdarg>
 #include "openads/ace.h"
@@ -29603,9 +29604,20 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         }
     }
 
+    auto remote_source_budget = [c](openads::engine::Table* table,
+                                    openads::engine::RemoteSqlShapeBudget& budget)
+        -> openads::util::Result<void> {
+        if (!c->remote_server()) return {};
+        if (!table) return openads::util::Error{7079, 0, "SQL source lookup failed", ""};
+        std::uint64_t width = 5;
+        for (std::uint16_t i = 0; i < table->field_count(); ++i)
+            width += table->field_descriptor(i).length;
+        return budget.add_source(table->record_count(), width);
+    };
+
     // Open a table by name, transparently resolving "system.*" virtual tables
     // to memory tables materialized from DD state.
-    auto open_or_sys = [c, &sql](const std::string& tname,
+    auto open_or_sys_unchecked = [c, &sql](const std::string& tname,
                             openads::engine::TableType  ttype,
                             openads::engine::OpenMode   omode,
                             openads::engine::LockingMode lmode)
@@ -29676,6 +29688,19 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 " Table name: " + tname, ""};
         }
         return ot;
+    };
+
+    auto open_or_sys = [&](const std::string& name,
+                           openads::engine::TableType type,
+                           openads::engine::OpenMode mode,
+                           openads::engine::LockingMode locking)
+        -> openads::util::Result<Handle> {
+        auto opened = open_or_sys_unchecked(name, type, mode, locking);
+        if (!opened) return opened.error();
+        openads::engine::RemoteSqlShapeBudget budget;
+        auto allowed = remote_source_budget(c->lookup_table(opened.value()), budget);
+        if (!allowed) { c->close_table(opened.value()); return allowed.error(); }
+        return opened;
     };
 
     // Per-operation ACL check for SQL statements when check_rights is set.
@@ -31869,6 +31894,14 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         "multi-table join: table open failed");
         }
 
+        openads::engine::RemoteSqlShapeBudget join_budget;
+        for (auto* source : tbls) {
+            if (auto allowed = remote_source_budget(source, join_budget); !allowed) {
+                close_all();
+                return fail(allowed.error());
+            }
+        }
+
         // SAP 2137 -- an unqualified column present in more than one joined
         // table is ambiguous. Checked before resolution (which resolves
         // left-first and would silently pick one).
@@ -32777,6 +32810,15 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         openads::engine::Table* rtbl = c->lookup_table(rh.value());
         if (ltbl == nullptr || rtbl == nullptr) {
             return fail(openads::AE_INTERNAL_ERROR, "join post-open");
+        }
+
+        openads::engine::RemoteSqlShapeBudget join_budget;
+        for (auto* source : {ltbl, rtbl}) {
+            if (auto allowed = remote_source_budget(source, join_budget); !allowed) {
+                c->close_table(lh.value());
+                c->close_table(rh.value());
+                return fail(allowed.error());
+            }
         }
 
         // SAP 2137 -- reject an unqualified column present in both joined
