@@ -4939,13 +4939,19 @@ DispatchResult Session::dispatch(const Frame& f) {
                         static thread_local std::vector<UNSIGNED8> out_v(65536 + 1);
                         UNSIGNED8* out = out_v.data();
                         UNSIGNED32 cap = static_cast<UNSIGNED32>(out_v.size());
-                        std::size_t n = std::min<std::size_t>(
-                            cn.size(), sizeof(fbuf) - 1);
+                        if (cn.size() >= sizeof(fbuf)) {
+                            reply = err("Fetch column name exceeds lookup limit");
+                            parse_ok = false; break;
+                        }
+                        std::size_t n = cn.size();
                         std::memcpy(fbuf, cn.data(), n);
                         fbuf[n] = 0;
                         UNSIGNED32 rrc = AdsGetField(hCur, fbuf,
                                                      out, &cap, 0);
-                        if (rrc != 0) cap = 0;
+                        if (rrc != 0) {
+                            reply = err("Fetch field read failed", rrc);
+                            parse_ok = false; break;
+                        }
                         if (cap > 65535 || rowbuf.size() + 2 + cap > 16u*1024u*1024u - 16u) {
                             reply = err("Fetch result exceeds protocol limit"); parse_ok = false; break;
                         }
@@ -4970,7 +4976,15 @@ DispatchResult Session::dispatch(const Frame& f) {
                         if (fi >= 0) {
                             auto v = tbl->read_field(
                                 static_cast<std::uint16_t>(fi));
-                            if (v) val = v.value().as_string;
+                            if (!v) {
+                                reply = err("Fetch field read failed",
+                                            static_cast<UNSIGNED32>(v.error().code));
+                                parse_ok = false; break;
+                            }
+                            val = v.value().as_string;
+                        } else {
+                            reply = err("Fetch column not found", openads::AE_COLUMN_NOT_FOUND);
+                            parse_ok = false; break;
                         }
                         if (val.size() > 65535 || rowbuf.size() + 2 + val.size() > 16u*1024u*1024u - 16u) {
                             reply = err("Fetch result exceeds protocol limit"); parse_ok = false; break;
@@ -5095,7 +5109,15 @@ DispatchResult Session::dispatch(const Frame& f) {
                             if (fi >= 0) {
                                 auto v = tbl->read_field(
                                     static_cast<std::uint16_t>(fi));
-                                if (v) val = v.value().as_string;
+                                if (!v) {
+                                    reply = err("FetchWhere field read failed",
+                                                static_cast<UNSIGNED32>(v.error().code));
+                                    parse_ok = false; break;
+                                }
+                                val = v.value().as_string;
+                            } else {
+                                reply = err("FetchWhere column not found", openads::AE_COLUMN_NOT_FOUND);
+                                parse_ok = false; break;
                             }
                             if (val.size() > 65535 || rowbuf.size() + 2 + val.size() > 16u*1024u*1024u - 16u) {
                                 reply = err("FetchWhere result exceeds protocol limit"); parse_ok = false; break;

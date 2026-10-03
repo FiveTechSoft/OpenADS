@@ -2348,3 +2348,71 @@ TEST_CASE("wire DD table rights authorize direct engine reads writes and mainten
     server.stop();
     fs::remove_all(dir, error);
 }
+
+TEST_CASE("Fetch and FetchWhere refuse values beyond u16 without truncation") {
+    namespace fs = std::filesystem;
+    auto dir = fs::temp_directory_path() / "openads_fetch_wire_limits";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+    std::string root = dir.string();
+    std::vector<UNSIGNED8> rootbuf(root.begin(), root.end());
+    rootbuf.push_back(0);
+    ADSHANDLE local = 0, table = 0;
+    REQUIRE(AdsConnect60(rootbuf.data(), ADS_LOCAL_SERVER, nullptr, nullptr, 0, &local) == 0);
+    UNSIGNED8 name[] = "limits.dbf", definition[] = "TEXT,M,10,0", field[] = "TEXT";
+    REQUIRE(AdsCreateTable(local, name, nullptr, ADS_CDX, 0, 0, 0, 0, definition, &table) == 0);
+    for (std::size_t size : {65535u, 65536u, 70000u}) {
+        std::string value(size, 'X');
+        REQUIRE(AdsAppendRecord(table) == 0);
+        REQUIRE(AdsSetString(table, field, reinterpret_cast<UNSIGNED8*>(value.data()),
+                             static_cast<UNSIGNED32>(value.size())) == 0);
+        REQUIRE(AdsWriteRecord(table) == 0);
+    }
+    REQUIRE(AdsCloseTable(table) == 0);
+    REQUIRE(AdsDisconnect(local) == 0);
+    openads::network::Server server;
+    REQUIRE(server.start("127.0.0.1", 0));
+    openads::network::RemoteConnection client;
+    REQUIRE(client.connect("127.0.0.1", server.port(), root));
+    const auto opened = client.open_table("limits.dbf");
+    REQUIRE(opened);
+    const auto id = opened.value().id;
+    for (int mode = 0; mode < 2; ++mode) {
+        REQUIRE(client.goto_record(id, 1));
+        if (mode == 0) {
+            auto good = client.fetch_batch(id, 1, {"TEXT"});
+            REQUIRE(good);
+            REQUIRE(good.value().size() == 1);
+            CHECK(good.value()[0][0] == std::string(65535, 'X'));
+        } else {
+            auto good = client.fetch_where(id, 1, "", {"TEXT"});
+            REQUIRE(good);
+            REQUIRE(good.value().rows.size() == 1);
+            CHECK(good.value().rows[0][0] == std::string(65535, 'X'));
+        }
+        for (std::uint32_t row : {2u, 3u}) {
+            REQUIRE(client.goto_record(id, row));
+            if (mode == 0) CHECK_FALSE(client.fetch_batch(id, 1, {"TEXT"}));
+            else CHECK_FALSE(client.fetch_where(id, 1, "", {"TEXT"}));
+        }
+    }
+    auto cursor = client.execute_sql("SELECT TEXT FROM limits");
+    REQUIRE(cursor);
+    REQUIRE(client.goto_top(cursor.value()));
+    auto cursor_good = client.fetch_batch(cursor.value(), 1, {"TEXT"});
+    REQUIRE(cursor_good);
+    REQUIRE(cursor_good.value().size() == 1);
+    CHECK(cursor_good.value()[0][0] == std::string(65535, 'X'));
+    CHECK_FALSE(client.fetch_batch(cursor.value(), 1, {"TEXT"}));
+    REQUIRE(client.goto_top(cursor.value()));
+    CHECK_FALSE(client.fetch_batch(cursor.value(), 1, {"MISSING"}));
+    REQUIRE(client.close_table(cursor.value()));
+    REQUIRE(client.goto_record(id, 1));
+    CHECK_FALSE(client.fetch_batch(id, 1, {"MISSING"}));
+    CHECK_FALSE(client.fetch_where(id, 1, "", {"MISSING"}));
+    REQUIRE(client.close_table(id));
+    client.disconnect();
+    server.stop();
+    fs::remove_all(dir, ec);
+}
