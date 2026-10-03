@@ -12,6 +12,9 @@ produce fewer actual rows. WHERE, TOP and indexes do not bypass the bound.
 For trusted batch work use local execution or partition the source workload.
 
 This is not a wall-clock deadline, an exact memory allocator limit, or a bound
-on memo values. DML scans, external backends, native DLLs, script-level UDFs,
+on memo values. External backends, native DLLs, script-level UDFs,
 repeated statements and several UNION/derived stages still need separate work
 budgets. The existing SQL input and recursion limits remain in force.
+
+UPDATE/DELETE/MERGE target scans now use the same source preflight. See
+[Remote DML target preflight](security-sql-dml-preflight.md).

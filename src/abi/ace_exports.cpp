@@ -30358,6 +30358,13 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         if (!th) return fail(th.error());
         openads::engine::Table* tbl = c->lookup_table(th.value());
         if (!tbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
+        // Bound physical target scan work before locks, indexes or row writes.
+        // Reuse SELECT's conservative source limit; local batch SQL is unchanged.
+        openads::engine::RemoteSqlShapeBudget dml_budget;
+        if (auto allowed = remote_source_budget(tbl, dml_budget); !allowed) {
+            c->close_table(th.value());
+            return fail(allowed.error());
+        }
         sql_dml_hold_write_lock(tbl);
         // Keep the structural bag current on every SQL write (see
         // DmlProductionIndexGuard above); no-op when no <base>.cdx/.adi
@@ -30679,6 +30686,13 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         if (!th) return fail(th.error());
         openads::engine::Table* tbl = c->lookup_table(th.value());
         if (!tbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
+        // Bound physical target scan work before locks, indexes or row writes.
+        // Reuse SELECT's conservative source limit; local batch SQL is unchanged.
+        openads::engine::RemoteSqlShapeBudget dml_budget;
+        if (auto allowed = remote_source_budget(tbl, dml_budget); !allowed) {
+            c->close_table(th.value());
+            return fail(allowed.error());
+        }
         sql_dml_hold_write_lock(tbl);
         // Keep the structural bag current on every SQL write (see
         // DmlProductionIndexGuard above); no-op when no <base>.cdx/.adi
@@ -30948,6 +30962,13 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         if (!th) return fail(th.error());
         openads::engine::Table* tbl = c->lookup_table(th.value());
         if (!tbl) return fail(openads::AE_INTERNAL_ERROR, "post-open");
+        // Bound physical target scan work before locks, indexes or row writes.
+        // Reuse SELECT's conservative source limit; local batch SQL is unchanged.
+        openads::engine::RemoteSqlShapeBudget dml_budget;
+        if (auto allowed = remote_source_budget(tbl, dml_budget); !allowed) {
+            c->close_table(th.value());
+            return fail(allowed.error());
+        }
         sql_dml_hold_write_lock(tbl);
         // Keep the structural bag current on every SQL write (see
         // DmlProductionIndexGuard above); no-op when no <base>.cdx/.adi

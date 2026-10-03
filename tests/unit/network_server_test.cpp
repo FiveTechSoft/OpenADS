@@ -2060,3 +2060,61 @@ TEST_CASE("remote SQL join preflight rejects fanout before materialization; loca
     REQUIRE(AdsDisconnect(connection) == 0);
     fs::remove_all(dir, error);
 }
+
+TEST_CASE("remote DML target preflight rejects before any row changes and keeps connection usable") {
+    namespace fs = std::filesystem;
+    const auto dir = fs::temp_directory_path() / "openads_sql_dml_budget";
+    std::error_code error;
+    fs::remove_all(dir, error);
+    fs::create_directories(dir);
+    m12_write_dbf(dir / "big.dbf", std::vector<std::string>(100001, "SAME"));
+    m12_write_dbf(dir / "small.dbf", {"SAME"});
+    auto read_bytes = [](const fs::path& path) {
+        std::ifstream file(path, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(file), {});
+    };
+    const auto original = read_bytes(dir / "big.dbf");
+    Server server;
+    REQUIRE(server.start("127.0.0.1", 0).has_value());
+    std::string uri = "tcp://127.0.0.1:" + std::to_string(server.port()) + "/" + dir.string();
+    ADSHANDLE connection = 0, statement = 0;
+    REQUIRE(AdsConnect60(reinterpret_cast<UNSIGNED8*>(uri.data()), ADS_REMOTE_SERVER,
+                        nullptr, nullptr, 0, &connection) == 0);
+    REQUIRE(AdsCreateSQLStatement(connection, &statement) == 0);
+    auto execute = [&](const std::string& query, ADSHANDLE* cursor) {
+        std::vector<UNSIGNED8> sql(query.begin(), query.end());
+        sql.push_back(0);
+        return AdsExecuteSQLDirect(statement, sql.data(), cursor);
+    };
+    for (const auto& query : {
+            "UPDATE big.dbf SET TAG = 'EDIT'",
+            "DELETE FROM big.dbf",
+            "MERGE INTO big.dbf ON TAG = 'SAME' WHEN MATCHED THEN UPDATE SET TAG = 'EDIT'"}) {
+        ADSHANDLE cursor = 0;
+        INFO(std::string(query));
+        CHECK(execute(query, &cursor) != 0);
+        CHECK(cursor == 0);
+        UNSIGNED32 code = 0;
+        UNSIGNED16 length = 2048;
+        UNSIGNED8 message[2048]{};
+        REQUIRE(AdsGetLastError(&code, message, &length) == 0);
+        // ExecuteSQL intentionally returns generic text over the wire.
+        CHECK(code == 7200);
+        CHECK(std::string(reinterpret_cast<char*>(message)).find("server-side exec failed") != std::string::npos);
+    }
+    ADSHANDLE cursor = 0;
+    REQUIRE(execute("UPDATE small.dbf SET TAG = 'EDIT'", &cursor) == 0);
+    REQUIRE(AdsCloseSQLStatement(statement) == 0);
+    REQUIRE(AdsDisconnect(connection) == 0);
+    server.stop();
+    CHECK(read_bytes(dir / "big.dbf") == original);
+    // Trusted local batch scan remains available, even above the remote bound.
+    std::string local = dir.string();
+    REQUIRE(AdsConnect60(reinterpret_cast<UNSIGNED8*>(local.data()), ADS_LOCAL_SERVER,
+                        nullptr, nullptr, 0, &connection) == 0);
+    REQUIRE(AdsCreateSQLStatement(connection, &statement) == 0);
+    REQUIRE(execute("UPDATE big.dbf SET TAG = 'EDIT' WHERE TAG = 'NONE'", &cursor) == 0);
+    REQUIRE(AdsCloseSQLStatement(statement) == 0);
+    REQUIRE(AdsDisconnect(connection) == 0);
+    fs::remove_all(dir, error);
+}

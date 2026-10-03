@@ -13,6 +13,9 @@ sería menor. WHERE, TOP e índices no lo evitan. Para trabajo batch de confianz
 usar ejecución local o dividir el conjunto de datos.
 
 No es un plazo de tiempo, un límite exacto del allocator ni un límite de memos.
-Scans DML, backends externos, DLL nativas, UDF de scripts, sentencias repetidas
+Backends externos, DLL nativas, UDF de scripts, sentencias repetidas
 y varias etapas UNION/derivadas necesitan presupuestos separados. Siguen
 vigentes los límites anteriores de input SQL y recursión.
+
+Los destinos UPDATE/DELETE/MERGE ya usan el mismo preflight de source. Ver
+[Prevalidación DML remota](security-sql-dml-preflight.md).

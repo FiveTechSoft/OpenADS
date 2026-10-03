@@ -349,3 +349,6 @@ SECURITY: [DONE] Conservative remote SELECT source/fanout/fixed-width preflight 
 SECURITY: [DONE] Shared nested script budget1M (including expressions), cooperative5s deadline,8 Executor levels and non-catchable exhaustion. Bridge/native blocking work remains separately bounded.
 
 SECURITY: [DONE] No SQL source/error text retained in SQL error logs; debug connection strings/last errors hidden. Caller diagnostics preserved; old logs need operator retention review.
+Security hardening 2026-10-03: remote native UPDATE/DELETE/MERGE target
+preflight before locks/indexes/writes, same 100k/64MiB source bound as SELECT.
+EN/ES: docs/{en,es}/security-sql-dml-preflight.md. Memo/runtime budgets remain.
