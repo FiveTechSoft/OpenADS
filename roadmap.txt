@@ -366,3 +366,7 @@ EN/ES: docs/{en,es}/security-sql-predicate-work.md. Join/runtime budgets remain.
 SECURITY: Native authenticated DD SQL operation ACLs no longer caller-disabled;
 SELECT primary/join/inline predicate sources checked before materialization.
 EN/ES: docs/{en,es}/security-native-sql-permissions.md. Column/backend audit open.
+
+Security: native dictionary SQL schema/file changes require dictionary administrator;
+full table DML permission no longer permits DROP/ALTER/CREATE schema operations.
+Seguridad: cambios de esquema SQL con diccionario requieren admin, no solo permiso DML.

@@ -29782,6 +29782,19 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         }
     }
 
+    // Schema/file destruction cannot be inferred from table DML grants.
+    // Keep local/no-DD compatibility; live dictionary schema changes need
+    // the same administrator authority as dictionary metadata mutations.
+    if (c->has_dd() && !dictionary_admin(c) &&
+        (openads::sql::sql_is_drop_table(sql) ||
+         openads::sql::sql_is_drop_index(sql) ||
+         openads::sql::sql_is_alter_table(sql) ||
+         openads::sql::sql_is_create_table(sql) ||
+         openads::sql::sql_is_create_index(sql) ||
+         openads::sql::sql_is_create_database(sql)))
+        return fail(openads::AE_ACCESS_DENIED,
+                    "dictionary administrator required for SQL schema changes");
+
     // M10.5/M10.7/M10.9: dispatch on the leading keyword. INSERT /
     // UPDATE / DELETE / CREATE TABLE / CREATE INDEX write through
     // the engine and return no cursor (phCursor Ã¢â€ â€™ 0); SELECT keeps

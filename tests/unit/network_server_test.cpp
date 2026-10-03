@@ -2261,13 +2261,19 @@ TEST_CASE("remote SQL DD named-user rights reject ignored-rights join and inline
             "SELECT * FROM hidden",
             "SELECT allowed.TAG FROM allowed INNER JOIN hidden ON allowed.TAG = hidden.TAG",
             "SELECT TAG FROM allowed WHERE EXISTS (SELECT TAG FROM hidden)",
-            "UPDATE allowed SET TAG = 'EDIT'"}) {
+            "UPDATE allowed SET TAG = 'EDIT'",
+            "DROP TABLE allowed", "ALTER TABLE allowed ADD COLUMN EXTRA CHAR(4)",
+            "CREATE TABLE denied (TAG CHAR(4))", "CREATE INDEX denied ON allowed (TAG)",
+            "CREATE DATABASE 'denied.add'"}) {
         ADSHANDLE cursor = 0;
         INFO(std::string(text));
         CHECK(execute(text, &cursor) == 7200);
         CHECK(cursor == 0);
     }
     ADSHANDLE cursor = 0;
+    CHECK(fs::exists(dir / "allowed.dbf"));
+    CHECK_FALSE(fs::exists(dir / "denied.dbf"));
+    CHECK_FALSE(fs::exists(dir / "denied.add"));
     REQUIRE(execute("SELECT TAG FROM allowed", &cursor) == 0);
     REQUIRE(AdsCloseTable(cursor) == 0);
     REQUIRE(AdsCloseSQLStatement(statement) == 0);

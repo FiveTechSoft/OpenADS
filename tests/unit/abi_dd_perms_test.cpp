@@ -831,3 +831,54 @@ TEST_CASE("Native SQL DD operation rights cannot be disabled and cover join pred
     REQUIRE(AdsDisconnect(connection) == 0);
     fs::remove_all(dir, error);
 }
+
+TEST_CASE("Native DD SQL schema changes require administrator rather than DML permission") {
+    const auto dir = fs::temp_directory_path() / "openads_sql_dd_schema_acl";
+    std::error_code error;
+    fs::remove_all(dir, error);
+    fs::create_directories(dir);
+    make_dbf(dir / "tbl.dbf");
+    openads_test::make_dd(dir / "test.add",
+        "TABLE tbl=tbl.dbf\nUSER alice\nUSERPROP alice;prop_1101=pw\n"
+        "USER admin\nUSERPROP admin;prop_1101=pw\nMEMBER admin=DB:Admin\n"
+        "DBPROP prop_5=1\nTABLEPERM tbl;alice=4\n");
+    const auto connection = connect_as(dir / "test.add", "alice", "pw");
+    REQUIRE(connection != 0);
+    ADSHANDLE statement = 0;
+    REQUIRE(AdsCreateSQLStatement(connection, &statement) == 0);
+    for (const auto& text : {"DROP TABLE tbl", "DROP TABLE tbl.dbf",
+            "ALTER TABLE tbl ADD COLUMN EXTRA CHAR(4)",
+            "CREATE INDEX secret_idx ON tbl (ID)",
+            "DROP INDEX secret_idx ON tbl", "CREATE TABLE created (ID CHAR(4))",
+            "CREATE TABLE copied AS SELECT ID FROM tbl",
+            "CREATE DATABASE 'created.add'"}) {
+        INFO(std::string(text));
+        std::vector<UNSIGNED8> sql(text, text + std::strlen(text));
+        sql.push_back(0);
+        ADSHANDLE cursor = 0;
+        CHECK(AdsExecuteSQLDirect(statement, sql.data(), &cursor) == 7200);
+        CHECK(cursor == 0);
+        UNSIGNED32 code = 0;
+        UNSIGNED8 message[2048]{};
+        UNSIGNED16 length = sizeof(message);
+        REQUIRE(AdsGetLastError(&code, message, &length) == 0);
+        CHECK(std::string(reinterpret_cast<char*>(message)).find("NativeError = 7079") != std::string::npos);
+        CHECK(fs::exists(dir / "tbl.dbf"));
+        CHECK_FALSE(fs::exists(dir / "tbl.cdx"));
+        CHECK_FALSE(fs::exists(dir / "created.dbf"));
+        CHECK_FALSE(fs::exists(dir / "copied.dbf"));
+        CHECK_FALSE(fs::exists(dir / "created.add"));
+    }
+    REQUIRE(AdsCloseSQLStatement(statement) == 0);
+    REQUIRE(AdsDisconnect(connection) == 0);
+    const auto admin = connect_as(dir / "test.add", "admin", "pw");
+    REQUIRE(admin != 0);
+    REQUIRE(AdsCreateSQLStatement(admin, &statement) == 0);
+    UNSIGNED8 create[] = "CREATE TABLE created (ID CHAR(4))";
+    ADSHANDLE cursor = 0;
+    REQUIRE(AdsExecuteSQLDirect(statement, create, &cursor) == 0);
+    CHECK(fs::exists(dir / "created.dbf"));
+    REQUIRE(AdsCloseSQLStatement(statement) == 0);
+    REQUIRE(AdsDisconnect(admin) == 0);
+    fs::remove_all(dir, error);
+}
