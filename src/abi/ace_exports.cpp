@@ -7610,8 +7610,7 @@ UNSIGNED32 ENTRYPOINT AdsConnect101(UNSIGNED8* pucConnectString,
                          ADSHANDLE* phConnect) {
     arc2_trace("AdsConnect101");
     arc2_trace("AdsConnect101");
-    arc2_log("CONNECT101 connstr=[%s]",
-             pucConnectString ? (const char*)pucConnectString : "(null)");
+    arc2_log("CONNECT101 connection string hidden");
     if (phConnect == nullptr) {
         return fail(openads::AE_INTERNAL_ERROR, "phConnect is null");
     }
@@ -13138,9 +13137,8 @@ UNSIGNED32 ENTRYPOINT AdsGetLastError(UNSIGNED32* pulCode, UNSIGNED8* pucBuf,
                            UNSIGNED16* pusBufLen) {
     arc2_trace("AdsGetLastError");
     arc2_trace("AdsGetLastError");
-    arc2_log("LASTERR code=%d msg=%.120s",
-             (int)openads::abi::last_error_code(),
-             openads::abi::last_error_message().c_str());
+    arc2_log("LASTERR code=%d (message hidden)",
+             (int)openads::abi::last_error_code());
     if (pulCode != nullptr) *pulCode = static_cast<UNSIGNED32>(
         openads::abi::last_error_code());
     if (pucBuf != nullptr && pusBufLen != nullptr) {
@@ -28937,8 +28935,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         arc2_log("EXEC remote (SQL text hidden)");
         auto r = it->second->remote->execute_sql(sqlstr);
         if (!r) {
-            arc2_log("EXEC remote FAIL code=%d msg=%.80s",
-                     r.error().code, r.error().message.c_str());
+            arc2_log("EXEC remote FAIL code=%d (message hidden)", r.error().code);
             return fail(r.error());
         }
         std::uint32_t cur_id = r.value();
@@ -37292,9 +37289,9 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
 }
 
 // Thin export over the SQL dispatcher above: a failing statement also
-// lands in the SAP-style ads_err error log with the statement text --
-// matching ADS, whose error log records the SQL errors (7200 etc.) it
-// raises while serving clients. Success paths pay nothing.
+// lands in the SAP-style ads_err error log with the code but without SQL
+// or error text, which can contain secrets. The requesting caller still
+// receives the full diagnostic. Success paths pay nothing.
 // S4 -- AQE envelope depth guard. Internal recursion (derived tables,
 // INTO snapshots, script-bridge embedded SQL) re-enters
 // AdsExecuteSQLDirect; only the OUTERMOST, client-facing call wraps the
@@ -37344,13 +37341,11 @@ UNSIGNED32 ENTRYPOINT AdsExecuteSQLDirect(ADSHANDLE hStatement, UNSIGNED8* pucSQ
         (void)AdsGotoTop(*phCursor);
     }
     if (rc != openads::AE_SUCCESS) {
-        std::string sql = pucSQL != nullptr
-            ? openads::abi::to_internal(pucSQL, 0) : std::string();
-        if (sql.size() > 160) sql.resize(160);
-        std::string msg = openads::abi::last_error_message();
+        // Error text can quote SQL literals, connection strings or user RAISE
+        // messages. Preserve it only for the requesting caller, never at rest.
         openads::mgmt::ErrorLog::instance().log(
             static_cast<std::int32_t>(rc), "SQL", 0,
-            msg.empty() ? sql : (msg + " | " + sql));
+            "SQL execution failed (SQL and error text hidden)");
     }
     return rc;
 }

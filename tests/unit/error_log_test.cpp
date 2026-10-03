@@ -137,3 +137,39 @@ TEST_CASE("error log: ads_err.log is fixed-width with 3-space separators") {
     CHECK(all[0].code == 5018);
     CHECK(all[1].code == 7200);
 }
+
+TEST_CASE("error log: SQL literals and error diagnostics are not retained") {
+    LogDirGuard guard("openads_errlog_sql_secrets");
+    // LogDirGuard only removes the old directory; logging creates it lazily.
+    // This test connects before its first log write, so create the data root.
+    fs::create_directories(guard.dir);
+    std::string root = guard.dir.string();
+    ADSHANDLE connection = 0, statement = 0, cursor = 0;
+    REQUIRE(AdsConnect60(reinterpret_cast<UNSIGNED8*>(root.data()), ADS_LOCAL_SERVER,
+                        nullptr, nullptr, 0, &connection) == 0);
+    REQUIRE(AdsCreateSQLStatement(connection, &statement) == 0);
+    std::string sql = "RAISE secret_marker(901, 'very-private-password-9387');";
+    CHECK(AdsExecuteSQLDirect(statement, reinterpret_cast<UNSIGNED8*>(sql.data()), &cursor) != 0);
+    CHECK(cursor == 0);
+    UNSIGNED32 code = 0;
+    UNSIGNED8 diagnostic[1024] = {};
+    UNSIGNED16 length = sizeof(diagnostic);
+    REQUIRE(AdsGetLastError(&code, diagnostic, &length) == 0);
+    CHECK(std::string(reinterpret_cast<char*>(diagnostic), length).find("very-private-password-9387") != std::string::npos);
+    REQUIRE(AdsCloseSQLStatement(statement) == 0);
+    REQUIRE(AdsDisconnect(connection) == 0);
+    const auto entries = ErrorLog::instance().read_last(100);
+    REQUIRE(!entries.empty());
+    bool saw_sql = false;
+    for (const auto& entry : entries) {
+        CHECK(entry.detail.find("very-private-password-9387") == std::string::npos);
+        CHECK(entry.detail.find("secret_marker") == std::string::npos);
+        if (entry.source == "SQL") saw_sql = true;
+    }
+    CHECK(saw_sql);
+    std::ifstream input(guard.dir / "ads_err.log", std::ios::binary);
+    REQUIRE(input.good());
+    const std::string text(std::istreambuf_iterator<char>(input), {});
+    CHECK(text.find("very-private-password-9387") == std::string::npos);
+    CHECK(text.find("secret_marker") == std::string::npos);
+}

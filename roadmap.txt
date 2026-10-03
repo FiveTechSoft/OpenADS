@@ -347,3 +347,5 @@ SECURITY: [DONE] Optional native TLS data listeners with nonblocking accepted-so
 SECURITY: [DONE] Conservative remote SELECT source/fanout/fixed-width preflight (100k rows,64MiB); local unchanged. DML, deadlines, memo payloads and repeated stages still pending.
 
 SECURITY: [DONE] Shared nested script budget1M (including expressions), cooperative5s deadline,8 Executor levels and non-catchable exhaustion. Bridge/native blocking work remains separately bounded.
+
+SECURITY: [DONE] No SQL source/error text retained in SQL error logs; debug connection strings/last errors hidden. Caller diagnostics preserved; old logs need operator retention review.
