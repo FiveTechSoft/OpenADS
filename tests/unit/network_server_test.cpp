@@ -2118,3 +2118,68 @@ TEST_CASE("remote DML target preflight rejects before any row changes and keeps 
     REQUIRE(AdsDisconnect(connection) == 0);
     fs::remove_all(dir, error);
 }
+
+TEST_CASE("remote SQL UNION additive budget checks rows bytes and overflow") {
+    using Budget = openads::engine::RemoteSqlUnionBudget;
+    Budget rows;
+    REQUIRE(rows.add(60000, 16).has_value());
+    CHECK_FALSE(rows.add(60000, 16).has_value());
+    Budget bytes;
+    REQUIRE(bytes.add(40000, 1024).has_value());
+    CHECK_FALSE(bytes.add(40000, 1024).has_value());
+    Budget exact;
+    REQUIRE(exact.add(100000, 16).has_value());
+    CHECK(exact.add(0, 16).has_value());
+    CHECK_FALSE(exact.add(1, 16).has_value());
+    Budget overflow;
+    CHECK_FALSE(overflow.add(UINT64_MAX, UINT64_MAX).has_value());
+}
+
+TEST_CASE("remote UNION rejects combined staging even when each member fits; local unchanged") {
+    namespace fs = std::filesystem;
+    const auto dir = fs::temp_directory_path() / "openads_sql_union_budget";
+    std::error_code error;
+    fs::remove_all(dir, error);
+    fs::create_directories(dir);
+    m12_write_dbf(dir / "a.dbf", std::vector<std::string>(60000, "SAME"));
+    Server server;
+    REQUIRE(server.start("127.0.0.1", 0).has_value());
+    std::string uri = "tcp://127.0.0.1:" + std::to_string(server.port()) + "/" + dir.string();
+    ADSHANDLE connection = 0, statement = 0;
+    REQUIRE(AdsConnect60(reinterpret_cast<UNSIGNED8*>(uri.data()), ADS_REMOTE_SERVER,
+                        nullptr, nullptr, 0, &connection) == 0);
+    REQUIRE(AdsCreateSQLStatement(connection, &statement) == 0);
+    auto execute = [&](const std::string& query, ADSHANDLE* cursor) {
+        std::vector<UNSIGNED8> sql(query.begin(), query.end());
+        sql.push_back(0);
+        return AdsExecuteSQLDirect(statement, sql.data(), cursor);
+    };
+    ADSHANDLE cursor = 0;
+    for (const auto& query : {
+            "SELECT TAG FROM a.dbf UNION ALL SELECT TAG FROM a.dbf",
+            "SELECT TAG FROM a.dbf UNION SELECT TAG FROM a.dbf"}) {
+        INFO(std::string(query));
+        CHECK(execute(query, &cursor) != 0);
+        CHECK(cursor == 0);
+        UNSIGNED32 code = 0;
+        UNSIGNED16 length = 2048;
+        UNSIGNED8 message[2048]{};
+        REQUIRE(AdsGetLastError(&code, message, &length) == 0);
+        CHECK(code == 7200);
+        CHECK(std::string(reinterpret_cast<char*>(message)).find("server-side exec failed") != std::string::npos);
+    }
+    REQUIRE(execute("SELECT COUNT(*) FROM a.dbf", &cursor) == 0);
+    REQUIRE(AdsCloseTable(cursor) == 0);
+    REQUIRE(AdsCloseSQLStatement(statement) == 0);
+    REQUIRE(AdsDisconnect(connection) == 0);
+    server.stop();
+    std::string local = dir.string();
+    REQUIRE(AdsConnect60(reinterpret_cast<UNSIGNED8*>(local.data()), ADS_LOCAL_SERVER,
+                        nullptr, nullptr, 0, &connection) == 0);
+    REQUIRE(AdsCreateSQLStatement(connection, &statement) == 0);
+    REQUIRE(execute("SELECT TAG FROM a.dbf UNION ALL SELECT TAG FROM a.dbf", &cursor) == 0);
+    REQUIRE(AdsCloseTable(cursor) == 0);
+    REQUIRE(AdsCloseSQLStatement(statement) == 0);
+    REQUIRE(AdsDisconnect(connection) == 0);
+    fs::remove_all(dir, error);
+}

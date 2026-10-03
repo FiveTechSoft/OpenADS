@@ -355,3 +355,6 @@ EN/ES: docs/{en,es}/security-sql-dml-preflight.md. Memo/runtime budgets remain.
 Security hardening 2026-10-03: native remote memo reads capped at 8MiB before
 store allocation/growth; FPT/ADM declared payload validated against file size.
 EN/ES: docs/{en,es}/security-memo-read-limits.md. Total SQL allocator budget open.
+Security hardening 2026-10-03: remote UNION/UNION ALL additive staging budget
+100k rows/64MiB before copying each member, including later discarded duplicates.
+EN/ES: docs/{en,es}/security-sql-union-budget.md. Total runtime/allocator budget open.

@@ -30,4 +30,21 @@ struct RemoteSqlShapeBudget {
     }
 };
 
+// Additive staging allowance for UNION members, including rows which a later
+// DISTINCT would discard. Enforce before copying rows into the accumulator.
+struct RemoteSqlUnionBudget {
+    std::uint64_t rows = 0;
+    std::uint64_t bytes = 0;
+    util::Result<void> add(std::uint64_t count, std::uint64_t width) {
+        constexpr auto max_rows = RemoteSqlShapeBudget::kRows;
+        constexpr auto max_bytes = RemoteSqlShapeBudget::kBytes;
+        if (count > max_rows - rows || width > max_bytes ||
+            (count != 0 && width > (max_bytes - bytes) / count))
+            return util::Error{7079, 0, "remote SQL UNION budget exceeded", ""};
+        rows += count;
+        bytes += count * width;
+        return {};
+    }
+};
+
 } // namespace openads::engine

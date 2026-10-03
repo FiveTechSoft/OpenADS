@@ -31622,6 +31622,7 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             std::vector<openads::drivers::DbfField> schema;
             std::uint32_t rec_len = 0;
             std::vector<std::vector<std::uint8_t>> rows;
+            openads::engine::RemoteSqlUnionBudget union_budget;
 
             for (std::size_t mi = 0; mi < uparts.size(); ++mi) {
                 // Recurse into the full SELECT executor for this
@@ -31689,6 +31690,13 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                             mt->is_deleted()) continue;
                         if (!mt->passes_filter()) continue;
                         recnos.push_back(r);
+                    }
+                }
+                if (c->remote_server()) {
+                    if (auto allowed = union_budget.add(recnos.size(), rec_len);
+                        !allowed) {
+                        AdsCloseTable(memberCur);
+                        return fail(allowed.error());
                     }
                 }
                 for (std::uint32_t r : recnos) {
