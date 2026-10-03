@@ -23,6 +23,14 @@ using openads::abi::lock_retry_policy;
 #include "abi/charset.h"
 #include "abi/last_error.h"
 #include "abi/create_table_diag.h"
+
+// One TLS definition per linked image: MinGW cannot coalesce the dynamic
+// initializers emitted for inline thread_local std::string in multiple TUs.
+namespace openads::abi::create_diag {
+thread_local std::string target;
+thread_local std::string correlation;
+}
+
 #include "abi/runtime.h"
 
 #include "engine/aof_eval.h"

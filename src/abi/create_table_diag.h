@@ -12,8 +12,8 @@
 #include <string_view>
 
 namespace openads::abi::create_diag {
-inline thread_local std::string target;
-inline thread_local std::string correlation;
+extern thread_local std::string target;
+extern thread_local std::string correlation;
 
 inline std::string leaf(std::string_view path) {
     auto end = path.find_last_not_of("/\\");
