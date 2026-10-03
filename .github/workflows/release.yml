@@ -10,6 +10,11 @@ on:
         description: "tag to package (e.g. v1.0.0-rc1)"
         required: true
 
+      source_ref:
+        description: "Exact commit to build before publishing a new tag (optional)"
+        required: false
+        type: string
+
       repack_only:
         description: "Repackage existing public assets without rebuilding any binaries"
         required: false
@@ -61,7 +66,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ inputs.source_ref || inputs.tag || github.ref }}
 
       - name: Resolve tag
         id: tag
@@ -462,6 +467,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
+          target_commitish: ${{ inputs.source_ref || github.sha }}
           draft: true
           body_path: ${{ steps.notes.outputs.path }}
           files: out/*
