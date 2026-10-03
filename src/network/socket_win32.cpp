@@ -242,7 +242,7 @@ util::Result<int> socket_poll(std::vector<PollItem>& items, int timeout_ms) {
     std::vector<WSAPOLLFD> fds(items.size());
     for (std::size_t i = 0; i < items.size(); ++i) {
         fds[i].fd      = static_cast<SOCKET>(items[i].sock.handle);
-        fds[i].events  = POLLRDNORM;
+        fds[i].events  = static_cast<short>(POLLRDNORM | ((items[i].events & static_cast<std::uint8_t>(PollEvent::Writable)) ? POLLWRNORM : 0));
         fds[i].revents = 0;
     }
     int rc = WSAPoll(fds.data(), static_cast<ULONG>(fds.size()), timeout_ms);
@@ -251,6 +251,8 @@ util::Result<int> socket_poll(std::vector<PollItem>& items, int timeout_ms) {
     }
     for (std::size_t i = 0; i < items.size(); ++i) {
         std::uint8_t ev = 0;
+        if (fds[i].revents & POLLOUT)
+            ev |= static_cast<std::uint8_t>(PollEvent::Writable);
         if (fds[i].revents & (POLLRDNORM | POLLIN))
             ev |= static_cast<std::uint8_t>(PollEvent::Readable);
         if (fds[i].revents & (POLLERR | POLLHUP | POLLNVAL))

@@ -533,6 +533,15 @@ bool Server::kill_session_by_conn_no(std::uint16_t conn_no) {
     return kill_session(sessions[conn_no - 1].id);
 }
 
+#if defined(OPENADS_WITH_TLS)
+util::Result<void> Server::set_tls(const TlsConfig& config) {
+    if (running_.load()) return util::Error{5000, 0, "TLS configuration requires a stopped server", ""};
+    if (auto result = validate_tls_server_config(config); !result) return result.error();
+    tls_ = config;
+    return {};
+}
+#endif
+
 util::Result<void> Server::start(const std::string& host,
                                  std::uint16_t port) {
     if (running_.load()) return {};
@@ -847,12 +856,13 @@ void Server::session_loop(Socket s, std::string default_data_dir,
                           std::uint16_t listener_port) {
     // The per-frame contract (read → dispatch → reply → telemetry) lives in
     // Session::handle_readable so the reactor WorkerPool shares it verbatim.
+    (void)socket_set_nonblocking(s, true);
     Session sess(*this, s, std::move(default_data_dir), listener_port);
     while (!sess.expired()) {
-        std::vector<PollItem> ready{{s, static_cast<std::uint8_t>(PollEvent::Readable)}};
+        std::vector<PollItem> ready{{s, sess.poll_events()}};
         auto polled = socket_poll(ready, 200);
         if (!polled) break;
-        if (polled.value() != 0 && !sess.handle_readable()) break;
+        if ((polled.value() != 0 || sess.buffered_read()) && !sess.handle_readable()) break;
     }
     sock_close(s);
 }

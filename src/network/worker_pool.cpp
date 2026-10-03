@@ -52,7 +52,6 @@ util::Result<std::pair<Socket, Socket>> make_wake_pair() {
 }
 
 constexpr std::uint8_t kRead = static_cast<std::uint8_t>(PollEvent::Readable);
-constexpr std::uint8_t kErr  = static_cast<std::uint8_t>(PollEvent::Error);
 
 } // namespace
 
@@ -134,7 +133,8 @@ void WorkerPool::worker_loop(Worker& w) {
         std::vector<PollItem> items;
         items.reserve(w.session_socks.size() + 1);
         items.push_back({w.wake_read, kRead});
-        for (Socket sk : w.session_socks) items.push_back({sk, kRead});
+        for (std::size_t j = 0; j < w.session_socks.size(); ++j)
+            items.push_back({w.session_socks[j], w.sessions[j]->poll_events()});
 
         auto pr = socket_poll(items, 200 /*ms*/);
         if (!pr) break;
@@ -152,7 +152,7 @@ void WorkerPool::worker_loop(Worker& w) {
         std::vector<std::size_t> dead;
         for (std::size_t j = 0; j < w.sessions.size(); ++j) {
             if (w.sessions[j]->expired()) { dead.push_back(j); continue; }
-            if ((items[j + 1].events & (kRead | kErr)) == 0) continue;
+            if (items[j + 1].events == 0 && !w.sessions[j]->buffered_read()) continue;
             // One poisoned session must not escape into std::terminate and
             // take the reactor worker (and every session it multiplexes) down.
             try {

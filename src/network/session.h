@@ -59,6 +59,9 @@ public:
     // Accessor for the reactor: the connection socket this Session owns.
     Socket socket() const noexcept { return s_; }
     bool expired() const noexcept;
+    std::uint8_t poll_events() const noexcept;
+    bool buffered_read() const noexcept;
+
 
 private:
     // Telemetry + dispatch + reply for one complete frame. Shared by the
@@ -66,6 +69,15 @@ private:
     // Returns false when the connection should be torn down.
     bool process_frame(const Frame& f);
 
+    bool queue_reply(const Frame& frame);
+    bool flush_reply();
+    std::unique_ptr<ITransport> tls_transport_;
+    bool transport_failed_ = false;
+    bool close_after_reply_ = false;
+    bool drain_reader_ = false;
+    std::vector<std::uint8_t> reply_bytes_;
+    std::size_t reply_offset_ = 0;
+    std::chrono::steady_clock::time_point reply_since_ = std::chrono::steady_clock::now();
     Server*       srv_;
     Socket        s_;
     std::uint64_t sid_;

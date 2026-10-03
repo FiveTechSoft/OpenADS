@@ -341,3 +341,5 @@ SECURITY: [DONE] Remote-owned engine tables cap record locks, including SQL auto
 SECURITY: [DONE] Remote SQL input source/token/parenthesis caps and embeddedNUL rejection, including remote-owned ABI reentry. Recursive procedures/query execution budgets remain under review.
 
 SECURITY: [DONE] SQL reentry depth8 across procedures/triggers/scripts; trigger traces hide SQL. Query execution deadlines remain pending.
+
+SECURITY: [DONE] Optional native TLS data listeners with nonblocking accepted-socket BIO, certificate/key validation and bounded reply backpressure. Studio HTTPS still requires proxy.

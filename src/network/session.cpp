@@ -348,6 +348,38 @@ Session::Session(Server& srv, Socket s, std::string default_data_dir,
     srv_->install_session_socket(sid_, s_);
 }
 
+std::uint8_t Session::poll_events() const noexcept {
+    auto events = static_cast<std::uint8_t>(PollEvent::Readable);
+    if ((!reply_bytes_.empty() && !tls_transport_) ||
+        (tls_transport_ && tls_transport_->wants_write()))
+        events |= static_cast<std::uint8_t>(PollEvent::Writable);
+    return events;
+}
+bool Session::buffered_read() const noexcept {
+    return drain_reader_ || (tls_transport_ && tls_transport_->buffered_read());
+}
+bool Session::queue_reply(const Frame& frame) {
+    auto encoded = encode_frame(frame);
+    if (!encoded || !reply_bytes_.empty()) return false;
+    reply_bytes_ = std::move(encoded).value();
+    reply_offset_ = 0;
+    reply_since_ = std::chrono::steady_clock::now();
+    return flush_reply();
+}
+bool Session::flush_reply() {
+    while (reply_offset_ < reply_bytes_.size()) {
+        auto sent = tls_transport_
+            ? tls_transport_->send(reply_bytes_.data() + reply_offset_, reply_bytes_.size() - reply_offset_)
+            : sock_send(s_, reply_bytes_.data() + reply_offset_, reply_bytes_.size() - reply_offset_);
+        if (!sent) return transport_would_block(sent.error());
+        if (sent.value() == 0) return false;
+        reply_offset_ += sent.value();
+    }
+    reply_bytes_.clear();
+    reply_offset_ = 0;
+    return true;
+}
+
 Session::~Session() {
     cleanup();
     srv_->erase_session_socket(sid_);
@@ -447,7 +479,7 @@ bool Session::process_frame(const Frame& f) {
     }
     srv_->set_session_executing(sid_, false);
     if (res.reply) {
-        if (auto wr = write_frame(s_, *res.reply); !wr) return false;
+        if (!queue_reply(*res.reply)) return false;
         auto& mgst = openads::mgmt::process_mg_stats();
         mgst.packets_out.fetch_add(1, std::memory_order_relaxed);
         // RCB 07/14/2026: bytes_out was declared alongside packets_out but
@@ -459,46 +491,55 @@ bool Session::process_frame(const Frame& f) {
                                  std::memory_order_relaxed);
         srv_->touch_session(sid_, false, true);
     }
-    return !res.close_session;
+    close_after_reply_ = res.close_session;
+    return !close_after_reply_ || !reply_bytes_.empty();
 }
 
 bool Session::expired() const noexcept {
     const auto now = std::chrono::steady_clock::now();
-    return (!sess_conn_ && !mg_connected_ && now - created_ >= std::chrono::seconds(30)) ||
+    return (!reply_bytes_.empty() && now - reply_since_ >= std::chrono::seconds(30)) ||
+           (!sess_conn_ && !mg_connected_ && now - created_ >= std::chrono::seconds(30)) ||
            now - last_read_ >= std::chrono::minutes(5) ||
            (reader_.buffered() != 0 && now - partial_since_ >= std::chrono::seconds(30));
 }
 
 bool Session::handle_readable() {
-    if (expired()) return false;
-    // Read whatever a single recv yields — a partial frame, one frame, or
-    // several — then reassemble and dispatch every complete frame. On a
-    // non-blocking socket (reactor pool) an idle or stalled peer returns
-    // would-block and we hand the worker straight back to its other
-    // connections, so one slow client can't cause head-of-line blocking. On a
-    // blocking socket (legacy thread-per-connection loop) recv just waits for
-    // the next bytes, preserving the previous one-frame-at-a-time behavior.
-    std::uint8_t buf[16384];
-    auto r = sock_recv(s_, buf, sizeof(buf));
-    if (!r) {
-        if (socket_recv_would_block(r.error())) return true;  // nothing right now
-        return false;                                         // peer reset / error
+    if (expired() || transport_failed_) return false;
+#if defined(OPENADS_WITH_TLS)
+    if (!tls_transport_ && srv_->tls_config()) {
+        auto transport = accept_tls(s_, *srv_->tls_config());
+        if (!transport) { transport_failed_ = true; return false; }
+        tls_transport_ = std::move(transport).value();
     }
-    if (r.value() == 0) return false;                         // peer closed cleanly
-    last_read_ = std::chrono::steady_clock::now();
+#endif
+    if (!flush_reply()) return false;
+    if (!reply_bytes_.empty()) return true; // backpressure: one bounded reply
+    if (close_after_reply_) return false;
+    std::uint8_t buf[16384];
+    auto r = tls_transport_ ? tls_transport_->recv(buf, sizeof(buf)) : sock_recv(s_, buf, sizeof(buf));
+    std::size_t received = 0;
+    if (!r) {
+        if (!transport_would_block(r.error())) return false;
+    } else {
+        if (r.value() == 0) return false;
+        received = r.value();
+        last_read_ = std::chrono::steady_clock::now();
+    }
     const bool had_partial = reader_.buffered() != 0;
     reader_.set_payload_limit(sess_conn_ ? kMaxFramePayload : 64 * 1024);
-    auto frames = reader_.feed(buf, r.value(), 1);
+    drain_reader_ = false;
+    auto frames = reader_.feed(buf, received, 1);
     for (;;) {
         if (!frames) {
-            if (frames.error().message == "unknown opcode")
-                (void)write_frame(s_, err("unsupported opcode"));
+            if (frames.error().message == "unknown opcode") {
+                close_after_reply_ = true;
+                return queue_reply(err("unsupported opcode")) && !reply_bytes_.empty();
+            }
             return false;
         }
         if (frames.value().empty()) break;
         if (!process_frame(frames.value().front())) return false;
-        // Connect and a subsequent large authenticated frame may arrive in
-        // one TCP read. Change the limit only AFTER Connect actually succeeds.
+        if (!reply_bytes_.empty()) { drain_reader_ = true; break; }
         reader_.set_payload_limit(sess_conn_ ? kMaxFramePayload : 64 * 1024);
         frames = reader_.feed(nullptr, 0, 1);
     }

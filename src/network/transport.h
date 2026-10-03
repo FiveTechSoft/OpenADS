@@ -27,7 +27,13 @@ public:
         recv(std::uint8_t* buf, std::size_t n) = 0;
     virtual void close() noexcept            = 0;
     virtual bool valid() const noexcept      = 0;
+    virtual bool wants_write() const noexcept { return false; }
+    virtual bool buffered_read() const noexcept { return false; }
 };
+
+inline bool transport_would_block(const util::Error& error) noexcept {
+    return error.context == "transport would block" || socket_recv_would_block(error);
+}
 
 class PlainTransport : public ITransport {
 public:

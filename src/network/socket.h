@@ -71,6 +71,7 @@ void                      sock_close(Socket& sock) noexcept;
 enum class PollEvent : std::uint8_t {
     None     = 0,
     Readable = 1,   // data (or EOF / a pending accept) available to read
+    Writable = 4,
     Error    = 2,   // POLLERR / POLLHUP / POLLNVAL
 };
 struct PollItem {

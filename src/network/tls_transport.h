@@ -23,7 +23,7 @@ namespace openads::network {
 
 struct TlsConfig {
     // PEM-encoded CA bundle the client uses to verify the server.
-    // Empty ⇒ verification is skipped (testing / dev only).
+    // Empty fails verification unless insecure_skip_verify is explicit.
     std::string ca_pem;
     // PEM-encoded server cert + key (server-side only).
     std::string cert_pem;
@@ -40,13 +40,11 @@ util::Result<std::unique_ptr<ITransport>>
     connect_tls(const std::string& host, std::uint16_t port,
                 const TlsConfig& cfg);
 
-// NOTE — server-side TLS termination requires replacing the
-// Socket-based listener with an mbedtls_net_context one (mbedtls
-// 3.6 doesn't expose a way to adopt an externally-accepted fd).
-// That refactor is queued for v1.0.x; for v1.0 the client side is
-// the only thing that speaks tls://. Real-world deployments
-// typically front the server with a TLS-terminating proxy
-// (haproxy / nginx / stunnel) anyway.
+// Adopt an accepted, non-blocking socket without owning its lifetime.
+// Handshake advances cooperatively from recv/send. The Session owns closure.
+util::Result<std::unique_ptr<ITransport>>
+    accept_tls(Socket socket, const TlsConfig& cfg);
+util::Result<void> validate_tls_server_config(const TlsConfig& cfg);
 
 } // namespace openads::network
 

@@ -34,6 +34,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <thread>
 #include <utility>
@@ -101,6 +103,9 @@ void usage(const char* argv0) {
         "               ini: error_log_max. See docs/en/error-log.md\n"
         "  --http_user  user:password — register a Studio login\n"
         "               (repeatable; if none given, console is open)\n"
+        "  --tls_cert FILE --tls_key FILE  PEM certificate chain and unencrypted key\n"
+        "               All TCP data listeners require TLS when configured.\n"
+        "               Needs OPENADS_WITH_TLS=ON. Studio HTTP is unchanged.\n"
         "  --allow_anonymous  explicitly allow anonymous non-loopback listeners\n"
         "  --auth_user  user:password — require this login for TCP\n"
         "               AdsConnect60 connections (repeatable)\n"
@@ -122,6 +127,8 @@ void usage(const char* argv0) {
 struct Args {
     std::string   host        = "127.0.0.1";
     bool          allow_anonymous = false;
+    std::string tls_cert_file;
+    std::string tls_key_file;
     std::uint16_t port        = 6262;
     int           backlog     = 16;
     // Cap on concurrent sessions (0 = unlimited). Defaults to 0 here so the
@@ -174,6 +181,8 @@ bool parse_args(int argc, char** argv, Args& out) {
             out.max_sessions = static_cast<std::uint32_t>(std::atoi(argv[++i]));
         else if (flag_eq(a, "http_port") && i + 1 < argc) out.http_port = static_cast<std::uint16_t>(std::atoi(argv[++i]));
         else if (flag_eq(a, "data")      && i + 1 < argc) out.data_dir = argv[++i];
+        else if (flag_eq(a, "tls_cert") && i + 1 < argc) out.tls_cert_file = argv[++i];
+        else if (flag_eq(a, "tls_key") && i + 1 < argc) out.tls_key_file = argv[++i];
         else if (flag_eq(a, "allow_anonymous")) out.allow_anonymous = true;
         else if (flag_eq(a, "disable_anonymous")) out.allow_anonymous = false;
         else if (flag_eq(a, "enable_file_func")) out.enable_file_func = true;
@@ -365,6 +374,10 @@ static void probe_ace_dlls(bool console) {
 // Run the actual server. Returns when g_running flips to false
 // (signal handler on POSIX / SCM stop control on Windows).
 int run_server(const Args& args, bool console) {
+    if (args.tls_cert_file.empty() != args.tls_key_file.empty()) {
+        std::fprintf(stderr, "Both --tls_cert and --tls_key are required.\n");
+        return 1;
+    }
     // Only literal loopback addresses are trusted. A hostname can resolve
     // to a public interface, so fail closed rather than infer its safety.
     const bool loopback = args.host == "127.0.0.1" || args.host == "::1";
@@ -381,7 +394,7 @@ int run_server(const Args& args, bool console) {
                 "http_user or explicitly pass --allow_anonymous.\n");
             return 1;
         }
-        std::fprintf(stderr,
+        if (args.tls_cert_file.empty()) std::fprintf(stderr,
             "WARNING: TCP listener has no native TLS. Credentials and data "
             "travel in cleartext. Use a TLS proxy and firewall the backend.\n");
         if (args.auth_users.empty() || (args.http_port != 0 && args.http_users.empty()))
@@ -439,6 +452,32 @@ int run_server(const Args& args, bool console) {
     }
 
     openads::network::Server srv;
+    if (!args.tls_cert_file.empty()) {
+#if defined(OPENADS_WITH_TLS)
+        auto read_pem = [](const std::string& path) {
+            std::ifstream input(path, std::ios::binary | std::ios::ate);
+            if (!input || input.tellg() <= 0 || input.tellg() > 1024 * 1024)
+                return std::string();
+            input.seekg(0);
+            return std::string(std::istreambuf_iterator<char>(input), {});
+        };
+        openads::network::TlsConfig config;
+        config.cert_pem = read_pem(args.tls_cert_file);
+        config.key_pem = read_pem(args.tls_key_file);
+        if (config.cert_pem.empty() || config.key_pem.empty()) {
+            std::fprintf(stderr, "Cannot read TLS certificate/key files.\n");
+            return 1;
+        }
+        auto tls = srv.set_tls(config);
+        if (!tls) {
+            std::fprintf(stderr, "TLS configuration rejected: %s\n", tls.error().message.c_str());
+            return 1;
+        }
+#else
+        std::fprintf(stderr, "TLS requested but this build lacks OPENADS_WITH_TLS=ON.\n");
+        return 1;
+#endif
+    }
     if (!args.data_dir.empty() && args.data_dir != ".")
         srv.set_data_dir(args.data_dir);
     srv.set_enable_file_func(args.enable_file_func);

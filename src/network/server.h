@@ -4,6 +4,7 @@
 #include "network/mutex_manager.h"
 #include "network/socket.h"
 #include "network/transport.h"
+#include "network/tls_transport.h"
 #include "network/wire.h"
 #include "util/result.h"
 
@@ -12,6 +13,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -55,6 +57,9 @@ class Server {
     // (register_session, install/erase_session_socket, unregister,
     // set_session_user, add_session_table, build_mg_snapshot,
     // kill_session_by_conn_no), creds_, data_dir_, require_auth().
+#if defined(OPENADS_WITH_TLS)
+    std::optional<TlsConfig> tls_;
+#endif
     friend class Session;
 
 public:
@@ -66,6 +71,10 @@ public:
     Server& operator=(const Server&) = delete;
     ~Server();
 
+#if defined(OPENADS_WITH_TLS)
+    util::Result<void> set_tls(const TlsConfig& config);
+    const TlsConfig* tls_config() const noexcept { return tls_ ? &*tls_ : nullptr; }
+#endif
     util::Result<void> start(const std::string& host,
                              std::uint16_t port);
     std::uint16_t      port() const noexcept { return port_; }
