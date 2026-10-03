@@ -344,6 +344,7 @@ util::Result<Stats> unzip_files(const std::string& archive_abs,
             // Scoped so the stream closes before any cleanup remove()
             // below — Windows cannot delete an open file.
             bool rerr = false;
+            std::uint64_t extracted = 0;
             {
                 std::ofstream out(out_path, std::ios::binary |
                                                 std::ios::trunc);
@@ -362,6 +363,8 @@ util::Result<Stats> unzip_files(const std::string& archive_abs,
                         break;
                     }
                     if (got == 0) break;
+                    extracted += static_cast<std::uint64_t>(got);
+                    if (extracted > info.uncompressed_size) { rerr = true; break; }
                     out.write(buf.data(), got);
                     if (!out) {
                         rerr = true;
@@ -370,6 +373,10 @@ util::Result<Stats> unzip_files(const std::string& archive_abs,
                 }
                 out.close();
             }
+            // Some bad-password deflate streams end early. minizip checks CRC
+            // only when its expected-length counter reaches zero, so a zero
+            // read alone is not proof of successful extraction.
+            if (extracted != info.uncompressed_size) rerr = true;
             // NB: unzCloseCurrentFile surfaces the CRC check.
             if (unzCloseCurrentFile(uf) != UNZ_OK) rerr = true;
             if (rerr) {

@@ -385,3 +385,5 @@ Security: native DD schema APIs require admin, with narrowly scoped internal cur
 Seguridad: APIs de esquema nativas DD requieren admin; resultados temporales registrados conservan mantenimiento.
 
 Security: native row/column operations enforce DD ACLs; native copies are jailed and index mutations require admin.
+
+Security: ZIP extraction requires exact uncompressed byte count before success; premature EOF removes partial output.

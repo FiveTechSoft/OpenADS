@@ -187,3 +187,24 @@ TEST_CASE("zip: Zip-Slip entries rejected, nothing escapes") {
     CHECK(!fs::exists(s.dir / "evil.txt"));
     CHECK(!fs::exists(s.dir / "dst" / "evil.txt"));
 }
+
+TEST_CASE("zip: premature deflate EOF cannot count as successful extraction") {
+    Scratch s;
+    const auto source = s.src("a.dbf", "hello-zip");
+    const auto archive = (s.dir / "early.zip").string();
+    REQUIRE(za::zip_files({source}, (s.dir / "src").string(), archive, ZipOptions{}).has_value());
+    // A valid short deflate stream with a larger declared length exercises
+    // the same early-EOF path observed with random wrong-password bytes.
+    // minizip skips CRC verification while remaining uncompressed bytes > 0.
+    std::fstream file(archive, std::ios::binary | std::ios::in | std::ios::out);
+    std::string bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    const auto central = bytes.find(std::string("PK\x01\x02", 4));
+    REQUIRE(central != std::string::npos);
+    REQUIRE(bytes.size() > central + 28);
+    const char ten[4] = {10, 0, 0, 0};
+    file.clear(); file.seekp(22); file.write(ten, 4);
+    file.seekp(static_cast<std::streamoff>(central + 24)); file.write(ten, 4); file.close();
+    const auto result = za::unzip_files(archive, (s.dir / "dst").string(), UnzipOptions{});
+    CHECK_FALSE(result.has_value());
+    CHECK_FALSE(fs::exists(s.dir / "dst" / "a.dbf"));
+}
