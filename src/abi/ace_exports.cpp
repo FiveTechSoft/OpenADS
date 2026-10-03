@@ -27844,7 +27844,7 @@ struct TriggerBridge final : openads::script::SqlBridge {
         static const bool trig_trace =
             openads::util::client_setting_truthy("OPENADS_TRACE", "trace");
         if (trig_trace)
-            std::fprintf(stderr, "[trig-exec] %.120s\n", sql.c_str());
+            std::fprintf(stderr, "[trig-exec] SQL text hidden\n");
         // 1. INSERT INTO __error Ã¢â‚¬Â¦ VALUES (code, 'msg') -- the classic ADS
         //    way for a trigger to fail the DML. Surface it as an error.
         {
@@ -37269,7 +37269,15 @@ UNSIGNED32 ENTRYPOINT AdsExecuteSQLDirect(ADSHANDLE hStatement, UNSIGNED8* pucSQ
         ~DepthGuard() { --sql_exec_depth_; }
     } depth_guard;
     ++sql_exec_depth_;
-    UNSIGNED32 rc = exec_sql_direct_impl(hStatement, pucSQL, phCursor);
+    // Re-entry from procedures, triggers and scripts shares this thread's
+    // call-depth budget. A new Executor must not reset recursion protection.
+    UNSIGNED32 rc;
+    if (sql_exec_depth_ > 8) {
+        if (phCursor) *phCursor = 0;
+        rc = fail(openads::AE_ACCESS_DENIED, "SQL execution recursion limit exceeded");
+    } else {
+        rc = exec_sql_direct_impl(hStatement, pucSQL, phCursor);
+    }
     if (rc != openads::AE_SUCCESS && sql_exec_depth_ == 1) {
         std::string sql_text = pucSQL != nullptr
             ? openads::abi::to_internal(pucSQL, 0) : std::string();

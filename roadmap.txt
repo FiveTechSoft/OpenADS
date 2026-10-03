@@ -339,3 +339,5 @@ SECURITY: [DONE] Remote Aggregate physical-row/spec/expression/reply budgets and
 SECURITY: [DONE] Remote-owned engine tables cap record locks, including SQL automatic/virtual append locks, at4096 before durable append; local behavior retained. Connection-wide SQL resource budgets remain under review.
 
 SECURITY: [DONE] Remote SQL input source/token/parenthesis caps and embeddedNUL rejection, including remote-owned ABI reentry. Recursive procedures/query execution budgets remain under review.
+
+SECURITY: [DONE] SQL reentry depth8 across procedures/triggers/scripts; trigger traces hide SQL. Query execution deadlines remain pending.

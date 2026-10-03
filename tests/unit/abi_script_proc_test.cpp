@@ -85,7 +85,9 @@ struct SpFixture {
         UNSIGNED32 rc = AdsExecuteSQLDirect(hStmt, sb.data(), &hc);
         if (rc != 0) {
             UNSIGNED32 ec = 0;
-            char em[512] = {0};
+            // Nested embedded-SQL diagnostics include each call site's text.
+            // Read the full bounded chain rather than treating truncation as empty.
+            char em[16384] = {0};
             UNSIGNED16 el = sizeof(em) - 1;
             AdsGetLastError(&ec, reinterpret_cast<UNSIGNED8*>(em), &el);
             last_msg = std::string(em, el < sizeof(em) ? el : 0);
@@ -379,4 +381,17 @@ TEST_CASE("trigger: script control flow runs in trigger bodies now") {
     INFO("trigger error: " << f.last_msg);
     CHECK(rc == 0);
     CHECK(f.scalar("SELECT COUNT(*) AS n FROM audit") == "1");
+}
+
+TEST_CASE("SQL procedure recursion fails without exhausting the native stack") {
+    SpFixture fixture("openads_sql_recursion_budget");
+    fixture.create_proc("sp_recurse", "EXECUTE PROCEDURE sp_recurse();", "", "");
+    ADSHANDLE cursor = 0;
+    CHECK(fixture.run("EXECUTE PROCEDURE sp_recurse();", &cursor) != 0);
+    CHECK(cursor == 0);
+    INFO(fixture.last_msg);
+    CHECK(fixture.last_msg.find("recursion limit") != std::string::npos);
+    // A failed nested execution must unwind its budget fully.
+    CHECK(fixture.run("INSERT INTO audit(ID) VALUES (7);") == 0);
+    CHECK(fixture.scalar("SELECT ID FROM audit") == "7");
 }
