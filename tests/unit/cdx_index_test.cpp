@@ -3,6 +3,7 @@
 #include "drivers/index_trait.h"
 #include "engine/index_expr.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -520,5 +521,80 @@ TEST_CASE("CdxIndex create resets page allocator tail after recreate at same pat
     MESSAGE("big=" << big_sz << " small=" << small_sz);
     CHECK(small_sz < 8 * 1024);
     CHECK(small_sz * 3 < big_sz);
+    fs::remove(p);
+}
+
+TEST_CASE("CdxIndex seek_last descends multilevel duplicate-key branches and refreshes peers") {
+    const auto p = fs::temp_directory_path() / "openads_cdx_last_multilevel.cdx";
+    fs::remove(p);
+    {
+    auto c = CdxIndex::create(p.string(), "T1", "TAG", 19, false, false);
+    REQUIRE(c.has_value());
+    CdxIndex writer = std::move(c).value();
+    auto empty = writer.seek_last();
+    REQUIRE(empty.has_value());
+    CHECK_FALSE(empty.value().positioned);
+    std::vector<std::pair<std::string, std::uint32_t>> keys;
+    // Enough leaves for more than one branch level; duplicate keys cross
+    // leaf boundaries and must end at the highest record number.
+    for (std::uint32_t rn = 1; rn <= 20000; ++rn)
+        keys.emplace_back(std::string(19, 'A'), rn);
+    REQUIRE(writer.build_bulk(std::move(keys)).has_value());
+    REQUIRE(writer.flush().has_value());
+    CdxIndex reader;
+    REQUIRE(reader.open(p.string(), IndexOpenMode::Shared).has_value());
+    auto last = reader.seek_last();
+    REQUIRE(last.has_value());
+    REQUIRE(last.value().positioned);
+    CHECK(last.value().recno == 20000);
+    CHECK(reader.current_key() == std::string(19, 'A'));
+    auto prev = reader.prev();
+    REQUIRE(prev.has_value());
+    CHECK(prev.value().recno == 19999);
+    REQUIRE(writer.insert(20001, std::string(19, 'Z')).has_value());
+    REQUIRE(writer.flush().has_value());
+    last = reader.seek_last();
+    REQUIRE(last.has_value());
+    CHECK(last.value().recno == 20001);
+    CHECK(reader.current_key() == std::string(19, 'Z'));
+    } // Close the CDX handles before deleting the fixture on Windows.
+    fs::remove(p);
+}
+
+TEST_CASE("CdxIndex seek_last skips empty rightmost leaves and handles an erased tree") {
+    const auto p = fs::temp_directory_path() / "openads_cdx_last_holes.cdx";
+    fs::remove(p);
+    {
+    auto c = CdxIndex::create(p.string(), "T1", "TAG", 19, false, false);
+    REQUIRE(c.has_value());
+    CdxIndex ix = std::move(c).value();
+    std::vector<std::pair<std::string, std::uint32_t>> keys;
+    for (std::uint32_t rn = 1; rn <= 300; ++rn) {
+        const std::string k = std::to_string(rn) + std::string(19 - std::to_string(rn).size(), ' ');
+        keys.emplace_back(k, rn);
+    }
+    REQUIRE(ix.build_bulk(keys).has_value());
+    REQUIRE(ix.flush().has_value());
+    // Compare against a full forward walk after removing the final half
+    // of sorted keys, including multiple physical tail leaves.
+    std::sort(keys.begin(), keys.end());
+    for (std::size_t i = 150; i < keys.size(); ++i)
+        REQUIRE(ix.erase(keys[i].second, keys[i].first).has_value());
+    REQUIRE(ix.flush().has_value());
+    auto last = ix.seek_last();
+    REQUIRE(last.has_value());
+    REQUIRE(last.value().positioned);
+    CHECK(last.value().recno == keys[149].second);
+    CHECK(ix.current_key() == keys[149].first);
+    auto prev = ix.prev();
+    REQUIRE(prev.has_value());
+    CHECK(prev.value().recno == keys[148].second);
+    for (std::size_t i = 0; i < 150; ++i)
+        REQUIRE(ix.erase(keys[i].second, keys[i].first).has_value());
+    REQUIRE(ix.flush().has_value());
+    last = ix.seek_last();
+    REQUIRE(last.has_value());
+    CHECK_FALSE(last.value().positioned);
+    } // Close the CDX handles before deleting the fixture on Windows.
     fs::remove(p);
 }
