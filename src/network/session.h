@@ -59,6 +59,8 @@ public:
     // Accessor for the reactor: the connection socket this Session owns.
     Socket socket() const noexcept { return s_; }
     bool expired() const noexcept;
+    // Explicit time argument keeps daemon lifecycle policy testable without sleeps.
+    bool expired_at(std::chrono::steady_clock::time_point now) const noexcept;
     std::uint8_t poll_events() const noexcept;
     bool buffered_read() const noexcept;
 
@@ -152,6 +154,7 @@ private:
     bool          client_prefetch_back_ok_ = false;
     // M12.x — client sends [u16 mode] prefix on OpenTable payloads.
     bool          client_open_table_mode_ok_ = false;
+    bool          client_locked_row_ok_ = false;
     // M12.32 — last ShowDeleted state received; abi_conn_ is created
     // lazily, so ensure_abi_conn must re-apply it or the ABI connection
     // starts with the default (show) and ordered walks leak deleted rows.

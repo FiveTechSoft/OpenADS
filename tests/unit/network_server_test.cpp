@@ -11,6 +11,7 @@
 #include "network/wire.h"
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -1999,6 +2000,46 @@ TEST_CASE("native TLS single-worker pool serves a client while another handshake
     sock_close(stalled.value());
     pool.stop();
     sock_close(listener.value());
+}
+namespace {
+std::atomic<long long> tls_idle_offset{0};
+std::chrono::steady_clock::time_point tls_idle_now() noexcept {
+    return std::chrono::steady_clock::now()+std::chrono::seconds(tls_idle_offset.load());
+}
+}
+TEST_CASE("mtfix41 daemon TLS established idle resumes in dedicated and reactor") {
+    namespace fs=std::filesystem;
+    auto dir=fs::temp_directory_path()/"openads_tls_idle41";
+    std::error_code ec; fs::create_directories(dir,ec);
+    for(bool reactor : {false,true}) {
+        tls_idle_offset.store(0);
+        Server server; server.set_session_clock(tls_idle_now);
+        openads::network::TlsConfig sc; sc.cert_pem=tls_test_cert; sc.key_pem=tls_test_key;
+        REQUIRE(server.set_tls(sc));
+        std::unique_ptr<openads::network::WorkerPool> pool;
+        Socket listener; std::uint16_t port=0;
+        if(reactor) {
+            auto l=openads::network::listen_tcp({"127.0.0.1",0,4}); REQUIRE(l); listener=l.value();
+            auto p=openads::network::socket_local_port(listener); REQUIRE(p); port=p.value();
+            pool=std::make_unique<openads::network::WorkerPool>(server,1); pool->start();
+        } else { REQUIRE(server.start("127.0.0.1",0)); port=server.port(); }
+        std::thread accepter;
+        if(reactor) accepter=std::thread([&] { auto peer=openads::network::accept_one(listener); if(peer)pool->submit(peer.value(),dir.string(),port); });
+        openads::network::TlsConfig cc; cc.ca_pem=tls_test_cert; cc.sni_hostname="localhost";
+        auto transport=openads::network::connect_tls("127.0.0.1",port,cc);
+        if(accepter.joinable()) accepter.join();
+        REQUIRE(transport);
+        openads::network::RemoteConnection client;
+        REQUIRE(client.connect_with_transport(std::move(transport).value(),dir.string()));
+        tls_idle_offset.store(2700); std::this_thread::sleep_for(std::chrono::milliseconds(450));
+        // Opening a nonexistent table yields a server Error, not transport loss.
+        auto absent=client.open_table("missing.dbf"); CHECK_FALSE(absent); CHECK(client.valid());
+        CHECK(absent.error().message!="peer closed connection");
+        client.disconnect();
+        if(pool)pool->stop(); else server.stop();
+        if(listener.valid())sock_close(listener);
+    }
+    tls_idle_offset.store(0); fs::remove_all(dir,ec);
 }
 #endif
 

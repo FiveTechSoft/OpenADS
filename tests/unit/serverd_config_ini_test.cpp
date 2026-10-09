@@ -198,3 +198,19 @@ TEST_CASE("allow_anonymous defaults closed and validates explicit boolean") {
     CHECK_FALSE(cfg.allow_anonymous);
     CHECK_FALSE(parse_ini("allow_anonymous = typo\n", cfg, err));
 }
+
+TEST_CASE("mtfix41 established idle setting strict parse and default never") {
+    auto defaults=parse_ok("");
+    CHECK_FALSE(defaults.has_established_session_idle_seconds);
+    CHECK(defaults.established_session_idle_seconds==0);
+    auto zero=parse_ok("established_session_idle_seconds = 0\n");
+    CHECK(zero.has_established_session_idle_seconds); CHECK(zero.established_session_idle_seconds==0);
+    auto positive=parse_ok("established-session-idle-seconds = 3600\n");
+    CHECK(positive.established_session_idle_seconds==3600);
+    auto max=parse_ok("established_session_idle_seconds = 4294967295\n");
+    CHECK(max.established_session_idle_seconds==4294967295u);
+    for(const char* value : {"-1","abc","1s","4294967296","184467440737095516160"}) {
+        openads::serverd::IniConfig bad; std::string error;
+        CHECK_FALSE(openads::serverd::parse_ini(std::string("established_session_idle_seconds = ")+value+"\n",bad,error));
+    }
+}

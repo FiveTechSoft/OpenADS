@@ -1,3 +1,4 @@
+#include "network/session_thread_launch.h"
 #include "network/server.h"
 
 // OPENADS_VERSION_STR from the CMake-generated header (configure_file,
@@ -797,9 +798,10 @@ void Server::accept_loop() {
                     continue;
                 }
                 std::uint64_t tid = thread_seq_.fetch_add(1);
-                session_threads_.emplace(tid,
-                    std::thread([this, s, tid, dd = std::move(dd),
-                                 listener_port]() mutable {
+                try {
+                    detail::register_session_thread(session_threads_, tid, [&] {
+                        return std::thread([this, s, tid, dd = std::move(dd),
+                                            listener_port]() mutable {
                         // One session must never take the server down: an
                         // uncaught exception here (e.g. std::bad_alloc once
                         // the address space is exhausted) would escape into
@@ -820,7 +822,26 @@ void Server::accept_loop() {
                         }
                         std::lock_guard<std::mutex> lk2(sessions_mu_);
                         finished_threads_.push_back(tid);
-                    }));
+                    });
+                    });
+                } catch (const std::exception& e) {
+                    rejected_sessions_.fetch_add(1);
+                    sock_close(s);
+                    // Logging must not throw while handling resource exhaustion.
+                    try {
+                        openads::mgmt::ErrorLog::instance().log(
+                            0, "SERVER", 0,
+                            std::string("session thread creation failed; connection rejected: ") + e.what());
+                    } catch (...) {}
+                } catch (...) {
+                    rejected_sessions_.fetch_add(1);
+                    sock_close(s);
+                    try {
+                        openads::mgmt::ErrorLog::instance().log(
+                            0, "SERVER", 0,
+                            "session thread creation failed; connection rejected: unknown exception");
+                    } catch (...) {}
+                }
             }
         }
     }
