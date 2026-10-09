@@ -10869,11 +10869,13 @@ std::optional<std::string> jail_local(const FsConnCtx& c,
 struct RemoteFileRec {
     openads::network::RemoteConnection* conn = nullptr;
     std::uint32_t                       file_id = 0;
+    std::mutex                         mu;
+    bool                               closed = false;
 };
 
-std::unordered_map<ADSHANDLE, std::unique_ptr<RemoteFileRec>>&
+std::unordered_map<ADSHANDLE, std::shared_ptr<RemoteFileRec>>&
 remote_files_map() {
-    static std::unordered_map<ADSHANDLE, std::unique_ptr<RemoteFileRec>> m;
+    static std::unordered_map<ADSHANDLE, std::shared_ptr<RemoteFileRec>> m;
     return m;
 }
 
@@ -11348,14 +11350,18 @@ UNSIGNED32 ENTRYPOINT AdsFOpen(ADSHANDLE hConn, UNSIGNED8* pucName,
     auto name = openads::abi::to_internal(pucName, 0);
     auto ctx = resolve_fs_conn(hConn);
     auto& s = state();
-    std::lock_guard<std::recursive_mutex> lk(s.mu);
+    std::unique_lock<std::recursive_mutex> lk(s.mu);
     if (ctx.remote) {
+        // RemoteConnection lifetime is process-owned; disconnect serializes
+        // with its requests, but must not wait while we hold state().mu.
+        lk.unlock();
         auto r = ctx.remote->fopen(name, usMode);
         if (!r) return fail(r.error());
-        auto rec = std::make_unique<RemoteFileRec>();
+        auto rec = std::make_shared<RemoteFileRec>();
         rec->conn = ctx.remote;
         rec->file_id = r.value();
         auto* raw = rec.get();
+        lk.lock();
         Handle h = s.registry.register_object(
             openads::session::HandleKind::RemoteFile, raw);
         remote_files_map().emplace(to_ads_handle(h), std::move(rec));
@@ -11384,14 +11390,18 @@ UNSIGNED32 ENTRYPOINT AdsFCreate(ADSHANDLE hConn, UNSIGNED8* pucName,
     auto name = openads::abi::to_internal(pucName, 0);
     auto ctx = resolve_fs_conn(hConn);
     auto& s = state();
-    std::lock_guard<std::recursive_mutex> lk(s.mu);
+    std::unique_lock<std::recursive_mutex> lk(s.mu);
     if (ctx.remote) {
+        // RemoteConnection lifetime is process-owned; disconnect serializes
+        // with its requests, but must not wait while we hold state().mu.
+        lk.unlock();
         auto r = ctx.remote->fcreate(name, usAttribute);
         if (!r) return fail(r.error());
-        auto rec = std::make_unique<RemoteFileRec>();
+        auto rec = std::make_shared<RemoteFileRec>();
         rec->conn = ctx.remote;
         rec->file_id = r.value();
         auto* raw = rec.get();
+        lk.lock();
         Handle h = s.registry.register_object(
             openads::session::HandleKind::RemoteFile, raw);
         remote_files_map().emplace(to_ads_handle(h), std::move(rec));
@@ -11415,10 +11425,17 @@ UNSIGNED32 ENTRYPOINT AdsFCreate(ADSHANDLE hConn, UNSIGNED8* pucName,
 UNSIGNED32 ENTRYPOINT AdsFClose(ADSHANDLE hFile) {
     arc2_trace("AdsFClose");
     auto& s = state();
-    std::lock_guard<std::recursive_mutex> lk(s.mu);
-    if (auto* rf = s.registry.lookup<RemoteFileRec>(
-            hFile, openads::session::HandleKind::RemoteFile)) {
+    std::unique_lock<std::recursive_mutex> lk(s.mu);
+    if (auto it = remote_files_map().find(hFile); it != remote_files_map().end()) {
+        // Retain lifetime under the registry lock, then release it BEFORE
+        // waiting on this file or its connection. Never invert that order.
+        auto rf = it->second;
+        lk.unlock();
+        std::lock_guard<std::mutex> file_lk(rf->mu);
+        if (rf->closed) return fail(openads::AE_INTERNAL_ERROR, "bad file handle");
         auto r = rf->conn->fclose(rf->file_id);
+        rf->closed = true; // Even a failed close consumes the public handle.
+        lk.lock();
         remote_files_map().erase(hFile);
         s.registry.release(hFile);
         if (!r) return fail(r.error());
@@ -11439,9 +11456,14 @@ UNSIGNED32 ENTRYPOINT AdsFRead(ADSHANDLE hFile, void* pBuf, UNSIGNED32 ulLen,
     if (!pulRead) return fail(openads::AE_INTERNAL_ERROR, "null out");
     *pulRead = 0;
     auto& s = state();
-    std::lock_guard<std::recursive_mutex> lk(s.mu);
-    if (auto* rf = s.registry.lookup<RemoteFileRec>(
-            hFile, openads::session::HandleKind::RemoteFile)) {
+    std::unique_lock<std::recursive_mutex> lk(s.mu);
+    if (auto it = remote_files_map().find(hFile); it != remote_files_map().end()) {
+        // Retain lifetime under the registry lock, then release it BEFORE
+        // waiting on this file or its connection. Never invert that order.
+        auto rf = it->second;
+        lk.unlock();
+        std::lock_guard<std::mutex> file_lk(rf->mu);
+        if (rf->closed) return fail(openads::AE_INTERNAL_ERROR, "bad file handle");
         auto r = rf->conn->fread(rf->file_id, ulLen);
         if (!r) return fail(r.error());
         const auto& bytes = r.value();
@@ -11467,9 +11489,14 @@ UNSIGNED32 ENTRYPOINT AdsFWrite(ADSHANDLE hFile, const void* pBuf,
     if (!pulWritten) return fail(openads::AE_INTERNAL_ERROR, "null out");
     *pulWritten = 0;
     auto& s = state();
-    std::lock_guard<std::recursive_mutex> lk(s.mu);
-    if (auto* rf = s.registry.lookup<RemoteFileRec>(
-            hFile, openads::session::HandleKind::RemoteFile)) {
+    std::unique_lock<std::recursive_mutex> lk(s.mu);
+    if (auto it = remote_files_map().find(hFile); it != remote_files_map().end()) {
+        // Retain lifetime under the registry lock, then release it BEFORE
+        // waiting on this file or its connection. Never invert that order.
+        auto rf = it->second;
+        lk.unlock();
+        std::lock_guard<std::mutex> file_lk(rf->mu);
+        if (rf->closed) return fail(openads::AE_INTERNAL_ERROR, "bad file handle");
         auto r = rf->conn->fwrite(
             rf->file_id, static_cast<const std::uint8_t*>(pBuf), ulLen);
         if (!r) return fail(r.error());
@@ -11496,9 +11523,14 @@ UNSIGNED32 ENTRYPOINT AdsFSeek(ADSHANDLE hFile, SIGNED32 lOffset,
     if (!pulPos) return fail(openads::AE_INTERNAL_ERROR, "null out");
     *pulPos = 0;
     auto& s = state();
-    std::lock_guard<std::recursive_mutex> lk(s.mu);
-    if (auto* rf = s.registry.lookup<RemoteFileRec>(
-            hFile, openads::session::HandleKind::RemoteFile)) {
+    std::unique_lock<std::recursive_mutex> lk(s.mu);
+    if (auto it = remote_files_map().find(hFile); it != remote_files_map().end()) {
+        // Retain lifetime under the registry lock, then release it BEFORE
+        // waiting on this file or its connection. Never invert that order.
+        auto rf = it->second;
+        lk.unlock();
+        std::lock_guard<std::mutex> file_lk(rf->mu);
+        if (rf->closed) return fail(openads::AE_INTERNAL_ERROR, "bad file handle");
         auto r = rf->conn->fseek(rf->file_id, lOffset,
                                  static_cast<std::uint8_t>(usOrigin));
         if (!r) return fail(r.error());
@@ -14964,7 +14996,8 @@ UNSIGNED32 ENTRYPOINT AdsLockRecord(ADSHANDLE hTable, UNSIGNED32 ulRecord) {
     arc2_trace("AdsLockRecord");
     if (auto* rt = get_remote_table(hTable)) {
         if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
-        auto r = rt->conn->lock_record(rt->id, ulRecord);
+        remote_settle_cursor(rt);
+        auto r = rt->conn->lock_record(rt, ulRecord);
         if (!r) return fail(r.error());
         rt->ever_locked = true;
         // ulRecord == 0 -> the current record (ACE convention). With
@@ -14974,6 +15007,12 @@ UNSIGNED32 ENTRYPOINT AdsLockRecord(ADSHANDLE hTable, UNSIGNED32 ulRecord) {
             ? (rt->row_valid ? rt->current_recno : 0) : ulRecord;
         if (lrec == 0) rt->locks_uncertain = true;
         else rt->held_recs.insert(lrec);
+        // Record the acquired lock before a fallback read can fail. A
+        // failed refresh must not erase ownership of a real held lock.
+        if (!rt->row_valid && lrec != 0 && lrec == rt->current_recno) {
+            auto fresh = rt->conn->refresh_record(rt);
+            if (!fresh) return fail(fresh.error());
+        }
         return ok();
     }
 #if defined(OPENADS_WITH_FIREBIRD)

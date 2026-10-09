@@ -81,6 +81,23 @@ public:
     bool               running() const noexcept { return running_.load(); }
     void               stop() noexcept;
 
+    // Opt-in established-session policy, configured before start. Zero never expires
+    // established DBF sessions for application inactivity.
+    void set_established_session_idle_seconds(std::uint32_t seconds) noexcept {
+        established_session_idle_seconds_ = seconds;
+    }
+    std::uint32_t established_session_idle_seconds() const noexcept {
+        return established_session_idle_seconds_;
+    }
+
+    // Configure before start; production uses the steady clock. A test clock
+    // lets both session schedulers exercise long idle periods deterministically.
+    using SessionClock = std::chrono::steady_clock::time_point (*)() noexcept;
+    void set_session_clock(SessionClock clock) noexcept { session_clock_ = clock; }
+    std::chrono::steady_clock::time_point session_now() const noexcept {
+        return session_clock_ ? session_clock_() : std::chrono::steady_clock::now();
+    }
+
     // M12.9 — auth. When at least one credential is registered, every
     // Connect frame must carry a matching user / password pair; an
     // empty map accepts any client (back-compat / dev mode).
@@ -211,6 +228,8 @@ private:
     // sessions_mu_ (this takes it).
     void reap_finished_threads_();
 
+    SessionClock session_clock_ = nullptr;
+    std::uint32_t established_session_idle_seconds_ = 0;
     Socket                   listener_;
     std::uint16_t            port_ = 0;
     // Multi-port: extra listeners with their own data directories.

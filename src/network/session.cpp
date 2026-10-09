@@ -336,6 +336,7 @@ Frame err(const std::string& msg,
 Session::Session(Server& srv, Socket s, std::string default_data_dir,
                  std::uint16_t listener_port)
     : srv_(&srv), s_(s), sid_(0), default_data_dir_(std::move(default_data_dir)) {
+    created_ = last_read_ = partial_since_ = reply_since_ = srv.session_now();
     // studio.web.0.4 — register an entry in the live sessions
     // registry so the Studio "Sessions" tab can list this peer.
     Server::SessionInfo init;
@@ -367,7 +368,7 @@ bool Session::queue_reply(const Frame& frame) {
     if (!encoded || !reply_bytes_.empty()) return false;
     reply_bytes_ = std::move(encoded).value();
     reply_offset_ = 0;
-    reply_since_ = std::chrono::steady_clock::now();
+    reply_since_ = srv_->session_now();
     return flush_reply();
 }
 bool Session::flush_reply() {
@@ -499,12 +500,30 @@ bool Session::process_frame(const Frame& f) {
     return !close_after_reply_ || !reply_bytes_.empty();
 }
 
+namespace {
+constexpr auto kHandshakeTimeout = std::chrono::seconds(30);
+constexpr auto kPartialFrameTimeout = std::chrono::seconds(30);
+constexpr auto kReplyDrainTimeout = std::chrono::seconds(30);
+constexpr auto kManagementIdleTimeout = std::chrono::minutes(5);
+}
+
 bool Session::expired() const noexcept {
-    const auto now = std::chrono::steady_clock::now();
-    return (!reply_bytes_.empty() && now - reply_since_ >= std::chrono::seconds(30)) ||
-           (!sess_conn_ && !mg_connected_ && now - created_ >= std::chrono::seconds(30)) ||
-           now - last_read_ >= std::chrono::minutes(5) ||
-           (reader_.buffered() != 0 && now - partial_since_ >= std::chrono::seconds(30));
+    return expired_at(srv_->session_now());
+}
+
+bool Session::expired_at(std::chrono::steady_clock::time_point now) const noexcept {
+    // DBF users can read a screen or leave a module open while holding login
+    // locks. Application silence is not evidence of transport death. Keep
+    // their established session until EOF/reset, Disconnect or shutdown;
+    // accepted-socket TCP keepalive detects unreachable peers separately.
+    // Management and unfinished handshakes retain their existing limits.
+    // A finite DBF timeout is an explicit daemon administrator opt-in.
+    return (!reply_bytes_.empty() && now - reply_since_ >= kReplyDrainTimeout) ||
+           (!sess_conn_ && !mg_connected_ && now - created_ >= kHandshakeTimeout) ||
+           (mg_connected_ && now - last_read_ >= kManagementIdleTimeout) ||
+           (sess_conn_ && srv_->established_session_idle_seconds() != 0 &&
+            now - last_read_ >= std::chrono::seconds(srv_->established_session_idle_seconds())) ||
+           (reader_.buffered() != 0 && now - partial_since_ >= kPartialFrameTimeout);
 }
 
 bool Session::handle_readable() {
@@ -527,7 +546,7 @@ bool Session::handle_readable() {
     } else {
         if (r.value() == 0) return false;
         received = r.value();
-        last_read_ = std::chrono::steady_clock::now();
+        last_read_ = srv_->session_now();
     }
     const bool had_partial = reader_.buffered() != 0;
     reader_.set_payload_limit(sess_conn_ ? kMaxFramePayload : 64 * 1024);
@@ -1839,6 +1858,8 @@ DispatchResult Session::dispatch(const Frame& f) {
                 client_prefetch_back_ok_ =
                     (caps & openads::network::kCapPrefetchBackward) != 0;
                 // M12.x — client sends [u16 mode] prefix on OpenTable.
+                client_locked_row_ok_ = (caps & kCapLockedRow) != 0 &&
+                    std::getenv("OPENADS_NO_LOCKED_ROW_CAP") == nullptr;
                 client_open_table_mode_ok_ =
                     (caps & openads::network::kCapOpenTableMode) != 0;
             }
@@ -2007,12 +2028,19 @@ DispatchResult Session::dispatch(const Frame& f) {
             // the "connected:<dir>" echo against their requested dir
             // before trusting the trailing word (see connect_with_transport).
             {
-                const std::uint32_t scaps =
+                std::uint32_t scaps =
                     openads::network::kCapSetFieldsBatch |
                     openads::network::kCapFlushInCloseAll |
                     openads::network::kCapNavOrderFuse |
                     openads::network::kCapFlushTableDurable |
-                    openads::network::kCapNavBoundaryPair;
+                    openads::network::kCapNavBoundaryPair |
+                    openads::network::kCapLockedRow;
+                // mtfix39 test/diagnostic gate: simulate a pre-fix server
+                // that neither echoes kCapLockedRow nor answers the
+                // current-record flag with a row trailer, so the client
+                // negotiates down to the refresh-after-lock fallback.
+                if (std::getenv("OPENADS_NO_LOCKED_ROW_CAP") != nullptr)
+                    scaps &= ~openads::network::kCapLockedRow;
                 reply.payload.push_back(
                     static_cast<std::uint8_t>( scaps        & 0xFFu));
                 reply.payload.push_back(
@@ -3206,6 +3234,10 @@ DispatchResult Session::dispatch(const Frame& f) {
             // lock lands on nonexistent record 0 and the write guard
             // correctly rejects the later write with 5035.
             if (rn == 0) rn = tbl->recno();
+            // Do not move the client cursor when locking another record.
+            const bool wants_row = f.opcode == Opcode::LockRecord &&
+                client_locked_row_ok_ && f.payload.size() == 9 &&
+                f.payload[8] == 1 && rn == tbl->recno();
             const auto lock_key = (static_cast<std::uint64_t>(id) << 32) | rn;
             if (f.opcode == Opcode::LockRecord && explicit_record_locks_.count(lock_key) == 0 &&
                 explicit_record_locks_.size() >= 4096) {
@@ -3293,6 +3325,13 @@ DispatchResult Session::dispatch(const Frame& f) {
             reply.opcode = (f.opcode == Opcode::LockRecord)
                 ? Opcode::LockRecordAck
                 : Opcode::UnlockRecordAck;
+            if (wants_row) {
+                // The ABI twin owns indexed writes/locks. Its successful
+                // lock loaded disk bytes under the lock; sync the engine
+                // mirror before packing a natural-order row from it.
+                sync_engine_cursor(id);
+                pack_row_trailer(reply, id, 0);
+            }
             break;
         }
         // M12.36 — lock introspection. Same dual-handle routing as

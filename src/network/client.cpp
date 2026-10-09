@@ -420,7 +420,7 @@ void connect_pack_payload(std::vector<std::uint8_t>& payload,
     std::uint32_t caps = kCapPrefetchConsume | kCapPrefetchBackward
                        | kCapOpenTableMode | kCapSetFieldsBatch
                        | kCapFlushInCloseAll | kCapNavOrderFuse
-                       | kCapNavBoundaryPair;
+                       | kCapNavBoundaryPair | kCapLockedRow;
     for (int i = 0; i < 4; ++i)
         payload.push_back(static_cast<std::uint8_t>((caps >> (8 * i)) & 0xFFu));
 }
@@ -1898,6 +1898,70 @@ util::Result<void> RemoteConnection::lock_record(std::uint32_t id,
         write_u32_le(recno, req.payload);
         auto rep = request(req);
         if (rep && rep.value().opcode == Opcode::LockRecordAck) return {};
+        // Only contention (AE_LOCKED) is retryable — the server fail-fast
+        // answers it via an Error frame, which request() maps to a failed
+        // Result. Anything else is a real error; return it at once.
+        const bool contended =
+            !rep && rep.error().code ==
+                        static_cast<std::int32_t>(openads::AE_LOCKED);
+        if (!contended) {
+            if (rep) {
+                return util::Error{5000, 0, "LockRecord: server error", ""};
+            }
+            return rep.error();
+        }
+        if (i >= policy.retry_count &&
+            std::chrono::steady_clock::now() >= deadline) {
+            return rep.error();
+        }
+        openads::abi::lock_retry_sleep(i);
+    }
+}
+
+util::Result<void> RemoteConnection::lock_record(RemoteTable* rt,
+                                                  std::uint32_t recno) {
+    const auto id = rt->id;
+    const bool current = rt->current_recno != 0 &&
+        (recno == 0 || recno == rt->current_recno);
+    // The server answers a contended lock immediately (fail-fast). The
+    // retry lives HERE: one wire request per attempt, so the connection
+    // mutex is free between attempts and a peer thread's unlock/lock ops
+    // interleave instead of starving behind ours (Pritpal Bedi:
+    // "dbUnlock() in threads fail somehow").
+    const auto policy = openads::abi::lock_retry_policy();
+    // Budget = retry_count x cycle_ms (the plain ACE total-wait contract),
+    // but early attempts recheck after a few ms (adaptive backoff): a
+    // short contention — the common case — resolves in single-digit ms
+    // instead of one 100ms slice (700-instance B_BIG measured a full
+    // ~1.4s per contended RLock with the flat quantum).
+    const auto t0 = std::chrono::steady_clock::now();
+    const auto deadline =
+        t0 + std::chrono::milliseconds(policy.budget_ms());
+    for (std::uint32_t i = 0; ; ++i) {
+        Frame req; req.opcode = Opcode::LockRecord;
+        write_u32_le(id, req.payload);
+        write_u32_le(recno, req.payload);
+        if (current && (server_caps_ & kCapLockedRow) != 0)
+            req.payload.push_back(1);
+        auto rep = request(req);
+        if (rep && rep.value().opcode == Opcode::LockRecordAck) {
+            if (current) {
+                rt->row_valid = false;
+                rt->invalidate_prefetch();
+                rt->goto_row_fresh = false;
+                rt->last_nav = 0;
+                rt->pair_valid = false;
+                if ((server_caps_ & kCapLockedRow) != 0 &&
+                    !rep.value().payload.empty()) {
+                    parse_row_trailer_into(rt, rep.value().payload, 0);
+                    if (rt->row_valid) return {};
+                }
+                // Old server, or no row supplied: a real refresh must
+                // happen after lock acquisition, never reuse seek data.
+                return {};
+            }
+            return {};
+        }
         // Only contention (AE_LOCKED) is retryable — the server fail-fast
         // answers it via an Error frame, which request() maps to a failed
         // Result. Anything else is a real error; return it at once.

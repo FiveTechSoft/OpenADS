@@ -46,7 +46,9 @@ bool parse_uint(const std::string& v, unsigned long max, unsigned long& out) {
     unsigned long acc = 0;
     for (char c : v) {
         if (c < '0' || c > '9') return false;
-        acc = acc * 10 + static_cast<unsigned long>(c - '0');
+        const auto digit = static_cast<unsigned long>(c - '0');
+        if (acc > max / 10 || (acc == max / 10 && digit > max % 10)) return false;
+        acc = acc * 10 + digit;
         if (acc > max) return false;
     }
     out = acc;
@@ -158,6 +160,15 @@ bool parse_ini(const std::string& text, IniConfig& out, std::string& error) {
             }
             out.backlog = static_cast<int>(n);
             out.has_backlog = true;
+        } else if (key == "established_session_idle_seconds") {
+            unsigned long n = 0;
+            if (!parse_uint(val, 0xFFFFFFFFul, n)) {
+                error = "line " + std::to_string(lineno) +
+                        ": established_session_idle_seconds must be 0..4294967295";
+                return false;
+            }
+            out.established_session_idle_seconds = static_cast<std::uint32_t>(n);
+            out.has_established_session_idle_seconds = true;
         } else if (key == "max_sessions" || key == "maxsessions") {
             unsigned long n = 0;
             if (!parse_uint(val, 0xFFFFFFFFul, n)) {
