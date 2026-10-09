@@ -2653,7 +2653,8 @@ DispatchResult Session::dispatch(const Frame& f) {
             std::uint32_t id = read_u32_le(f.payload.data());
             if (auto cit = cursor_tbls_.find(id); cit != cursor_tbls_.end()) {
                 UNSIGNED32 rc = 0;
-                AdsGetRecordCount(cit->second, 0, &rc);
+                auto count_status = AdsGetRecordCount(cit->second, 0, &rc);
+                if (count_status != 0) { reply = err("GetRecordCount: refresh failed", count_status); break; }
                 reply.opcode = Opcode::GetRecordCountAck;
                 write_u32_le(rc, reply.payload);
                 break;
@@ -2666,7 +2667,9 @@ DispatchResult Session::dispatch(const Frame& f) {
             if (!tbl) { reply = err("GetRecordCount: lookup failed"); break; }
             // Refresh the on-disk record count so concurrent appends by
             // other connections are visible (multiuser coherence).
-            tbl->refresh_record_count_from_disk();
+            if (auto fresh = tbl->refresh_record_count_from_disk(); !fresh) {
+                reply = err(fresh.error().message, static_cast<UNSIGNED32>(fresh.error().code)); break;
+            }
             std::uint32_t rc = tbl->record_count();
             reply.opcode = Opcode::GetRecordCountAck;
             write_u32_le(rc, reply.payload);

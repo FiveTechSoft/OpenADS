@@ -76,6 +76,9 @@ TEST_CASE("M11.2 encrypt + reopen with correct password roundtrips") {
     REQUIRE(AdsOpenTable(hConn, leaf, nullptr, ADS_CDX,
                          0, 0, 0, 0, &hTable) == 0);
     REQUIRE(AdsEncryptTable(hTable) == 0);
+    UNSIGNED32 physical_count = 0;
+    REQUIRE(AdsGetRecordCount(hTable, ADS_IGNOREFILTERS, &physical_count) == 0);
+    CHECK(physical_count == 3); // full encryption retains fixed-length records
     REQUIRE(AdsCloseTable(hTable) == 0);
 
     // Header byte on disk must now be 0xC3.
@@ -169,6 +172,9 @@ TEST_CASE("M11.2 record-level encrypt: single record encrypted, others plain") {
 
     REQUIRE(AdsGotoRecord(hTable, 2) == 0);
     REQUIRE(AdsEncryptRecord(hTable) == 0);
+    UNSIGNED32 physical_count = 0;
+    REQUIRE(AdsGetRecordCount(hTable, ADS_IGNOREFILTERS, &physical_count) == 0);
+    CHECK(physical_count == 3); // trailing partial-encryption bitmap is not rows
 
     CHECK(AdsIsTableEncrypted(hTable, &enc) == 0);
     CHECK(enc == 1);
@@ -207,5 +213,35 @@ TEST_CASE("M11.2 record-level encrypt: single record encrypted, others plain") {
 
     REQUIRE(AdsCloseTable(hTable) == 0);
     REQUIRE(AdsDisconnect(hConn) == 0);
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("Physical count: partial encryption bitmap does not become extra rows") {
+    auto dir = fs::temp_directory_path() / "openads_physical_count_bitmap";
+    std::error_code ec;
+    fs::remove_all(dir, ec); fs::create_directories(dir);
+    write_plain_dbf(dir / "data.dbf", std::vector<std::string>(80, "AAAAA"));
+    auto path = dir.string();
+    ADSHANDLE connection = 0, table = 0;
+    REQUIRE(AdsConnect60(reinterpret_cast<UNSIGNED8*>(path.data()),
+        ADS_LOCAL_SERVER, nullptr, nullptr, 0, &connection) == AE_SUCCESS);
+    UNSIGNED8 password[] = "count-test", name[] = "data.dbf";
+    REQUIRE(AdsSetEncryptionPassword(connection, password) == AE_SUCCESS);
+    REQUIRE(AdsOpenTable(connection, name, nullptr, ADS_CDX,
+        0, 0, 0, 0, &table) == AE_SUCCESS);
+    REQUIRE(AdsGotoRecord(table, 80) == AE_SUCCESS);
+    REQUIRE(AdsEncryptRecord(table) == AE_SUCCESS);
+    // At 80 rows the bitmap is longer than one six-byte record. Treating
+    // this format like an ordinary DBF would report phantom extra rows.
+    UNSIGNED32 count = 0;
+    REQUIRE(AdsGetRecordCount(table, ADS_IGNOREFILTERS, &count) == AE_SUCCESS);
+    CHECK(count == 80);
+    REQUIRE(AdsCloseTable(table) == AE_SUCCESS);
+    REQUIRE(AdsOpenTable(connection, name, nullptr, ADS_CDX,
+        0, 0, 0, 0, &table) == AE_SUCCESS);
+    REQUIRE(AdsGetRecordCount(table, ADS_IGNOREFILTERS, &count) == AE_SUCCESS);
+    CHECK(count == 80);
+    REQUIRE(AdsCloseTable(table) == AE_SUCCESS);
+    REQUIRE(AdsDisconnect(connection) == AE_SUCCESS);
     fs::remove_all(dir, ec);
 }

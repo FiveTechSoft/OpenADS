@@ -146,11 +146,11 @@ public:
     // Re-read the on-disk record count so concurrent appends by other
     // connections become visible.  Called by the server before answering
     // GetRecordCount and by AdsRefreshRecord.
-    void refresh_record_count_from_disk() noexcept {
+    util::Result<void> refresh_record_count_from_disk() {
         // A refresh is the moment another station's appends and deletes
         // become visible, so any cached live count taken before it is stale.
         bump_live_gen();
-        driver_->refresh_record_count_from_disk();
+        return driver_->refresh_record_count_from_disk();
     }
     // Clipper / SAP-ACE convention: phantom position past last
     // record reports recno()=LastRec()+1, so an empty table reads

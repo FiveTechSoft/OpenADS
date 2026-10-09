@@ -62,8 +62,8 @@ public:
     util::Result<std::uint32_t>
         bump_autoinc(std::uint16_t field_index) override;
 
-    void refresh_record_count_from_disk() noexcept override {
-        (void)refresh_record_count_();
+    util::Result<void> refresh_record_count_from_disk() override {
+        return refresh_record_count_();
     }
 
     // Drop the sequential read-ahead block (the engine calls this when a peer

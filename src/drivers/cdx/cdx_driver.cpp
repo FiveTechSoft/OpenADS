@@ -380,22 +380,19 @@ util::Result<void> CdxDriver::refresh_record_count_() {
                  (static_cast<std::uint32_t>(hdr_buf[5]) <<  8) |
                  (static_cast<std::uint32_t>(hdr_buf[6]) << 16) |
                  (static_cast<std::uint32_t>(hdr_buf[7]) << 24);
-    // Harbour DBFCDX derives the record count from the FILE SIZE
-    // (hb_dbfCalcRecCount) and flushes the header lazily — a peer's
-    // just-appended record can be on disk while the header still lags.
-    // Reading the header alone then hands the same recno to two writers
-    // (one record overwritten, both keys in the index: 299 rows / 300
-    // keys in the mixed stress test). Take the max of both views; zap()
-    // truncates the file, so the size-derived count can never resurrect
-    // zapped rows.
+    // Match Harbour hb_dbfCalcRecCount for ordinary DBFs: the physical
+    // file length, not the header count, is authoritative. Integer division
+    // discards the optional EOF byte for ordinary record lengths. A partial
+    // encryption bitmap follows the records, so that format retains its
+    // header-count path. Full-table encryption keeps fixed-length records.
     if (!partial_enc_ && rec_len_ != 0) {
-        // (a partially-encrypted table keeps a bitmap past the EOF record,
-        // so its file size does not track the record count)
-        if (auto sz = file_.size(); sz && sz.value() > hdr_len_) {
-            const std::uint32_t size_count = static_cast<std::uint32_t>(
-                (sz.value() - hdr_len_) / rec_len_);
-            if (size_count > rec_count_) rec_count_ = size_count;
+        auto sz = file_.size();
+        if (!sz) return sz.error();
+        if (sz.value() < hdr_len_) {
+            return util::Error{5103, 0, "DBF body shorter than header", ""};
         }
+        rec_count_ = static_cast<std::uint32_t>(
+            (sz.value() - hdr_len_) / rec_len_);
     }
     return {};
 }
