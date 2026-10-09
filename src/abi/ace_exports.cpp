@@ -13141,7 +13141,8 @@ UNSIGNED32 ENTRYPOINT AdsGetRecordCount(ADSHANDLE hTable, UNSIGNED16 bFilterOpti
         // Multiuser: peer appends bump the on-disk header; re-read so
         // LastRec() / RecCount() match the other stations (and so the
         // browser's EOF fence is not stuck at open-time count).
-        t->refresh_record_count_from_disk();
+        if (auto fresh = t->refresh_record_count_from_disk(); !fresh)
+            return fail(fresh.error());
         *pulRecordCount = t->record_count();
     }
     return ok();

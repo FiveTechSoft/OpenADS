@@ -39,8 +39,8 @@ public:
         bump_autoinc(std::uint16_t field_index) override;
 
     void invalidate_read_cache() noexcept override { invalidate_read_cache_(); }
-    void refresh_record_count_from_disk() noexcept override {
-        (void)refresh_count_shared_();
+    util::Result<void> refresh_record_count_from_disk() override {
+        return refresh_count_shared_();
     }
 
     // M11.2 — encrypted DBF support. `encrypted()` reflects the

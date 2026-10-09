@@ -98,7 +98,7 @@ public:
     // when answering GetRecordCount to keep the value fresh across
     // concurrent clients.  Default no-op (drivers that cache the count
     // in rec_count_ must override).
-    virtual void refresh_record_count_from_disk() noexcept {}
+    virtual util::Result<void> refresh_record_count_from_disk() { return {}; }
 };
 
 } // namespace openads::drivers
