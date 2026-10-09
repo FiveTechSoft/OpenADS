@@ -1206,31 +1206,42 @@ util::Result<SeekOutcome> CdxIndex::seek_first() {
 }
 
 util::Result<SeekOutcome> CdxIndex::seek_last() {
-    // seek_first() already reloads the header when the bag changed.
-    if (root_page_ == 0) {
-        if (auto r = reload_header_if_changed_(); !r) return r.error();
-        if (root_page_ == 0) return SeekOutcome{SeekHit::AfterEnd, 0, false};
-    }
+    // Absolute navigation must observe peer appends/rebuilds, even when
+    // this handle already has a non-zero (but stale) root.
+    if (auto r = reload_header_if_changed_(); !r) return r.error();
     cur_leaf_ = 0; cur_index_ = -1; cur_decoded_.clear();
+    if (root_page_ == 0) return SeekOutcome{SeekHit::AfterEnd, 0, false};
 
-    auto first = seek_first();
-    if (!first) return first.error();
-    if (!first.value().positioned) return first;
-
-    while (true) {
-        auto pg = get_page_(cur_leaf_);
+    // Each branch entry carries the maximum key of its child. The final
+    // entry therefore points at the rightmost subtree, including duplicate
+    // keys. Descend that edge rather than decoding every leaf from the left.
+    std::uint32_t cur = root_page_;
+    for (unsigned depth = 0; ; ++depth) {
+        if (depth >= 64) {
+            return util::Error{6106, 0, "Corrupt CDX: branch cycle or excessive depth", ""};
+        }
+        auto pg = get_page_(cur);
         if (!pg) return pg.error();
-        std::uint32_t right = read_u32_le(pg.value()->data() + 8);
-        if (right == 0xFFFFFFFFu || right == 0) break;
-        // Probe forward over any empty leaves; only move if a non-empty
-        // leaf remains, so holes don't cut the walk short of the true last.
-        std::uint32_t probe = right;
-        std::vector<std::pair<std::string, std::uint32_t>> nxt;
-        if (auto sk = skip_empty_leaves_right_(probe, nxt); !sk) return sk.error();
-        if (nxt.empty()) break;
-        cur_leaf_ = probe;
-        cur_decoded_ = std::move(nxt);
+        const auto* base = pg.value()->data();
+        const std::uint16_t attr = read_u16_le(base);
+        if (attr & CDX_NODE_LEAF) { cur_leaf_ = cur; break; }
+        const std::uint16_t nkeys = read_u16_le(base + 2);
+        if (nkeys == 0) return SeekOutcome{SeekHit::AfterEnd, 0, false};
+        const std::size_t stride = static_cast<std::size_t>(key_size_) + 8;
+        const std::size_t end = CDX_INT_HEADSIZE + nkeys * stride;
+        if (end > CDX_PAGE_LEN) {
+            return util::Error{6106, 0, "Corrupt CDX: branch entries exceed page", ""};
+        }
+        const auto* cp = base + end - 4;
+        cur = (static_cast<std::uint32_t>(cp[0]) << 24) |
+              (static_cast<std::uint32_t>(cp[1]) << 16) |
+              (static_cast<std::uint32_t>(cp[2]) << 8) |
+               static_cast<std::uint32_t>(cp[3]);
     }
+    // Erase may leave empty leaves at the physical right edge. Walk left
+    // only over those holes, preserving the true last live key.
+    if (auto sk = skip_empty_leaves_left_(cur_leaf_, cur_decoded_); !sk)
+        return sk.error();
     if (cur_decoded_.empty()) {
         return SeekOutcome{SeekHit::AfterEnd, 0, false};
     }
