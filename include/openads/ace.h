@@ -1565,6 +1565,11 @@ UNSIGNED32 ENTRYPOINT AdsGetDefaultConnection(ADSHANDLE* phConn);
 // OpenADS extension: process-wide logging kill-switch (audit + arc
 // traces). 0 = silent (production), non-zero = enabled (default).
 UNSIGNED32 ENTRYPOINT OAdsSetLogging(UNSIGNED16 usOn);
+// Aggregate health JSON from an AdsMgConnect handle (NOT a data connection).
+// *pulLen is buffer capacity incl. NUL; out is required size incl. NUL.
+// NULL/short buffer: AE_INSUFFICIENT_BUFFER, no partial JSON written.
+UNSIGNED32 ENTRYPOINT OAdsGetServerStats(ADSHANDLE hMgmt, UNSIGNED8* pucJson,
+                                        UNSIGNED32* pulLen);
 UNSIGNED32 ENTRYPOINT AdsSetEpoch          (UNSIGNED16 usEpoch);
 UNSIGNED32 ENTRYPOINT AdsSetExact          (UNSIGNED16 bExact);
 UNSIGNED32 ENTRYPOINT AdsSetExact22        (ADSHANDLE hObj,

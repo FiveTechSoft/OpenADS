@@ -321,6 +321,7 @@ EXPORTS
     AdsSetDecimals
     AdsSetDefault
     AdsSetDefaultConnection
+    OAdsGetServerStats
     OAdsSetLogging
     AdsSetEpoch
     AdsSetExact

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 namespace openads::sql_backend {
 
@@ -37,6 +38,7 @@ struct EnterpriseConfig {
     bool          sqlite_wal_mode                 = true;
 
     std::uint32_t server_max_sessions   = 500;
+    std::string server_max_sessions_source = "default";
     std::uint32_t server_listen_backlog = 256;
 
     // Enterprise step 3 — wire-server connection pool (sharded reactor).

@@ -15,6 +15,7 @@ enum class MgRequestKind : std::uint8_t {
     KillUser       = 0x02,  // arg: u16 conn_no
     ResetCommStats = 0x03,
     DumpTables     = 0x04,
+    HealthJson     = 0x05,  // additive aggregate-only health reply
 };
 
 // Request payload: [u8 kind][optional args].

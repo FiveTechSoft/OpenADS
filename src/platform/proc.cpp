@@ -10,6 +10,12 @@
 #  include <unistd.h>
 #endif
 
+#if defined(__linux__)
+#  include <dirent.h>
+#  include <sys/resource.h>
+#  include <cerrno>
+#endif
+
 namespace openads::platform {
 
 std::uint64_t process_rss_bytes() {
@@ -36,6 +42,34 @@ std::uint64_t process_rss_bytes() {
     long pg = sysconf(_SC_PAGESIZE);
     return static_cast<std::uint64_t>(resident) *
            static_cast<std::uint64_t>(pg > 0 ? pg : 4096);
+#endif
+}
+
+std::optional<std::uint64_t> process_fd_count() {
+#if defined(__linux__)
+    DIR* dir = opendir("/proc/self/fd");
+    if (!dir) return std::nullopt;
+    std::uint64_t count = 0;
+    errno = 0;
+    while (const auto* ent = readdir(dir))
+        if (ent->d_name[0] != '.') ++count;
+    const bool failed = errno != 0;
+    closedir(dir);
+    if (failed) return std::nullopt;
+    // Exclude the descriptor this query opened to enumerate /proc/self/fd.
+    return count > 0 ? count - 1 : 0;
+#else
+    return std::nullopt;
+#endif
+}
+std::optional<std::uint64_t> process_fd_limit() {
+#if defined(__linux__)
+    struct rlimit lim{};
+    if (getrlimit(RLIMIT_NOFILE, &lim) != 0 || lim.rlim_cur == RLIM_INFINITY)
+        return std::nullopt;
+    return static_cast<std::uint64_t>(lim.rlim_cur);
+#else
+    return std::nullopt;
 #endif
 }
 

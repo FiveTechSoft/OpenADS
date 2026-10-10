@@ -60,6 +60,15 @@ EnterpriseConfig load_from_env() {
     c.sqlite_wal_mode = env_bool("OPENADS_SQLITE_WAL", true);
 
     c.server_max_sessions   = env_u32("OPENADS_SERVER_MAX_SESSIONS", 500);
+    const char* raw_sessions = std::getenv("OPENADS_SERVER_MAX_SESSIONS");
+    if (raw_sessions && *raw_sessions) {
+        errno = 0;
+        char* end = nullptr;
+        const long long parsed = std::strtoll(raw_sessions, &end, 10);
+        if (end != raw_sessions && *end == '\0' && errno != ERANGE &&
+            parsed >= 0 && parsed <= static_cast<long long>(UINT32_MAX))
+            c.server_max_sessions_source = "environment:OPENADS_SERVER_MAX_SESSIONS";
+    }
     c.server_listen_backlog = env_u32("OPENADS_SERVER_BACKLOG", 256);
 
     c.server_pool_enabled = env_bool("OPENADS_SERVER_POOL", false);
