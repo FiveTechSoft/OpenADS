@@ -191,16 +191,16 @@ TEST_CASE("Open metadata: legacy clients do not receive setup sections") {
         std::size_t off = 6 + baglen; REQUIRE(off < pl.size());
         const unsigned count = pl[off++]; bool found_length = false, found_index = false;
         for (unsigned i = 0; i < count; ++i) {
-            REQUIRE(off + 5 <= pl.size()); const auto tag = pl[off++];
+            REQUIRE(off + 5 <= pl.size()); const auto tlv_tag = pl[off++];
             const std::size_t length = static_cast<std::uint32_t>(pl[off]) |
                 (static_cast<std::uint32_t>(pl[off+1]) << 8) |
                 (static_cast<std::uint32_t>(pl[off+2]) << 16) |
                 (static_cast<std::uint32_t>(pl[off+3]) << 24);
             off += 4; REQUIRE(off + length <= pl.size());
-            if (tag == openads::network::OpenTableAckSections::kRecordLength) {
+            if (tlv_tag == openads::network::OpenTableAckSections::kRecordLength) {
                 found_length = true; CHECK(length == 4); CHECK(pl[off] == 9);
             }
-            if (tag == openads::network::OpenTableAckSections::kProductionIndex) {
+            if (tlv_tag == openads::network::OpenTableAckSections::kProductionIndex) {
                 found_index = true;
                 std::vector<std::uint8_t> bytes(pl.begin() + off, pl.begin() + off + length);
                 auto parsed = openads::network::RemoteConnection::parse_open_index_reply(bytes, "cap.cdx");
