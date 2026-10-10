@@ -7,6 +7,7 @@
 #include "drivers/fpt/fpt_memo.h"
 #include "drivers/ntx/ntx_driver.h"
 #include "platform/dll.h"
+#include "platform/file.h"
 #include "platform/fs_sandbox.h"
 #include "platform/path.h"
 #include "platform/time.h"
@@ -76,11 +77,21 @@ bool path_is_inside(const std::string&           base_dir,
 // in which case the caller keeps whatever type it had.
 std::optional<openads::engine::TableType>
 sniff_table_type(const std::string& path) {
-    std::FILE* f = std::fopen(path.c_str(), "rb");
-    if (f == nullptr) return std::nullopt;
     unsigned char hdr[16] = {0};
-    std::size_t n = std::fread(hdr, 1, sizeof(hdr), f);
-    std::fclose(f);
+    std::size_t n = 0;
+    if (platform::File::data_jail_active()) {
+        auto opened = platform::File::open(path, platform::OpenMode::ReadOnly);
+        if (!opened) return std::nullopt;
+        auto read = opened.value().read_at(0, hdr, sizeof(hdr));
+        if (!read) return std::nullopt;
+        n = read.value();
+    } else {
+        // Keep the DLL/local sniff exactly as before.
+        std::FILE* f = std::fopen(path.c_str(), "rb");
+        if (f == nullptr) return std::nullopt;
+        n = std::fread(hdr, 1, sizeof(hdr), f);
+        std::fclose(f);
+    }
     if (n < 1) return std::nullopt;
 
     // ADT files open with the literal "Advantage Table".
@@ -232,6 +243,23 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
         util::write_audit(util::AuditKind::Resolved, conn_serial_, entry, seq,
                            msg, ts, log_alias);
     };
+    // Serverd-only early containment check; File::open is the no-follow backstop.
+    auto jail_check = [&](const std::string& p) -> std::string {
+        if (!remote_server_ || !platform::File::data_jail_active() || p.empty()) return p;
+        const auto roots = platform::split_data_roots(data_dir_);
+        if (roots.empty()) return p;
+        if (platform::resolve_under_any_root(roots, p)) return p;
+        const std::uint32_t entry = next_entry_serial_++;
+        const std::uint32_t seq   = util::next_audit_seq();
+        last_audit_seq_ = seq;
+        std::string norm_p = p;
+        for (char& ch : norm_p) { if (ch == '\\') ch = '/'; }
+        util::write_audit(util::AuditKind::Resolved, conn_serial_, entry, seq,
+                          "REFUSED=\"" + norm_p +
+                              "\" ESCAPE ASKED=\"" + relative_path + "\"",
+                          ts, log_alias);
+        return std::string();
+    };
     // The connection's data_dir is the directory the server owns; every
     // table name is resolved *relative to* it. Clients (Harbour rddads,
     // X# ADSRDD, …) routinely pass an absolute or drive-rooted path that
@@ -304,6 +332,8 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
             if (path_is_inside(data_dir_, rel)) {
                 std::string resolved =
                     platform::resolve_case_insensitive(rel.string());
+                resolved = jail_check(resolved);
+                if (resolved.empty()) return resolved;
                 log_resolved(resolved, "JAILED");
                 return resolved;
             }
@@ -444,6 +474,8 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
     // own header have the last word, but never on a create: there the
     // path names a file that does not exist yet (and if it does, the
     // caller is deliberately overwriting it with a chosen format).
+    resolved = jail_check(resolved);
+    if (resolved.empty()) return resolved;
     if (!for_create) align_type_with_file(resolved, type);
     log_resolved(resolved, "JAILED");
     return resolved;
@@ -549,27 +581,27 @@ util::Result<Handle> Connection::open_table(const std::string& relative_path,
             std::error_code ec;
             if (fs::exists(stem, ec)) {
                 auto m = std::make_unique<openads::drivers::adm::AdmMemo>();
-                if (m->open(stem.string(), memo_open_mode)) {
-                    holder->attach_memo(std::move(m));
-                }
+                auto mr = m->open(stem.string(), memo_open_mode);
+                if (mr) holder->attach_memo(std::move(m));
+                else if (platform::File::data_jail_active()) return mr.error();
             }
         } else if (type == engine::TableType::Ntx) {
             stem.replace_extension(".dbt");
             std::error_code ec;
             if (fs::exists(stem, ec)) {
                 auto m = std::make_unique<openads::drivers::dbt::DbtMemo>();
-                if (m->open(stem.string(), memo_open_mode)) {
-                    holder->attach_memo(std::move(m));
-                }
+                auto mr = m->open(stem.string(), memo_open_mode);
+                if (mr) holder->attach_memo(std::move(m));
+                else if (platform::File::data_jail_active()) return mr.error();
             }
         } else {
             stem.replace_extension(".fpt");
             std::error_code ec;
             if (fs::exists(stem, ec)) {
                 auto m = std::make_unique<openads::drivers::fpt::FptMemo>();
-                if (m->open(stem.string(), memo_open_mode)) {
-                    holder->attach_memo(std::move(m));
-                }
+                auto mr = m->open(stem.string(), memo_open_mode);
+                if (mr) holder->attach_memo(std::move(m));
+                else if (platform::File::data_jail_active()) return mr.error();
             }
         }
     }

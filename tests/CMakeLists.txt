@@ -30,6 +30,7 @@ add_executable(openads_unit_tests
     ${CMAKE_SOURCE_DIR}/tools/serverd/config_ini.cpp
     unit/platform_file_test.cpp
     unit/platform_lock_test.cpp
+    unit/file_jail_test.cpp
     unit/platform_mmap_test.cpp
     unit/platform_path_test.cpp
     unit/fs_sandbox_test.cpp

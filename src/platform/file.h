@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace openads::platform {
 
@@ -32,6 +33,22 @@ public:
     ~File();
 
     static util::Result<File> open(const std::string& path, OpenMode mode);
+
+    // --- server data jail (ADSCDX) ------------------------------------
+    // Only openads_serverd activates this policy. The DLL/local path
+    // remains the legacy plain open while no jail is installed.
+    // POSIX: root descriptors plus O_NOFOLLOW on every component;
+    // parent steps use a verified descriptor stack, never openat("..").
+    // Windows: directory handles opened with OPEN_REPARSE_POINT and
+    // without share-delete pin the verified path; leaf handles are
+    // no-follow and verified before truncation. Roots must exist.
+    // Symlinks/reparse points below configured roots are refused.
+    static util::Result<void> set_data_jail(std::vector<std::string> roots);
+    // Remove the jail (tests). Later opens revert to the legacy plain
+    // path.
+    static void clear_data_jail() noexcept;
+    // True while a jail is installed.
+    static bool data_jail_active() noexcept;
 
     util::Result<std::size_t> read_at (std::uint64_t offset,
                                        void* buf, std::size_t n);

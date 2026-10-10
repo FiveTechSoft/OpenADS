@@ -1,4 +1,5 @@
 #include "platform/path.h"
+#include "platform/file.h"
 
 #include <algorithm>
 #include <cctype>
@@ -129,6 +130,10 @@ std::optional<std::string> resolve_under_root(const std::string& root,
     // exactly what "--data /" means.
     while (!root_s.empty() && root_s.back() == '/') root_s.pop_back();
     if (!path_has_prefix(canon_s, root_s)) return std::nullopt;
+    // Server-only no-follow policy must see the original components.
+    // Returning the canonical spelling would erase an in-root symlink
+    // before File::open can refuse it (including legacy-path remounts).
+    if (File::data_jail_active()) return combined.string();
     return canon_s;
 }
 

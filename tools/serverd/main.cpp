@@ -15,6 +15,7 @@
 #include "mgmt/error_log.h"
 #include "mgmt/mg_stats.h"
 #include "network/server.h"
+#include "platform/file.h"
 #include "platform/dll.h"
 #include "engine/hrb_udf.h"
 #if defined(OPENADS_WITH_HARBOUR_UDF)
@@ -467,6 +468,24 @@ int run_server(const Args& args, bool console) {
             udf_path.c_str());
         return 1;
 #endif
+    }
+
+    // Activate the data jail only in serverd, before any listener starts.
+    {
+        std::vector<std::string> jail_roots =
+            openads::platform::split_data_roots(args.data_dir);
+        for (const auto& pe : args.extra_listeners) {
+            auto more = openads::platform::split_data_roots(pe.data_dir);
+            jail_roots.insert(jail_roots.end(), more.begin(), more.end());
+        }
+        if (auto jr =
+                openads::platform::File::set_data_jail(std::move(jail_roots));
+            !jr) {
+            std::fprintf(stderr,
+                         "data jail: %s - refusing to start without the jail\n",
+                         jr.error().message.c_str());
+            return 1;
+        }
     }
 
     openads::network::Server srv;
