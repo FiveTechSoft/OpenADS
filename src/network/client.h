@@ -194,6 +194,9 @@ public:
         bool                   has_schema = false;
         std::vector<std::uint8_t> first_row;  // nav-ack trailer layout
         bool                      has_first_row = false;
+        bool has_record_length = false;
+        std::uint32_t record_length = 0;
+        std::vector<std::uint8_t> production_index_reply;
     };
     util::Result<OpenTableResult> open_table(const std::string& rel, std::uint16_t mode = 0);
     util::Result<void>          close_table(std::uint32_t id);
@@ -266,6 +269,7 @@ public:
                                               std::uint16_t option,
                                               const std::vector<std::uint32_t>& recnos);
     util::Result<std::uint16_t> get_aof_opt_level(std::uint32_t id);
+    static util::Result<std::vector<OpenIndexEntry>> parse_open_index_reply(const std::vector<std::uint8_t>& pl, const std::string& path);
     util::Result<std::vector<OpenIndexEntry>>
                                 open_index(std::uint32_t table_id,
                                            const std::string& path);
@@ -1014,6 +1018,7 @@ struct RemoteTable {
     // closes/reopens). Cached on first hit; rddads asks both per USE.
     bool                     table_type_cached = false;
     std::uint16_t            cached_table_type = 0;
+    std::vector<std::uint8_t> production_index_reply;
     bool                     record_length_cached = false;
     std::uint32_t            cached_record_length = 0;
     // Set by a wire AdsGotoRecord that landed on a row: the connection

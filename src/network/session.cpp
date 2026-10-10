@@ -1858,6 +1858,7 @@ DispatchResult Session::dispatch(const Frame& f) {
                 client_prefetch_back_ok_ =
                     (caps & openads::network::kCapPrefetchBackward) != 0;
                 // M12.x — client sends [u16 mode] prefix on OpenTable.
+                client_open_setup_metadata_ok_ = (caps & kCapOpenSetupMetadata) != 0;
                 client_locked_row_ok_ = (caps & kCapLockedRow) != 0 &&
                     std::getenv("OPENADS_NO_LOCKED_ROW_CAP") == nullptr;
                 client_open_table_mode_ok_ =
@@ -2325,6 +2326,38 @@ DispatchResult Session::dispatch(const Frame& f) {
                                          bag.begin(), bag.end());
                 }
                 append_open_warm_sections(reply.payload, id, tbl);
+                if (client_open_setup_metadata_ok_ && tbl != nullptr) {
+                    // Reuse the exact OpenIndex handler: per-session bindings,
+                    // rollback on failed index open and unchanged tag metadata.
+                    // Client releases its ABI mutex during OpenTable.
+                    std::vector<std::uint8_t> extra;
+                    unsigned added = 0;
+                    auto add = [&](std::uint8_t tag, const std::vector<std::uint8_t>& bytes) {
+                        extra.push_back(tag);
+                        write_u32_le(static_cast<std::uint32_t>(bytes.size()), extra);
+                        extra.insert(extra.end(), bytes.begin(), bytes.end());
+                        ++added;
+                    };
+                    std::vector<std::uint8_t> len;
+                    write_u32_le(tbl->driver() ? tbl->driver()->record_length() : 0, len);
+                    add(OpenTableAckSections::kRecordLength, len);
+                    if (!bag.empty()) {
+                        Frame index_req; index_req.opcode = Opcode::OpenIndex;
+                        write_u32_le(id, index_req.payload);
+                        index_req.payload.insert(index_req.payload.end(), bag.begin(), bag.end());
+                        auto index_reply = dispatch(index_req);
+                        if (index_reply.reply && index_reply.reply->opcode == Opcode::OpenIndexAck) {
+                            add(OpenTableAckSections::kProductionIndex, index_reply.reply->payload);
+                            if (auto hit = tbls_h_.find(id); hit != tbls_h_.end()) {
+                                (void)install_table_order(id, 0);
+                                (void)AdsGotoTop(hit->second);
+                            }
+                        }
+                    }
+                    const std::size_t count_offset = 6u + bag.size();
+                    reply.payload[count_offset] = static_cast<std::uint8_t>(reply.payload[count_offset] + added);
+                    reply.payload.insert(reply.payload.end(), extra.begin(), extra.end());
+                }
             }
             break;
         }
