@@ -274,6 +274,8 @@ mgmt::MgSnapshot Server::build_mg_snapshot() const {
     snap.connections = static_cast<std::uint32_t>(sessions.size());
     snap.server_type = 1;   // 1 = remote server
     snap.server_port = port_;
+    snap.max_sessions = max_sessions_;
+    snap.max_sessions_source = max_sessions_source_;
     snap.rss_bytes   = openads::platform::process_rss_bytes();
 
     {
@@ -362,7 +364,11 @@ std::uint64_t Server::register_session(const SessionInfo& info) {
     auto id = next_session_id_.fetch_add(1);
     SessionInfo si = info;
     si.id = id;
+    open_workareas_ += si.open_tables;
     sessions_info_.emplace(id, std::move(si));
+    auto& stats = openads::mgmt::process_mg_stats();
+    openads::mgmt::MgStats::bump_max(stats.max_workareas, open_workareas_);
+    openads::mgmt::MgStats::bump_max(stats.max_tables, open_workareas_);
     // M9.25 — raise the connection high-water mark under info_mu_.
     openads::mgmt::MgStats::bump_max(
         openads::mgmt::process_mg_stats().max_connections,
@@ -372,7 +378,11 @@ std::uint64_t Server::register_session(const SessionInfo& info) {
 
 void Server::unregister_session(std::uint64_t id) {
     std::lock_guard<std::mutex> lk(info_mu_);
-    sessions_info_.erase(id);
+    auto it = sessions_info_.find(id);
+    if (it != sessions_info_.end()) {
+        open_workareas_ -= it->second.open_tables;
+        sessions_info_.erase(it);
+    }
     // M9.25 — count one disconnect per terminated session. This runs
     // exactly once per session via session_loop's SessionGuard dtor.
     openads::mgmt::process_mg_stats()
@@ -434,6 +444,7 @@ void Server::add_session_table(std::uint64_t id, std::int32_t delta,
     auto it = sessions_info_.find(id);
     if (it == sessions_info_.end()) return;
     auto& n = it->second.open_tables;
+    const auto before = n;
     if (delta < 0) {
         std::uint32_t d = static_cast<std::uint32_t>(-delta);
         n = (n > d) ? n - d : 0;
@@ -448,6 +459,12 @@ void Server::add_session_table(std::uint64_t id, std::int32_t delta,
             it->second.open_table_names.push_back(table_name);
         }
     }
+    // Event-driven retained maximum, not a dashboard sampling maximum.
+    // Count logical session opens, including parked handles, not OS FDs.
+    open_workareas_ = open_workareas_ - before + n;
+    auto& stats = openads::mgmt::process_mg_stats();
+    openads::mgmt::MgStats::bump_max(stats.max_workareas, open_workareas_);
+    openads::mgmt::MgStats::bump_max(stats.max_tables, open_workareas_);
 }
 
 bool Server::try_register_open(std::uint64_t id,
@@ -549,9 +566,10 @@ util::Result<void> Server::start(const std::string& host,
     // Resolve enterprise limits once at start. A test/embedder override wins;
     // otherwise take the env-loaded EnterpriseConfig (OPENADS_SERVER_*).
     const auto& ecfg = openads::sql_backend::enterprise_config();
-    max_sessions_ = (max_sessions_override_ != 0)
+    max_sessions_ = has_max_sessions_override_
                         ? max_sessions_override_
                         : ecfg.server_max_sessions;
+    if (!has_max_sessions_override_) max_sessions_source_ = ecfg.server_max_sessions_source;
     ListenerOptions opts;
     opts.host = host;
     opts.port = port;

@@ -6060,3 +6060,13 @@ __declspec(dllexport) UNSIGNED32 __stdcall OAdsSetLogging(UNSIGNED16 a0) {
     arc_log_rc("OAdsSetLogging", rc, 1, (uintptr_t)a0);
     return rc;
 }
+
+/* Additive health export; x86 Harbour imports the stdcall spelling. */
+#define OAdsGetServerStats oadsimpl_OAdsGetServerStats
+extern UNSIGNED32 ENTRYPOINT OAdsGetServerStats(ADSHANDLE, UNSIGNED8*, UNSIGNED32*);
+#undef OAdsGetServerStats
+#pragma comment(linker, "/alternatename:_oadsimpl_OAdsGetServerStats=_OAdsGetServerStats")
+#pragma comment(linker, "/export:OAdsGetServerStats=_OAdsGetServerStats")
+__declspec(dllexport) UNSIGNED32 __stdcall OAdsGetServerStats(ADSHANDLE a0, UNSIGNED8* a1, UNSIGNED32* a2) {
+    return oadsimpl_OAdsGetServerStats(a0, a1, a2);
+}

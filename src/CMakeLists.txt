@@ -86,6 +86,7 @@ add_library(openads_core STATIC
     network/remote_index_nav.cpp
     network/mutex_manager.cpp
     mgmt/mg_collector.cpp
+    mgmt/mg_health.cpp
     mgmt/error_log.cpp
     network/mg_wire.cpp
     sql_backend/uri.cpp

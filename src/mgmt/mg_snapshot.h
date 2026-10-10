@@ -93,6 +93,8 @@ struct MgSnapshot {
     std::uint16_t server_type     = 0;   // 0 = unknown/local
     std::uint64_t rss_bytes       = 0;   // RSS of the reporting process
     std::uint16_t server_port     = 0;   // listener port (0 = local)
+    std::uint32_t max_sessions = 0; // health-only, resolved daemon admission cap
+    std::string max_sessions_source; // empty when no daemon limit is known
 
     // Cumulative / historical telemetry — captured from the reporting
     // process's MgStats so it travels the wire with the live counts

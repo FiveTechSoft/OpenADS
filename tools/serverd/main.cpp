@@ -138,6 +138,8 @@ struct Args {
     // --max-sessions / max_sessions= ini key overrides it.
     std::uint32_t max_sessions = 0;
     std::uint32_t established_session_idle_seconds = 0;
+    bool has_max_sessions = false;
+    std::string max_sessions_source;
     std::uint16_t http_port   = 0;
     std::string   data_dir    = ".";
     bool          enable_file_func = false;
@@ -194,8 +196,11 @@ bool parse_args(int argc, char** argv, Args& out) {
             }
             out.established_session_idle_seconds = static_cast<std::uint32_t>(seconds);
         }
-        else if (flag_eq(a, "max_sessions") && i + 1 < argc)
+        else if (flag_eq(a, "max_sessions") && i + 1 < argc) {
             out.max_sessions = static_cast<std::uint32_t>(std::atoi(argv[++i]));
+            out.has_max_sessions = true;
+            out.max_sessions_source = "command line:--max_sessions";
+        }
         else if (flag_eq(a, "http_port") && i + 1 < argc) out.http_port = static_cast<std::uint16_t>(std::atoi(argv[++i]));
         else if (flag_eq(a, "data")      && i + 1 < argc) out.data_dir = argv[++i];
         else if (flag_eq(a, "tls_cert") && i + 1 < argc) out.tls_cert_file = argv[++i];
@@ -280,7 +285,11 @@ void apply_ini(const openads::serverd::IniConfig& cfg, Args& out) {
     if (cfg.has_backlog)   out.backlog   = cfg.backlog;
     if (cfg.has_established_session_idle_seconds)
         out.established_session_idle_seconds = cfg.established_session_idle_seconds;
-    if (cfg.has_max_sessions) out.max_sessions = cfg.max_sessions;
+    if (cfg.has_max_sessions) {
+        out.max_sessions = cfg.max_sessions;
+        out.has_max_sessions = true;
+        out.max_sessions_source = "openads.ini:max_sessions";
+    }
     if (cfg.has_http_port) out.http_port = cfg.http_port;
     if (cfg.has_data)      out.data_dir  = cfg.data_dir;
     if (cfg.has_enable_file_func) out.enable_file_func = cfg.enable_file_func;
@@ -524,7 +533,7 @@ int run_server(const Args& args, bool console) {
     srv.set_backlog(args.backlog);
     // Session cap: an explicit --max-sessions / ini key wins (0 = unlimited);
     // otherwise the env default (OPENADS_SERVER_MAX_SESSIONS, 500) applies.
-    srv.set_max_sessions(args.max_sessions);
+    if (args.has_max_sessions) srv.set_max_sessions(args.max_sessions, args.max_sessions_source);
     for (const auto& u : args.auth_users)
         srv.add_credential(u.first, u.second);
 

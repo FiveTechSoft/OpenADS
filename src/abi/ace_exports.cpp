@@ -62,6 +62,7 @@ thread_local std::string correlation;
 #include "mgmt/error_log.h"
 #include "mgmt/mg_collector.h"
 #include "mgmt/mg_stats.h"
+#include "mgmt/mg_health.h"
 #include "session/connection.h"
 #include "session/handle_registry.h"
 #include "util/log.h"
@@ -40173,6 +40174,10 @@ UNSIGNED32 ENTRYPOINT AdsMgConnect(UNSIGNED8* pucServer, UNSIGNED8* pucUser,
     if (be.mg_user.size() > 256 || be.mg_password.size() > 4096) return openads::AE_LOGIN_FAILED;
     std::string srv = pucServer
         ? reinterpret_cast<const char*>(pucServer) : "";
+    // Management accepts the ordinary TCP endpoint spelling as well as
+    // host:port. Do not strip tls://: this backend does not negotiate TLS.
+    if (srv.rfind("tcp://", 0) == 0 || srv.rfind("TCP://", 0) == 0)
+        srv.erase(0, 6);
     // Strip leading / trailing UNC slashes ("\\\\host\\").
     while (!srv.empty() && (srv.front() == '\\' || srv.front() == '/'))
         srv.erase(srv.begin());
@@ -40227,6 +40232,54 @@ UNSIGNED32 ENTRYPOINT AdsMgConnect(UNSIGNED8* pucServer, UNSIGNED8* pucUser,
     ADSHANDLE h = g_mg_next++;
     g_mg_handles.emplace(h, std::move(be));
     *phMgmt = h;
+    return openads::AE_SUCCESS;
+}
+
+UNSIGNED32 ENTRYPOINT OAdsGetServerStats(ADSHANDLE hMgmt, UNSIGNED8* json, UNSIGNED32* len) {
+    if (!len) return openads::AE_INTERNAL_ERROR;
+    MgBackend be;
+    {
+        std::lock_guard<std::mutex> lock(g_mg_mu);
+        const auto it = g_mg_handles.find(hMgmt);
+        if (it == g_mg_handles.end()) return openads::AE_INVALID_CONNECTION_HANDLE;
+        be = it->second; // concurrent disconnect cannot invalidate this copy
+    }
+    std::string text;
+    if (!be.remote) {
+        std::lock_guard<std::recursive_mutex> lock(state().mu);
+        text = openads::mgmt::health_json(collect_local_abi_snapshot(), OPENADS_VERSION_STR);
+    } else {
+        openads::network::network_init();
+        auto connected = openads::network::connect_tcp(be.host, be.port);
+        if (!connected) return openads::AE_NO_CONNECTION;
+        auto socket = connected.value();
+        if (!authenticate_mg_socket(socket, be)) {
+            openads::network::sock_close(socket);
+            return openads::AE_ACCESS_DENIED;
+        }
+        openads::network::Frame req;
+        req.opcode = openads::network::Opcode::MgRequest;
+        const auto body = openads::network::encode_mg_request(
+            openads::network::MgRequestKind::HealthJson, 0);
+        req.payload.assign(body.begin(), body.end());
+        if (!openads::network::write_frame(socket, req)) {
+            openads::network::sock_close(socket); return openads::AE_NO_CONNECTION;
+        }
+        auto reply = openads::network::read_frame(socket);
+        openads::network::sock_close(socket);
+        if (!reply) return openads::AE_NO_CONNECTION;
+        if (reply.value().opcode != openads::network::Opcode::MgReplyAck)
+            return openads::AE_FUNCTION_NOT_AVAILABLE;
+        text.assign(reply.value().payload.begin(), reply.value().payload.end());
+        // Bound the reply and require a JSON object envelope. This is not a full JSON parser.
+        if (text.empty() || text.size() > 65535 || text.front() != '{' || text.back() != '}')
+            return openads::AE_INTERNAL_ERROR;
+    }
+    const UNSIGNED32 needed = static_cast<UNSIGNED32>(text.size() + 1);
+    const UNSIGNED32 capacity = *len;
+    *len = needed;
+    if (!json || capacity < needed) return openads::AE_INSUFFICIENT_BUFFER;
+    std::memcpy(json, text.c_str(), needed);
     return openads::AE_SUCCESS;
 }
 

@@ -152,7 +152,11 @@ public:
     // the env-loaded EnterpriseConfig value; call before start(). Production
     // reads OPENADS_SERVER_MAX_SESSIONS / openads.ini max_sessions; this
     // exists mainly for tests.
-    void set_max_sessions(std::uint32_t n) { max_sessions_override_ = n; }
+    void set_max_sessions(std::uint32_t n, const std::string& source = "API override") {
+        max_sessions_override_ = n;
+        has_max_sessions_override_ = true;
+        max_sessions_source_ = source;
+    }
     // listen() backlog override for the primary + extra listeners (0 = keep
     // the env default, OPENADS_SERVER_BACKLOG / 256). Production config comes
     // from --backlog / openads.ini backlog.
@@ -266,6 +270,8 @@ private:
     // tests inject a small cap without touching the env-loaded singleton.
     std::uint32_t                                  max_sessions_ = 0;
     std::uint32_t                                  max_sessions_override_ = 0;
+    bool has_max_sessions_override_ = false;
+    std::string max_sessions_source_;
     std::atomic<std::uint32_t>                     rejected_sessions_{0};
     int                                            backlog_override_ = 0;
 
@@ -298,6 +304,7 @@ private:
     // sessions_snapshot().
     mutable std::mutex                          info_mu_;
     std::unordered_map<std::uint64_t, SessionInfo> sessions_info_;
+    std::uint32_t open_workareas_ = 0; // aggregate, protected by info_mu_
     std::atomic<std::uint64_t>                  next_session_id_{1};
 
 public:
