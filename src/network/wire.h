@@ -700,7 +700,11 @@ inline constexpr std::uint32_t kCapLockedRow = 0x00000400u;
 // clients skip both round-trips. Unknown tags are skipped by length,
 // so the section list stays extensible in both directions.
 
+inline constexpr std::uint32_t kCapOpenSetupMetadata = 0x00000200u;
+
 namespace OpenTableAckSections {
+    constexpr std::uint8_t kRecordLength = 3;
+    constexpr std::uint8_t kProductionIndex = 4;
     constexpr std::uint8_t kSchema   = 1;
     constexpr std::uint8_t kFirstRow = 2;
 }

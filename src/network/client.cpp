@@ -420,7 +420,7 @@ void connect_pack_payload(std::vector<std::uint8_t>& payload,
     std::uint32_t caps = kCapPrefetchConsume | kCapPrefetchBackward
                        | kCapOpenTableMode | kCapSetFieldsBatch
                        | kCapFlushInCloseAll | kCapNavOrderFuse
-                       | kCapNavBoundaryPair | kCapLockedRow;
+                       | kCapNavBoundaryPair | kCapOpenSetupMetadata | kCapLockedRow;
     for (int i = 0; i < 4; ++i)
         payload.push_back(static_cast<std::uint8_t>((caps >> (8 * i)) & 0xFFu));
 }
@@ -683,6 +683,14 @@ RemoteConnection::open_table(const std::string& rel, std::uint16_t mode) {
                         if (auto sr = parse_schema_body(pl, off, slen)) {
                             result.fields = std::move(sr).value();
                             result.has_schema = true;
+                        }
+                    } else if (tag == OpenTableAckSections::kRecordLength && slen == 4) {
+                        result.record_length = read_u32_le(pl.data() + off);
+                        result.has_record_length = true;
+                    } else if (tag == OpenTableAckSections::kProductionIndex) {
+                        std::vector<std::uint8_t> bytes(pl.begin() + static_cast<std::ptrdiff_t>(off), pl.begin() + static_cast<std::ptrdiff_t>(off+slen));
+                        if (parse_open_index_reply(bytes, result.prod_bag_path)) {
+                            result.production_index_reply = std::move(bytes);
                         }
                     } else if (tag == OpenTableAckSections::kFirstRow) {
                         result.first_row.assign(
@@ -2199,7 +2207,12 @@ RemoteConnection::open_index(std::uint32_t table_id,
         rep.value().payload.size() < 2) {
         return util::Error{5000, 0, "OpenIndex: server error", path};
     }
-    const auto& pl = rep.value().payload;
+    return parse_open_index_reply(rep.value().payload, path);
+}
+
+util::Result<std::vector<RemoteConnection::OpenIndexEntry>>
+RemoteConnection::parse_open_index_reply(const std::vector<std::uint8_t>& pl, const std::string& path) {
+    if (pl.size() < 2) return util::Error{5000, 0, "OpenIndex: short payload", path};
     std::uint16_t n = read_u16_le(pl.data());
     if (pl.size() < 2u + 4u * n) {
         return util::Error{5000, 0,

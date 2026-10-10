@@ -361,7 +361,7 @@ TEST_CASE("Teardown batching: immutable metadata caches per handle") {
     // Table type: answered from the opened name's extension (0 frames)
     // when it has one; at most one frame otherwise.
     CHECK(tb_op(0x6A) <= tt0 + 1);
-    CHECK(tb_op(0x6C) == rl0 + 1);
+    CHECK(tb_op(0x6C) == rl0); // immutable length rode OpenTableAck
 
     REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
     REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
