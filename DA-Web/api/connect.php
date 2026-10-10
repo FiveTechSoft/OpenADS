@@ -102,6 +102,7 @@ if ($action === 'connect') {
     if (!isset($_SESSION['connections'])) {
         $_SESSION['connections'] = [];
     }
+    unset($_SESSION['management_auth'][$name]);
     $_SESSION['connections'][$name] = [
         'path'     => $opts['path'] ?? $path,
         'sourcePath' => $path,
@@ -121,6 +122,7 @@ if ($action === 'disconnect') {
     $name = trim($body['name'] ?? '');
     if (isset($_SESSION['connections'][$name])) {
         unset($_SESSION['connections'][$name]);
+        unset($_SESSION['management_auth'][$name]);
     }
     echo json_encode(['ok' => true]);
     exit;
