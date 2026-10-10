@@ -6718,13 +6718,27 @@ UNSIGNED32 materialise_temp_adt_open(Connection* c,
     fs::path stem = adt;
     stem.replace_extension();
     {
-        std::fstream f(adt, std::ios::in | std::ios::out | std::ios::binary);
-        if (!f) return fail(openads::AE_INTERNAL_ERROR,
+        const bool jailed = openads::platform::File::data_jail_active();
+        openads::platform::File safe_file;
+        std::fstream f;
+        if (jailed) {
+            auto opened = openads::platform::File::open(adt.string(), openads::platform::OpenMode::ReadWrite);
+            if (!opened) return fail(opened.error());
+            safe_file = std::move(opened).value();
+        } else {
+            f.open(adt, std::ios::in | std::ios::out | std::ios::binary);
+        }
+        if (!jailed && !f) return fail(openads::AE_INTERNAL_ERROR,
                             "temp materialise: reopen of created ADT failed");
         auto rd32 = [&](std::streamoff off) -> std::uint32_t {
             std::uint8_t b[4] = {0, 0, 0, 0};
-            f.seekg(off);
-            f.read(reinterpret_cast<char*>(b), 4);
+            if (jailed) {
+                auto rd = safe_file.read_at(static_cast<std::uint64_t>(off), b, 4);
+                if (!rd || rd.value() != 4) return 0;
+            } else {
+                f.seekg(off);
+                f.read(reinterpret_cast<char*>(b), 4);
+            }
             return static_cast<std::uint32_t>(b[0]) |
                    (static_cast<std::uint32_t>(b[1]) << 8) |
                    (static_cast<std::uint32_t>(b[2]) << 16) |
@@ -6786,18 +6800,30 @@ UNSIGNED32 materialise_temp_adt_open(Connection* c,
             }
             obuf.insert(obuf.end(), rec.begin(), rec.end());
         }
-        f.seekp(static_cast<std::streamoff>(hdr_len));
-        f.write(reinterpret_cast<const char*>(obuf.data()),
-                static_cast<std::streamsize>(obuf.size()));
+        if (jailed) {
+            auto wr = safe_file.write_at(hdr_len, obuf.data(), obuf.size());
+            if (!wr) return fail(wr.error());
+            if (wr.value() != obuf.size()) return fail(openads::AE_INTERNAL_ERROR, "temp materialise: short write");
+        } else {
+            f.seekp(static_cast<std::streamoff>(hdr_len));
+            f.write(reinterpret_cast<const char*>(obuf.data()),
+                    static_cast<std::streamsize>(obuf.size()));
+        }
         // Patch the record count (header bytes 24-27, LE u32).
         std::uint8_t cnt[4] = {
             static_cast<std::uint8_t>( nrows        & 0xFFu),
             static_cast<std::uint8_t>((nrows >>  8) & 0xFFu),
             static_cast<std::uint8_t>((nrows >> 16) & 0xFFu),
             static_cast<std::uint8_t>((nrows >> 24) & 0xFFu)};
-        f.seekp(24);
-        f.write(reinterpret_cast<const char*>(cnt), 4);
-        if (!f) return fail(openads::AE_INTERNAL_ERROR,
+        if (jailed) {
+            auto wr = safe_file.write_at(24, cnt, 4);
+            if (!wr) return fail(wr.error());
+            if (wr.value() != 4) return fail(openads::AE_INTERNAL_ERROR, "temp materialise: short header write");
+        } else {
+            f.seekp(24);
+            f.write(reinterpret_cast<const char*>(cnt), 4);
+        }
+        if (!jailed && !f) return fail(openads::AE_INTERNAL_ERROR,
                             "temp materialise: short write");
     }
 
@@ -10635,6 +10661,13 @@ UNSIGNED32 ENTRYPOINT AdsRestructureTable(ADSHANDLE   hConnect,
         }
         file_bytes.push_back(0x1A);
 
+        if (openads::platform::File::data_jail_active()) {
+            auto jail_file = openads::platform::File::open(tmp.string(), openads::platform::OpenMode::CreateExclusive);
+            if (!jail_file) return fail(jail_file.error());
+            auto written = jail_file.value().write_at(0, file_bytes.data(), file_bytes.size());
+            if (!written) return fail(written.error());
+            if (written.value() != file_bytes.size()) return fail(openads::AE_INTERNAL_ERROR, "AdsRestructureTable: short write");
+        } else {
         std::ofstream out(tmp, std::ios::binary);
         if (!out) return fail(openads::AE_INTERNAL_ERROR,
                               "AdsRestructureTable: tmp open failed");
@@ -10642,6 +10675,7 @@ UNSIGNED32 ENTRYPOINT AdsRestructureTable(ADSHANDLE   hConnect,
                   static_cast<std::streamsize>(file_bytes.size()));
         if (!out) return fail(openads::AE_INTERNAL_ERROR,
                               "AdsRestructureTable: tmp write failed");
+        }
     }   // engine handle on `full` closes here
 
     {
@@ -21902,9 +21936,16 @@ UNSIGNED32 ENTRYPOINT AdsCopyTable(ADSHANDLE   hHandle,
 
     {
         std::error_code ec;
-        fs::remove(dst, ec);
+        if (!openads::platform::File::data_jail_active()) fs::remove(dst, ec);
     }
     {
+        if (openads::platform::File::data_jail_active()) {
+            auto opened = openads::platform::File::open(dst.string(), openads::platform::OpenMode::CreateExclusive);
+            if (!opened) return fail(opened.error());
+            auto written = opened.value().write_at(0, file.data(), file.size());
+            if (!written) return fail(written.error());
+            if (written.value() != file.size()) return fail(openads::AE_INTERNAL_ERROR, "AdsCopyTable: short write");
+        } else {
         std::ofstream out(dst, std::ios::binary);
         if (!out) return fail(openads::AE_INTERNAL_ERROR,
                               "AdsCopyTable: open for write failed");
@@ -21912,6 +21953,7 @@ UNSIGNED32 ENTRYPOINT AdsCopyTable(ADSHANDLE   hHandle,
                   static_cast<std::streamsize>(file.size()));
         if (!out) return fail(openads::AE_INTERNAL_ERROR,
                               "AdsCopyTable: write failed");
+        }
     }
     return ok();
 }
@@ -41118,6 +41160,13 @@ UNSIGNED32 ENTRYPOINT AdsCloneTable(ADSHANDLE hTable, ADSHANDLE* phClone) {
 
     fs::path tmp_path = fs::path(owning->data_dir()) / tmp_name;
     {
+        if (openads::platform::File::data_jail_active()) {
+            auto opened = openads::platform::File::open(tmp_path.string(), openads::platform::OpenMode::CreateExclusive);
+            if (!opened) return fail(opened.error());
+            auto written = opened.value().write_at(0, file.data(), file.size());
+            if (!written) return fail(written.error());
+            if (written.value() != file.size()) return fail(openads::AE_INTERNAL_ERROR, "AdsCloneTable: short write");
+        } else {
         std::ofstream out(tmp_path, std::ios::binary);
         if (!out) return fail(openads::AE_INTERNAL_ERROR,
                               "AdsCloneTable: write failed");
@@ -41125,6 +41174,7 @@ UNSIGNED32 ENTRYPOINT AdsCloneTable(ADSHANDLE hTable, ADSHANDLE* phClone) {
                   static_cast<std::streamsize>(file.size()));
         if (!out) return fail(openads::AE_INTERNAL_ERROR,
                               "AdsCloneTable: write error");
+        }
     }
 
     // Open the clone through the owning connection.
@@ -41197,9 +41247,16 @@ UNSIGNED32 ENTRYPOINT AdsCopyTableStructure(ADSHANDLE hTable, UNSIGNED8* pucFile
 
     {
         std::error_code ec;
-        fs::remove(dst, ec);
+        if (!openads::platform::File::data_jail_active()) fs::remove(dst, ec);
     }
     {
+        if (openads::platform::File::data_jail_active()) {
+            auto opened = openads::platform::File::open(dst.string(), openads::platform::OpenMode::CreateExclusive);
+            if (!opened) return fail(opened.error());
+            auto written = opened.value().write_at(0, file.data(), file.size());
+            if (!written) return fail(written.error());
+            if (written.value() != file.size()) return fail(openads::AE_INTERNAL_ERROR, "AdsCopyTableStructure: short write");
+        } else {
         std::ofstream out(dst, std::ios::binary);
         if (!out) return fail(openads::AE_INTERNAL_ERROR,
                               "AdsCopyTableStructure: open failed");
@@ -41207,6 +41264,7 @@ UNSIGNED32 ENTRYPOINT AdsCopyTableStructure(ADSHANDLE hTable, UNSIGNED8* pucFile
                   static_cast<std::streamsize>(file.size()));
         if (!out) return fail(openads::AE_INTERNAL_ERROR,
                               "AdsCopyTableStructure: write failed");
+        }
     }
     return ok();
 }
