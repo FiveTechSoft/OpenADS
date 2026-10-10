@@ -42,6 +42,9 @@
 #include "hbapi.h"
 #include "hbapiitm.h"
 #include "hbdate.h"
+#include "hbjson.h"
+#include "hbthread.h"
+#include "hbvm.h"
 #include "ace.h"
 #include <string.h>
 
@@ -93,6 +96,80 @@ static ADSHANDLE oads_default_connection( void )
 extern UNSIGNED32 ENTRYPOINT AdsGetServerVersion( ADSHANDLE   hConnect,
                                                   UNSIGNED8 * pucBuf,
                                                   UNSIGNED16 * pusLen );
+
+/* Additive OpenADS export, declared here for older ACE SDK headers. */
+extern UNSIGNED32 ENTRYPOINT OAdsGetServerStats(ADSHANDLE hMgmt,
+                                               UNSIGNED8* pucJson,
+                                               UNSIGNED32* pulLen);
+
+/* OAds_ServerStats(hMgmt, @nError) -> hash, NIL on failure.
+   hMgmt must come from AdsMgConnect; deliberately no default data handle.
+   Harbour JSON preserves null as NIL and uses wide numeric values on x86. */
+HB_FUNC( OADS_SERVERSTATS )
+{
+    char buffer[8192];
+    UNSIGNED32 len = ( UNSIGNED32 ) sizeof(buffer);
+    UNSIGNED32 rc = OAdsGetServerStats(( ADSHANDLE ) hb_parnint(1),
+                                      ( UNSIGNED8* ) buffer, &len);
+    PHB_ITEM value = hb_itemNew(NULL);
+    if (rc == 0 && (len < 2 || len > sizeof(buffer) ||
+        hb_jsonDecode(buffer, value) != (HB_SIZE)(len - 1) || !HB_IS_HASH(value)))
+        rc = 5001;
+    hb_stornint((HB_MAXINT)rc, 2);
+    if (rc == 0) hb_itemReturnRelease(value);
+    else { hb_itemRelease(value); hb_ret(); }
+}
+
+/* OAds_ServerStatsRemote(host, port, adminUser, adminPass, @error).
+ * Own handle, no change to rddads' shared management/data handles. This
+ * wrapper serializes its connect/read/disconnect lifecycle for MT callers.
+ * Host is a literal hostname/IP, not a path or URI; credentials never log.
+ */
+static HB_CRITICAL_NEW( s_oads_health_mutex );
+HB_FUNC( OADS_SERVERSTATSREMOTE )
+{
+    const char * host = hb_parc( 1 );
+    int port = hb_parni( 2 );
+    UNSIGNED32 rc = 5001, len = 8192;
+    ADSHANDLE handle = 0;
+    char buffer[8192];
+    char * endpoint;
+    PHB_ITEM value = hb_itemNew( NULL );
+    if( !host || !*host || strlen( host ) > 253 || strlen( host ) != hb_parclen( 1 ) ||
+        strpbrk( host, ":/\\ \t\r\n" ) || !HB_ISNUM( 2 ) ||
+        hb_parnd( 2 ) != port || port < 1 || port > 65535 ||
+        !HB_ISCHAR( 3 ) || !HB_ISCHAR( 4 ) ||
+        hb_parclen( 3 ) > 256 || hb_parclen( 4 ) > 4096 ||
+        strlen( hb_parc( 3 ) ) != hb_parclen( 3 ) ||
+        strlen( hb_parc( 4 ) ) != hb_parclen( 4 ) )
+    {
+        hb_stornint( ( HB_MAXINT ) rc, 5 );
+        hb_itemRelease( value );
+        hb_ret();
+        return;
+    }
+    endpoint = ( char * ) hb_xgrab( strlen( host ) + 8 );
+    hb_snprintf( endpoint, strlen( host ) + 8, "%s:%d", host, port );
+    hb_threadEnterCriticalSectionGC( &s_oads_health_mutex );
+    rc = AdsMgConnect( ( UNSIGNED8 * ) endpoint,
+                      ( UNSIGNED8 * ) HB_UNCONST( hb_parc( 3 ) ),
+                      ( UNSIGNED8 * ) HB_UNCONST( hb_parc( 4 ) ), &handle );
+    if( rc == 0 )
+    {
+        UNSIGNED32 close_rc;
+        rc = OAdsGetServerStats( handle, ( UNSIGNED8 * ) buffer, &len );
+        close_rc = AdsMgDisconnect( handle );
+        if( rc == 0 ) rc = close_rc;
+    }
+    hb_threadLeaveCriticalSection( &s_oads_health_mutex );
+    hb_xfree( endpoint );
+    if( rc == 0 && (len < 2 || len > sizeof(buffer) ||
+        hb_jsonDecode(buffer, value) != (HB_SIZE)(len - 1) || !HB_IS_HASH(value)))
+        rc = 5001;
+    hb_stornint( ( HB_MAXINT ) rc, 5 );
+    if( rc == 0 ) hb_itemReturnRelease( value );
+    else { hb_itemRelease( value ); hb_ret(); }
+}
 
 /* ------------------------------------------------------------------ */
 /*  OADS_SETCONNECTION( hConn ) -> lOk                                 */

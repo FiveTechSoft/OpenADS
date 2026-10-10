@@ -4761,7 +4761,7 @@
     try {
       const r = await apiFetch('api/server_info.php', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'kill', dd, connNo: row.connNo, user: row.name }),
+        body: JSON.stringify({ action: 'kill', csrf: document.getElementById('srvinfo-' + tabId)?.dataset.managementCsrf, dd, connNo: row.connNo, user: row.name }),
       });
       if (r.error) { setStatus(`Disconnect failed: ${r.error}`); return; }
       setStatus(r.note || `Disconnected ${label}`);
@@ -4778,7 +4778,7 @@
     try {
       const r = await apiFetch('api/server_info.php', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'sql', dd, threadNo: row.threadNo }),
+        body: JSON.stringify({ action: 'sql', csrf: document.getElementById('srvinfo-' + tabId)?.dataset.managementCsrf, dd, threadNo: row.threadNo }),
       });
       if (r.error) { box.textContent = `Error: ${r.error}`; return; }
       if (!r.sql) { box.textContent = 'This thread has not run any SQL yet.'; return; }
@@ -4796,7 +4796,7 @@
     try {
       const r = await apiFetch('api/server_info.php', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'locks', dd, tableName: row.name }),
+        body: JSON.stringify({ action: 'locks', csrf: document.getElementById('srvinfo-' + tabId)?.dataset.managementCsrf, dd, tableName: row.name }),
       });
       if (r.error) { box.textContent = `Error: ${r.error}`; return; }
       if (!r.locks || r.locks.length === 0) {
@@ -4820,16 +4820,49 @@
     }
   }
 
+  function serverHealthHtml(h, error) {
+    if (!h) return `<div class="alert alert-info">${escHtml(error || 'Health unavailable')}</div>`;
+    const val = v => v == null ? 'Unavailable / not measured' : escHtml(String(v));
+    const rows = Object.entries(h).filter(([k]) => k !== 'semantics').map(([k,v]) =>
+      `<tr><th style="text-align:left;padding:5px">${escHtml(k.replaceAll('_',' '))}</th><td style="padding:5px">${v && typeof v === 'object' ? `Current: ${val(v.current)} | Max used: ${val(v.max_used)} | Rejected: ${val(v.rejected)}` : k === 'max_sessions' && v === 0 ? 'Unlimited (0)' : val(v)}</td></tr>`).join('');
+    return `<h3>Server health</h3><div style="overflow:auto"><table>${rows}</table></div><details><summary>Count meanings and raw JSON</summary><pre style="white-space:pre-wrap;overflow-wrap:anywhere">${escHtml(JSON.stringify(h,null,2))}</pre></details>`;
+  }
+
+  function showManagementLogin(container, tabId, dd, resp) {
+    container.innerHTML = `<div class="alert alert-info">${escHtml(resp.error || 'Management login required')}</div>
+      <p>Separate daemon-management credentials, not Data Dictionary login. Kept in this PHP session for 20 minutes only. Use HTTPS for the portal and a trusted/firewalled management route or TLS proxy.</p>
+      <form style="display:flex;flex-direction:column;gap:12px;max-width:480px" id="mg-login-${tabId}"><label>Management user <input name="user" autocomplete="off" maxlength="256" required></label>
+      <label>Password <input name="password" type="password" autocomplete="off" maxlength="4096"></label>
+      <button class="btn" type="submit">Connect management</button></form><div id="mg-error-${tabId}"></div>`;
+    const form = document.getElementById('mg-login-' + tabId);
+    form.addEventListener('submit', async e => {
+      e.preventDefault();
+      const user = form.elements.user.value, password = form.elements.password.value;
+      form.elements.password.value = '';
+      try {
+        const r = await apiFetch('api/server_info.php', {method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({action:'management_login',dd,csrf:resp.management_csrf,management_user:user,management_password:password})});
+        if (r.error) document.getElementById('mg-error-'+tabId).textContent = r.error;
+        else loadServerInfo(tabId,dd);
+      } catch (err) { document.getElementById('mg-error-'+tabId).textContent = err.message; }
+    });
+  }
+
   function loadServerInfo(tabId, dd) {
     const container = document.getElementById('srvinfo-' + tabId);
     if (!container) return;
     container.innerHTML = `<div class="alert alert-info" style="margin:8px;">Loading…</div>`;
 
     Promise.all([
-      apiFetch(`api/server_info.php?dd=${encodeURIComponent(dd)}`),
+      apiFetch(`api/server_info.php?dd=${encodeURIComponent(dd)}`).catch(err => {
+        if (err.data?.management_required) return err.data;
+        throw err;
+      }),
       apiFetch(`api/db_props.php?dd=${encodeURIComponent(dd)}`).catch(() => null),
     ])
       .then(([resp, props]) => {
+        container.dataset.managementCsrf = resp.management_csrf || '';
+        if (resp.management_required) { showManagementLogin(container,tabId,dd,resp); return; }
         if (resp.error) {
           container.innerHTML = `<div class="alert alert-error" style="margin:8px;">${escHtml(resp.error)}</div>`;
           return;
@@ -4843,12 +4876,14 @@
           <div class="health-panel">
             <div class="health-toolbar">
               <button class="btn btn-sm" id="srvinfo-refresh-${tabId}">Refresh</button>
+              <button class="btn btn-sm" id="mg-logout-${tabId}">Forget management login</button>
               <span>${escHtml(dd)}</span>
               <span class="health-note" style="color:#a6adc8;">Up ${a.upTime.days}d ${a.upTime.hours}h ${a.upTime.minutes}m ${a.upTime.seconds}s</span>
               ${isLocal ? '<span class="health-note">local connection — Disconnect is a no-op</span>' : ''}
               ${loginsDisabled ? '<span class="health-note" style="color:#f38ba8;">Logins disabled</span>' : ''}
               <span class="health-note" id="srvinfo-filter-note-${tabId}" style="display:none;color:#89b4fa;"></span>
             </div>
+            <div>${serverHealthHtml(resp.health,resp.health_error)}</div>
             <div class="health-summary" style="grid-template-columns:repeat(6,minmax(100px,1fr));">
               ${countBox('Users', a.users.inUse)}
               ${countBox('Connections', a.connections.inUse)}
@@ -4879,6 +4914,11 @@
             </div>
           </div>`;
 
+        document.getElementById('mg-logout-' + tabId)?.addEventListener('click', async () => {
+          await apiFetch('api/server_info.php',{method:'POST',headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({action:'management_logout',dd,csrf:resp.management_csrf})});
+          loadServerInfo(tabId,dd);
+        });
         document.getElementById('srvinfo-refresh-' + tabId)?.addEventListener('click', () => loadServerInfo(tabId, dd));
 
         /* global Tabulator */

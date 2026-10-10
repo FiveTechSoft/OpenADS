@@ -384,6 +384,8 @@ inline constexpr const char kSpaPart2[] = R"OPENADS_SPA(  padding:4px 10px;borde
     </div>
 
     <div id="pane-server" class="pane hidden">
+      <div class="toolbar"><button id="server-refresh" class="btn-secondary">Refresh server health</button></div>
+      <div id="server-health" class="empty">Loading health…</div>
       <div id="server-body" class="empty">Loading…</div>
     </div>
 
@@ -1074,7 +1076,29 @@ function fmtBytes(n) {
   if (n < 1024*1024*1024) return (n/1024/1024).toFixed(2) + " MB";
   return (n/1024/1024/1024).toFixed(2) + " GB";
 }
+// Render every scalar/usage entry without treating unavailable as zero.
+function renderServerHealth(h) {
+  if (!h || h.schema_version !== 1) throw new Error("Unsupported health schema");
+  const val = v => v == null ? "Unavailable / not measured" : esc(String(v));
+  let html = `<h3>Server health</h3><div class="kv">`;
+  for (const [key, value] of Object.entries(h)) {
+    if (key === "semantics") continue;
+    const label = key.replaceAll("_", " ");
+    if (value && typeof value === "object") {
+      html += `<div>${esc(label)}</div><div>Current: ${val(value.current)} | Max used: ${val(value.max_used)} | Rejected: ${val(value.rejected)}</div>`;
+    } else html += `<div>${esc(label)}</div><div>${key === "max_sessions" && value === 0 ? "Unlimited (0)" : val(value)}</div>`;
+  }
+  html += `</div><details><summary>Count meanings and raw JSON</summary><pre style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(JSON.stringify(h, null, 2))}</pre></details>`;
+  return html;
+}
+$("server-refresh").addEventListener("click", loadServerInfo);
+async function loadServerHealth() {
+  try { $("server-health").innerHTML = renderServerHealth(await api("/api/server/health")); $("server-health").classList.remove("empty"); }
+  catch (e) { $("server-health").innerHTML = `<div class="err">${esc(e.message)}</div>`; }
+}
+
 async function loadServerInfo() {
+  loadServerHealth();
   try {
     const d = await api("/api/server/info");
     const osIcon = ({Windows:"🪟", Linux:"🐧", macOS:"🍎"}[d.os]

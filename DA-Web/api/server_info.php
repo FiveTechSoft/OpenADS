@@ -31,14 +31,27 @@
  * Requires: php.ini  ffi.enable=true  (or ffi.enable=preload)
  */
 header('Content-Type: application/json');
+header('Cache-Control: no-store');
 session_start();
 require_once __DIR__ . '/common.php';
 
 api_require_session();
 
 $method = $_SERVER['REQUEST_METHOD'];
+if (empty($_SESSION['management_csrf'])) {
+    $_SESSION['management_csrf'] = bin2hex(random_bytes(32));
+}
+
 if ($method === 'POST') {
-    $body   = json_decode(file_get_contents('php://input'), true) ?? [];
+    // Browser form POSTs cannot mint/use management authority cross-site.
+    if (stripos($_SERVER['CONTENT_TYPE'] ?? '', 'application/json') !== 0) {
+        api_error(415, 'JSON request required');
+    }
+    $body = json_decode(file_get_contents('php://input'), true) ?? [];
+    if (!is_array($body)) api_error(400, 'JSON object required');
+    if (!hash_equals($_SESSION['management_csrf'], (string)($body['csrf'] ?? ''))) {
+        api_error(403, 'Management request expired; refresh Server Info');
+    }
     $ddName = trim($body['dd'] ?? '');
 } else {
     $body   = [];
@@ -84,7 +97,7 @@ if (!$dllPath) {
 
 // ── FFI declarations ─────────────────────────────────────────────────────────
 $cdef = '
-typedef unsigned long long ADSHANDLE;
+typedef unsigned int ADSHANDLE;
 typedef unsigned short UNSIGNED16;
 typedef unsigned int   UNSIGNED32;
 typedef unsigned char  UNSIGNED8;
@@ -214,20 +227,54 @@ function ffiCStr(FFI $ffi, string $s): FFI\CData {
 // state). A remote DD (host:port from the session's own connection)
 // connects the mgmt handle to that same server, so activity/kill reflect
 // the server actually serving the DD instead of this PHP process.
-// Pass the DD's own connected username so this mgmt session registers
-// under that name instead of showing up as "(anonymous)" alongside the
-// user's real connections in the Connected Users / Active Queries grids.
+// Use separate, endpoint-scoped daemon-management credentials.
 $hMgmt = $ffi->new('ADSHANDLE');
 $hMgmt->cdata = 0;
 $serverArg = $mgServer !== null ? ffiCStr($ffi, $mgServer) : null;
-$mgUsername = trim((string)($connInfo['username'] ?? ''));
-$userArg = $mgUsername !== '' ? ffiCStr($ffi, $mgUsername) : null;
-$rc = $ffi->AdsMgConnect($serverArg, $userArg, null, FFI::addr($hMgmt));
+// Never reuse the DD username/password as daemon-management credentials.
+$endpointKey = $mgServer ?? 'local';
+$mgAuth = $_SESSION['management_auth'][$ddName] ?? null;
+if ($mgAuth && (($mgAuth['endpoint'] ?? '') !== $endpointKey ||
+                ($mgAuth['expires'] ?? 0) <= time())) {
+    unset($_SESSION['management_auth'][$ddName]);
+    $mgAuth = null;
+}
+$action = (string)($body['action'] ?? '');
+if ($method === 'POST' && in_array($action, ['management_login', 'management_logout'], true)) {
+    if ($action === 'management_logout') {
+        unset($_SESSION['management_auth'][$ddName]);
+        echo json_encode(['ok' => true]);
+        exit;
+    }
+    // Frontend credential entry must use HTTPS, or a literal loopback browser
+    // connection. This does not add encryption to the AdsMg wire connection.
+    $https = !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off';
+    $loopback = in_array($_SERVER['REMOTE_ADDR'] ?? '', ['127.0.0.1', '::1'], true);
+    if (!$https && !$loopback) api_error(403, 'Use HTTPS to enter management credentials');
+    $user = (string)($body['management_user'] ?? '');
+    $password = (string)($body['management_password'] ?? '');
+    if ($user === '' || strlen($user) > 256 || strlen($password) > 4096 ||
+        str_contains($user, "\0") || str_contains($password, "\0")) {
+        api_error(400, 'Invalid management credential fields');
+    }
+    $mgAuth = ['endpoint' => $endpointKey, 'user' => $user, 'password' => $password,
+               'expires' => time() + 1200];
+}
+$userArg = $mgAuth ? ffiCStr($ffi, $mgAuth['user']) : null;
+$passwordArg = $mgAuth ? ffiCStr($ffi, $mgAuth['password']) : null;
+$rc = $ffi->AdsMgConnect($serverArg, $userArg, $passwordArg, FFI::addr($hMgmt));
 if ($rc !== 0) {
-    http_response_code(500);
-    echo json_encode(['error' => "AdsMgConnect failed (rc=$rc)"]);
+    unset($_SESSION['management_auth'][$ddName]);
+    api_error(401, 'Management credentials required or connection unavailable', $rc,
+        ['management_required' => true, 'management_csrf' => $_SESSION['management_csrf']]);
+}
+if ($method === 'POST' && $action === 'management_login') {
+    $_SESSION['management_auth'][$ddName] = $mgAuth;
+    $ffi->AdsMgDisconnect($hMgmt->cdata);
+    echo json_encode(['ok' => true]);
     exit;
 }
+
 $h = $hMgmt->cdata;
 
 try {
@@ -329,6 +376,26 @@ try {
                 : null,
         ]);
         exit;
+    }
+
+    $health = null;
+    $healthError = null;
+    try {
+        $healthFfi = FFI::cdef('typedef unsigned int UNSIGNED32;
+            UNSIGNED32 OAdsGetServerStats(unsigned int, unsigned char*, UNSIGNED32*);', $dllPath);
+        $healthBuffer = $healthFfi->new('unsigned char[8192]');
+        $healthLength = $healthFfi->new('UNSIGNED32');
+        $healthLength->cdata = 8192;
+        $healthRc = $healthFfi->OAdsGetServerStats($h, $healthBuffer, FFI::addr($healthLength));
+        if ($healthRc !== 0) $healthError = 'Health statistics unavailable (rc=' . $healthRc . ')';
+        else {
+            $health = json_decode(FFI::string(FFI::cast('char*', $healthBuffer)), true, 32, JSON_THROW_ON_ERROR);
+            if (($health['schema_version'] ?? 0) !== 1) {
+                $health = null; $healthError = 'Unsupported health schema';
+            }
+        }
+    } catch (Throwable $e) {
+        $healthError = 'Health extension unavailable; use a matching DLL and server with OAdsGetServerStats support';
     }
 
     // ── Activity info (counts) ────────────────────────────────────────────────
@@ -439,6 +506,9 @@ try {
         'ok'       => true,
         'connType' => $connType,
         'activity' => $activity,
+        'health' => $health,
+        'health_error' => $healthError,
+        'management_csrf' => $_SESSION['management_csrf'],
         'users'    => $users,
         'tables'   => $tables,
         'queries'  => $queries,

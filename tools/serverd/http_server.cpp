@@ -8,6 +8,7 @@
 
 #include "engine/data_dict.h"
 #include "mgmt/error_log.h"
+#include "mgmt/mg_health.h"
 #include "network/server.h"
 #include "openads/ace.h"
 #include "openads/error.h"
@@ -1547,6 +1548,32 @@ bool HttpConsole::start(const std::string& host,
             [this](const httplib::Request&, httplib::Response& res) {
         json j = server_info(data_dir_);
         res.set_content(j.dump(), "application/json");
+    });
+
+    // Same schema/formatter as the Harbour health helper, under the existing
+    // pre-routing auth gate. Do not use a PHP/client-local snapshot for serverd.
+    srv.Get("/api/server/health", [this](const httplib::Request&, httplib::Response& res) {
+        res.set_header("Cache-Control", "no-store");
+        if (wire_srv_) {
+            res.set_content(openads::mgmt::health_json(wire_srv_->build_mg_snapshot(),
+                                                      OPENADS_VERSION_STR), "application/json");
+            return;
+        }
+        UNSIGNED8 local[] = "local";
+        ADSHANDLE handle = 0;
+        UNSIGNED8 buffer[8192];
+        UNSIGNED32 size = sizeof(buffer);
+        UNSIGNED32 rc = AdsMgConnect(local, nullptr, nullptr, &handle);
+        if (rc == 0) {
+            rc = OAdsGetServerStats(handle, buffer, &size);
+            AdsMgDisconnect(handle);
+        }
+        if (rc != 0) {
+            res.status = 503;
+            res.set_content(json_error("health statistics unavailable", 503).dump(), "application/json");
+            return;
+        }
+        res.set_content(reinterpret_cast<const char*>(buffer), "application/json");
     });
 
     // studio.web.0.12 — backup data dir as a STORE-only ZIP.
