@@ -2242,7 +2242,8 @@ UNSIGNED32 remote_query_key_num(openads::network::RemoteTable* rt,
 
 UNSIGNED32 remote_goto_key_num(openads::network::RemoteTable* rt,
                                 openads::network::RemoteIndex* ri,
-                                std::uint32_t keyno) {
+                                std::uint32_t keyno,
+                                const std::uint32_t* physical_snapshot = nullptr) {
     if (rt == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
     // Scrollbar jump moves the cursor: buffered sets belong to the row
     // under the old position. Land them first (no-op when clean).
@@ -2252,13 +2253,17 @@ UNSIGNED32 remote_goto_key_num(openads::network::RemoteTable* rt,
         auto act = openads::network::remote_activate_index(ri);
         if (!act) return fail(act.error());
     }
-    remote_ensure_rec_count(rt);
+    // mtfix34: ordered position uses scoped key count, not physical count.
+    // Do not ask for a physical value that the branch below discards.
+    if (!remote_table_has_index(rt) && physical_snapshot == nullptr)
+        remote_ensure_rec_count(rt);
     // Clamp to the scoped key count when an order is active -- a KeyGoto
     // past the scope end must land on the last scoped key, not on a
     // physical record outside the scope.
     const std::uint32_t kmax = remote_table_has_index(rt)
         ? remote_ensure_key_count(rt)
-        : (rt->rec_count_cached ? rt->cached_rec_count : 0u);
+        : (physical_snapshot != nullptr ? *physical_snapshot
+             : (rt->rec_count_cached ? rt->cached_rec_count : 0u));
     cli_trace("goto_key_num", "want=%u kmax=%u", keyno, kmax);
     if (kmax > 0 && keyno > kmax) {
         keyno = kmax;
@@ -2297,7 +2302,9 @@ UNSIGNED32 remote_query_rel_key_pos(openads::network::RemoteTable* rt,
         auto act = openads::network::remote_activate_index(ri);
         if (!act) return fail(act.error());
     }
-    remote_ensure_rec_count(rt);
+    // mtfix34: ordered position uses scoped key count, not physical count.
+    // Do not ask for a physical value that the branch below discards.
+    if (!remote_table_has_index(rt)) remote_ensure_rec_count(rt);
     // Relative position is within the active order's key walk, so the
     // denominator is the scoped key count when an order is active --
     // not the physical record count.
@@ -39642,7 +39649,7 @@ UNSIGNED32 ENTRYPOINT AdsSetRelKeyPos(ADSHANDLE h, double pos) {
         std::uint32_t target = static_cast<std::uint32_t>(
             pos * static_cast<double>(rc - 1u) + 0.5) + 1u;
         if (target > rc) target = rc;
-        return remote_goto_key_num(rt, ri, target);
+        return remote_goto_key_num(rt, ri, target, &rc);
     }
     if (auto* rt = get_remote_table(h)) {
         remote_ensure_rec_count(rt);
@@ -39655,13 +39662,13 @@ UNSIGNED32 ENTRYPOINT AdsSetRelKeyPos(ADSHANDLE h, double pos) {
             std::uint32_t target = static_cast<std::uint32_t>(
                 pos * static_cast<double>(rc - 1u) + 0.5) + 1u;
             if (target > rc) target = rc;
-            return remote_goto_key_num(rt, nullptr, target);
+            return remote_goto_key_num(rt, nullptr, target, &rc);
         }
         std::uint32_t rn = static_cast<std::uint32_t>(
             pos * static_cast<double>(rc - 1u) + 0.5) + 1u;
         if (rn < 1u) rn = 1u;
         if (rn > rc) rn = rc;
-        return remote_goto_key_num(rt, nullptr, rn);
+        return remote_goto_key_num(rt, nullptr, rn, &rc);
     }
     Table* t = get_table(h);
     if (t == nullptr) return fail(openads::AE_INTERNAL_ERROR, "no table");
