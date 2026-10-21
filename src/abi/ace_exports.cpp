@@ -9594,7 +9594,11 @@ AdtFieldSpec adt_spec_for(const FieldOut& f) {
         case 'Q': return { 6, 9,          0,     true };  // BINARY (9-byte ref)
         case 'I': return { 7, 9,          0,     true };  // IMAGE  (9-byte ref)
         case 'N':
-            if (f.dec > 0) return {10, 8, f.dec, false}; // DOUBLE
+            // A DOUBLE descriptor carries no decimal count, so N(9,4) came back
+            // as B(8,0) and every unformatted display rounded (7.75 -> "8").
+            // ADT type 2 keeps the declared width and scale, like a DBF N field.
+            if (f.dec > 0) return { 2, static_cast<std::uint16_t>(f.length ? f.length : 10u),
+                                    f.dec, false};          // NUMERIC as ASCII digits
             // INTEGER is a 4-byte int32, so it only holds up to 2,147,483,647.
             // Mapping every decimal-less numeric to it silently destroyed any
             // wider value: a DBF N(19,0) holding 5,000,000,000 read back as 0
@@ -12079,6 +12083,16 @@ UNSIGNED32 ENTRYPOINT AdsSkip(ADSHANDLE hTable, SIGNED32 lRows) {
         cli_trace_tbl(ri->parent, "AdsSkip(idx)", "rows=%d", (int)lRows);
         openads::network::RemoteTable* rt = ri->parent;
         if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
+        // A pair-certified GotoTop/GotoBottom moved only the client: the
+        // server cursor still sits at the boundary the pair was fetched
+        // from. Anchor it on the client-visible row first, as the natural
+        // Skip path does, or Skip(-1) after GoTop+GoBottom walks from the
+        // top and reports BOF.
+        if (rt != nullptr && rt->conn != nullptr && rt->pair_local_position &&
+            rt->row_valid && rt->current_recno != 0) {
+            auto ar = rt->conn->goto_record(rt, rt->current_recno);
+            if (!ar) return fail(ar.error());
+        }
         const std::uint32_t rec_before =
             (rt != nullptr && rt->row_valid) ? rt->current_recno : 0u;
         const bool row_valid_before = rt != nullptr && rt->row_valid;
@@ -12109,7 +12123,10 @@ UNSIGNED32 ENTRYPOINT AdsSkip(ADSHANDLE hTable, SIGNED32 lRows) {
         // Cached boundary landings/read-ahead can leave the physical server
         // cursor elsewhere. Clearing the order also drops their lag, so
         // anchor a direct natural Skip at the client-visible physical row.
-        if ((natural_transition || (rt->server_order_id == 0 && rt->pair_local_position)) &&
+        // pair_local_position alone is enough: server_order_id can still be
+        // kOrderUnknown here (table handle never given an explicit order),
+        // and GotoRecord repositions both the engine table and the twin.
+        if ((natural_transition || rt->pair_local_position) &&
             natural_anchor != 0) {
             auto r = rt->conn->goto_record(rt, natural_anchor);
             if (!r) return fail(r.error());

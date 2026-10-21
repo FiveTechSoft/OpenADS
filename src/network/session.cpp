@@ -867,6 +867,13 @@ ADSHANDLE Session::ensure_abi_handle(std::uint32_t id) {
     }
     WTRACE("[wire] ensure_abi_handle id=%u opened h=%llu gt_rc=%u bof=%u eof=%u twin_recs=%u\n",
            id, (unsigned long long)h, (unsigned)gt_rc, (unsigned)_b, (unsigned)_e, (unsigned)twin_recs);
+    // An AOF set before the twin existed lives only on the engine table;
+    // copy it so ordered navigation on the twin honours it as well.
+    if (const std::string& aof = tbl->aof_expr(); !aof.empty()) {
+        std::vector<UNSIGNED8> ab(aof.size() + 1);
+        std::memcpy(ab.data(), aof.data(), aof.size());
+        (void)AdsSetAOF(h, ab.data(), 0);
+    }
     tbls_h_[id] = h;
     return h;
 }
@@ -3571,13 +3578,34 @@ DispatchResult Session::dispatch(const Frame& f) {
             }
             auto* tbl = sess_conn_->lookup_table(it->second);
             if (!tbl) { reply = err("SetAOF: lookup failed"); break; }
+            // Ordered GotoTop/Skip run on the ABI twin (tbls_h_), a
+            // separate handle: mirror the AOF there too, or indexed
+            // navigation ignores it while natural order honours it.
+            ADSHANDLE htwin = 0;
+            if (auto hit = tbls_h_.find(id); hit != tbls_h_.end()) {
+                htwin = hit->second;
+            }
             auto ast = openads::engine::aof::parse(cond);
             if (!ast) {
                 // Expression outside the optimisable AOF subset
-                // (e.g. Empty(NAME)) — not an error. Drop any
-                // prior AOF and ack; the client RDD filters.
+                // (e.g. Empty(NAME), substr(...)). Drop any prior AOF
+                // and answer AE_INVALID_EXPRESSION, like local
+                // AdsSetAOF: stock rddads only runs its client-side
+                // row filter when AdsSetAOF fails, so an ack here made
+                // SET FILTER a no-op under REMOTE. Built by hand, not
+                // with err(), so the expected refusal stays out of
+                // the ads_err log.
                 tbl->clear_filter();
-                reply.opcode = Opcode::SetAOFAck;
+                if (htwin != 0) AdsClearAOF(htwin);
+                const UNSIGNED32 code = openads::AE_INVALID_EXPRESSION;
+                const std::string msg = "AOF expression not optimisable; client filters";
+                reply.opcode = Opcode::Error;
+                reply.payload.clear();
+                reply.payload.push_back(static_cast<std::uint8_t>( code        & 0xFFu));
+                reply.payload.push_back(static_cast<std::uint8_t>((code >>  8) & 0xFFu));
+                reply.payload.push_back(static_cast<std::uint8_t>((code >> 16) & 0xFFu));
+                reply.payload.push_back(static_cast<std::uint8_t>((code >> 24) & 0xFFu));
+                reply.payload.insert(reply.payload.end(), msg.begin(), msg.end());
                 break;
             }
             auto rep = openads::engine::aof::evaluate_optimised(*ast.value(), *tbl);
@@ -3591,6 +3619,11 @@ DispatchResult Session::dispatch(const Frame& f) {
                 case openads::engine::aof::OptLevel::Full: lvl = ADS_OPTIMIZED_FULL; break;
             }
             tbl->set_aof_opt_level(lvl);
+            if (htwin != 0) {
+                std::vector<UNSIGNED8> tb(cond.size() + 1);
+                std::memcpy(tb.data(), cond.data(), cond.size());
+                (void)AdsSetAOF(htwin, tb.data(), 0);
+            }
             reply.opcode = Opcode::SetAOFAck;
             break;
         }
@@ -3609,6 +3642,9 @@ DispatchResult Session::dispatch(const Frame& f) {
             auto* tbl = sess_conn_->lookup_table(it->second);
             if (!tbl) { reply = err("ClearAOF: lookup failed"); break; }
             tbl->clear_filter();
+            if (auto hit = tbls_h_.find(id); hit != tbls_h_.end()) {
+                AdsClearAOF(hit->second);
+            }
             reply.opcode = Opcode::ClearAOFRemoteAck;
             break;
         }

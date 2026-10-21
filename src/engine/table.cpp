@@ -785,6 +785,23 @@ util::Result<void> Table::goto_record(std::uint32_t recno) {
     }
     auto r = load_record_(recno);
     if (!r) return r.error();
+    // A filter (AOF) or SQL result walks recno_sequence_ by
+    // sequence_idx_: re-anchor it on this row, or the next SKIP steps
+    // from wherever the last GoTop/GoBottom/Skip left it (GoTo(n) then
+    // Skip(-1) fell off the front to BOF). AOF sequences are ascending,
+    // so binary-search first; fall back to a linear find for SQL ones.
+    if (recno_sequence_active_ && !recno_sequence_.empty()) {
+        auto it = std::lower_bound(recno_sequence_.begin(),
+                                   recno_sequence_.end(), recno);
+        if (it == recno_sequence_.end() || *it != recno) {
+            it = std::find(recno_sequence_.begin(),
+                           recno_sequence_.end(), recno);
+        }
+        if (it != recno_sequence_.end()) {
+            sequence_idx_ = static_cast<std::int64_t>(
+                it - recno_sequence_.begin());
+        }
+    }
     // Re-position the active index cursor on this row's key so a
     // subsequent SKIP walks from here (and not from wherever the
     // index was left after a previous SEEK / SKIP-past-end). When
