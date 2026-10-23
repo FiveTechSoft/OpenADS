@@ -15,6 +15,10 @@ std::string resolve_case_insensitive(const std::string& path);
 // canonicalize, and return the result only when it stays inside `root`.
 // Absolute client paths are accepted when they already lie under `root`.
 // Returns nullopt when the path escapes the jail (e.g. `..` segments).
+// True when `path` equals `root` or lies below it. ignore_case folds ASCII case.
+bool path_has_prefix(const std::string& path, const std::string& root,
+                     bool ignore_case = false);
+
 std::optional<std::string> resolve_under_root(const std::string& root,
                                               const std::string& client_path);
 

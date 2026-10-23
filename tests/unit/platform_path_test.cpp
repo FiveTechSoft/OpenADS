@@ -136,3 +136,24 @@ TEST_CASE("resolve_under_any_root accepts a path under any listed root") {
     fs::remove_all(rootB);
     fs::remove_all(outside);
 }
+
+TEST_CASE("resolve_under_root self-directory retains canonical containment") {
+    namespace fs = std::filesystem;
+    auto root = fs::temp_directory_path() / "openads-self-root";
+    fs::create_directories(root);
+    auto expected = fs::weakly_canonical(root).generic_string();
+    auto self = openads::platform::resolve_under_root(root.string(), ".");
+    REQUIRE(self.has_value());
+    CHECK(*self == expected);
+    CHECK_FALSE(openads::platform::resolve_under_root(root.string(), "../outside").has_value());
+    CHECK_FALSE(openads::platform::resolve_under_root(root.string(), (root.parent_path() / "outside").string()).has_value());
+    fs::remove_all(root);
+}
+
+TEST_CASE("path_has_prefix folds case only when asked") {
+    using openads::platform::path_has_prefix;
+    CHECK_FALSE(path_has_prefix("C:/Data/x.dbf", "c:/data"));
+    CHECK(path_has_prefix("C:/Data/x.dbf", "c:/data", true));
+    CHECK(path_has_prefix("C:/Data", "c:/data", true));
+    CHECK_FALSE(path_has_prefix("C:/DataX/x.dbf", "c:/data", true));
+}
