@@ -45,7 +45,11 @@ std::string id_field(ADSHANDLE h) {
     UNSIGNED8 fld[] = "ID";
     REQUIRE(AdsGetField(h, fld, reinterpret_cast<UNSIGNED8*>(buf), &len,
                         ADS_NONE) == AE_SUCCESS);
-    return std::string(buf, len);
+    // An N field written from text is stored right-aligned (dBase/ADS
+    // format), so AdsGetField returns it space-padded on the left.
+    std::string out(buf, len);
+    const auto p = out.find_first_not_of(' ');
+    return p == std::string::npos ? std::string() : out.substr(p);
 }
 
 } // namespace

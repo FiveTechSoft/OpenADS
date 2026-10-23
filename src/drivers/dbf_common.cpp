@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -805,6 +807,36 @@ util::Result<void> encode_field_string(const DbfField& f,
             break;
         default:
             break;
+    }
+
+    // DBF N/F text field: the text must be right-aligned with the declared
+    // decimals (dBase/ADS format). Copying the caller's text verbatim stored
+    // "12.5" left-aligned with no padding of decimals, which other readers
+    // (and the client under REMOTE) parse differently. Non-numeric or too
+    // wide text keeps the old verbatim copy.
+    if ((f.type == DbfFieldType::Numeric || f.type == DbfFieldType::Float) &&
+        f.length > 0 && f.length < 64) {
+        const char* b = value.c_str();
+        char* e = nullptr;
+        const double d = std::strtod(b, &e);
+        bool all_blank_tail = true;
+        for (const char* q = e; *q; ++q)
+            if (*q != ' ') { all_blank_tail = false; break; }
+        if (e != b && all_blank_tail && std::isfinite(d)) {
+            char buf[96];
+            const int w = static_cast<int>(f.length);
+            const int dec = static_cast<int>(f.decimals);
+            // Values that round to zero at the declared scale print as 0
+            // (not -0.00).
+            double scale = 1.0;
+            for (int k = 0; k < dec; ++k) scale *= 10.0;
+            const double dv = (std::fabs(d) * scale < 0.5) ? 0.0 : d;
+            const int len = std::snprintf(buf, sizeof(buf), "%*.*f", w, dec, dv);
+            if (len > 0 && len <= w) {
+                std::memcpy(dst, buf, f.length);
+                return {};
+            }
+        }
     }
 
     std::size_t n = std::min<std::size_t>(value.size(), f.length);
