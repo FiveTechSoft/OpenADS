@@ -764,7 +764,9 @@ TEST_CASE("M5 ADT scope: all types local round-trip") {
     REQUIRE(AdsGetFieldType(hTable, (UNSIGNED8*)"Valor", &t_valor) == AE_SUCCESS);
     REQUIRE(AdsGetFieldType(hTable, (UNSIGNED8*)"Foto", &t_foto) == AE_SUCCESS);
     REQUIRE(AdsGetFieldType(hTable, (UNSIGNED8*)"Raw", &t_raw) == AE_SUCCESS);
-    CHECK(t_valor == ADS_DOUBLE);
+    // Numeric with decimals is ADT type 2 (ASCII digits, declared scale), the
+    // way ADS stores it; it used to be a binary DOUBLE and lost the scale.
+    CHECK(t_valor == ADS_NUMERIC);
     CHECK(t_foto == ADS_IMAGE);
     CHECK(t_raw == ADS_BINARY);
 
