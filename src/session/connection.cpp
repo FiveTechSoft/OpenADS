@@ -451,7 +451,11 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
             // align_type_with_file() below sniffs the header to set `type`.
             full = dat_cand;
         } else {
-            full = dbf_cand;   // report the .dbf name when nothing exists
+            // Nothing exists yet. A create in ADT mode must name the .adt
+            // file; every other caller keeps the historical .dbf name.
+            full = (for_create && type == engine::TableType::Adt)
+                       ? adt_cand
+                       : dbf_cand;   // report the .dbf name when nothing exists
         }
         if (full.extension() == ".adt") type = engine::TableType::Adt;
     } else {

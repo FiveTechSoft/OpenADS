@@ -30324,6 +30324,21 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         // default is always CDX; callers that want ADT must set it explicitly.
         UNSIGNED16 ct_tgt_type = it->second->table_type;
         if (ct_tgt_type == 0 || ct_tgt_type == ADS_DEFAULT) ct_tgt_type = ADS_CDX;
+        // A table the statement names with an .adt extension is an ADT table.
+        // Without this the default type (CDX) wrote a VFP file under the .adt
+        // name, which no ADT reader can open. Only the default type is
+        // changed; an explicit AdsStmtSetTableType still wins, and names
+        // without .adt behave as before.
+        if (ct_tgt_type == ADS_CDX && (it->second->table_type == 0 ||
+                                       it->second->table_type == ADS_DEFAULT)) {
+            const std::string& tn = ct.value().table;
+            if (tn.size() >= 4) {
+                std::string ext = tn.substr(tn.size() - 4);
+                for (auto& ch : ext) ch = static_cast<char>(
+                    std::tolower(static_cast<unsigned char>(ch)));
+                if (ext == ".adt") ct_tgt_type = ADS_ADT;
+            }
+        }
 
         // Build the rddads `NAME,Type,Len,Dec;Ã¢â‚¬Â¦` field-def string and
         // route through AdsCreateTable so M9.5's parser owns the
