@@ -17149,8 +17149,17 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
         // both the index itself and native FoxPro/Clipper readers.
         const std::string bare = openads::engine::strip_alias_qualifiers(expr);
         std::int32_t fi = t->field_index(bare);
+        std::optional<std::uint16_t> static_w;
+        if (fi < 0 && is_cdx)
+            static_w = openads::engine::static_key_width(*t, expr);
         if (fi >= 0) {
             klen = t->field_descriptor(static_cast<std::uint16_t>(fi)).length;
+        } else if (static_w) {
+            // CDX: size the tag from the expression's static maximum, as
+            // Visual FoxPro does (TYPE+RIGHT(TRIM(CCN),4) -> 7 even when
+            // record 1 has a blank CCN or the table is empty). Probing
+            // record 1 truncated every longer key and VFP's SEEKs missed.
+            klen = *static_w;
         } else if (t->record_count() > 0) {
             // Composite expression: probe the first record's key.
             // key_len=0 makes evaluate_index_expr return the un-padded

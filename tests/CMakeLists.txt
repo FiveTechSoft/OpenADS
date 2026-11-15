@@ -54,6 +54,7 @@ add_executable(openads_unit_tests
     unit/handle_registry_kind_of_test.cpp
     unit/backend_registry_test.cpp
     unit/session_connection_test.cpp
+    unit/cdx_vfp_compat_test.cpp
     unit/abi_smoke_test.cpp
     unit/abi_write_smoke_test.cpp
     unit/abi_pritpal_lock_test.cpp

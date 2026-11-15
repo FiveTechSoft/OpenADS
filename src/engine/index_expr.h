@@ -25,6 +25,9 @@ class Table;
 //               STR(n)   STR(n, len)   STR(n, len, dec)
 //               DTOS(d)
 //               SUBSTR(s, start)   SUBSTR(s, start, len)
+//               LEFT(s, n) RIGHT(s, n) SPACE(n) REPLICATE(s, n) LEN(s)
+//               PADL/PADR/PADC(s, n [, c])  EMPTY(x)
+//               IIF(cond, a, b) / IF(...)  -- cond uses the FOR grammar
 //
 // Identifiers are looked up first as field names against the table's
 // schema; an unknown identifier evaluates to an empty string. Bare
@@ -35,6 +38,18 @@ util::Result<std::string>
     evaluate_index_expr(Table&             t,
                         const std::string& expr,
                         std::uint16_t      key_len);
+
+// Width of a character key expression the way Visual FoxPro sizes a CDX
+// tag: from the expression's STATIC maximum, not from any record's value.
+// TRIM(x) keeps x's declared width, LEFT/RIGHT(x,n) is min(n, width(x)),
+// PADx/SPACE(n) is n, IIF takes the wider branch, '+' sums. VFP sizes
+// INDEX ON TYPE+RIGHT(TRIM(CCN),4) as 3+4 = 7 even when the first record's
+// CCN is blank or the table is empty; sizing from record 1 truncated
+// every later key. Returns nullopt for numeric results or anything the
+// analyser does not know (unknown function / field, non-literal count) --
+// the caller then falls back to probing a record.
+std::optional<std::uint16_t>
+    static_key_width(Table& t, const std::string& expr);
 
 // FOR-clause / scope predicate evaluator. Parses a Clipper-style
 // boolean expression and returns whether the current row passes.

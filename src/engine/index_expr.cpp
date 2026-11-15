@@ -28,6 +28,7 @@ enum class TokKind {
 struct Token {
     TokKind     kind;
     std::string text;
+    std::size_t pos = 0;   // byte offset of the token in the source text
 };
 
 std::vector<Token> tokenize(const std::string& s) {
@@ -35,17 +36,18 @@ std::vector<Token> tokenize(const std::string& s) {
     std::size_t i = 0;
     while (i < s.size()) {
         char c = s[i];
+        const std::size_t at = i;
         if (std::isspace(static_cast<unsigned char>(c))) { ++i; continue; }
-        if (c == '(') { out.push_back({TokKind::LParen, "("}); ++i; continue; }
-        if (c == ')') { out.push_back({TokKind::RParen, ")"}); ++i; continue; }
-        if (c == ',') { out.push_back({TokKind::Comma,  ","}); ++i; continue; }
-        if (c == '+') { out.push_back({TokKind::Plus,   "+"}); ++i; continue; }
+        if (c == '(') { out.push_back({TokKind::LParen, "(", at}); ++i; continue; }
+        if (c == ')') { out.push_back({TokKind::RParen, ")", at}); ++i; continue; }
+        if (c == ',') { out.push_back({TokKind::Comma,  ",", at}); ++i; continue; }
+        if (c == '+') { out.push_back({TokKind::Plus,   "+", at}); ++i; continue; }
         if (c == '"' || c == '\'') {
             char q = c; ++i;
             std::string lit;
             while (i < s.size() && s[i] != q) { lit.push_back(s[i++]); }
             if (i < s.size()) ++i;
-            out.push_back({TokKind::String, std::move(lit)});
+            out.push_back({TokKind::String, std::move(lit), at});
             continue;
         }
         if (std::isdigit(static_cast<unsigned char>(c)) ||
@@ -58,7 +60,7 @@ std::vector<Token> tokenize(const std::string& s) {
                     s[i] == '.')) {
                 num.push_back(s[i++]);
             }
-            out.push_back({TokKind::Number, std::move(num)});
+            out.push_back({TokKind::Number, std::move(num), at});
             continue;
         }
         if (std::isalpha(static_cast<unsigned char>(c)) || c == '_') {
@@ -68,13 +70,31 @@ std::vector<Token> tokenize(const std::string& s) {
                     s[i] == '_')) {
                 id.push_back(s[i++]);
             }
-            out.push_back({TokKind::Ident, std::move(id)});
+            out.push_back({TokKind::Ident, std::move(id), at});
             continue;
         }
         ++i;   // skip the unknown char rather than die — best-effort.
     }
-    out.push_back({TokKind::End, ""});
+    out.push_back({TokKind::End, "", s.size()});
     return out;
+}
+
+// Index of the token that ends the IIF() argument starting at `from`: the
+// first top-level Comma / RParen (or End). Parentheses nest; commas inside
+// string literals never appear as Comma tokens.
+std::size_t arg_end(const std::vector<Token>& toks, std::size_t from) {
+    int depth = 0;
+    std::size_t k = from;
+    for (; toks[k].kind != TokKind::End; ++k) {
+        if (toks[k].kind == TokKind::LParen) { ++depth; continue; }
+        if (toks[k].kind == TokKind::RParen) {
+            if (depth == 0) break;
+            --depth;
+            continue;
+        }
+        if (toks[k].kind == TokKind::Comma && depth == 0) break;
+    }
+    return k;
 }
 
 } // namespace (anonymous)
@@ -287,14 +307,18 @@ std::string substr_utf8(const std::string& s, int start_1based, int len) {
     return out;
 }
 
+// xBase TRIM / LTRIM strip SPACES only (Clipper, Harbour hb_strRTrimLen
+// with bAnySpace=false, VFP). isspace() also ate TAB/CR/LF/VT/FF, so a
+// field holding binary data (encrypted card numbers) produced a different
+// key than VFP / Harbour compute for the same row.
 std::string ltrim_ascii(const std::string& s) {
     std::size_t i = 0;
-    while (i < s.size() && std::isspace(static_cast<unsigned char>(s[i]))) ++i;
+    while (i < s.size() && s[i] == ' ') ++i;
     return s.substr(i);
 }
 std::string rtrim_ascii(const std::string& s) {
     std::size_t e = s.size();
-    while (e > 0 && std::isspace(static_cast<unsigned char>(s[e - 1]))) --e;
+    while (e > 0 && s[e - 1] == ' ') --e;
     return s.substr(0, e);
 }
 
@@ -307,6 +331,19 @@ std::string rtrim_ascii(const std::string& s) {
 // no rows and the conditional index came out EMPTY.
 std::string format_number_fn(double v, int width, int dec) {
     char buf[64];
+    // xBase STR() rounds half away from zero at `dec` places and never
+    // prints "-0.00". Raw printf turned floating residue such as
+    // 10.10-10.10 = -2.3e-13 into "-0.00", so FOR LTRIM(STR(x,15,2))#"0.00"
+    // let rows through that Harbour / VFP exclude (VTRANS open-item tags).
+    {
+        const int d = dec > 0 ? (dec > 15 ? 15 : dec) : 0;
+        const double p = std::pow(10.0, d);
+        const double x = v * p;
+        // Nudge by a few ULPs so 2.675*100 = 267.4999... rounds like xBase.
+        double r = std::round(x + std::copysign(std::fabs(x) * 4e-16, x)) / p;
+        if (r == 0.0) r = 0.0;   // drop the sign of zero
+        if (std::isfinite(r)) v = r;
+    }
     if (width <= 0) {
         std::snprintf(buf, sizeof(buf), "%.*f", dec > 0 ? dec : 0, v);
     } else {
@@ -420,6 +457,31 @@ Value apply_scalar_fn(const std::string& fn, const std::vector<Value>& args) {
                 pos = p + 1;
             }
         }
+    } else if ((fn == "LEFT" || fn == "RIGHT") && args.size() >= 2) {
+        // LEFT/RIGHT(c, n): the first / last n characters (all of c when
+        // shorter). Used in keys like TYPE+RIGHT(TRIM(CCN),4).
+        const std::string& s = args[0].s;
+        int n = args[1].is_number ? static_cast<int>(args[1].n) : 0;
+        if (n < 0) n = 0;
+        const std::size_t take = std::min<std::size_t>(
+            static_cast<std::size_t>(n), s.size());
+        v.s = (fn == "LEFT") ? s.substr(0, take) : s.substr(s.size() - take);
+    } else if (fn == "SPACE" && args.size() >= 1) {
+        int n = args[0].is_number ? static_cast<int>(args[0].n) : 0;
+        v.s.assign(static_cast<std::size_t>(n < 0 ? 0 : n), ' ');
+    } else if ((fn == "REPLICATE" || fn == "REPL") && args.size() >= 2) {
+        int n = args[1].is_number ? static_cast<int>(args[1].n) : 0;
+        for (int k = 0; k < n; ++k) v.s += args[0].s;
+    } else if (fn == "LEN" && args.size() >= 1) {
+        v.is_number = true;
+        v.n = static_cast<double>(args[0].s.size());
+    } else if (fn == "EMPTY" && args.size() >= 1) {
+        // Number 1/0 so the FOR / IIF truthy evaluator reads it as a bool.
+        v.is_number = true;
+        bool empty = args[0].is_number
+            ? args[0].n == 0.0
+            : rtrim_ascii(args[0].s).empty();
+        v.n = empty ? 1.0 : 0.0;
     } else if (fn == "REVERSE" && args.size() >= 1) {
         // REVERSE(cString) -> byte-reversed string. Clipper-era UDFs
         // implement this as a byte loop (SubStr(cIn, i, 1) from LEN
@@ -466,10 +528,15 @@ Value apply_scalar_fn(const std::string& fn, const std::vector<Value>& args) {
     return v;
 }
 
+// FOR-clause evaluator over raw text (defined after eval_or, below). The key
+// parser hands IIF() conditions to it: they need comparisons, .AND./.NOT.,
+// '#', logical fields -- exactly the FOR grammar.
+bool truthy_text(Table& t, const std::string& cond);
+
 class Parser {
 public:
-    Parser(const std::vector<Token>& toks, Table& t)
-        : toks_(toks), t_(t) {}
+    Parser(const std::vector<Token>& toks, Table& t, const std::string& src)
+        : toks_(toks), t_(t), src_(src) {}
 
     Value parse_expr() {
         Value lhs = parse_term();
@@ -517,6 +584,8 @@ private:
             ++pos_;
             if (peek().kind == TokKind::LParen) {
                 ++pos_;
+                const std::string uname = upper_utf8(name);
+                if (uname == "IIF" || uname == "IF") return parse_iif();
                 std::vector<Value> args;
                 if (peek().kind != TokKind::RParen) {
                     args.push_back(parse_expr());
@@ -526,13 +595,35 @@ private:
                     }
                 }
                 if (peek().kind == TokKind::RParen) ++pos_;
-                return apply_scalar_fn(upper_utf8(name), args);
+                return apply_scalar_fn(uname, args);
             }
             return field_or_empty(name);
         }
         Value v;
         v.is_number = false;
         return v;
+    }
+
+    // IIF(cond, a, b) / IF(...) -- positioned just after the '('. The
+    // condition is re-read from the source text by the FOR evaluator; both
+    // branches are parsed (keeps the token cursor simple; they are pure)
+    // and the chosen one returned. Unknown before: the call fell through to
+    // apply_scalar_fn and came back EMPTY, shortening every key that used it.
+    Value parse_iif() {
+        const std::size_t cond_begin = pos_;
+        const std::size_t cond_end   = arg_end(toks_, pos_);
+        // Start right after the '(' -- NOT at the first token: the
+        // tokenizer drops '.', '!' and '#', so `.NOT.EMPTY(x)` would lose
+        // its leading '.' and stop parsing as a negation.
+        const std::size_t b0 = toks_[cond_begin - 1].pos + 1;
+        const std::size_t b1 = toks_[cond_end].pos;
+        const bool c = truthy_text(t_, src_.substr(b0, b1 - b0));
+        pos_ = cond_end;
+        Value a, b;
+        if (peek().kind == TokKind::Comma) { ++pos_; a = parse_expr(); }
+        if (peek().kind == TokKind::Comma) { ++pos_; b = parse_expr(); }
+        if (peek().kind == TokKind::RParen) ++pos_;
+        return c ? a : b;
     }
 
     Value field_or_empty(const std::string& name) {
@@ -581,6 +672,7 @@ private:
     const std::vector<Token>& toks_;
     std::size_t               pos_ = 0;
     Table&                    t_;
+    const std::string&        src_;
 };
 
 } // namespace
@@ -627,7 +719,10 @@ evaluate_index_expr(Table& t, const std::string& expr, std::uint16_t key_len) {
         // Detect simple fast-path cases: UPPER(barefield), VAL(barefield)
         // These avoid Parser + per-row field lookup + Value machinery
         // during bulk index builds (the hot path for INDEX ON).
-        if (ce.toks.size() >= 4 &&
+        // The pattern must be the WHOLE expression (4 tokens + End): with a
+        // bare ">= 4" check, UPPER(MAN)+CLASS+SUB+DESC took this path and
+        // every key silently dropped "+CLASS+SUB+DESC".
+        if (ce.toks.size() == 5 &&
             ce.toks[0].kind == TokKind::Ident &&
             (ce.toks[0].text == "UPPER" || ce.toks[0].text == "upper") &&
             ce.toks[1].kind == TokKind::LParen &&
@@ -635,7 +730,7 @@ evaluate_index_expr(Table& t, const std::string& expr, std::uint16_t key_len) {
             ce.toks[3].kind == TokKind::RParen) {
             ce.upper_bare = true;
             ce.fast_field = ce.toks[2].text;
-        } else if (ce.toks.size() >= 4 &&
+        } else if (ce.toks.size() == 5 &&
                    ce.toks[0].kind == TokKind::Ident &&
                    (ce.toks[0].text == "VAL" || ce.toks[0].text == "val") &&
                    ce.toks[1].kind == TokKind::LParen &&
@@ -734,7 +829,7 @@ evaluate_index_expr(Table& t, const std::string& expr, std::uint16_t key_len) {
         }
     }
 
-    Parser p(ce.toks, t);
+    Parser p(ce.toks, t, ce.stripped);
     Value v = p.parse_expr();
     std::string s = v.s;
     // key_len == 0 asks for the NATURAL, unpadded/untruncated key — the
@@ -746,6 +841,165 @@ evaluate_index_expr(Table& t, const std::string& expr, std::uint16_t key_len) {
     if (s.size() < key_len) s.append(key_len - s.size(), ' ');
     if (s.size() > key_len) s.resize(key_len);
     return s;
+}
+
+// ---- Static key width (VFP tag sizing) ------------------------------------
+namespace {
+
+struct Width {
+    bool        ok      = true;
+    bool        num     = false;   // numeric-valued
+    bool        fixed   = true;    // always exactly `w` chars (TRIM breaks it)
+    bool        has_val = false;   // numeric value known statically
+    double      val     = 0.0;
+    std::size_t w       = 0;
+};
+
+class WidthParser {
+public:
+    WidthParser(const std::vector<Token>& toks, Table& t)
+        : toks_(toks), t_(t) {}
+
+    Width expr() {
+        Width a = term();
+        while (a.ok && peek().kind == TokKind::Plus) {
+            ++pos_;
+            Width b = term();
+            if (!b.ok) return fail();
+            if (a.num && b.num) { a.has_val = false; continue; }
+            if (a.num || b.num) return fail();   // mixed: not a char key
+            a.w += b.w;
+            a.fixed = a.fixed && b.fixed;
+        }
+        return a;
+    }
+
+    bool at_end() const { return peek().kind == TokKind::End; }
+
+private:
+    static Width fail() { Width f; f.ok = false; return f; }
+    static Width str(std::size_t w, bool fixed) {
+        Width r; r.w = w; r.fixed = fixed; return r;
+    }
+    static Width number(bool has_val = false, double v = 0.0) {
+        Width r; r.num = true; r.has_val = has_val; r.val = v; return r;
+    }
+    const Token& peek() const { return toks_[pos_]; }
+
+    Width term() {
+        const Token& tk = peek();
+        switch (tk.kind) {
+        case TokKind::String: ++pos_; return str(tk.text.size(), true);
+        case TokKind::Number:
+            ++pos_;
+            return number(true, std::strtod(tk.text.c_str(), nullptr));
+        case TokKind::LParen: {
+            ++pos_;
+            Width v = expr();
+            if (peek().kind == TokKind::RParen) ++pos_;
+            return v;
+        }
+        case TokKind::Ident: break;
+        default: return fail();
+        }
+        const std::string name = tk.text;
+        ++pos_;
+        if (peek().kind != TokKind::LParen) return field(name);
+        ++pos_;
+        const std::string fn = upper_utf8(name);
+        if (fn == "IIF" || fn == "IF") {
+            pos_ = arg_end(toks_, pos_);            // skip the condition
+            Width a = fail(), b = fail();
+            if (peek().kind == TokKind::Comma) { ++pos_; a = expr(); }
+            if (peek().kind == TokKind::Comma) { ++pos_; b = expr(); }
+            if (peek().kind == TokKind::RParen) ++pos_;
+            if (!a.ok || !b.ok) return fail();
+            if (a.num && b.num) return number();
+            if (a.num || b.num) return fail();
+            return str(std::max(a.w, b.w), a.fixed && b.fixed && a.w == b.w);
+        }
+        std::vector<Width> args;
+        if (peek().kind != TokKind::RParen) {
+            args.push_back(expr());
+            while (peek().kind == TokKind::Comma) { ++pos_; args.push_back(expr()); }
+        }
+        if (peek().kind == TokKind::RParen) ++pos_;
+        for (const auto& a : args) if (!a.ok) return fail();
+        auto count = [&](std::size_t i, double& out) {
+            if (i >= args.size() || !args[i].num || !args[i].has_val) return false;
+            out = args[i].val < 0 ? 0.0 : args[i].val;
+            return true;
+        };
+        const bool s0 = !args.empty() && !args[0].num;
+        double n = 0.0;
+        if ((fn == "UPPER" || fn == "LOWER" || fn == "REVERSE") && s0)
+            return str(args[0].w, args[0].fixed);
+        if ((fn == "TRIM" || fn == "RTRIM" || fn == "LTRIM" || fn == "ALLTRIM") && s0)
+            return str(args[0].w, false);
+        if ((fn == "LEFT" || fn == "RIGHT") && s0 && count(1, n))
+            return str(std::min(args[0].w, static_cast<std::size_t>(n)), args[0].fixed);
+        if ((fn == "SUBSTR" || fn == "SUBS") && s0 && count(1, n)) {
+            const std::size_t start = n < 1 ? 1 : static_cast<std::size_t>(n);
+            std::size_t avail = args[0].w >= start ? args[0].w - start + 1 : 0;
+            double len = 0.0;
+            if (args.size() >= 3) {
+                if (!count(2, len)) return fail();
+                avail = std::min(avail, static_cast<std::size_t>(len));
+            }
+            return str(avail, args[0].fixed);
+        }
+        if ((fn == "PADL" || fn == "PADR" || fn == "PADC") && !args.empty() && count(1, n))
+            return str(static_cast<std::size_t>(n), true);
+        if (fn == "SPACE" && count(0, n)) return str(static_cast<std::size_t>(n), true);
+        if ((fn == "REPLICATE" || fn == "REPL") && s0 && count(1, n))
+            return str(args[0].w * static_cast<std::size_t>(n), args[0].fixed);
+        if (fn == "STR" && !args.empty()) {
+            if (args.size() == 1) return str(10, true);
+            if (!count(1, n)) return fail();
+            return str(static_cast<std::size_t>(n), true);
+        }
+        if (fn == "DTOS" && args.size() == 1) return str(8, true);
+        if (fn == "LEN" && s0)
+            return args[0].fixed ? number(true, static_cast<double>(args[0].w))
+                                 : number();
+        if (fn == "VAL" || fn == "RECNO" || fn == "AT" || fn == "ATNUM")
+            return number();
+        return fail();   // unknown here (incl. Harbour UDFs): probe instead
+    }
+
+    Width field(const std::string& name) {
+        const std::int32_t fi = t_.field_index(name);
+        if (fi < 0) return fail();
+        const auto& f = t_.field_descriptor(static_cast<std::uint16_t>(fi));
+        using FT = drivers::DbfFieldType;
+        switch (f.type) {
+        case FT::Character: case FT::CiCharacter: return str(f.length, true);
+        case FT::Date:    return str(8, true);
+        case FT::Logical: return str(1, true);
+        case FT::Numeric: case FT::Float: case FT::Integer: case FT::Double:
+        case FT::Currency: case FT::AdtMoney:
+            return number();
+        default: return fail();
+        }
+    }
+
+    const std::vector<Token>& toks_;
+    std::size_t               pos_ = 0;
+    Table&                    t_;
+};
+
+} // namespace
+
+std::optional<std::uint16_t> static_key_width(Table& t, const std::string& expr) {
+    const std::string e = strip_alias_qualifiers(expr);
+    if (e.empty()) return std::nullopt;
+    const auto toks = tokenize(e);
+    WidthParser p(toks, t);
+    const Width w = p.expr();
+    // Anything left unparsed (operators the key grammar lacks) -> unknown.
+    if (!w.ok || !p.at_end() || w.num || w.w == 0 || w.w > 240)
+        return std::nullopt;
+    return static_cast<std::uint16_t>(w.w);
 }
 
 // ---- M(rddads-compat) FOR-clause / scope truthy evaluator ----------------
@@ -800,10 +1054,18 @@ bool eval_or(Lex& lx, Table& t);
 bool eval_and(Lex& lx, Table& t);
 bool eval_not(Lex& lx, Table& t);
 bool eval_cmp(Lex& lx, Table& t);
+Value parse_add(Lex& lx, Table& t);
 
 Value parse_atom(Lex& lx, Table& t) {
     lx.skip_ws();
     Value v;
+    // Parenthesised arithmetic inside an operand: STR((AMT-PAID),15,2).
+    // (A '(' that opens a boolean group is consumed by eval_cmp first.)
+    if (lx.match_char('(')) {
+        v = parse_add(lx, t);
+        lx.match_char(')');
+        return v;
+    }
     if (lx.i < lx.s.size() &&
         (lx.s[lx.i] == '"' || lx.s[lx.i] == '\'')) {
         char q = lx.s[lx.i++];
@@ -843,12 +1105,21 @@ Value parse_atom(Lex& lx, Table& t) {
         }
         std::string upper = upper_utf8(name);
         if (lx.match_char('(')) {
-            // Only RECNO() / DELETED() are common in FOR clauses.
+            if (upper == "IIF" || upper == "IF") {
+                const bool c = eval_or(lx, t);
+                Value a, b;
+                if (lx.match_char(',')) a = parse_add(lx, t);
+                if (lx.match_char(',')) b = parse_add(lx, t);
+                lx.match_char(')');
+                return c ? a : b;
+            }
+            // Arguments are full expressions (LEFT(LTRIM(X)+SPACE(10),10)),
+            // not just atoms -- an atom-only argument stopped at the '+'.
             std::vector<Value> args;
             lx.skip_ws();
             if (!lx.match_char(')')) {
-                args.push_back(parse_atom(lx, t));
-                while (lx.match_char(',')) args.push_back(parse_atom(lx, t));
+                args.push_back(parse_add(lx, t));
+                while (lx.match_char(',')) args.push_back(parse_add(lx, t));
                 lx.match_char(')');
             }
             if (upper == "RECNO") {
@@ -1014,8 +1285,23 @@ bool eval_cmp(Lex& lx, Table& t) {
         double a = lhs.is_number ? lhs.n : std::strtod(lhs.s.c_str(), nullptr);
         double b = rhs.is_number ? rhs.n : std::strtod(rhs.s.c_str(), nullptr);
         cmp = (a < b) ? -1 : (a > b ? 1 : 0);
-    } else {
+    } else if (op == "==") {
         cmp = lhs.s.compare(rhs.s);
+        if (cmp < 0) cmp = -1; else if (cmp > 0) cmp = 1;
+    } else {
+        // xBase string comparison (SET EXACT OFF, Harbour hb_itemStrCmp):
+        // a longer left side is cut to the right side's length, then the
+        // shorter operand is padded with spaces. Field values reach here
+        // right-trimmed, so a plain compare made a blank MARKED differ from
+        // " " and FOR MARKED#" " indexed every row (VFP: only marked ones).
+        // The cut applies to the equality family (= # != <>) only; the
+        // ordering operators just pad, so TAG > 'AAA' still holds for AAAB.
+        std::string a = lhs.s, b = rhs.s;
+        const bool eq_family = (op == "=" || op == "#" || op == "!=" || op == "<>");
+        if (eq_family && a.size() > b.size()) a.resize(b.size());
+        if (a.size() < b.size()) a.append(b.size() - a.size(), ' ');
+        if (b.size() < a.size()) b.append(a.size() - b.size(), ' ');
+        cmp = a.compare(b);
         if (cmp < 0) cmp = -1; else if (cmp > 0) cmp = 1;
     }
     if (op == "==" || op == "=") return cmp == 0;
@@ -1056,6 +1342,11 @@ bool eval_or(Lex& lx, Table& t) {
     return a;
 }
 
+bool truthy_text(Table& t, const std::string& cond) {
+    Lex lx(cond);
+    return eval_or(lx, t);
+}
+
 } // anonymous namespace
 
 bool evaluate_index_expr_truthy(Table& t, const std::string& expr) {
@@ -1078,7 +1369,7 @@ bool evaluate_index_expr_number(Table& t, const std::string& expr,
     const std::string e = strip_alias_qualifiers(expr);
     if (e.empty()) return false;
     auto toks = tokenize(e);
-    Parser p(toks, t);
+    Parser p(toks, t, e);
     Value v = p.parse_expr();
     if (!v.is_number) return false;
     out = v.n;
