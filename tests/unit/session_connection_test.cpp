@@ -407,6 +407,36 @@ TEST_CASE("remote server refuses host-absolute leftover and stays in the jail") 
     fs::remove_all(base, ec);
 }
 
+// rddads sends USE FILESYS as the absolute "K:\Custdata\ss\FILESYS" (no
+// extension). On a remote server whose --data contains that path the name
+// must still get the .dbf probe; it used to be returned verbatim and the
+// open failed with 5103 "CreateFileW(jail): file not found".
+TEST_CASE("remote server probes .dbf for an extensionless absolute path inside data root") {
+    ResolveAuditGuard g;
+    auto base = tmp_dir("remote_abs_noext");
+    fs::create_directories(base / "ss");
+    write_minimal_dbf(base / "ss" / "FILESYS.dbf");
+    {
+        auto opened = Connection::open(base.string());
+        REQUIRE(opened.has_value());
+        Connection c = std::move(opened).value();
+        c.set_remote_server(true);
+
+        const std::string abs_noext = (base / "ss" / "FILESYS").string();
+        auto type = TableType::Cdx;
+        const std::string got = c.resolve_table_file(abs_noext, type);
+        CHECK(fs::path(got).extension().string() == ".dbf");
+        CHECK(fs::exists(got));
+
+        auto th = c.open_table(abs_noext, TableType::Cdx);
+        REQUIRE(th.has_value());
+        CHECK(c.lookup_table(th.value())->record_count() == 1);
+        c.close_table(th.value());
+    }
+    std::error_code ec;
+    fs::remove_all(base, ec);
+}
+
 TEST_CASE("resolve entry serial increments per call on the same connection") {
     ResolveAuditGuard g;
     auto dir = tmp_dir("audit_seq");

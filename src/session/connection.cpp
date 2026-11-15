@@ -330,14 +330,22 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
             // doubled data_dir_/Users/.../ path that opened nothing
             // (surfaced as AE_PARSE_ERROR at the SQL boundary).
             if (path_is_inside(data_dir_, rel)) {
-                std::string resolved =
-                    platform::resolve_case_insensitive(rel.string());
-                resolved = jail_check(resolved);
-                if (resolved.empty()) return resolved;
-                log_resolved(resolved, "JAILED");
-                return resolved;
+                if (rel.has_extension()) {
+                    std::string resolved =
+                        platform::resolve_case_insensitive(rel.string());
+                    resolved = jail_check(resolved);
+                    if (resolved.empty()) return resolved;
+                    log_resolved(resolved, "JAILED");
+                    return resolved;
+                }
+                // No extension ("K:\data\ss\FILESYS" from rddads): keep
+                // the absolute path and fall through to the .dbf/.adt/.dat
+                // probe below (data_dir_ / <absolute> yields <absolute>).
+                // Returning it verbatim opened a file literally named
+                // FILESYS and failed with 5103 although FILESYS.dbf exists.
+            } else {
+                rel = rel.relative_path();
             }
-            rel = rel.relative_path();
         } else if (!for_create) {
             std::error_code ec;
             fs::path cand = rel;
