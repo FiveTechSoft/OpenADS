@@ -406,6 +406,21 @@ int run_server(const Args& args, bool console) {
         std::fprintf(stderr, "Both --tls_cert and --tls_key are required.\n");
         return 1;
     }
+    // The Studio console must not share a port with a wire listener. On
+    // Windows both binds succeed (the HTTP socket is SO_REUSEADDR), so a
+    // clash is silent: browsers reach the wire protocol and get no page.
+    if (args.http_port != 0) {
+        bool clash = args.http_port == args.port;
+        for (const auto& pe : args.extra_listeners)
+            if (pe.port == args.http_port) clash = true;
+        if (clash) {
+            std::fprintf(stderr,
+                "http_port %u is also a wire (TCP) port. Give the Studio "
+                "web console its own port (e.g. %u).\n",
+                args.http_port, static_cast<unsigned>(args.port + 1));
+            return 1;
+        }
+    }
     // Only literal loopback addresses are trusted. A hostname can resolve
     // to a public interface, so fail closed rather than infer its safety.
     const bool loopback = args.host == "127.0.0.1" || args.host == "::1";

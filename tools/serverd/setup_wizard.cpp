@@ -80,8 +80,9 @@ void write_ini(std::ostream& os, const std::string& host,
         else
             os << "# http_user = admin:change-me   # console is open\n";
     } else {
-        os << "# http_port = 6263   # uncomment to enable the Studio "
-              "web console\n";
+        os << "# http_port = "
+           << (std::stol(port) < 65535 ? std::stol(port) + 1 : 8080)
+           << "   # uncomment to enable the Studio web console\n";
     }
 }
 
@@ -201,10 +202,23 @@ bool run_setup_wizard(const std::string& exe_path, SetupResult& out) {
                    false, studio))
         return false;
     if (studio) {
+        // Default to the port after the wire port. A fixed default (6263)
+        // collided with the wire port whenever the user took the 6263 hint
+        // above, and on Windows that clash binds silently.
+        const std::string http_default =
+            std::to_string(std::stol(port) < 65535 ? std::stol(port) + 1 : 8080);
         for (;;) {
-            if (!ask("  Studio HTTP port", "6263", http_port)) return false;
-            if (is_digits(http_port) && std::stol(http_port) <= 65535) break;
-            std::printf("  ! port must be a number 0..65535\n");
+            if (!ask("  Studio HTTP port", http_default, http_port)) return false;
+            if (!is_digits(http_port) || std::stol(http_port) > 65535) {
+                std::printf("  ! port must be a number 0..65535\n");
+                continue;
+            }
+            if (std::stol(http_port) == std::stol(port)) {
+                std::printf("  ! the web console needs its own port, not the "
+                            "wire port %s\n", port.c_str());
+                continue;
+            }
+            break;
         }
         std::string user;
         if (!ask("  Studio admin user (blank = open console)", "", user))
