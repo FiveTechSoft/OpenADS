@@ -4806,7 +4806,7 @@ DispatchResult Session::dispatch(const Frame& f) {
                 auto v = openads::engine::fs_lock_step(*it->second, start, len, type, f.payload[22]);
                 if (!v) { reply = err("FileLockOp", static_cast<UNSIGNED32>(v.error().code)); break; }
                 reply.opcode = Opcode::FileLockOp;
-                reply.payload.push_back(v.value() ? 1 : 0);
+                write_u32_le(static_cast<std::uint32_t>(v.value()), reply.payload);
             } else if (f.opcode == Opcode::FileTrunc) {
                 if (f.payload.size() < 12) {
                     reply = err("FileTrunc: short payload"); break;

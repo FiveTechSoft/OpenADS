@@ -3117,7 +3117,7 @@ RemoteConnection::file_set_time(const std::string& path, std::uint16_t year,
     return {};
 }
 
-util::Result<bool>
+util::Result<std::int32_t>
 RemoteConnection::file_lock_step(std::uint32_t id, std::uint64_t start,
                     std::uint64_t len, std::uint16_t type, std::uint8_t op) {
     Frame req;
@@ -3129,9 +3129,9 @@ RemoteConnection::file_lock_step(std::uint32_t id, std::uint64_t start,
     req.payload.push_back(op);
     auto rep = request(req);
     if (!rep) return rep.error();
-    if (rep.value().opcode != Opcode::FileLockOp || rep.value().payload.size() != 1)
+    if (rep.value().opcode != Opcode::FileLockOp || rep.value().payload.size() != 4)
         return fs_wire_err(rep.value(), "FileLockOp");
-    return rep.value().payload[0] != 0;
+    return static_cast<std::int32_t>(read_u32_le(rep.value().payload.data()));
 }
 
 util::Result<void>

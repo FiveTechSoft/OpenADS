@@ -10,11 +10,18 @@
 #include <sstream>
 #include <system_error>
 #include <fcntl.h>
+#include <algorithm>
+#include <cerrno>
+#include <unordered_map>
+#include <limits>
 #if defined(_WIN32)
 #include <io.h>
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
 #include <sys/stat.h>
 #else
 #include <unistd.h>
+#include <sys/stat.h>
 #endif
 
 namespace fs = std::filesystem;
@@ -162,21 +169,21 @@ util::Result<void> fs_copy(const std::string& abs_src,
     if (!ec && same)
         return io_err(static_cast<std::int32_t>(openads::AE_INTERNAL_ERROR),
                       "source and target are the same file", abs_src);
-    // Plain stream copy: MinGW's fs::copy_file is unreliable when the
-    // target already exists, and truncate-on-open is the wanted overwrite.
-    std::ifstream in(abs_src, std::ios::binary);
-    if (!in)
-        return io_err(static_cast<std::int32_t>(openads::AE_INTERNAL_ERROR),
-                      "open source failed", abs_src);
-    std::ofstream out(abs_dst, std::ios::binary | std::ios::trunc);
-    if (!out)
-        return io_err(static_cast<std::int32_t>(openads::AE_INTERNAL_ERROR),
-                      "open target failed", abs_dst);
-    out << in.rdbuf();
-    out.flush();
-    if (!out || in.bad())
-        return io_err(static_cast<std::int32_t>(openads::AE_INTERNAL_ERROR),
-                      "copy failed", abs_src);
+    auto src = fs_open(abs_src, ADS_FO_READ, false);
+    if (!src) return src.error();
+    auto dst = fs_open(abs_dst, ADS_FO_READWRITE, true);
+    if (!dst) return dst.error();
+    std::vector<char> chunk(65536);
+    for (;;) {
+        src.value()->stream.read(chunk.data(), static_cast<std::streamsize>(chunk.size()));
+        if (!src.value()->stream) return io_err(5000, "copy read failed", abs_src);
+        auto n = src.value()->stream.gcount();
+        if (n == 0) break;
+        dst.value()->stream.write(chunk.data(), n);
+        if (!dst.value()->stream) return io_err(5000, "copy write failed", abs_dst);
+    }
+    dst.value()->stream.flush();
+    if (!dst.value()->stream) return io_err(5000, "copy flush failed", abs_dst);
     return {};
 }
 
@@ -192,15 +199,14 @@ util::Result<std::vector<std::uint8_t>> fs_load(const std::string& abs_path) {
     if (sz > kMaxFsWholeFile)
         return io_err(static_cast<std::int32_t>(openads::AE_INTERNAL_ERROR),
                       "file too large for one call", abs_path);
-    std::ifstream in(abs_path, std::ios::binary);
-    if (!in)
-        return io_err(static_cast<std::int32_t>(openads::AE_NO_FILE_FOUND),
-                      "open failed", abs_path);
+    auto handle = fs_open(abs_path, ADS_FO_READ, false);
+    if (!handle) return handle.error();
+    auto& in = handle.value()->stream;
     std::vector<std::uint8_t> out(static_cast<std::size_t>(sz));
     if (sz)
         in.read(reinterpret_cast<char*>(out.data()),
                 static_cast<std::streamsize>(sz));
-    if (in.bad() || static_cast<std::uint64_t>(in.gcount()) != sz)
+    if (!in || static_cast<std::uint64_t>(in.gcount()) != sz)
         return io_err(static_cast<std::int32_t>(openads::AE_INTERNAL_ERROR),
                       "read failed", abs_path);
     return out;
@@ -211,10 +217,9 @@ util::Result<void> fs_save(const std::string& abs_path,
     if (size > kMaxFsWholeFile)
         return io_err(static_cast<std::int32_t>(openads::AE_INTERNAL_ERROR),
                       "too large for one call", abs_path);
-    std::ofstream out(abs_path, std::ios::binary | std::ios::trunc);
-    if (!out)
-        return io_err(static_cast<std::int32_t>(openads::AE_ACCESS_DENIED),
-                      "open failed", abs_path);
+    auto handle = fs_open(abs_path, ADS_FO_READWRITE, true);
+    if (!handle) return handle.error();
+    auto& out = handle.value()->stream;
     if (size)
         out.write(reinterpret_cast<const char*>(data),
                   static_cast<std::streamsize>(size));
@@ -301,7 +306,9 @@ util::Result<void> fs_truncate(FsFile& file, std::uint64_t size) {
     if (!file.stream)
         return io_err(static_cast<std::int32_t>(openads::AE_INTERNAL_ERROR),
                       "flush failed", file.path);
-    auto r = file.stream.file.truncate(size);
+    auto native = file.stream.native;
+    std::lock_guard<std::mutex> guard(native->mu);
+    auto r = native->file.truncate(size);
     if (!r) return r;
     file.stream.clear();
     if (pos >= 0) {
@@ -352,8 +359,10 @@ util::Result<std::uint64_t> fs_dir_space(const std::string& abs_dir,
     if (ec)
         return io_err(static_cast<std::int32_t>(openads::AE_NO_FILE_FOUND),
                       "space query failed", abs_dir);
-    if (type == 1) return static_cast<std::uint64_t>(sp.capacity);
-    if (type == 2) return static_cast<std::uint64_t>(sp.free);
+    // Harbour fileio.ch HB_DISK_* values, not a private numbering.
+    if (type == 1) return static_cast<std::uint64_t>(sp.free);
+    if (type == 2) return static_cast<std::uint64_t>(sp.capacity - sp.free);
+    if (type == 3) return static_cast<std::uint64_t>(sp.capacity);
     return static_cast<std::uint64_t>(sp.available);
 }
 
@@ -465,26 +474,30 @@ util::Result<void> fs_dir_remove(const std::string& abs_path) {
 void FsStream::read(char* data, std::streamsize n) {
     count_ = 0;
     if (!good_ || n < 0) { good_ = false; return; }
-    auto v = file.read_at(static_cast<std::uint64_t>(pos_), data, static_cast<std::size_t>(n));
+    std::lock_guard<std::mutex> guard(native->mu);
+    auto v = native->file.read_at(static_cast<std::uint64_t>(pos_), data, static_cast<std::size_t>(n));
     if (!v) { good_ = false; return; }
     count_ = static_cast<std::streamsize>(v.value());
     pos_ += static_cast<std::streamoff>(v.value());
 }
 void FsStream::write(const char* data, std::streamsize n) {
-    if (!good_ || n < 0) { good_ = false; return; }
-    auto v = file.write_at(static_cast<std::uint64_t>(pos_), data, static_cast<std::size_t>(n));
+    if (!good_ || !writable || n < 0) { good_ = false; return; }
+    std::lock_guard<std::mutex> guard(native->mu);
+    auto v = native->file.write_at(static_cast<std::uint64_t>(pos_), data, static_cast<std::size_t>(n));
     if (!v) { good_ = false; return; }
     pos_ += static_cast<std::streamoff>(v.value());
     good_ = v.value() == static_cast<std::size_t>(n);
 }
 void FsStream::flush() {
-    if (good_ && writable) good_ = file.sync().has_value();
+    // Native positional I/O is unbuffered at this layer. Flush is not
+    // Commit: like hb_vfFlush, it does not promise a durable disk sync.
 }
 void FsStream::seekg(std::streamoff off, std::ios::seekdir way) {
     std::streamoff base = 0;
     if (way == std::ios::cur) base = pos_;
     else if (way == std::ios::end) {
-        auto n = file.size();
+        std::lock_guard<std::mutex> guard(native->mu);
+        auto n = native->file.size();
         if (!n || n.value() > 0x7FFFFFFFFFFFFFFFULL) { good_ = false; return; }
         base = static_cast<std::streamoff>(n.value());
     }
@@ -493,43 +506,132 @@ void FsStream::seekg(std::streamoff off, std::ios::seekdir way) {
     pos_ = base + off;
 }
 
-util::Result<bool> fs_lock_step(FsFile& f, std::uint64_t start,
+namespace {
+std::mutex fs_files_mu;
+std::unordered_map<std::string, std::weak_ptr<FsNative>> fs_files;
+std::string fs_identity(const std::string& path) {
+#if defined(_WIN32)
+    HANDLE h = ::CreateFileA(path.c_str(), FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return {};
+    BY_HANDLE_FILE_INFORMATION i{};
+    bool ok = ::GetFileInformationByHandle(h, &i) != 0;
+    ::CloseHandle(h);
+    if (!ok) return {};
+    return std::to_string(i.dwVolumeSerialNumber) + ":" +
+           std::to_string(i.nFileIndexHigh) + ":" + std::to_string(i.nFileIndexLow);
+#else
+    struct stat st{};
+    if (::stat(path.c_str(), &st) != 0) return {};
+    return std::to_string(st.st_dev) + ":" + std::to_string(st.st_ino);
+#endif
+}
+std::int32_t own_lock_pid() {
+#if defined(_WIN32)
+    return 1;
+#else
+    return static_cast<std::int32_t>(::getpid());
+#endif
+}
+util::Error native_lock_error(const char* msg, const std::string& path) {
+#if defined(_WIN32)
+    auto code = static_cast<std::int32_t>(::GetLastError());
+#else
+    auto code = errno;
+#endif
+    return util::Error{5013, code, msg, path};
+}
+}
+
+util::Result<std::int32_t> fs_lock_step(FsFile& f, std::uint64_t start,
                                 std::uint64_t len, std::uint16_t type,
                                 std::uint8_t op) {
-    if (op > 2 || (type & ~0x0300u) != 0 || len == 0 ||
-        start > 0x7FFFFFFFFFFFFFFFULL || len > 0x7FFFFFFFFFFFFFFFULL - start)
+    if (op > 2 || (type & ~0x0300u) != 0 || start > 0x7FFFFFFFFFFFFFFFULL ||
+        len > 0x7FFFFFFFFFFFFFFFULL - start)
         return io_err(5000, "invalid lock range or flags", f.path);
-    bool shared = (type & 0x0100u) != 0;
+    auto state = f.stream.native;
+    std::lock_guard<std::mutex> guard(state->mu);
+    const auto end = len == 0 ? 0x8000000000000000ULL : start + len;
+    auto overlap = [&](const FsRange& h) {
+        const auto he = h.len == 0 ? 0x8000000000000000ULL : h.start + h.len;
+        return start < he && h.start < end;
+    };
+    auto& ranges = state->ranges;
+    // Like Harbour filebuf.c: test the merged process-local registrations
+    // first. Re-locking an owned overlap is an error, even with WAIT.
+    if (op != 1 && std::any_of(ranges.begin(), ranges.end(), overlap)) {
+        if (op == 2) return own_lock_pid();
+        return io_err(5012, "range already locked by this process", f.path);
+    }
+    auto containing = ranges.end();
     if (op == 1) {
-        for (auto it = f.locks.begin(); it != f.locks.end(); ++it) {
-            if (it->start == start && it->len == len) {
-                auto v = it->lock.release();
-                if (!v) return v.error();
-                f.locks.erase(it);
-                return true;
-            }
+        containing = std::find_if(ranges.begin(), ranges.end(), [&](const FsRange& h) {
+            auto he = h.len == 0 ? 0x8000000000000000ULL : h.start + h.len;
+            return start >= h.start && end <= he;
+        });
+        if (containing == ranges.end()) return io_err(5012, "unlock range not held", f.path);
+    }
+    bool shared = (type & 0x0100u) != 0;
+#if !defined(_WIN32)
+    // Harbour's Unix backend forces read-only opens to shared locks.
+    if (!f.writable) shared = true;
+#endif
+#if defined(_WIN32)
+    OVERLAPPED ov{};
+    ov.Offset = static_cast<DWORD>(start);
+    ov.OffsetHigh = static_cast<DWORD>(start >> 32);
+    auto h = reinterpret_cast<HANDLE>(state->file.native_handle());
+    auto lo = static_cast<DWORD>(len), hi = static_cast<DWORD>(len >> 32);
+    if (op == 1) {
+        if (!::UnlockFileEx(h, 0, lo, hi, &ov)) return native_lock_error("UnlockFileEx", f.path);
+    } else {
+        DWORD flags = LOCKFILE_FAIL_IMMEDIATELY | (shared ? 0 : LOCKFILE_EXCLUSIVE_LOCK);
+        if (!::LockFileEx(h, flags, 0, lo, hi, &ov)) {
+            if (::GetLastError() == ERROR_LOCK_VIOLATION) return op == 2 ? 1 : 0;
+            return native_lock_error("LockFileEx", f.path);
         }
-        return io_err(5000, "unlock range not held", f.path);
-    }
-    for (const auto& h : f.locks) {
-        if (start < h.start + h.len && h.start < start + len) {
-            if (op == 2) return true; // Harbour LockTest reports own registrations too
-            if (start == h.start && len == h.len && shared == h.shared) return true;
-            return io_err(5000, "overlapping own lock; unlock it first", f.path);
+        if (op == 2) {
+            if (!::UnlockFileEx(h, 0, lo, hi, &ov)) return native_lock_error("UnlockFileEx test", f.path);
+            return 0;
         }
     }
-    if (!shared && !f.writable)
-        return io_err(7079, "exclusive lock needs writable handle", f.path);
-    if (f.locks.size() >= 1024) return io_err(5000, "file lock limit", f.path);
-    auto v = platform::ByteLock::try_acquire(f.stream.file, start, len,
-                  shared ? platform::LockKind::Shared : platform::LockKind::Exclusive);
-    if (!v) {
-        if (v.error().code == 5012) return op == 2;
-        return v.error();
+#else
+    int fd = static_cast<int>(reinterpret_cast<intptr_t>(state->file.native_handle()) - 1);
+    struct flock fl{};
+    fl.l_whence = SEEK_SET;
+    fl.l_start = static_cast<off_t>(start);
+    fl.l_len = static_cast<off_t>(len);
+    fl.l_type = op == 1 ? F_UNLCK : shared ? F_RDLCK : F_WRLCK;
+    if (op == 2) {
+        if (::fcntl(fd, F_GETLK, &fl) != 0) return native_lock_error("F_GETLK", f.path);
+        return fl.l_type == F_UNLCK ? 0 : static_cast<std::int32_t>(fl.l_pid);
     }
-    if (op == 2) return false; // temporary lock releases on destruction
-    f.locks.push_back({start, len, shared, std::move(v.value())});
-    return true;
+    if (::fcntl(fd, F_SETLK, &fl) != 0) {
+        if (op == 0 && (errno == EAGAIN || errno == EACCES)) return 0;
+        return native_lock_error("F_SETLK", f.path);
+    }
+#endif
+    if (op == 1) {
+        const auto hs = containing->start;
+        const auto he = containing->len == 0 ? 0x8000000000000000ULL : hs + containing->len;
+        auto idx = static_cast<std::size_t>(containing - ranges.begin());
+        ranges.erase(containing);
+        if (hs < start) ranges.insert(ranges.begin() + static_cast<std::ptrdiff_t>(idx++), {hs, start-hs});
+        if (end < he) ranges.insert(ranges.begin() + static_cast<std::ptrdiff_t>(idx),
+                                    {end, he == 0x8000000000000000ULL ? 0 : he-end});
+    } else {
+        ranges.push_back({start,len});
+        std::sort(ranges.begin(), ranges.end(), [](const FsRange& a, const FsRange& b) { return a.start < b.start; });
+        for (std::size_t i = 1; i < ranges.size();) {
+            auto& prev = ranges[i-1];
+            if (prev.len != 0 && prev.start + prev.len == ranges[i].start) {
+                prev.len = ranges[i].len == 0 ? 0 : prev.len + ranges[i].len;
+                ranges.erase(ranges.begin() + static_cast<std::ptrdiff_t>(i));
+            } else ++i;
+        }
+    }
+    return 1;
 }
 
 util::Result<std::unique_ptr<FsFile>> fs_open(const std::string& abs_path,
@@ -537,15 +639,47 @@ util::Result<std::unique_ptr<FsFile>> fs_open(const std::string& abs_path,
     auto f = std::make_unique<FsFile>();
     f->path = abs_path;
     f->writable = create || (mode != ADS_FO_READ && mode != 3);
-    auto native = platform::File::open(abs_path, create ? platform::OpenMode::CreateRW :
+    std::lock_guard<std::mutex> global(fs_files_mu);
+    auto key = fs_identity(abs_path);
+    std::shared_ptr<FsNative> state;
+    if (!key.empty()) state = fs_files[key].lock();
+    if (state) {
+        std::lock_guard<std::mutex> guard(state->mu);
+        if (f->writable && !state->writable) {
+            // Win32 lock ownership is per native handle. Never switch away
+            // from a handle that still holds byte ranges.
+#if defined(_WIN32)
+            if (!state->ranges.empty()) return io_err(5012, "locked read-only file cannot upgrade", abs_path);
+#endif
+            auto upgraded = platform::File::open(abs_path, platform::OpenMode::ReadWrite);
+            if (!upgraded) return upgraded.error();
+            state->retained.push_back(std::move(state->file));
+            state->file = std::move(upgraded.value());
+            state->writable = true;
+        }
+        if (create) {
+            auto v = state->file.truncate(0);
+            if (!v) return v.error();
+        }
+    } else {
+        auto native = platform::File::open(abs_path, create ? platform::OpenMode::CreateRW :
                      f->writable ? platform::OpenMode::ReadWrite : platform::OpenMode::ReadOnly);
-    if (!native && create) {
-        std::error_code ec;
-        fs::create_directories(fs::path(abs_path).parent_path(), ec);
-        native = platform::File::open(abs_path, platform::OpenMode::CreateRW);
+        if (!native && create) {
+            std::error_code ec;
+            fs::create_directories(fs::path(abs_path).parent_path(), ec);
+            native = platform::File::open(abs_path, platform::OpenMode::CreateRW);
+        }
+        if (!native) return native.error();
+        state = std::make_shared<FsNative>();
+        state->file = std::move(native.value());
+        state->writable = f->writable;
+        key = fs_identity(abs_path);
+        if (!key.empty()) fs_files[key] = state;
+        // Remove expired weak entries so file churn does not retain names.
+        for (auto it = fs_files.begin(); it != fs_files.end();)
+            if (it->second.expired()) it = fs_files.erase(it); else ++it;
     }
-    if (!native) return native.error();
-    f->stream.file = std::move(native.value());
+    f->stream.native = std::move(state);
     f->stream.writable = f->writable;
     return f;
 }

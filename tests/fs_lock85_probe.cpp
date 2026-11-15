@@ -2,12 +2,23 @@
 #include "engine/server_fs.h"
 #include <filesystem>
 #include <chrono>
+#include <thread>
+#include <fstream>
 #include <iostream>
 #include <cstdlib>
 #include <string>
 using namespace openads::engine;
 namespace fs = std::filesystem;
 int main(int argc, char** argv) {
+    if (argc == 4 && std::string(argv[1]) == "hold") {
+        auto f = fs_open(argv[2], 2, false);
+        if (!f) return 20;
+        auto v = fs_lock_step(*f.value(), 128, 16, 0, 0);
+        if (!v || !v.value()) return 21;
+        std::ofstream marker(argv[3]); marker << "ready"; marker.close();
+        std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+        return 0;
+    }
     if (argc == 5 && std::string(argv[1]) == "child") {
         auto f = fs_open(argv[2], 2, false);
         if (!f) return 10;

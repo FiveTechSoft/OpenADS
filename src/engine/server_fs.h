@@ -2,7 +2,7 @@
 
 #include "util/result.h"
 #include "platform/file.h"
-#include "platform/lock.h"
+#include <mutex>
 
 #include <cstdint>
 #include <fstream>
@@ -59,7 +59,7 @@ util::Result<void>          fs_truncate(const std::string& abs_path,
 // with prefix; returns the file name (not the full path).
 util::Result<std::string>   fs_tempfile(const std::string& abs_dir,
                                         const std::string& prefix);
-// type 0 = free available, 1 = total capacity, 2 = free.
+// type 0 = available, 1 = free, 2 = used, 3 = total.
 util::Result<std::uint64_t> fs_dir_space(const std::string& abs_dir,
                                          std::uint8_t type);
 util::Result<std::uint64_t> fs_size(const std::string& abs_path);
@@ -72,15 +72,23 @@ util::Result<bool>          fs_dir_exist(const std::string& abs_path);
 util::Result<void>          fs_dir_make(const std::string& abs_path);
 util::Result<void>          fs_dir_remove(const std::string& abs_path);
 
-// Low-level file-function stream facade. I/O and locks use the SAME native
-// handle, which Windows requires for the owner to read/write locked bytes.
-// This is independent of the RDD/CDX engine's file and lock state.
+// FS-only native state and merged byte ranges, separate from RDD locks.
+struct FsRange { std::uint64_t start, len; };
+struct FsNative {
+    platform::File file;
+    // POSIX closing ANY fd drops process locks, so retain an old read-only
+    // descriptor across an upgrade until the last file reference closes.
+    std::vector<platform::File> retained;
+    std::mutex mu;
+    std::vector<FsRange> ranges;
+    bool writable = false;
+};
 class FsStream {
 public:
-    platform::File file;
+    std::shared_ptr<FsNative> native;
     bool writable = false;
     void clear() { good_ = true; }
-    explicit operator bool() const { return good_ && file.is_open(); }
+    explicit operator bool() const { return good_ && native && native->file.is_open(); }
     void read(char* data, std::streamsize n);
     void write(const char* data, std::streamsize n);
     void flush();
@@ -94,21 +102,14 @@ private:
     std::streamsize count_ = 0;
     bool good_ = true;
 };
-struct FsHeldLock {
-    std::uint64_t start, len;
-    bool shared;
-    platform::ByteLock lock;
-};
 struct FsFile {
     FsStream stream;
     std::string path;
     bool writable = false;
-    // Destroy locks before the native handle (reverse member order).
-    std::vector<FsHeldLock> locks;
 };
-// One non-blocking OS attempt. op: 0 lock, 1 exact-range unlock, 2 test.
-// Lock returns false for contention. Test returns true for a conflict.
-util::Result<bool> fs_lock_step(FsFile& file, std::uint64_t start,
+// One non-blocking native attempt. op 0 lock, 1 unlock, 2 query.
+// Lock result 0 busy, 1 success. Query 0 free, positive owner, -1 error.
+util::Result<std::int32_t> fs_lock_step(FsFile& file, std::uint64_t start,
                                 std::uint64_t len, std::uint16_t type,
                                 std::uint8_t op);
 util::Result<void> fs_truncate(FsFile& file, std::uint64_t size);

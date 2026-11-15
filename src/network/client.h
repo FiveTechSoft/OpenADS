@@ -450,7 +450,7 @@ public:
                                               std::uint8_t hh,
                                               std::uint8_t mm,
                                               std::uint8_t ss);
-    util::Result<bool> file_lock_step(std::uint32_t file_id, std::uint64_t start,
+    util::Result<std::int32_t> file_lock_step(std::uint32_t file_id, std::uint64_t start,
                     std::uint64_t len, std::uint16_t type, std::uint8_t op);
     util::Result<void>          ftruncate(std::uint32_t file_id,
                                           std::uint64_t size);

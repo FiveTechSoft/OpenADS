@@ -11563,7 +11563,7 @@ UNSIGNED32 ENTRYPOINT AdsSetFileTime(ADSHANDLE hConn, UNSIGNED8* pucName,
 // Each invocation makes one non-blocking attempt. Never sleep while holding
 // the ABI registry mutex or the per-file/connection mutex.
 extern "C++" {
-static openads::util::Result<bool> oads_fs_lock_once(ADSHANDLE hFile,
+static openads::util::Result<std::int32_t> oads_fs_lock_once(ADSHANDLE hFile,
         UNSIGNED64 start, UNSIGNED64 len, UNSIGNED16 type, std::uint8_t op) {
     auto& s = state();
     std::unique_lock<std::recursive_mutex> lk(s.mu);
@@ -11606,7 +11606,7 @@ UNSIGNED32 ENTRYPOINT AdsFLockTest(ADSHANDLE hFile, UNSIGNED64 ullStart,
     *plResult = -1;
     auto v = oads_fs_lock_once(hFile, ullStart, ullLen, usType, 2);
     if (!v) return fail(v.error());
-    *plResult = v.value() ? 1 : 0;
+    *plResult = v.value();
     return ok();
 }
 

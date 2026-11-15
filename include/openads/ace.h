@@ -137,7 +137,7 @@ UNSIGNED32 ENTRYPOINT AdsFTrunc        (ADSHANDLE  hFile,
 UNSIGNED32 ENTRYPOINT AdsTempFile      (ADSHANDLE  hConnect, UNSIGNED8* pucDir,
                               UNSIGNED8* pucPrefix, UNSIGNED8* pucName,
                               UNSIGNED16* pusNameLen);
-// ucType: 0 = free available, 1 = total capacity, 2 = free.
+// ucType: 0 = available, 1 = free, 2 = used, 3 = total.
 UNSIGNED32 ENTRYPOINT AdsDirSpace      (ADSHANDLE  hConnect, UNSIGNED8* pucDir,
                               UNSIGNED8 ucType, UNSIGNED64* pullBytes);
 UNSIGNED32 ENTRYPOINT AdsGetFileSize   (ADSHANDLE  hConnect, UNSIGNED8* pucName,

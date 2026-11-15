@@ -1,53 +1,66 @@
 OpenADS FS byte locks - mtfix85
 Pritpal Bedi
-2026-11-15 10:48
+2026-11-15 10:59
 
 OAds_FLock( hFile, nStart, nLen, nType ) -> lOk
 OAds_FUnlock( hFile, nStart, nLen ) -> lOk
 OAds_FLockTest( hFile, nStart, nLen, nType ) -> nResult
 
 hFile comes from OAds_FOpen or OAds_FCreate. These are file-system
-byte-range locks, not RDD record locks. They use the server host's OS
-locks and work across processes. I/O and locks use the same native file
-handle, including on Windows. Close/disconnect releases held locks.
-EnableFileFunc must be enabled on the server. Jail rules remain in force.
+byte-range locks, not RDD record locks. No RDD/CDX lock code is changed.
+They use the host OS byte locks, visible across processes. Windows I/O
+and locks use the same native handle. EnableFileFunc and jail rules apply.
 
-nType flags, added with hb_bitOr():
+nType flags, combined with hb_bitOr():
   0x0000 = exclusive, no wait (default)
   0x0100 = shared
   0x0200 = wait until success
   0x0300 = shared, wait until success
 
-NO_WAIT makes one attempt and returns .F. on contention.
-WAIT repeats until success or a real error, closed handle, or connection
-failure. Each server request makes one non-blocking OS attempt: there
-is no server-side sleep or lock wait. The client retries every 10 ms,
-releasing the file/connection/registry mutexes between attempts. The
-Harbour wrapper releases the VM during the call. Another thread or
-connection can unlock while the caller waits. A caller asking for WAIT
-can wait indefinitely if the owner never releases. There is no hidden
-30-second overall timeout and no change to the RDD's lock settings.
+NO_WAIT makes one attempt. WAIT repeats after OS contention until success
+or error. Each server request makes one non-blocking OS attempt, never
+sleeps, and returns. The client retries every 10 ms without holding the
+file/connection/registry mutexes between requests. The Harbour wrapper
+releases the VM. Connection failure or a closed handle ends the call.
+A caller can wait indefinitely if an external owner never releases.
 
-FLockTest is a momentary check, not a reservation:
-  0 = no conflicting lock for the requested shared/exclusive mode
-  1 = conflict (also returned for an overlapping lock owned by this handle)
- -1 = error
+Harbour filebuf.c behavior preserved:
+- Opens of the same physical file share a merged process-local range
+  registry and native file. Each public handle keeps its own position.
+- An overlapping lock already in that registry fails immediately,
+  including with WAIT. An identical re-lock is not recursive/idempotent.
+- Adjacent registrations merge. Unlock removes/splits a contained range
+  after the native OS unlock succeeds.
+- LockTest reports an overlapping own registration as locked. Otherwise
+  Unix F_GETLK returns the external owner PID; Windows returns 1 for
+  conflict. Both return 0 for free, -1 for error. It never waits.
+- Closing one reference does not release shared native-file locks while
+  another reference remains. Last close releases the OS locks.
+- Unix read-only opens request shared OS locks, as Harbour does.
 
-First-scope differences from Harbour:
-- Unlock requires the exact start and length that were acquired.
-  Partial unlock and an unlock spanning multiple acquired ranges fail.
-- nLen must be positive. Zero-length/to-EOF locks are not implemented.
-- Ranges must fit below the signed 64-bit file-offset limit.
-- Overlapping locks on one handle must be unlocked before changing mode.
-  Taking the identical same-mode range again succeeds without a new lock.
-- LockTest reports 1, not the POSIX process ID of the lock owner.
-- Exclusive locking on a read-only file handle fails. Harbour's Unix
-  implementation can turn a read-only handle's request into shared mode.
-- At most 1024 acquired ranges per file handle.
-- These do not implement Harbour virtual-file drivers or socket handles.
+OS behavior is preserved, including:
+- Unix partial unlock and zero-length-to-EOF ranges work through fcntl.
+- Windows UnlockFileEx requires the exact native acquired range. A
+  partial unlock or one spanning distinct acquisitions can fail, just as
+  Harbour's Windows backend does. Zero length has Windows native meaning,
+  not the Unix to-EOF meaning.
+- Windows locks affect I/O. Unix locks are advisory. Other programs must
+  cooperate. POSIX process locks can be dropped if unrelated code in the
+  same host process closes another descriptor for the same physical file;
+  the OAds FS functions reuse the native file to avoid doing that.
 
-Windows enforces byte locks on I/O. POSIX byte locks are advisory, so
-other programs must cooperate. This is OS behavior, not RDD policy.
+Nonnegative file offsets and ranges must fit the signed 64-bit offset
+space used by the cross-platform API. No virtual-file/socket drivers are
+implemented by these OAds handles. Error reporting is through OAds return
+values, not Harbour FError().
 
-Test with the MinGW x86 kit's librddads.a and matching DLL. Use the
-matching 64-bit server. Keep the earlier kit for rollback.
+DirSpace correction in mtfix85 (supersedes mtfix84 custom values):
+  HB_DISK_AVAIL = 0, HB_DISK_FREE = 1, HB_DISK_USED = 2,
+  HB_DISK_TOTAL = 3, matching Harbour include/fileio.ch.
+Do not carry mtfix84's 1=capacity or 2=free meanings into this kit.
+
+Reference source:
+https://github.com/harbour/core/blob/master/src/rtl/vfile.c
+https://github.com/harbour/core/blob/master/src/rtl/filebuf.c
+https://github.com/harbour/core/blob/master/src/rtl/filesys.c
+https://github.com/harbour/core/blob/master/include/fileio.ch
