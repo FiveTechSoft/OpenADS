@@ -1928,34 +1928,60 @@ CdxIndex::build_bulk(std::vector<std::pair<std::string, std::uint32_t>> keys) {
     }
 
     // --- Pass 1: partition the sorted keys into leaf-sized groups. Compact
-    // leaf packing is dup/trl-prefix dependent, so capacity is data-driven;
-    // probe-encode the growing group and close it just before overflow.
+    // leaf packing is dup/trl-prefix dependent, so capacity is data-driven.
+    // A group of n keys fits a leaf iff
+    //     sum(suffix_len) + n * req_byte <= CDX_PAGE_LEN - CDX_EXT_HEADSIZE
+    // and its largest recno fits the record-number field -- exactly the
+    // checks encode_compact_leaf_static makes. suffix_len depends only on
+    // the previous key and req_byte only on the max recno so far, so keep
+    // running totals instead of re-encoding the growing group per key.
+    // (The re-encode was quadratic per leaf: on a 3.7M-row table it was
+    // ~75% of every INDEX ON -- 30 s for one 16-byte tag, VFP needs 4.5 s.)
     std::vector<std::pair<std::size_t, std::size_t>> groups;   // [start, count)
     {
-        Page probe{};
-        std::vector<std::pair<std::string, std::uint32_t>> cur;
-        std::size_t start = 0;
+        const std::uint8_t trl_byte = trail_byte_();
+        const std::uint32_t room = CDX_PAGE_LEN - CDX_EXT_HEADSIZE;
+        std::size_t   start   = 0;
+        std::size_t   n       = 0;
+        std::uint32_t sum_suf = 0;
+        std::uint32_t max_rec = 0;
+        const std::string* prev = nullptr;
         std::size_t i = 0;
-        const std::uint8_t trl = trail_byte_();
         while (i < keys.size()) {
-            cur.push_back(keys[i]);
-            auto e = encode_compact_leaf_static(probe, key_size_, cur,
-                                                0xFFFFFFFFu, 0xFFFFFFFFu,
-                                                /*req_byte_override=*/0, trl);
-            if (!e) {
-                if (cur.size() == 1) {
+            const std::string& k = keys[i].first;   // padded to key_size_ above
+            std::uint32_t dup = 0;
+            if (n > 0) {
+                while (dup < key_size_ && k[dup] == (*prev)[dup]) ++dup;
+            }
+            std::uint32_t trl = 0;
+            while (trl < key_size_ - dup &&
+                   static_cast<std::uint8_t>(k[key_size_ - 1 - trl]) == trl_byte)
+                ++trl;
+            const std::uint32_t suf = key_size_ - dup - trl;
+            const std::uint32_t mr  = std::max(max_rec, keys[i].second);
+            const LeafLayout L = compute_layout(key_size_, mr);
+            const bool fits = mr <= L.rn_mask &&
+                sum_suf + suf + static_cast<std::uint32_t>(n + 1) * L.req_byte <= room;
+            if (!fits) {
+                if (n == 0) {
                     return util::Error{5000, 0,
                         "CDX bulk: single key exceeds page capacity", ""};
                 }
-                groups.emplace_back(start, i - start);   // close [start, i)
+                groups.emplace_back(start, n);   // close [start, i)
                 start = i;
-                cur.clear();
-                // retry keys[i] as the first key of the next leaf (no ++i)
-            } else {
-                ++i;
+                n = 0;
+                sum_suf = 0;
+                max_rec = 0;
+                prev = nullptr;
+                continue;   // retry keys[i] as the first key of the next leaf
             }
+            sum_suf += suf;
+            max_rec = mr;
+            prev = &k;
+            ++n;
+            ++i;
         }
-        groups.emplace_back(start, keys.size() - start);
+        groups.emplace_back(start, n);
     }
 
     // Allocate one page per leaf up front so sibling links reference the
