@@ -658,6 +658,32 @@ void write_expr_pool_(std::uint8_t* hdr,
 
 // Build a fresh sub-tag CDXTAGHEADER (1024 bytes). Mirrors the file
 // header layout but is stored at the sub-tag's offset, not at 0.
+// Sub-tag indexOpt byte, exactly as Visual FoxPro writes it:
+//   UNIQUE(0x01) | FORFILTER(0x08) | COMPACT(0x20) | COMPOUND(0x40).
+// VFP only honours a stored FOR expression when FORFILTER is set -- without
+// it a conditional tag reopens as unconditional (VFP reports the rows the
+// FOR excluded as "missing" and adds their keys on its own updates). Every
+// place that writes indexOpt must go through here; set_options and the
+// create paths used to write a bare 0x20, which VFP rejects as a compound
+// tag (it then shows only one tag per bag).
+std::uint8_t cdx_tag_opt_byte(bool unique, bool has_for) {
+    return static_cast<std::uint8_t>((unique ? 0x01 : 0x00) |
+                                     (has_for ? 0x08 : 0x00) | 0x20 | 0x40);
+}
+
+// An empty compact leaf flagged ROOT|LEAF: what VFP / Harbour write as the
+// root of a tag that has no keys yet. A tag header must never carry root
+// offset 0 -- VFP follows it to the file header and fails the whole bag
+// with error 114 "Index does not match the table".
+CdxIndex::Page make_empty_root_leaf(std::uint16_t key_size) {
+    CdxIndex::Page leaf{};
+    (void)encode_compact_leaf_static(leaf, key_size, {}, 0xFFFFFFFFu,
+                                     0xFFFFFFFFu);
+    write_u16_le(leaf.data() + 0,
+                 static_cast<std::uint16_t>(CDX_NODE_ROOT | CDX_NODE_LEAF));
+    return leaf;
+}
+
 std::array<std::uint8_t, CDX_HEADER_LEN>
 build_subtag_header(std::uint32_t root_page,
                     std::uint16_t key_size,
@@ -672,10 +698,7 @@ build_subtag_header(std::uint32_t root_page,
     write_u32_le(hdr.data() + 4, 0xFFFFFFFFu);
     write_u32_be(hdr.data() + 8, 1);
     write_u16_le(hdr.data() + 12, key_size);
-    // indexOpt: UNIQUE | COMPACT(0x20) | COMPOUND(0x40). A native FoxPro
-    // sub-tag carries 0x60; we previously wrote 0x20 (no COMPOUND).
-    hdr[14] = static_cast<std::uint8_t>(
-        (unique ? 0x01 : 0x00) | 0x20 | 0x40);
+    hdr[14] = cdx_tag_opt_byte(unique, !for_expr.empty());
     hdr[15] = 0x01;
     write_u16_le(hdr.data() + 16, CDX_HEADER_LEN);
     write_u16_le(hdr.data() + 18, CDX_PAGE_LEN);
@@ -1064,7 +1087,14 @@ void CdxIndex::refresh_from_disk() {
 
 bool CdxIndex::empty() {
     refresh_from_disk();
-    return root_page_ == 0;
+    if (root_page_ == 0) return true;
+    // A tag with no keys is rooted at an empty ROOT|LEAF page (what VFP /
+    // Harbour write and what we now write too -- never root 0 on disk).
+    auto pg = get_page_(root_page_);
+    if (!pg) return false;
+    const std::uint16_t attr  = read_u16_le(pg.value()->data() + 0);
+    const std::uint16_t nkeys = read_u16_le(pg.value()->data() + 2);
+    return (attr & CDX_NODE_LEAF) && nkeys == 0;
 }
 
 util::Result<void> CdxIndex::reload_header_if_changed_() {
@@ -1838,6 +1868,21 @@ CdxIndex::build_bulk(std::vector<std::pair<std::string, std::uint32_t>> keys) {
     if (auto wl = ensure_write_lock_(); !wl) return wl.error();
     invalidate_pos_cache();
 
+    // A freshly created tag is rooted at an empty ROOT|LEAF page (VFP
+    // layout). Hand it back to the free list so the build below reuses it
+    // as its first page instead of orphaning it. Only an EMPTY leaf root is
+    // reclaimed here; a populated tree keeps the historical behaviour.
+    if (root_page_ != 0) {
+        auto pg = get_page_(root_page_);
+        if (!pg) return pg.error();
+        const std::uint16_t attr  = read_u16_le(pg.value()->data() + 0);
+        const std::uint16_t nkeys = read_u16_le(pg.value()->data() + 2);
+        if ((attr & CDX_NODE_LEAF) && nkeys == 0) {
+            if (auto e = free_tree_(root_page_); !e) return e.error();
+            root_page_ = 0;
+        }
+    }
+
     // Pad to key_size_ and sort by (key, recno) — the CDX leaf order. Ties
     // on key resolve by recno so a forward seek surfaces the first-inserted
     // recno, matching the incremental insert path (upper_bound on key,recno).
@@ -2262,8 +2307,7 @@ util::Result<void> CdxIndex::set_options(bool unique, bool descend,
     descend_ = descend;
     if (new_key_size != 0) key_size_ = new_key_size;
     if (auto wl = ensure_write_lock_(); !wl) return wl.error();
-    index_opt_ = static_cast<std::uint8_t>(
-        (unique ? 0x01 : 0x00) | 0x20);
+    index_opt_ = cdx_tag_opt_byte(unique, !for_expr_.empty());
     std::array<std::uint8_t, CDX_HEADER_LEN> hdr{};
     auto got = file_.read_at(sub_header_offset_, hdr.data(), hdr.size());
     if (!got) return got.error();
@@ -2309,6 +2353,9 @@ util::Result<void> CdxIndex::set_expression(const std::string& key_expr,
     // deletes + recreates the tag (hb_cdxOrderCreate -> hb_cdxIndexDelTag);
     // this brings OpenADS to the same observable result.
     write_expr_pool_(hdr.data(), key_expr, for_expr);
+    // The FOR may have appeared or gone away: keep FORFILTER in step.
+    index_opt_ = cdx_tag_opt_byte(unique_, !for_expr.empty());
+    hdr[14] = index_opt_;
     auto wrote = file_.write_at(sub_header_offset_, hdr.data(), hdr.size());
     if (!wrote) return wrote.error();
     key_expr_ = key_expr;
@@ -2404,6 +2451,19 @@ std::uint32_t CdxIndex::allocate_page_() {
 util::Result<void> CdxIndex::rewrite_header_() {
     if (sub_header_offset_ == 0) {
         return util::Error{6106, 0, "CDX sub-tag header offset uninitialised", ""};
+    }
+    // Never persist root 0 (VFP error 114): an emptied tag (bulk build of
+    // zero keys, cleared tree) gets a real empty ROOT|LEAF page, written
+    // straight to disk before the header that points at it.
+    if (root_page_ == 0) {
+        const std::uint32_t off = allocate_page_();
+        auto pg = get_page_(off);
+        if (!pg) return pg.error();
+        *pg.value() = make_empty_root_leaf(key_size_);
+        auto w = file_.write_at(off, pg.value()->data(), pg.value()->size());
+        if (!w) return w.error();
+        dirty_.erase(off);
+        root_page_ = off;
     }
     std::array<std::uint8_t, CDX_HEADER_LEN> hdr{};
     auto got = file_.read_at(sub_header_offset_, hdr.data(), hdr.size());
@@ -2510,8 +2570,9 @@ CdxIndex::create(const std::string& path,
         if (!wrote) return wrote.error();
     }
 
-    // 3) Sub-tag CDXTAGHEADER at CDX_SUB_HEADER_OFFSET (1024B).
-    //    root_page = 0 (no data yet); first insert allocates the leaf.
+    // 3) Sub-tag CDXTAGHEADER at CDX_SUB_HEADER_OFFSET (1024B), rooted at
+    //    an empty ROOT|LEAF page right behind it (CDX_SUB_DATA_BASE) --
+    //    the layout VFP writes. The first insert / bulk build reuses it.
     {
         // Key + FOR (each plus a NUL) must fit the 512-byte expression pool;
         // refuse rather than silently truncate into a malformed index.
@@ -2519,12 +2580,16 @@ CdxIndex::create(const std::string& path,
             return util::Error{6106, 0,
                 "Key and FOR expressions too long for CDX header pool", ""};
         }
-        auto sub_hdr = build_subtag_header(0, key_size, key_expr,
-                                           tag_name, unique, descend,
-                                           for_expr);
+        auto sub_hdr = build_subtag_header(CDX_SUB_DATA_BASE, key_size,
+                                           key_expr, tag_name, unique,
+                                           descend, for_expr);
         auto wrote = file.write_at(CDX_SUB_HEADER_OFFSET,
                                    sub_hdr.data(), sub_hdr.size());
         if (!wrote) return wrote.error();
+        auto root = make_empty_root_leaf(key_size);
+        auto wrote_root = file.write_at(CDX_SUB_DATA_BASE, root.data(),
+                                        root.size());
+        if (!wrote_root) return wrote_root.error();
     }
 
     if (want_fsync_()) {
@@ -2535,20 +2600,19 @@ CdxIndex::create(const std::string& path,
     ix.path_              = canonicalize_path(path);
     ix.file_              = std::move(file);
     ix.mode_              = IndexOpenMode::Shared;
-    ix.root_page_         = 0;
+    ix.root_page_         = CDX_SUB_DATA_BASE;   // the empty root leaf
     ix.free_ptr_          = 0xFFFFFFFFu;
     ix.counter_           = 1;
     ix.file_counter_      = 1;   // matches the file header written above
     ix.key_size_          = key_size;
-    ix.index_opt_         = static_cast<std::uint8_t>(
-        (unique ? 0x01 : 0x00) | 0x20);
+    ix.index_opt_         = cdx_tag_opt_byte(unique, !for_expr.empty());
     ix.unique_            = unique;
     ix.descend_           = descend;
     ix.key_expr_          = key_expr;
     ix.for_expr_          = for_expr;
     ix.tag_name_          = tag_name;
     ix.sub_header_offset_ = CDX_SUB_HEADER_OFFSET;
-    ix.file_size_         = CDX_SUB_DATA_BASE;
+    ix.file_size_         = CDX_SUB_DATA_BASE + CDX_PAGE_LEN;
     {
         // CreateRW truncates the on-disk file. The process-wide tail map
         // must be RESET (not max'd) to the new end of data — otherwise a
@@ -2558,7 +2622,7 @@ CdxIndex::create(const std::string& path,
         // .cdx by 10x+ with huge sparse holes and broken key order.
         std::lock_guard<std::mutex> lk(g_cdx_alloc_mu);
         g_cdx_alloc_tail[ix.path_] =
-            static_cast<std::uint64_t>(CDX_SUB_DATA_BASE);
+            static_cast<std::uint64_t>(CDX_SUB_DATA_BASE + CDX_PAGE_LEN);
     }
     return ix;
 }
@@ -2681,11 +2745,18 @@ CdxIndex::add_tag(const std::string& path,
         return util::Error{6106, 0,
             "Key and FOR expressions too long for CDX header pool", ""};
     }
-    auto sub_hdr = build_subtag_header(0, key_size, key_expr,
+    // Root the new tag at an empty ROOT|LEAF page right after its header
+    // (never root 0 -- see make_empty_root_leaf).
+    const std::uint64_t root_off = new_off + CDX_HEADER_LEN;
+    auto sub_hdr = build_subtag_header(static_cast<std::uint32_t>(root_off),
+                                       key_size, key_expr,
                                        tag_name, unique, descend,
                                        for_expr);
     auto wrote2 = file.write_at(new_off, sub_hdr.data(), sub_hdr.size());
     if (!wrote2) return wrote2.error();
+    auto root = make_empty_root_leaf(key_size);
+    auto wrote_root = file.write_at(root_off, root.data(), root.size());
+    if (!wrote_root) return wrote_root.error();
 
     // The struct-tag leaf gained an entry — bump the FILE-header version
     // counter (offset 8, BE) so Harbour peers notice the bag changed.
@@ -2705,24 +2776,23 @@ CdxIndex::add_tag(const std::string& path,
     ix.path_              = canonicalize_path(path);
     ix.file_              = std::move(file);
     ix.mode_              = IndexOpenMode::Shared;
-    ix.root_page_         = 0;
+    ix.root_page_         = static_cast<std::uint32_t>(root_off);
     ix.free_ptr_          = 0xFFFFFFFFu;
     ix.counter_           = 1;
     ix.file_counter_      = file_ctr;
     ix.key_size_          = key_size;
-    ix.index_opt_         = static_cast<std::uint8_t>(
-        (unique ? 0x01 : 0x00) | 0x20);
+    ix.index_opt_         = cdx_tag_opt_byte(unique, !for_expr.empty());
     ix.unique_            = unique;
     ix.descend_           = descend;
     ix.key_expr_          = key_expr;
     ix.for_expr_          = for_expr;
     ix.tag_name_          = tag_name;
     ix.sub_header_offset_ = static_cast<std::uint32_t>(new_off);
-    ix.file_size_         = new_off + CDX_HEADER_LEN;
+    ix.file_size_         = root_off + CDX_PAGE_LEN;
     {
         std::lock_guard<std::mutex> lk(g_cdx_alloc_mu);
         g_cdx_alloc_tail[ix.path_] = std::max(g_cdx_alloc_tail[ix.path_],
-            new_off + CDX_HEADER_LEN);
+            root_off + CDX_PAGE_LEN);
     }
     return ix;
 }
