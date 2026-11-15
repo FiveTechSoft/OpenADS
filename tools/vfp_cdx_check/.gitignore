@@ -1,0 +1,3 @@
+# VFP compiles check.prg next to itself on every run
+*.fxp
+*.FXP
