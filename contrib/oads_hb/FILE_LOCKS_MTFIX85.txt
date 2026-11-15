@@ -1,0 +1,53 @@
+OpenADS FS byte locks - mtfix85
+Pritpal Bedi
+2026-11-15 10:48
+
+OAds_FLock( hFile, nStart, nLen, nType ) -> lOk
+OAds_FUnlock( hFile, nStart, nLen ) -> lOk
+OAds_FLockTest( hFile, nStart, nLen, nType ) -> nResult
+
+hFile comes from OAds_FOpen or OAds_FCreate. These are file-system
+byte-range locks, not RDD record locks. They use the server host's OS
+locks and work across processes. I/O and locks use the same native file
+handle, including on Windows. Close/disconnect releases held locks.
+EnableFileFunc must be enabled on the server. Jail rules remain in force.
+
+nType flags, added with hb_bitOr():
+  0x0000 = exclusive, no wait (default)
+  0x0100 = shared
+  0x0200 = wait until success
+  0x0300 = shared, wait until success
+
+NO_WAIT makes one attempt and returns .F. on contention.
+WAIT repeats until success or a real error, closed handle, or connection
+failure. Each server request makes one non-blocking OS attempt: there
+is no server-side sleep or lock wait. The client retries every 10 ms,
+releasing the file/connection/registry mutexes between attempts. The
+Harbour wrapper releases the VM during the call. Another thread or
+connection can unlock while the caller waits. A caller asking for WAIT
+can wait indefinitely if the owner never releases. There is no hidden
+30-second overall timeout and no change to the RDD's lock settings.
+
+FLockTest is a momentary check, not a reservation:
+  0 = no conflicting lock for the requested shared/exclusive mode
+  1 = conflict (also returned for an overlapping lock owned by this handle)
+ -1 = error
+
+First-scope differences from Harbour:
+- Unlock requires the exact start and length that were acquired.
+  Partial unlock and an unlock spanning multiple acquired ranges fail.
+- nLen must be positive. Zero-length/to-EOF locks are not implemented.
+- Ranges must fit below the signed 64-bit file-offset limit.
+- Overlapping locks on one handle must be unlocked before changing mode.
+  Taking the identical same-mode range again succeeds without a new lock.
+- LockTest reports 1, not the POSIX process ID of the lock owner.
+- Exclusive locking on a read-only file handle fails. Harbour's Unix
+  implementation can turn a read-only handle's request into shared mode.
+- At most 1024 acquired ranges per file handle.
+- These do not implement Harbour virtual-file drivers or socket handles.
+
+Windows enforces byte locks on I/O. POSIX byte locks are advisory, so
+other programs must cooperate. This is OS behavior, not RDD policy.
+
+Test with the MinGW x86 kit's librddads.a and matching DLL. Use the
+matching 64-bit server. Keep the earlier kit for rollback.

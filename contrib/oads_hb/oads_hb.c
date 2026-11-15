@@ -708,6 +708,43 @@ HB_FUNC( OADS_SETFILETIME )
 /* ------------------------------------------------------------------ */
 /*  OADS_FTrunc( hFile, nSize ) -> lOk                                */
 /* ------------------------------------------------------------------ */
+/* FS byte locks only, independent of RDD record locks.
+ * nType: 0 exclusive/no-wait, 0x100 shared, 0x200 wait until success.
+ * Unlock requires the exact range. LockTest: 0 free, 1 conflict, -1 error.
+ * WAIT releases the Harbour VM so another Harbour thread can unlock.
+ */
+HB_FUNC( OADS_FLOCK )
+{
+    ADSHANDLE h = ( ADSHANDLE ) hb_parnint( 1 );
+    HB_MAXINT start = hb_parnint( 2 ), len = hb_parnint( 3 );
+    UNSIGNED16 type = ( UNSIGNED16 ) hb_parni( 4 );
+    UNSIGNED32 rc = 5000;
+    if( h && start >= 0 && len > 0 )
+    {
+        hb_vmUnlock();
+        rc = oads_FLock( h, ( UNSIGNED64 ) start, ( UNSIGNED64 ) len, type );
+        hb_vmLock();
+    }
+    hb_retl( rc == 0 );
+}
+HB_FUNC( OADS_FUNLOCK )
+{
+    ADSHANDLE h = ( ADSHANDLE ) hb_parnint( 1 );
+    HB_MAXINT start = hb_parnint( 2 ), len = hb_parnint( 3 );
+    hb_retl( h && start >= 0 && len > 0 &&
+             oads_FUnlock( h, ( UNSIGNED64 ) start, ( UNSIGNED64 ) len ) == 0 );
+}
+HB_FUNC( OADS_FLOCKTEST )
+{
+    ADSHANDLE h = ( ADSHANDLE ) hb_parnint( 1 );
+    HB_MAXINT start = hb_parnint( 2 ), len = hb_parnint( 3 );
+    SIGNED32 result = -1;
+    if( h && start >= 0 && len > 0 )
+        oads_FLockTest( h, ( UNSIGNED64 ) start, ( UNSIGNED64 ) len,
+                       ( UNSIGNED16 ) hb_parni( 4 ), &result );
+    hb_retni( result );
+}
+
 HB_FUNC( OADS_FTRUNC )
 {
     ADSHANDLE hFile = ( ADSHANDLE ) hb_parnint( 1 );

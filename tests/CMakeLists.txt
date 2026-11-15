@@ -621,3 +621,11 @@ if(UNIX AND TARGET auth_mutual_probe)
         "${CMAKE_BINARY_DIR}/tools/serverd/mutual-test-only.hrb")
     set_tests_properties(auth_mutual_v2 PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
 endif()
+
+# mtfix85: independent-process FS byte-range lock proof, no RDD dependency.
+add_executable(openads_fs_lock85_probe fs_lock85_probe.cpp)
+target_link_libraries(openads_fs_lock85_probe PRIVATE openads_core)
+target_include_directories(openads_fs_lock85_probe PRIVATE ${PROJECT_SOURCE_DIR}/src)
+add_dependencies(openads_unit_tests openads_fs_lock85_probe)
+add_test(NAME fs_lock85_process COMMAND openads_fs_lock85_probe)
+set_tests_properties(fs_lock85_process PROPERTIES TIMEOUT 20)

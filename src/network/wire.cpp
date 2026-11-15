@@ -228,6 +228,7 @@ bool valid_opcode(std::uint8_t opcode) noexcept {
         case static_cast<std::uint8_t>(Opcode::FileSetAttrAck):
         case static_cast<std::uint8_t>(Opcode::FileSetTime):
         case static_cast<std::uint8_t>(Opcode::FileSetTimeAck):
+        case static_cast<std::uint8_t>(Opcode::FileLockOp):
         case static_cast<std::uint8_t>(Opcode::FileTrunc):
         case static_cast<std::uint8_t>(Opcode::FileTruncAck):
         case static_cast<std::uint8_t>(Opcode::FileTemp):

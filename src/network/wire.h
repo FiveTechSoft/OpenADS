@@ -72,6 +72,10 @@ enum class Opcode : std::uint8_t {
     FileSetTime        = 0x36,
     FileSetTimeAck     = 0x37,
     // FileTrunc:   [u32 file_id][u64 size] -> empty ack
+    // FileLockOp request: [u32 id][u64 start][u64 len][u16 type][u8 op]
+    // op=0 lock, 1 unlock, 2 conflict test. Same-opcode reply: [u8 result].
+    // Server always makes ONE non-blocking OS attempt. WAIT belongs to client.
+    FileLockOp         = 0x0F,
     FileTrunc          = 0x38,
     FileTruncAck       = 0x39,
     // FileTemp:    [u16 dirLen][dir][u16 prefixLen][prefix]

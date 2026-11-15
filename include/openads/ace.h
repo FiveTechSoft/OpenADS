@@ -127,6 +127,9 @@ UNSIGNED32 ENTRYPOINT AdsSetFileTime   (ADSHANDLE  hConnect, UNSIGNED8* pucName,
                               UNSIGNED16 usYear, UNSIGNED8 ucMon,
                               UNSIGNED8 ucDay, UNSIGNED8 ucHour,
                               UNSIGNED8 ucMin, UNSIGNED8 ucSec);
+UNSIGNED32 ENTRYPOINT AdsFLock(ADSHANDLE hFile, UNSIGNED64 ullStart, UNSIGNED64 ullLen, UNSIGNED16 usType);
+UNSIGNED32 ENTRYPOINT AdsFUnlock(ADSHANDLE hFile, UNSIGNED64 ullStart, UNSIGNED64 ullLen);
+UNSIGNED32 ENTRYPOINT AdsFLockTest(ADSHANDLE hFile, UNSIGNED64 ullStart, UNSIGNED64 ullLen, UNSIGNED16 usType, SIGNED32* plResult);
 UNSIGNED32 ENTRYPOINT AdsFTrunc        (ADSHANDLE  hFile,
                               UNSIGNED64 ullSize);
 // Creates an empty uniquely named file under pucDir; the name lands in
@@ -237,6 +240,9 @@ UNSIGNED32 OADSAPI oads_SetFileTime    (ADSHANDLE  hConnect, UNSIGNED8* pucName,
                                 UNSIGNED16 usYear, UNSIGNED8 ucMon,
                                 UNSIGNED8 ucDay, UNSIGNED8 ucHour,
                                 UNSIGNED8 ucMin, UNSIGNED8 ucSec);
+UNSIGNED32 OADSAPI oads_FLock(ADSHANDLE hFile, UNSIGNED64 ullStart, UNSIGNED64 ullLen, UNSIGNED16 usType);
+UNSIGNED32 OADSAPI oads_FUnlock(ADSHANDLE hFile, UNSIGNED64 ullStart, UNSIGNED64 ullLen);
+UNSIGNED32 OADSAPI oads_FLockTest(ADSHANDLE hFile, UNSIGNED64 ullStart, UNSIGNED64 ullLen, UNSIGNED16 usType, SIGNED32* plResult);
 UNSIGNED32 OADSAPI oads_FTrunc         (ADSHANDLE  hFile,
                                 UNSIGNED64 ullSize);
 UNSIGNED32 OADSAPI oads_TempFile       (ADSHANDLE  hConnect, UNSIGNED8* pucDir,

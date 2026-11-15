@@ -1,6 +1,8 @@
 #pragma once
 
 #include "util/result.h"
+#include "platform/file.h"
+#include "platform/lock.h"
 
 #include <cstdint>
 #include <fstream>
@@ -70,11 +72,45 @@ util::Result<bool>          fs_dir_exist(const std::string& abs_path);
 util::Result<void>          fs_dir_make(const std::string& abs_path);
 util::Result<void>          fs_dir_remove(const std::string& abs_path);
 
-struct FsFile {
-    std::fstream stream;
-    std::string  path;
+// Low-level file-function stream facade. I/O and locks use the SAME native
+// handle, which Windows requires for the owner to read/write locked bytes.
+// This is independent of the RDD/CDX engine's file and lock state.
+class FsStream {
+public:
+    platform::File file;
     bool writable = false;
+    void clear() { good_ = true; }
+    explicit operator bool() const { return good_ && file.is_open(); }
+    void read(char* data, std::streamsize n);
+    void write(const char* data, std::streamsize n);
+    void flush();
+    std::streamsize gcount() const { return count_; }
+    std::streampos tellg() const { return good_ ? std::streampos(pos_) : std::streampos(-1); }
+    void seekg(std::streamoff off, std::ios::seekdir way = std::ios::beg);
+    void seekg(std::streampos pos) { seekg(static_cast<std::streamoff>(pos)); }
+    void seekp(std::streampos pos) { seekg(pos); }
+private:
+    std::streamoff pos_ = 0;
+    std::streamsize count_ = 0;
+    bool good_ = true;
 };
+struct FsHeldLock {
+    std::uint64_t start, len;
+    bool shared;
+    platform::ByteLock lock;
+};
+struct FsFile {
+    FsStream stream;
+    std::string path;
+    bool writable = false;
+    // Destroy locks before the native handle (reverse member order).
+    std::vector<FsHeldLock> locks;
+};
+// One non-blocking OS attempt. op: 0 lock, 1 exact-range unlock, 2 test.
+// Lock returns false for contention. Test returns true for a conflict.
+util::Result<bool> fs_lock_step(FsFile& file, std::uint64_t start,
+                                std::uint64_t len, std::uint16_t type,
+                                std::uint8_t op);
 util::Result<void> fs_truncate(FsFile& file, std::uint64_t size);
 
 // create=true → create/truncate (FCreate). mode uses ADS_FO_*.

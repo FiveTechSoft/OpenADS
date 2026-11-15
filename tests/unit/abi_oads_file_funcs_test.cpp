@@ -33,6 +33,8 @@
 #include "network/server.h"
 
 #include <chrono>
+#include <atomic>
+#include <thread>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -637,6 +639,80 @@ TEST_CASE( "oads_* local: Load Save ReadAt WriteAt Flush Eof" )
     fs::remove_all( dir, ec );
 }
 
+static void lock_round_trip( ADSHANDLE h )
+{
+    ADSHANDLE a = 0, b = 0, c = 0;
+    REQUIRE( oads_FCreate( h, (UNSIGNED8*)"locks.bin", 0, &a ) == 0 );
+    REQUIRE( oads_FOpen( h, (UNSIGNED8*)"locks.bin", 2, &b ) == 0 );
+    REQUIRE( oads_FOpen( h, (UNSIGNED8*)"locks.bin", 2, &c ) == 0 );
+    REQUIRE( oads_FLock( a, 0, 16, 0 ) == 0 );
+    CHECK( oads_FLock( b, 0, 16, 0 ) == 5012 );
+    CHECK( oads_FLock( b, 0, 16, 0x100 ) == 5012 );
+    SIGNED32 result = -1;
+    REQUIRE( oads_FLockTest( b, 0, 16, 0, &result ) == 0 );
+    CHECK( result == 1 );
+    // Locking must not block I/O through the owning native handle.
+    UNSIGNED32 wrote = 0, got = 0;
+    REQUIRE( oads_FWriteAt( a, 0, "owned", 5, &wrote ) == 0 );
+    CHECK( wrote == 5 );
+    char buf[8] = {};
+    REQUIRE( oads_FReadAt( a, 0, buf, 5, &got ) == 0 );
+    CHECK( std::string( buf, got ) == "owned" );
+    // A disjoint range can be held concurrently.
+    REQUIRE( oads_FLock( b, 64, 16, 0 ) == 0 );
+    REQUIRE( oads_FUnlock( b, 64, 16 ) == 0 );
+    CHECK( oads_FLock( b, 0, 0, 0 ) != 0 );
+    CHECK( oads_FLock( b, 0, 16, 1 ) != 0 );
+    CHECK( oads_FLock( b, 0x7FFFFFFFFFFFFFFFULL, 1, 0 ) != 0 );
+    // WAIT must not hold the global registry, the VM or the connection
+    // between retries: the other caller can unlock on this connection.
+    std::atomic<bool> started{false}, done{false};
+    std::atomic<UNSIGNED32> rc{999};
+    std::thread waiter([&] {
+        started.store(true);
+        rc.store(oads_FLock(b, 0, 16, 0x200));
+        done.store(true);
+    });
+    for (int i = 0; i < 100 && !started.load(); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    CHECK_FALSE( done.load() );
+    auto unlock_rc = oads_FUnlock( a, 0, 16 );
+    CHECK( unlock_rc == 0 );
+    for (int i = 0; i < 300 && !done.load(); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    if (!done.load()) oads_FClose(b); // explicit cancellation, no test hang
+    waiter.join();
+    CHECK( done.load() );
+    CHECK( rc.load() == 0 );
+    REQUIRE( oads_FUnlock( b, 0, 16 ) == 0 );
+    REQUIRE( oads_FLock( a, 0, 16, 0x100 ) == 0 );
+    REQUIRE( oads_FLock( b, 0, 16, 0x100 ) == 0 );
+    CHECK( oads_FLock( c, 0, 16, 0 ) == 5012 );
+    REQUIRE( oads_FUnlock( a, 0, 16 ) == 0 );
+    REQUIRE( oads_FUnlock( b, 0, 16 ) == 0 );
+    REQUIRE( oads_FLock( a, 32, 16, 0 ) == 0 );
+    REQUIRE( oads_FClose(a) == 0 ); // close releases its locks
+    REQUIRE( oads_FLock( b, 32, 16, 0 ) == 0 );
+    REQUIRE( oads_FUnlock( b, 32, 16 ) == 0 );
+    REQUIRE( oads_FLockTest( c, 0, 16, 0, &result ) == 0 );
+    CHECK( result == 0 );
+    REQUIRE( oads_FClose(b) == 0 );
+    REQUIRE( oads_FClose(c) == 0 );
+    CHECK( oads_FLock( b, 0, 16, 0 ) != 0 );
+}
+
+TEST_CASE( "oads_* local: FS byte locks shared exclusive wait and owner IO" )
+{
+    auto dir = fs::temp_directory_path() / "oads_file_g4";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    auto h = local_connect(dir);
+    lock_round_trip(h);
+    REQUIRE( AdsDisconnect(h) == 0 );
+    fs::remove_all(dir);
+}
+
 static void metadata_round_trip( ADSHANDLE h, const fs::path& dir )
 {
     REQUIRE( oads_SaveFile( h, (UNSIGNED8*)"m.txt", "0123456789", 10 ) == 0 );
@@ -885,6 +961,7 @@ TEST_CASE( "oads_* remote embedded: full round-trip" )
     ADSHANDLE h = remote_connect_embedded( data, srv.port() );
     oads_round_trip( h, "remote-embedded" );
     metadata_round_trip( h, data );
+    lock_round_trip( h );
 
     // verify file lands in server data dir, not client cwd
     CHECK_FALSE( fs::exists( app / "oads_test.txt" ) );

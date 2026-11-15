@@ -240,3 +240,12 @@ UNSIGNED32 OADSAPI oads_Directory( ADSHANDLE hConnect,
 {
     return AdsDirectory( hConnect, pucMask, usAttr, pucBuffer, pulBufLen );
 }
+
+UNSIGNED32 OADSAPI oads_FLock(ADSHANDLE hFile, UNSIGNED64 ullStart, UNSIGNED64 ullLen, UNSIGNED16 usType)
+{ return AdsFLock(hFile, ullStart, ullLen, usType); }
+
+UNSIGNED32 OADSAPI oads_FUnlock(ADSHANDLE hFile, UNSIGNED64 ullStart, UNSIGNED64 ullLen)
+{ return AdsFUnlock(hFile, ullStart, ullLen); }
+
+UNSIGNED32 OADSAPI oads_FLockTest(ADSHANDLE hFile, UNSIGNED64 ullStart, UNSIGNED64 ullLen, UNSIGNED16 usType, SIGNED32* plResult)
+{ return AdsFLockTest(hFile, ullStart, ullLen, usType, plResult); }
