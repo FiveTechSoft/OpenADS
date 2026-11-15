@@ -8,6 +8,7 @@
 
 #include "engine/data_dict.h"
 #include "mgmt/error_log.h"
+#include "mgmt/mg_collector.h"
 #include "mgmt/mg_health.h"
 #include "network/server.h"
 #include "openads/ace.h"
@@ -17,12 +18,21 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cctype>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
 #include <ctime>
+#include <deque>
 #include <filesystem>
 #include <fstream>
+#include <map>
+#include <mutex>
 #include <string>
+#include <thread>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 using nlohmann::json;
@@ -30,7 +40,85 @@ namespace fs = std::filesystem;
 
 namespace openads::studio {
 
+// Reverse-DNS names for client IPs, resolved on one background thread so
+// a console request never waits on DNS. lookup() answers from the cache
+// (empty until the first resolution finishes, or when there is no name)
+// and queues unknown IPs. Failures are cached too, so each IP is looked
+// up once per server run.
+struct HttpConsole::HostCache {
+    HostCache() : worker_([this] { run(); }) {}
+    ~HostCache() {
+        { std::lock_guard<std::mutex> lk(mu_); quit_ = true; }
+        cv_.notify_all();
+        worker_.join();
+    }
+    std::string lookup(const std::string& ip) {
+        if (ip.empty()) return {};
+        std::lock_guard<std::mutex> lk(mu_);
+        if (auto it = names_.find(ip); it != names_.end()) return it->second;
+        if (queued_.insert(ip).second) { queue_.push_back(ip); cv_.notify_one(); }
+        return {};
+    }
+
+private:
+    static std::string resolve(const std::string& ip) {
+        char host[NI_MAXHOST] = {0};
+        if (ip == "127.0.0.1" || ip == "::1") {
+            // Loopback: the client is this machine.
+            if (gethostname(host, sizeof host - 1) == 0) return host;
+            return {};
+        }
+        addrinfo hints{};
+        hints.ai_flags  = AI_NUMERICHOST;
+        hints.ai_family = AF_UNSPEC;
+        addrinfo* ai = nullptr;
+        if (getaddrinfo(ip.c_str(), nullptr, &hints, &ai) != 0 || ai == nullptr)
+            return {};
+        std::string out;
+        if (getnameinfo(ai->ai_addr, static_cast<socklen_t>(ai->ai_addrlen),
+                        host, sizeof host, nullptr, 0, NI_NAMEREQD) == 0)
+            out = host;
+        freeaddrinfo(ai);
+        return out;
+    }
+    void run() {
+        std::unique_lock<std::mutex> lk(mu_);
+        for (;;) {
+            cv_.wait(lk, [this] { return quit_ || !queue_.empty(); });
+            if (quit_) return;
+            const std::string ip = queue_.front();
+            queue_.pop_front();
+            lk.unlock();
+            std::string name = resolve(ip);
+            lk.lock();
+            names_[ip] = std::move(name);
+        }
+    }
+
+    std::mutex                                   mu_;
+    std::condition_variable                      cv_;
+    std::deque<std::string>                      queue_;
+    std::unordered_set<std::string>              queued_;
+    std::unordered_map<std::string, std::string> names_;
+    bool                                         quit_ = false;
+    std::thread                                  worker_;  // last: starts in ctor
+};
+
 namespace {
+
+// Identity of a session for the console: computer name (as the client
+// reported it, else reverse DNS of its IP), OS user and program.
+json session_identity(const openads::network::Server::SessionInfo& s,
+                      HttpConsole::HostCache* hosts) {
+    std::string computer = s.client_computer;
+    std::string source = computer.empty() ? "" : "client";
+    if (computer.empty() && hosts) {
+        computer = hosts->lookup(s.peer_ip);
+        if (!computer.empty()) source = "dns";
+    }
+    return json{{"computer", computer}, {"computer_source", source},
+                {"os_user", s.client_os_user}, {"program", s.client_program}};
+}
 
 // Open a fresh ABI connection per request. Stateless web requests
 // + per-request connection is the simplest correctness model:
@@ -76,6 +164,129 @@ UNSIGNED16 resolve_table_type(const std::string& dir,
 
 json json_error(const std::string& msg, int http_code) {
     return json{{"error", msg}, {"http_code", http_code}};
+}
+
+// Grouping key for the "Open Files" view: one file opened under different
+// spellings (case, slash direction) is one entry. Windows file names are
+// case-insensitive; elsewhere only the slashes are unified.
+std::string open_file_key(const std::string& path) {
+    std::string k = path;
+    std::replace(k.begin(), k.end(), '\\', '/');
+#if defined(_WIN32)
+    std::transform(k.begin(), k.end(), k.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+#endif
+    return k;
+}
+
+// Path with one slash style: backslashes on Windows, forward elsewhere.
+std::string native_slashes(std::string p) {
+#if defined(_WIN32)
+    std::replace(p.begin(), p.end(), '/', '\\');
+#else
+    std::replace(p.begin(), p.end(), '\\', '/');
+#endif
+    return p;
+}
+
+// Every file open on the wire server, each with the sessions using it.
+//   {"files":[{"key","file","exclusive_session","handles","locks",
+//              "sessions":[{"id","peer_ip","peer_port","user",
+//                           "connected_secs","idle_secs","handles",
+//                           "exclusive"}]}], "count"}
+json open_files_json(openads::network::Server& srv,
+                     HttpConsole::HostCache* hosts) {
+    const auto now = std::chrono::system_clock::now();
+    auto secs = [&](auto t) {
+        return static_cast<long long>(
+            std::chrono::duration_cast<std::chrono::seconds>(now - t).count());
+    };
+    std::unordered_map<std::string, std::uint64_t> excl;
+    for (const auto& [path, sid] : srv.exclusive_holders())
+        excl.emplace(open_file_key(path), sid);
+
+    using SessionInfo = openads::network::Server::SessionInfo;
+    struct Use { const SessionInfo* s; int handles; };
+    struct File {
+        std::string name;
+        std::vector<Use> uses;
+        std::vector<openads::mgmt::MgLock> locks;
+    };
+    std::map<std::string, File> files;  // sorted by key
+    const auto sessions = srv.sessions_snapshot();
+    std::unordered_map<std::uint64_t, const SessionInfo*> by_id;
+    for (const auto& s : sessions) {
+        by_id.emplace(s.id, &s);
+        for (const auto& name : s.open_table_names) {
+            if (name.empty()) continue;
+            auto& f = files[open_file_key(name)];
+            if (f.name.empty()) f.name = name;
+            auto u = std::find_if(f.uses.begin(), f.uses.end(),
+                                  [&](const Use& x) { return x.s == &s; });
+            if (u == f.uses.end()) f.uses.push_back({&s, 1});
+            else ++u->handles;
+        }
+    }
+    // Record / file locks held through the wire server, by file.
+    for (auto& l : openads::mgmt::LockRegistry::instance().snapshot()) {
+        if (l.table.empty()) continue;
+        auto& f = files[open_file_key(l.table)];
+        if (f.name.empty()) f.name = l.table;
+        f.locks.push_back(std::move(l));
+    }
+
+    auto who = [&](const SessionInfo& s) {
+        json j = session_identity(s, hosts);
+        j["id"]        = s.id;
+        j["peer_ip"]   = s.peer_ip;
+        j["peer_port"] = s.peer_port;
+        j["user"]      = s.user;
+        return j;
+    };
+    json arr = json::array();
+    for (auto& [key, f] : files) {
+        const auto ex = excl.find(key);
+        const std::uint64_t ex_sid = ex == excl.end() ? 0 : ex->second;
+        json ss = json::array();
+        int handles = 0;
+        for (const auto& u : f.uses) {
+            handles += u.handles;
+            json j = who(*u.s);
+            j["connected_secs"] = secs(u.s->connected_at);
+            j["idle_secs"]      = secs(u.s->last_activity);
+            j["handles"]        = u.handles;
+            j["exclusive"]      = ex_sid != 0 && ex_sid == u.s->id;
+            ss.push_back(std::move(j));
+        }
+        // File locks first, then records in record-number order.
+        std::sort(f.locks.begin(), f.locks.end(),
+                  [](const auto& a, const auto& b) {
+                      return a.recno != b.recno ? a.recno < b.recno
+                                                : a.session_id < b.session_id;
+                  });
+        json ls = json::array();
+        for (const auto& l : f.locks) {
+            json j;
+            if (auto it = by_id.find(l.session_id); it != by_id.end()) {
+                j = who(*it->second);
+            } else {
+                // Session already gone, or a lock not taken over the wire.
+                j = json{{"id", l.session_id}, {"user", l.user},
+                         {"computer", ""}, {"computer_source", ""},
+                         {"os_user", ""}, {"program", ""},
+                         {"peer_ip", ""}, {"peer_port", 0}};
+            }
+            j["recno"] = l.recno;
+            j["type"]  = l.recno == 0 ? "file" : "record";
+            ls.push_back(std::move(j));
+        }
+        arr.push_back(json{{"key", key}, {"file", native_slashes(f.name)},
+                           {"exclusive_session", ex_sid},
+                           {"handles", handles}, {"sessions", ss},
+                           {"locks", ls}});
+    }
+    return json{{"files", arr}, {"count", arr.size()}};
 }
 
 // studio.web.0.15 — Studio's row serialiser used to push raw memo
@@ -194,8 +405,15 @@ std::vector<std::string> list_dbf_files(const std::string& dir) {
     std::vector<std::string> out;
     std::error_code ec;
     if (!fs::exists(dir, ec)) return out;
-    for (auto& e : fs::recursive_directory_iterator(dir, ec)) {
-        if (!e.is_regular_file()) continue;
+    // Walk with error codes all the way: a range-for's operator++ throws on
+    // the first sub-folder it may not open ("Access is denied"), which
+    // took down the whole listing. Unreadable folders are skipped.
+    fs::recursive_directory_iterator it(
+        dir, fs::directory_options::skip_permission_denied, ec), end;
+    for (; !ec && it != end; it.increment(ec)) {
+        const auto& e = *it;
+        std::error_code fec;
+        if (!e.is_regular_file(fec)) continue;
         auto ext = e.path().extension().string();
         std::transform(ext.begin(), ext.end(), ext.begin(),
                        [](unsigned char c){ return std::tolower(c); });
@@ -1255,7 +1473,9 @@ json run_sql(const std::string& dir, const std::string& sql,
 
 } // namespace
 
-HttpConsole::HttpConsole() : srv_(std::make_unique<httplib::Server>()) {}
+HttpConsole::HttpConsole()
+    : hosts_(std::make_unique<HostCache>()),
+      srv_(std::make_unique<httplib::Server>()) {}
 HttpConsole::~HttpConsole() { stop(); }
 
 void HttpConsole::add_user(const std::string& user,
@@ -1695,6 +1915,56 @@ bool HttpConsole::start(const std::string& host,
                         "application/json");
     });
 
+    // Open Files view: every open table with the sessions using it.
+    srv.Get("/api/server/files",
+            [this](const httplib::Request&, httplib::Response& res) {
+        res.set_header("Cache-Control", "no-store");
+        if (wire_srv_ == nullptr) {
+            res.set_content(json{{"files", json::array()}, {"count", 0},
+                                 {"hint", "wire server unavailable"}}.dump(),
+                            "application/json");
+            return;
+        }
+        res.set_content(open_files_json(*wire_srv_, hosts_.get()).dump(), "application/json");
+    });
+
+    // Kill every session that has the file open. Body: {"key": "<key from
+    // /api/server/files>"}. A session is a whole client connection, so its
+    // other tables close too.
+    srv.Post("/api/server/files/kill",
+             [this](const httplib::Request& req, httplib::Response& res) {
+        if (wire_srv_ == nullptr) {
+            res.status = 503;
+            res.set_content(json_error("wire server unavailable", 503).dump(),
+                            "application/json");
+            return;
+        }
+        json body;
+        try { body = json::parse(req.body); } catch (...) {}
+        const std::string key =
+            body.is_object() && body.contains("key") && body["key"].is_string()
+                ? body["key"].get<std::string>() : std::string();
+        if (key.empty()) {
+            res.status = 400;
+            res.set_content(json_error("missing \"key\"", 400).dump(),
+                            "application/json");
+            return;
+        }
+        json killed = json::array();
+        // Keep the snapshot in a named object: a range-for over a member of
+        // a temporary would iterate a destroyed array.
+        const json snap = open_files_json(*wire_srv_, hosts_.get());
+        for (const auto& f : snap["files"]) {
+            if (f["key"] != key) continue;
+            for (const auto& s : f["sessions"]) {
+                const auto id = s["id"].get<std::uint64_t>();
+                if (wire_srv_->kill_session(id)) killed.push_back(id);
+            }
+        }
+        res.set_content(json{{"ok", true}, {"key", key}, {"killed", killed}}.dump(),
+                        "application/json");
+    });
+
     srv.Get("/api/server/sessions",
             [this](const httplib::Request&, httplib::Response& res) {
         if (wire_srv_ == nullptr) {
@@ -1721,8 +1991,10 @@ bool HttpConsole::start(const std::string& host,
                 {"idle_secs",      static_cast<long long>(secs(s.last_activity))},
                 {"frames_in",     s.frames_in},
                 {"frames_out",    s.frames_out},
-                {"open_tables",   s.open_tables}
+                {"open_tables",   s.open_tables},
+                {"open_table_names", s.open_table_names}
             });
+            arr.back().update(session_identity(s, hosts_.get()));
         }
         res.set_content(json{{"sessions", arr},
                              {"count", arr.size()}}.dump(),

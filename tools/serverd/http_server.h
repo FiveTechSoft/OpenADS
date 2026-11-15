@@ -56,7 +56,12 @@ public:
     // carry an `Authorization: Basic …` header that matches.
     void add_user(const std::string& user, const std::string& password);
 
+    // Background reverse-DNS cache for client IPs (computer name of
+    // clients that do not report one). Defined in http_server.cpp.
+    struct HostCache;
+
 private:
+    std::unique_ptr<HostCache>       hosts_;
     std::unique_ptr<httplib::Server> srv_;
     std::thread                      thread_;
     std::atomic<bool>                running_{false};

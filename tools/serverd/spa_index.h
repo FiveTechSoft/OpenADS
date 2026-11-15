@@ -64,94 +64,137 @@ inline constexpr const char kSpaPart1[] = R"OPENADS_SPA(
   }
   body { font-family: -apple-system, system-ui, Segoe UI, Roboto, sans-serif;
          margin: 0; height: 100vh; display: flex; flex-direction: column;
-         background: var(--bg); color: var(--fg); font-size: 19px; }
-  header { background: #0d6efd; color: white; padding: 14px 22px;
+         background: var(--bg); color: var(--fg); font-size: 13px;
+         line-height: 1.35; }
+  header { background: #0d6efd; color: white; padding: 6px 14px;
            display: flex; align-items: center; justify-content: space-between; }
-  header h1 { font-size: 24px; margin: 0; font-weight: 500; }
-  header .status { font-size: 17px; opacity: 0.85; }
+  header h1 { font-size: 16px; margin: 0; font-weight: 500; }
+  header .status { font-size: 12px; opacity: 0.85; }
   main { flex: 1; display: flex; min-height: 0; }
-  aside { width: 320px; background: var(--panel); border-right: 1px solid var(--border);
-          overflow-y: auto; flex-shrink: 0; }
-  aside h2 { font-size: 15px; text-transform: uppercase; opacity: 0.6;
-             margin: 16px 18px 10px; }
+  aside { width: 220px; background: var(--panel); border-right: 1px solid var(--border);
+          overflow: hidden; flex-shrink: 0; display: flex; flex-direction: column; }
+  /* Only the table list scrolls; the Server block stays pinned at the
+     bottom so it is reachable however many tables there are. */
+  aside > * { flex: none; }
+  aside #tables { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+  #server-block { border-top: 1px solid var(--border); padding-bottom: 6px; }
+  #server-block h2 { cursor: pointer; }
+  aside h2 { font-size: 11px; text-transform: uppercase; opacity: 0.6;
+             margin: 10px 12px 4px; letter-spacing: 0.04em; }
   aside ul { list-style: none; padding: 0; margin: 0; }
-  aside li { padding: 10px 18px; cursor: pointer; font-size: 18px; }
+  aside li { padding: 3px 12px; cursor: pointer; font-size: 13px; }
   aside li:hover { background: var(--panel-2); }
   aside li.active { background: #094771; color: white; }
   section.work { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-  nav.tabs { background: var(--panel-2); padding: 0 12px; display: flex;
+  nav.tabs { background: var(--panel-2); padding: 0 8px; display: flex;
              gap: 1px; border-bottom: 1px solid #094771; }
   nav.tabs button { background: var(--panel-2); color: #aaa; border: 0;
-                    padding: 12px 26px; cursor: pointer; font-size: 17px; }
+                    padding: 6px 14px; cursor: pointer; font-size: 13px; }
   nav.tabs button:hover { background: #3a3a3d; color: white; }
+  body.light nav.tabs button:not(.active):not(:hover) { color: #555; }
   nav.tabs button.active { background: #094771; color: white; }
-  .pane { flex: 1; overflow: auto; padding: 20px; min-height: 0; }
+  .pane { flex: 1; overflow: auto; padding: 10px 12px; min-height: 0; }
   .pane.hidden { display: none; }
-  .toolbar { display: flex; gap: 12px; align-items: center;
-             margin-bottom: 14px; flex-wrap: wrap; }
+  .toolbar { display: flex; gap: 8px; align-items: center;
+             margin-bottom: 8px; flex-wrap: wrap; }
   .toolbar button, .btn { background: #0d6efd; color: white; border: 0;
-                          padding: 9px 22px; cursor: pointer;
-                          border-radius: 3px; font-size: 17px; }
+                          padding: 3px 12px; cursor: pointer;
+                          border-radius: 3px; font-size: 13px; line-height: 1.4; }
+  td .btn { padding: 0 8px; font-size: 12px; }
+  .toolbar input, .toolbar select { font-size: 13px; padding: 2px 6px; }
   .toolbar button:hover, .btn:hover { background: #0b5ed7; }
-  .btn-danger { background: #d9534f; }
+  .btn-danger, .toolbar .btn-danger { background: #d9534f; }
+  tr.pick { cursor: pointer; }
+  tr.pick:hover td { background: var(--panel-2); }
+  tr.sel td { background: #094771; color: white; }
+  /* Hovering the selected row must not fall back to the (light-mode
+     pale) hover colour while the text stays white. */
+  tr.pick.sel:hover td { background: #0b5a8e; color: white; }
+  th.sortable { cursor: pointer; user-select: none; }
+  th.sort-asc::after { content: " ▲"; font-size: 9px; }
+  th.sort-desc::after { content: " ▼"; font-size: 9px; }
+  td.fname { white-space: normal; word-break: break-all; width: 100%; }
   .btn-danger:hover { background: #c9302c; }
   .btn-secondary { background: #444; }
   .btn-secondary:hover { background: #555; }
-  .err { color: #f48771; font-size: 17px; }
-  .ok  { color: #6cc24a; font-size: 17px; }
+  .err { color: #f48771; font-size: 13px; }
+  .ok  { color: #6cc24a; font-size: 13px; }
   table { border-collapse: collapse; width: 100%; }
-  th, td { padding: 8px 12px; border: 1px solid var(--border); text-align: left;
-           white-space: nowrap; vertical-align: top; font-size: 17px; }
+  th, td { padding: 2px 8px; border: 1px solid var(--border); text-align: left;
+           white-space: nowrap; vertical-align: middle; font-size: 13px; }
   th { background: var(--panel-2); font-weight: 500; position: sticky; top: 0;
        z-index: 1; }
   tr.deleted td { opacity: 0.4; text-decoration: line-through; }
-  .editor textarea { background: #1e1e1e; color: #ddd; border: 1px solid var(--border);
-                     outline: none; padding: 14px;
-                     font: 18px Consolas, Monaco, monospace; resize: vertical;
+  .editor textarea { background: var(--bg); color: var(--fg); border: 1px solid var(--border);
+                     outline: none; padding: 8px;
+                     font: 13px Consolas, Monaco, monospace; resize: vertical;
                      width: 100%; min-height: 170px; }
-  .form-row { display: flex; align-items: center; margin-bottom: 10px;
-              gap: 14px; }
-  .form-row label { width: 200px; font-size: 17px; opacity: 0.85; }
-  .form-row input { flex: 1; background: var(--panel-2); color: #ddd;
-                    border: 1px solid #444; padding: 8px 12px;
-                    font: 17px Consolas, monospace; border-radius: 2px; }
-  .empty { padding: 28px; opacity: 0.5; font-size: 18px; }
-  .pager { margin-top: 14px; display: flex; gap: 12px; align-items: center; }
-  .pager span { font-size: 17px; opacity: 0.85; }
-  .kv { display: grid; grid-template-columns: 200px 1fr; gap: 8px 22px;
-        font-size: 17px; max-width: 800px; }
+  .form-row { display: flex; align-items: center; margin-bottom: 4px;
+              gap: 10px; }
+  .form-row label { width: 160px; font-size: 13px; opacity: 0.85; }
+  .form-row input { flex: 1; background: var(--panel-2); color: var(--fg);
+                    border: 1px solid var(--border); padding: 2px 6px;
+                    font: 13px Consolas, monospace; border-radius: 2px; }
+  .empty { padding: 10px 4px; opacity: 0.5; font-size: 13px; }
+  /* Containers start as .empty placeholders; once real content is
+     rendered into them they must not stay dimmed. */
+  .empty:has(table, .kv, form, .toolbar, .err) { opacity: 1; padding: 0; }
+  td.dir { max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
+  /* Monitor panes (Sessions, Open Files, Locks) fit the window: the
+     master grid is capped, the detail grids share what is left, and every
+     grid scrolls inside its own box under a sticky header. */
+  .pane.fit { display: flex; flex-direction: column; overflow: hidden; }
+  .pane.fit.hidden { display: none; }
+  .fit > *, .fit-sel > * { flex: none; }
+  .fit .grid { flex: 0 1 auto; overflow: auto; min-height: 4.2em;
+               border-bottom: 1px solid var(--border); }
+  /* The master grid never gives up space to the details: it is as tall as
+     its rows, up to 40% of the window; only the detail grids shrink. */
+  #sessions-body, #files-body { flex: none; max-height: 40vh; }
+  #locks-body, #browse-grid, #sql-result { flex: 1 1 auto; }
+  /* Nothing selected: the master grid may use the whole pane. */
+  .fit:has(.fit-sel.hidden) #sessions-body,
+  .fit:has(.fit-sel.hidden) #files-body { flex: 0 1 auto; max-height: none; }
+  .fit .fit-sel { flex: 1 1 auto; min-height: 0; display: flex;
+                  flex-direction: column; margin-top: 10px; }
+  .fit .fit-sel.hidden { display: none; }
+  .pager { margin-top: 8px; display: flex; gap: 8px; align-items: center; }
+  .pager span { font-size: 13px; opacity: 0.85; }
+  .kv { display: grid; grid-template-columns: 180px 1fr; gap: 2px 16px;
+        font-size: 13px; max-width: 800px; }
   .kv > div:nth-child(odd) { opacity: 0.7; }
   .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.6);
               display: none; align-items: center; justify-content: center;
               z-index: 10; }
   .modal-bg.show { display: flex; }
   .modal { background: var(--panel); border: 1px solid #094771;
-           padding: 22px; border-radius: 6px; min-width: 460px;
+           padding: 14px; border-radius: 6px; min-width: 420px;
            max-width: 90vw; max-height: 90vh; overflow: auto; }
-  .modal h3 { margin: 0 0 16px; font-size: 17px; }
+  .modal h3 { margin: 0 0 10px; font-size: 14px; }
   .col-row { display: grid; grid-template-columns: 1.3fr 0.6fr 0.5fr 0.5fr 0.4fr;
              gap: 6px; margin-bottom: 5px; align-items: center; }
-  .col-row input, .col-row select { background: var(--panel-2); color: #ddd;
-             border: 1px solid #444; padding: 5px 8px;
-             font: 14px Consolas, monospace; border-radius: 2px; }
+  .col-row input, .col-row select { background: var(--panel-2); color: var(--fg);
+             border: 1px solid var(--border); padding: 5px 8px;
+             font: 13px Consolas, monospace; border-radius: 2px; }
   .col-row button { background: #d9534f; color: white; border: 0;
              padding: 4px 8px; cursor: pointer; border-radius: 2px;
              font-size: 12px; }
   .aside-head { display: flex; align-items: center;
-                justify-content: space-between; margin: 14px 16px 8px; }
+                justify-content: space-between; margin: 10px 12px 4px; }
   .aside-head h2 { margin: 0; }
   .aside-head button { background: #094771; color: white; border: 0;
-                       width: 24px; height: 24px; cursor: pointer;
-                       border-radius: 3px; font-size: 16px; line-height: 1; }
+                       width: 20px; height: 20px; cursor: pointer;
+                       border-radius: 3px; font-size: 13px; line-height: 1; }
   /* Truncate big cells; click to expand in a modal. */
   td.cell { max-width: 380px; overflow: hidden;
             text-overflow: ellipsis; cursor: pointer; }
   td.cell:hover { background: var(--panel-2); }
-  .modal pre { background: #1e1e1e; padding: 14px; border-radius: 3px;
-               font: 14px Consolas, monospace; white-space: pre-wrap;
+  .modal pre { background: var(--bg); color: var(--fg); padding: 10px; border-radius: 3px;
+               font: 12px Consolas, monospace; white-space: pre-wrap;
                word-break: break-all; max-height: 70vh; overflow: auto;
                border: 1px solid var(--border); }
-  /* SQL editor syntax highlight overlay */
+)OPENADS_SPA";
+inline constexpr const char kSpaPart1b[] = R"OPENADS_SPA(  /* SQL editor syntax highlight overlay */
   .sql-kw     { color: #569cd6; font-weight: 600; }
   .sql-str    { color: #ce9178; }
   .sql-num    { color: #b5cea8; }
@@ -160,8 +203,8 @@ inline constexpr const char kSpaPart1[] = R"OPENADS_SPA(
   body.light .sql-str { color: #a31515; }
   body.light .sql-num { color: #098658; }
   body.light .sql-cmt { color: #008000; }
-  td.sel-col { width: 30px; text-align: center; }
-  td.sel-col input { transform: scale(1.3); cursor: pointer; }
+  td.sel-col { width: 24px; text-align: center; }
+  td.sel-col input { cursor: pointer; margin: 0; }
 
   /* ============================================================
      Responsive — phone & tablet. The table-list <aside> turns
@@ -179,9 +222,9 @@ inline constexpr const char kSpaPart1[] = R"OPENADS_SPA(
 
   /* ---- Tablet and below ---- */
   @media (max-width: 768px) {
-    body { font-size: 17px; }
-    header { padding: 12px 16px; }
-    header h1 { font-size: 20px; }
+    body { font-size: 14px; }
+    header { padding: 8px 12px; }
+    header h1 { font-size: 16px; }
     header .status { display: none; }
     #nav-toggle { display: inline-block; }
     /* sidebar becomes an off-canvas drawer */
@@ -193,8 +236,8 @@ inline constexpr const char kSpaPart1[] = R"OPENADS_SPA(
     aside.open { transform: translateX(0); }
     nav.tabs { overflow-x: auto; flex-wrap: nowrap;
                -webkit-overflow-scrolling: touch; }
-    nav.tabs button { padding: 12px 18px; white-space: nowrap; }
-    .pane { padding: 14px; }
+    nav.tabs button { padding: 8px 14px; white-space: nowrap; }
+    .pane { padding: 10px; }
     .kv { grid-template-columns: 160px 1fr; }
   }
 
@@ -213,8 +256,8 @@ inline constexpr const char kSpaPart1[] = R"OPENADS_SPA(
     .col-row { grid-template-columns: 1.2fr 0.7fr 0.5fr 0.5fr auto; gap: 4px; }
     .col-row input, .col-row select { font-size: 13px; padding: 5px; }
     /* larger touch targets */
-    .toolbar button, .btn, nav.tabs button { min-height: 42px; }
-    aside li { padding: 13px 18px; }
+    .toolbar button, .btn, nav.tabs button { min-height: 36px; }
+    aside li { padding: 9px 14px; }
   }
 </style>
 </head>
@@ -225,21 +268,21 @@ inline constexpr const char kSpaPart1[] = R"OPENADS_SPA(
   <div style="display:flex;gap:18px;align-items:center">
     <select id="lang-pick"
        style="background:transparent;color:white;border:1px solid rgba(255,255,255,0.4);
-              padding:5px 8px;border-radius:3px;cursor:pointer;font-size:14px">
+              padding:3px 4px;border-radius:3px;cursor:pointer;font-size:12px">
       <option value="en">EN</option>
       <option value="es">ES</option>
       <option value="pt">PT</option>
     </select>
     <button id="theme-toggle"
        style="background:transparent;color:white;border:1px solid rgba(255,255,255,0.4);
-              padding:5px 12px;border-radius:3px;cursor:pointer;font-size:15px">
+              padding:3px 7px;border-radius:3px;cursor:pointer;font-size:13px">
       🌙
     </button>
     <a href="https://fivetechsoft.github.io/OpenADS/"
        target="_blank" rel="noopener"
-       style="color:white;text-decoration:none;font-size:15px;
+       style="color:white;text-decoration:none;font-size:13px;
               opacity:0.9;border:1px solid rgba(255,255,255,0.4);
-              padding:5px 12px;border-radius:3px">
+              padding:3px 7px;border-radius:3px">
       📖 Docs
     </a>
     <!-- studio.web.0.17 — deployment-mode badge. Filled in by
@@ -248,8 +291,8 @@ inline constexpr const char kSpaPart1[] = R"OPENADS_SPA(
          Server when hosted by openads_serverd. -->
     <div id="mode-badge"
          title="Studio deployment mode"
-         style="font-size:13px;font-weight:600;letter-spacing:0.3px;
-                padding:4px 10px;border-radius:3px;
+         style="font-size:12px;font-weight:600;letter-spacing:0.3px;
+                padding:2px 6px;border-radius:3px;
                 background:rgba(255,255,255,0.18);
                 border:1px solid rgba(255,255,255,0.4);
                 color:white;display:none"></div>
@@ -270,8 +313,10 @@ inline constexpr const char kSpaPart1[] = R"OPENADS_SPA(
     <ul id="tables"></ul>
     <input type="file" id="upload-input" multiple
            style="display:none" accept=".dbf,.cdx,.ntx,.fpt,.dbt,.add">
-    <h2 data-i18n="server">Server</h2>
-    <ul><li id="server-link" data-i18n="info">Info</li></ul>
+    <div id="server-block">
+      <h2 id="server-head" data-i18n="server">Server</h2>
+      <ul><li id="server-link" data-i18n="info">Info</li></ul>
+    </div>
   </aside>
   <section class="work">
     <nav class="tabs" id="tabs">
@@ -281,16 +326,18 @@ inline constexpr const char kSpaPart1[] = R"OPENADS_SPA(
       <button data-tab="sql"       data-i18n="sql">SQL</button>
       <button data-tab="server"    data-i18n="server">Server</button>
       <button data-tab="sessions"  data-i18n="sessions">Sessions</button>
-      <button data-tab="dd"        data-i18n="dict">Dict</button>
+      <button data-tab="files"     data-i18n="files">Open Files</button>
+      <button data-tab="locks"     data-i18n="locks">Locks</button>
+      <button data-tab="dd"       data-i18n="dict">Dict</button>
     </nav>
 
-    <div id="pane-browse" class="pane">
+    <div id="pane-browse" class="pane fit">
       <div class="toolbar">
         <span id="browse-title" class="err"></span>
         <input id="browse-filter" placeholder="filter rows…"
                style="background:var(--panel-2);color:var(--fg);
                       border:1px solid var(--border);
-                      padding:6px 10px;font-size:15px;border-radius:2px;
+                      padding:3px 6px;font-size:13px;border-radius:2px;
                       flex:1;min-width:140px;max-width:340px">
         <button class="btn btn-danger" id="browse-bulk-del"
                 style="display:none">Delete selected</button>
@@ -302,13 +349,13 @@ inline constexpr const char kSpaPart1[] = R"OPENADS_SPA(
            matching records. The badge shows whether the filter was
            served by an index (🟢 FULL), partly (🟡 PART) or fell
            back to a full-record AST evaluation (⚪ NONE / no AOF). -->
-      <div class="toolbar" style="margin-top:6px">
-        <span style="font-size:13px;color:var(--muted);min-width:170px"
+      <div class="toolbar" style="margin-top:3px">
+        <span style="font-size:12px;color:var(--muted);min-width:170px"
               data-i18n="aof_label">AOF (Rushmore) filter:</span>
         <input id="browse-aof" placeholder="e.g. AGE >= 25"
                style="background:var(--panel-2);color:var(--fg);
                       border:1px solid var(--border);
-                      padding:6px 10px;font-size:15px;border-radius:2px;
+                      padding:3px 6px;font-size:13px;border-radius:2px;
                       flex:1;min-width:200px;max-width:520px;
                       font-family:ui-monospace,monospace">
         <button class="btn btn-primary" id="browse-aof-apply"
@@ -325,7 +372,7 @@ inline constexpr const char kSpaPart1[] = R"OPENADS_SPA(
                 title="Run the full AOF demo end-to-end on the active table">▶ Demo</button>
         <span id="browse-aof-badge"
               title="AdsGetAOFOptLevel — shows whether the filter is served by an index"
-              style="font-size:13px;font-weight:600;
+              style="font-size:12px;font-weight:600;
                    )OPENADS_SPA";
 inline constexpr const char kSpaPart2[] = R"OPENADS_SPA(  padding:4px 10px;border-radius:3px;
                      background:rgba(255,255,255,0.05);
@@ -336,14 +383,14 @@ inline constexpr const char kSpaPart2[] = R"OPENADS_SPA(  padding:4px 10px;borde
              matching index yet. Each chip kicks off a one-click
              CREATE INDEX so the next Apply lifts OptLevel. -->
         <span id="browse-aof-hints"
-              style="font-size:13px;color:var(--muted);
+              style="font-size:12px;color:var(--muted);
                      display:none"></span>
       </div>
       <!-- studio.web.0.20 — narration line for the guided Demo. -->
       <div id="browse-aof-demo-status"
-           style="font-size:13px;color:var(--muted);
-                  margin:2px 0 4px 0;display:none"></div>
-      <div id="browse-grid" class="empty" data-i18n="browse_pick">Select a table on the left.</div>
+           style="font-size:12px;color:var(--muted);
+                  margin:1px 0 2px 0;display:none"></div>
+      <div id="browse-grid" class="grid empty" data-i18n="browse_pick">Select a table on the left.</div>
       <div class="pager" id="browse-pager"></div>
     </div>
 
@@ -355,13 +402,13 @@ inline constexpr const char kSpaPart2[] = R"OPENADS_SPA(  padding:4px 10px;borde
       <div id="insert-body" class="empty">Select a table.</div>
     </div>
 
-    <div id="pane-sql" class="pane hidden">
+    <div id="pane-sql" class="pane fit hidden">
       <div class="editor" style="position:relative">
         <pre id="sql-hl" aria-hidden="true"
-             style="position:absolute;inset:0;margin:0;padding:14px;
+             style="position:absolute;inset:0;margin:0;padding:8px;
                     pointer-events:none;color:transparent;
                     background:transparent;border:1px solid transparent;
-                    font:18px Consolas, Monaco, monospace;
+                    font:13px Consolas, Monaco, monospace;
                     white-space:pre-wrap;word-break:break-word;
                     overflow:hidden;min-height:170px"></pre>
         <textarea id="sql"
@@ -375,12 +422,12 @@ inline constexpr const char kSpaPart2[] = R"OPENADS_SPA(  padding:4px 10px;borde
         <button id="sql-export-json" class="btn-secondary">Export JSON</button>
         <button id="sql-save"        class="btn-secondary">Save query…</button>
         <select id="sql-saved" style="background:var(--panel-2);color:var(--fg);
-                border:1px solid var(--border);padding:7px 10px;
-                font-size:15px;border-radius:2px"></select>
+                border:1px solid var(--border);padding:4px 6px;
+                font-size:13px;border-radius:2px"></select>
         <button id="sql-saved-del" class="btn-danger" style="display:none">×</button>
         <span id="sql-status"></span>
       </div>
-      <div id="sql-result" class="empty">Result will appear here.</div>
+      <div id="sql-result" class="grid empty">Result will appear here.</div>
     </div>
 
     <div id="pane-server" class="pane hidden">
@@ -389,22 +436,71 @@ inline constexpr const char kSpaPart2[] = R"OPENADS_SPA(  padding:4px 10px;borde
       <div id="server-body" class="empty">Loading…</div>
     </div>
 
-    <div id="pane-sessions" class="pane hidden">
+    <div id="pane-sessions" class="pane fit hidden">
       <div class="toolbar">
         <button class="btn btn-secondary" id="sessions-refresh">Refresh</button>
-        <label style="font-size:14px;opacity:0.85">
+        <label style="font-size:12px;opacity:0.85">
           <input type="checkbox" id="sessions-auto" checked>
           auto-refresh every 3 s
         </label>
         <span id="sessions-status"></span>
       </div>
-      <div id="sessions-body" class="empty">Loading…</div>
+      <div id="sessions-body" class="grid"><div class="empty">Loading…</div></div>
+      <div id="sessions-sel" class="fit-sel hidden">
+        <div id="sessions-files-title" style="font-size:13px;margin-bottom:6px"></div>
+        <div id="sessions-files" class="grid"></div>
+        <div id="sessions-locks-title" style="font-size:13px;margin:12px 0 6px"></div>
+        <div id="sessions-locks" class="grid"></div>
+      </div>
+    </div>
+
+    <div id="pane-files" class="pane fit hidden">
+      <div class="toolbar">
+        <button class="btn btn-secondary" id="files-refresh">Refresh</button>
+        <label style="font-size:12px;opacity:0.85">
+          <input type="checkbox" id="files-auto" checked>
+          auto-refresh every 3 s
+        </label>
+        <input id="files-filter" placeholder="filter files…">
+        <span id="files-status"></span>
+      </div>
+      <div id="files-body" class="grid"><div class="empty">Loading…</div></div>
+      <div id="files-sel" class="fit-sel hidden">
+        <div class="toolbar">
+          <span id="files-sel-title" style="font-size:13px"></span>
+          <button class="btn btn-danger" id="files-kill-all">Kill all sessions on this file</button>
+        </div>
+        <div style="font-size:12px;opacity:0.7;margin-bottom:6px">
+          Killing a session drops that whole client connection, so its other open files close too.
+        </div>
+        <div id="files-sessions" class="grid"></div>
+        <div id="files-locks-title" style="font-size:13px;margin:12px 0 6px"></div>
+        <div id="files-locks" class="grid"></div>
+      </div>
+    </div>
+
+)OPENADS_SPA";
+inline constexpr const char kSpaPart2b[] = R"OPENADS_SPA(    <div id="pane-locks" class="pane fit hidden">
+      <div class="toolbar">
+        <button class="btn btn-secondary" id="locks-refresh">Refresh</button>
+        <label style="font-size:12px;opacity:0.85">
+          <input type="checkbox" id="locks-auto" checked>
+          auto-refresh every 3 s
+        </label>
+        <input id="locks-filter" placeholder="filter file / user / computer…">
+        <span id="locks-status"></span>
+      </div>
+      <div style="font-size:12px;opacity:0.7;margin-bottom:6px">
+        Kill drops the whole client connection holding the lock: all its locks
+        are released and its open files close.
+      </div>
+      <div id="locks-body" class="grid"><div class="empty">Loading…</div></div>
     </div>
 
     <div id="pane-dd" class="pane hidden">
       <div class="toolbar">
-        <select id="dd-pick" style="background:var(--panel-2);color:#ddd;
-                border:1px solid #444;padding:6px 10px;font-size:15px;
+        <select id="dd-pick" style="background:var(--panel-2);color:var(--fg);
+                border:1px solid var(--border);padding:3px 6px;font-size:13px;
                 border-radius:2px"></select>
         <button class="btn" id="dd-new">New dict…</button>
         <button class="btn btn-danger" id="dd-drop">Drop</button>
@@ -422,12 +518,12 @@ inline constexpr const char kSpaPart2[] = R"OPENADS_SPA(  padding:4px 10px;borde
       <label>Table file name</label>
       <input id="ct-name" type="text" placeholder="newtable.dbf">
     </div>
-    <div class="col-row" style="font-weight:500;opacity:0.85;font-size:13px">
+    <div class="col-row" style="font-weight:500;opacity:0.85;font-size:12px">
       <div>Column name</div><div>Type</div><div>Length</div>
       <div>Decimals</div><div></div>
     </div>
     <div id="ct-cols"></div>
-    <div class="toolbar" style="margin-top:14px">
+    <div class="toolbar" style="margin-top:8px">
       <button class="btn btn-secondary" id="ct-add-col">+ column</button>
       <button class="btn" id="ct-create">Create</button>
       <button class="btn btn-secondary" id="ct-cancel">Cancel</button>
@@ -439,13 +535,13 @@ inline constexpr const char kSpaPart2[] = R"OPENADS_SPA(  padding:4px 10px;borde
 <div class="modal-bg" id="modal-cell">
   <div class="modal" style="min-width:600px">
     <h3 id="cell-title">Cell</h3>
-    <div class="toolbar" style="margin-bottom:10px">
-      <span style="opacity:0.85;font-size:14px">Bytes: <b id="cell-len">0</b></span>
+    <div class="toolbar" style="margin-bottom:6px">
+      <span style="opacity:0.85;font-size:12px">Bytes: <b id="cell-len">0</b></span>
       <button class="btn btn-secondary" id="cell-mode-text">Text</button>
       <button class="btn btn-secondary" id="cell-mode-hex">Hex</button>
     </div>
     <pre id="cell-body"></pre>
-    <div class="toolbar" style="margin-top:14px">
+    <div class="toolbar" style="margin-top:8px">
       <button class="btn btn-secondary" id="cell-copy">Copy</button>
       <button class="btn btn-secondary" id="cell-close">Close</button>
     </div>
@@ -455,7 +551,7 @@ inline constexpr const char kSpaPart2[] = R"OPENADS_SPA(  padding:4px 10px;borde
 <div class="modal-bg" id="modal-encrypt">
   <div class="modal">
     <h3>Encrypt table</h3>
-    <p style="margin:0 0 14px;opacity:0.8">
+    <p style="margin:0 0 8px;opacity:0.8">
       AES-256-CTR keyed off the password below. Schema stays plain
       text; record bodies are encrypted in place (M11.2). The
       password must be supplied to every connection that reopens
@@ -465,7 +561,7 @@ inline constexpr const char kSpaPart2[] = R"OPENADS_SPA(  padding:4px 10px;borde
       <label>Password</label>
       <input id="enc-pw" type="password">
     </div>
-    <div class="toolbar" style="margin-top:14px">
+    <div class="toolbar" style="margin-top:8px">
       <button class="btn" id="enc-go">Encrypt</button>
       <button class="btn btn-secondary" id="enc-cancel">Cancel</button>
       <span id="enc-status"></span>
@@ -482,15 +578,15 @@ const esc = s => (""+s)
 const I18N = {
   en: { tables: "Tables", server: "Server", info: "Info",
         browse: "Browse", structure: "Structure", insert: "Insert",
-        sql: "SQL", sessions: "Sessions", dict: "Dict",
+        sql: "SQL", sessions: "Sessions", files: "Open Files", locks: "Locks", dict: "Dict",
         browse_pick: "Select a table on the left." },
   es: { tables: "Tablas", server: "Servidor", info: "Info",
         browse: "Explorar", structure: "Estructura", insert: "Insertar",
-        sql: "SQL", sessions: "Sesiones", dict: "Dicc",
+        sql: "SQL", sessions: "Sesiones", files: "Archivos abiertos", locks: "Bloqueos", dict: "Dicc",
         browse_pick: "Elige una tabla a la izquierda." },
   pt: { tables: "Tabelas", server: "Servidor", info: "Info",
         browse: "Procurar", structure: "Estrutura", insert: "Inserir",
-        sql: "SQL", sessions: "Sessões", dict: "Dic",
+        sql: "SQL", sessions: "Sessões", files: "Arquivos abertos", locks: "Bloqueios", dict: "Dic",
         browse_pick: "Escolha uma tabela à esquerda." }
 };
 const LANG_KEY = "openads-studio.lang";
@@ -523,7 +619,7 @@ async function api(url, opts) {
 }
 
 function showTab(tab) {
-  ["browse","structure","insert","sql","server","sessions","dd"].forEach(t => {
+  ["browse","structure","insert","sql","server","sessions","files","locks","dd"].forEach(t => {
     $("pane-" + t).classList.toggle("hidden", t !== tab);
   });
   document.querySelectorAll("nav.tabs button").forEach(b =>
@@ -537,6 +633,18 @@ function showTab(tab) {
     startSessionsAutoRefresh();
   } else {
     stopSessionsAutoRefresh();
+  }
+  if (tab === "files") {
+    loadFiles();
+    startFilesAutoRefresh();
+  } else {
+    stopFilesAutoRefresh();
+  }
+  if (tab === "locks") {
+    loadLocks();
+    startLocksAutoRefresh();
+  } else {
+    stopLocksAutoRefresh();
   }
   if (tab === "dd") loadDicts();
 }
@@ -577,6 +685,7 @@ async function loadBrowse() {
     state.browseSort = state.browseSort || { col: -1, dir: 1 };
     paintAofBadge(data);
     renderBrowseGrid();
+    $("browse-grid").scrollTop = 0;  // the grid scrolls itself: new page starts at row 1
     $("browse-pager").innerHTML = `
       <button class="btn btn-secondary" id="prev"
               ${state.browseOffset === 0 ? "disabled" : ""}>‹ Prev</button>
@@ -711,7 +820,7 @@ async function loadStructure() {
         <div>Records</div><div>${s.record_count}</div>
         <div>File size</div><div>${s.file_bytes} bytes</div>
       </div>
-      <div class="toolbar" style="margin-top:14px">
+      <div class="toolbar" style="margin-top:8px">
         <button class="btn btn-secondary" id="btn-reindex">Reindex</button>
         <button class="btn btn-secondary" id="btn-pack">Pack</button>
         <button class="btn btn-danger"    id="btn-zap">Zap</button>
@@ -720,20 +829,20 @@ async function loadStructure() {
         <button class="btn btn-danger"    id="btn-drop">Drop table</button>
         <span id="struct-status"></span>
       </div>
-      <h3 style="margin-top:18px;font-size:15px;opacity:0.85">Columns</h3>
+      <h3 style="margin-top:10px;font-size:13px;opacity:0.85">Columns</h3>
       <table><thead><tr><th>#</th><th>Name</th><th>Type</th><th>Length</th><th>Decimals</th></tr></thead>
       <tbody>${s.columns.map((c,i) => `<tr>
         <td>${i+1}</td><td>${esc(c.name)}</td>
         <td>${esc(c.type_name||c.type)}</td>
         <td>${c.length}</td><td>${c.decimals}</td></tr>`).join("")}</tbody></table>
 
-      <h3 style="margin-top:24px;font-size:15px;opacity:0.85">Create index</h3>
+      <h3 style="margin-top:13px;font-size:13px;opacity:0.85">Create index</h3>
       <form id="ci-form" class="form-row" style="flex-wrap:wrap">
         <input name="tag"  placeholder="tag (e.g. NAME_TAG)" required>
         <input name="expr" placeholder="expression (e.g. UPPER(NAME))" required>
-        <label style="font-size:14px;opacity:0.85">
+        <label style="font-size:12px;opacity:0.85">
           <input type="checkbox" name="descending"> DESC</label>
-        <label style="font-size:14px;opacity:0.85">
+        <label style="font-size:12px;opacity:0.85">
           <input type="checkbox" name="unique"> UNIQUE</label>
         <button type="submit" class="btn">+ Index</button>
       </form>`;
@@ -757,7 +866,7 @@ async function loadStructure() {
           `<tr><td>${esc(s.file)}</td><td>${esc(s.kind)}</td>
            <td>${s.bytes}</td></tr>`).join("");
         $("structure-body").insertAdjacentHTML("beforeend", `
-          <h3 style="margin-top:24px;font-size:15px;opacity:0.85">Companion files</h3>
+          <h3 style="margin-top:13px;font-size:13px;opacity:0.85">Companion files</h3>
           <table><thead><tr><th>file</th><th>kind</th><th>bytes</th></tr></thead>
           <tbody>${rows}</tbody></table>`);
       }
@@ -926,7 +1035,7 @@ async function loadInsertForm() {
           <label>${esc(c.name)} <small>(${c.type}/${c.length})</small></label>
           <input name="${esc(c.name)}" type="text">
         </div>`).join("")}
-      <div class="toolbar" style="margin-top:14px">
+      <div class="toolbar" style="margin-top:8px">
         <button type="submit" class="btn">Append record</button>
         <span id="insert-status"></span>
       </div></form>`;
@@ -970,10 +1079,10 @@ async function editRow(recno) {
         <label>${esc(c.name)} <small>(${c.type}/${c.length})</small></label>
         <input name="${esc(c.name)}" type="text"
                value="${esc(cells[i] || "")}"></div>`).join("");
-    const html = `<h3 style="font-size:13px;margin:0 0 10px">
+    const html = `<h3 style="font-size:12px;margin:0 0 6px">
       Edit recno ${recno} of ${esc(state.table)}</h3>
       <form id="edit-form">${lines}
-      <div class="toolbar" style="margin-top:14px">
+      <div class="toolbar" style="margin-top:8px">
         <button type="submit" class="btn">Save</button>
         <button type="button" class="btn btn-secondary" id="edit-cancel">Cancel</button>
         <span id="edit-status"></span>
@@ -1117,7 +1226,7 @@ async function loadServerInfo() {
       <div>Sidecar total</div><div>${fmtBytes(d.sidecar_bytes || 0)}</div>
       <div>On-disk total</div><div>${fmtBytes(d.total_bytes || 0)}</div>
       </div>
-      <div class="toolbar" style="margin-top:18px">
+      <div class="toolbar" style="margin-top:10px">
         <a class="btn" href="/api/server/backup" download>
           ⇩ Download backup (.zip)
         </a>
@@ -1187,11 +1296,11 @@ async function loadDictView(name) {
       `<tr><td>${esc(p.key)}</td><td>${esc(p.value)}</td></tr>`).join("");
 
     $("dd-body").innerHTML = `
-      <h3 style="font-size:17px;margin:0 0 8px">${esc(d.name)}</h3>
-      <p style="opacity:0.7;font-size:14px;margin:0 0 16px">${esc(d.path)}</p>
+      <h3 style="font-size:13px;margin:0 0 4px">${esc(d.name)}</h3>
+      <p style="opacity:0.7;font-size:12px;margin:0 0 9px">${esc(d.path)}</p>
 
-      <h4 style="font-size:15px;margin:18px 0 6px">Tables</h4>
-      <form id="dd-add-tbl" class="form-row" style="margin-bottom:8px">
+      <h4 style="font-size:13px;margin:10px 0 3px">Tables</h4>
+      <form id="dd-add-tbl" class="form-row" style="margin-bottom:4px">
         <input name="alias" placeholder="alias" required>
         <input name="path"  placeholder="relative.dbf" required>
         <button type="submit" class="btn">+ Add table</button>
@@ -1199,29 +1308,29 @@ async function loadDictView(name) {
       ${tblRows ? `<table><thead><tr><th>alias</th><th>path</th><th></th></tr></thead><tbody>${tblRows}</tbody></table>`
                 : `<div class="empty">No tables yet.</div>`}
 
-      <h4 style="font-size:15px;margin:18px 0 6px">Users</h4>
-      <form id="dd-add-usr" class="form-row" style="margin-bottom:8px">
+      <h4 style="font-size:13px;margin:10px 0 3px">Users</h4>
+      <form id="dd-add-usr" class="form-row" style="margin-bottom:4px">
         <input name="user" placeholder="username" required>
         <button type="submit" class="btn">+ Add user</button>
       </form>
       ${usrRows ? `<table><thead><tr><th>name</th><th></th></tr></thead><tbody>${usrRows}</tbody></table>`
                 : `<div class="empty">No users yet.</div>`}
 
-      <h4 style="font-size:15px;margin:18px 0 6px">Indexes</h4>
+      <h4 style="font-size:13px;margin:10px 0 3px">Indexes</h4>
       ${ixRows  ? `<table><thead><tr><th>table</th><th>path</th><th>comment</th></tr></thead><tbody>${ixRows}</tbody></table>`
                 : `<div class="empty">No indexes registered.</div>`}
 
-      <h4 style="font-size:15px;margin:18px 0 6px">Links</h4>
+      <h4 style="font-size:13px;margin:10px 0 3px">Links</h4>
       ${lkRows  ? `<table><thead><tr><th>alias</th><th>path</th><th>user</th></tr></thead><tbody>${lkRows}</tbody></table>`
                 : `<div class="empty">No links.</div>`}
 
-      <h4 style="font-size:15px;margin:18px 0 6px">RI rules</h4>
+      <h4 style="font-size:13px;margin:10px 0 3px">RI rules</h4>
       ${riRows  ? `<table><thead><tr><th>name</th><th>parent</th><th>child</th><th>tag</th>
                    <th>upd</th><th>del</th><th>fail</th></tr></thead><tbody>${riRows}</tbody></table>`
                 : `<div class="empty">No RI rules.</div>`}
 
-      <h4 style="font-size:15px;margin:18px 0 6px">DB properties</h4>
-      <form id="dd-add-prop" class="form-row" style="margin-bottom:8px">
+      <h4 style="font-size:13px;margin:10px 0 3px">DB properties</h4>
+      <form id="dd-add-prop" class="form-row" style="margin-bottom:4px">
         <input name="key"   placeholder="key" required>
         <input name="value" placeholder="value">
         <button type="submit" class="btn">Set</button>
@@ -1284,55 +1393,13 @@ async function ddDelete(url) {
   }
 }
 
-async function loadSessions() {
-  try {
-    const data = await api("/api/server/sessions");
-    $("sessions-status").textContent =
-      `${data.count} active`;
-    $("sessions-status").className = "ok";
-    if (!data.sessions || data.sessions.length === 0) {
-      $("sessions-body").innerHTML =
-        `<div class="empty">No active wire sessions.</div>`;
-      return;
-    }
-    const rows = data.sessions
-      .sort((a,b) => a.connected_secs - b.connected_secs)
-      .map(s => `<tr>
-        <td>${s.id}</td>
-        <td>${esc(s.peer_ip)}:${s.peer_port}</td>
-        <td>${esc(s.user || "<i style='opacity:0.5'>(none)</i>")}</td>
-        <td>${esc(s.data_dir)}</td>
-        <td>${fmtDuration(s.connected_secs)}</td>
-        <td>${fmtDuration(s.idle_secs)}</td>
-        <td>${s.frames_in}</td>
-        <td>${s.frames_out}</td>
-        <td>${s.open_tables}</td>
-        <td><button class="btn btn-danger" data-kill="${s.id}">Kill</button></td>
-        </tr>`).join("");
-    $("sessions-body").innerHTML = `<table>
-      <thead><tr>
-        <th>ID</th><th>Peer</th><th>User</th><th>Data dir</th>
-        <th>Connected</th><th>Idle</th>
-        <th>frames in</th><th>frames out</th><th>open</th>
-        <th></th>
-      </tr></thead><tbody>${rows}</tbody></table>`;
-    document.querySelectorAll("[data-kill]").forEach(b =>
-      b.addEventListener("click", async () => {
-        if (!confirm(`Kill session ${b.dataset.kill}?`)) return;
-        try {
-          await api(`/api/server/sessions/${b.dataset.kill}/kill`,
-                    {method:"POST"});
-          loadSessions();
-        } catch (e) { alert(e.message); }
-      }));
-  } catch (e) {
-    $("sessions-body").innerHTML = `<div class="err">${esc(e.message)}</div>`;
-  }
-}
+// Sessions tab: see renderSessionsTab (with the Open Files code).
+async function loadSessions() { return renderSessionsTab(); }
 
 document.querySelectorAll("nav.tabs button").forEach(b =>
   b.addEventListener("click", () => showTab(b.dataset.tab)));
-$("server-link").addEventListener("click", () => { showTab("server"); closeNav(); });
+["server-link", "server-head"].forEach(id => $(id).addEventListener("click",
+  () => { showTab("server"); closeNav(); }));
 
 /* ---- mobile nav drawer (studio responsive) ---- */
 function closeNav() {
@@ -1875,6 +1942,394 @@ inline constexpr const char kSpaPart7[] = R"OPENADS_SPA(archParams.get("table");
     if (run) await runSql();
   }
 }
+
+// ---- Open Files tab: open tables -> sessions using them -------------
+let filesState = { sel: null, data: null };
+let filesTimer = null;
+function startFilesAutoRefresh() {
+  stopFilesAutoRefresh();
+  if (!$("files-auto").checked) return;
+  filesTimer = setInterval(loadFiles, 3000);
+}
+function stopFilesAutoRefresh() {
+  if (filesTimer) { clearInterval(filesTimer); filesTimer = null; }
+}
+async function loadFiles() {
+  try {
+    const data = await api("/api/server/files");
+    filesState.data = data;
+    const nses = new Set();
+    (data.files || []).forEach(f => f.sessions.forEach(s => nses.add(s.id)));
+    $("files-status").textContent =
+      `${data.count} open file(s), ${nses.size} session(s)`;
+    $("files-status").className = "ok";
+    renderFiles();
+  } catch (e) {
+    $("files-body").innerHTML = `<div class="err">${esc(e.message)}</div>`;
+  }
+}
+function selectedFile() {
+  const d = filesState.data;
+  return d && d.files ? d.files.find(f => f.key === filesState.sel) : null;
+}
+function renderFiles() {
+  const d = filesState.data;
+  if (!d) return;
+  const all = d.files || [];
+  if (filesState.sel && !selectedFile()) {  // closed by its last session
+    $("files-status").textContent += " · selected file was closed";
+    filesState.sel = null;
+  }
+  const q = $("files-filter").value.trim().toLowerCase();
+  const list = all.filter(f => !q || f.file.toLowerCase().includes(q));
+  const keepTop = $("files-body").scrollTop;  // survive auto-refresh
+  if (list.length === 0) {
+    $("files-body").innerHTML = `<div class="empty">${
+      all.length ? "No open files match the filter." : "No open files."}</div>`;
+  } else {
+    const rows = list.map((f, i) => `<tr class="pick${
+        f.key === filesState.sel ? " sel" : ""}" data-fi="${i}">
+      <td class="fname">${esc(f.file)}</td>
+      <td>${f.sessions.length}</td>
+      <td>${f.handles}</td>
+      <td>${f.locks.length || ""}</td>
+      <td>${f.exclusive_session ? "session " + f.exclusive_session : ""}</td>
+      <td><button class="btn btn-danger" data-fkill="${i}">Kill all</button></td>
+      </tr>`).join("");
+    $("files-body").innerHTML = `<table>
+      <thead><tr><th>File</th><th>Sessions</th><th>Handles</th>
+      <th>Locks</th><th>Exclusive</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+    makeSortable($("files-body"), "files");
+    $("files-body").scrollTop = keepTop;
+    document.querySelectorAll("[data-fi]").forEach(tr =>
+      tr.addEventListener("click", () => {
+        filesState.sel = list[+tr.dataset.fi].key;
+        renderFiles();
+      }));
+    document.querySelectorAll("[data-fkill]").forEach(b =>
+      b.addEventListener("click", ev => {
+        ev.stopPropagation();
+        killFileSessions(list[+b.dataset.fkill]);
+      }));
+  }
+  renderFileSessions();
+}
+function renderFileSessions() {
+  const f = selectedFile();
+  $("files-sel").classList.toggle("hidden", !f);
+  if (!f) {  // nothing selected / file closed: leave no stale rows behind
+    ["files-sel-title", "files-sessions", "files-locks-title",
+     "files-locks"].forEach(e => $(e).innerHTML = "");
+    return;
+  }
+  $("files-sel-title").innerHTML =
+    `Sessions using <b>${esc(f.file)}</b> (${f.sessions.length})`;
+  const rows = f.sessions
+    .sort((a, b) => a.id - b.id)
+    .map(s => `<tr>
+      <td>${s.id}</td>
+      <td>${esc(s.peer_ip)}:${s.peer_port}</td>
+      <td>${s.user ? esc(s.user) : "<i style='opacity:0.5'>(none)</i>"}</td>
+      ${whoCells(s)}
+      <td data-sort="${s.connected_secs}">${fmtDuration(s.connected_secs)}</td>
+      <td data-sort="${s.idle_secs}">${fmtDuration(s.idle_secs)}</td>
+      <td>${s.handles}</td>
+      <td>${s.exclusive ? "exclusive" : "shared"}</td>
+      <td><button class="btn btn-danger" data-skill="${s.id}">Kill</button></td>
+      </tr>`).join("");
+  $("files-sessions").innerHTML = `<table>
+    <thead><tr><th>Session</th><th>Peer</th><th>User</th>${WHO_TH}<th>Connected</th>
+    <th>Idle</th><th>Handles</th><th>Mode</th><th></th></tr></thead>
+    <tbody>${rows}</tbody></table>`;
+  makeSortable($("files-sessions"), "fileSessions");
+  renderFileLocks(f);
+  document.querySelectorAll("[data-skill]").forEach(b =>
+    b.addEventListener("click", () => killOneSession(+b.dataset.skill)));
+}
+// Locks held on the selected file: file lock first, then records.
+function renderFileLocks(f) {
+  const locks = f.locks || [];
+  $("files-locks-title").innerHTML =
+    `Locks on <b>${esc(f.file)}</b> (${locks.length})`;
+  if (!locks.length) {
+    $("files-locks").innerHTML = `<div class="empty">No record or file locks.</div>`;
+    return;
+  }
+  const rows = locks.map(l => `<tr>
+      <td data-sort="${l.recno}">${l.type === "file" ? "<b>whole file</b>" : l.recno}</td>
+      <td>${l.id || ""}</td>
+      <td>${l.user ? esc(l.user) : "<i style='opacity:0.5'>(none)</i>"}</td>
+      ${whoCells(l)}
+      <td>${l.peer_ip ? esc(l.peer_ip) + ":" + l.peer_port : ""}</td>
+      <td>${l.id ? `<button class="btn btn-danger" data-skill="${l.id}">Kill</button>` : ""}</td>
+      </tr>`).join("");
+  $("files-locks").innerHTML = `<table>
+    <thead><tr><th>Record #</th><th>Session</th><th>User</th>${WHO_TH}
+    <th>Peer</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+  makeSortable($("files-locks"), "fileLocks");
+}
+// Computer / OS user / program cells for any session-shaped object.
+// A computer name found by reverse DNS (client did not report one) is
+// shown in italics.
+const WHO_TH = "<th>Computer</th><th>OS user</th><th>Program</th>";
+function whoCells(s) {
+  const none = "<i style='opacity:0.5'>?</i>";
+  const comp = !s.computer ? none
+    : s.computer_source === "dns"
+      ? `<i title="from DNS (client did not report its name)">${esc(s.computer)}</i>`
+      : esc(s.computer);
+  return `<td>${comp}</td><td>${s.os_user ? esc(s.os_user) : none}</td>` +
+         `<td>${s.program ? esc(s.program) : none}</td>`;
+}
+async function killFileSessions(f) {
+  if (!f) return;
+  if (!confirm(`Kill all ${f.sessions.length} session(s) using\n${f.file}?\n\n` +
+               `Each session is a whole client connection: its other open ` +
+               `files close too.`)) return;
+  try {
+    const r = await api("/api/server/files/kill", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key: f.key }) });
+    $("files-status").textContent = `killed ${r.killed.length} session(s)`;
+  } catch (e) { alert(e.message); }
+  setTimeout(loadFiles, 300);  // sessions close asynchronously
+}
+async function killOneSession(id) {
+  if (!confirm(`Kill session ${id}?\n\nIts other open files close too.`)) return;
+  try {
+    await api(`/api/server/sessions/${id}/kill`, { method: "POST" });
+  } catch (e) { alert(e.message); }
+  setTimeout(loadFiles, 300);
+}
+$("files-refresh").addEventListener("click", loadFiles);
+$("files-auto").addEventListener("change", startFilesAutoRefresh);
+$("files-filter").addEventListener("input", renderFiles);
+$("files-kill-all").addEventListener("click", () => killFileSessions(selectedFile()));
+
+)OPENADS_SPA";
+inline constexpr const char kSpaPart7b[] = R"OPENADS_SPA(// ---- Sortable grids -------------------------------------------------
+// Click a header to sort by that column, again to reverse. The choice is
+// kept per grid key, so auto-refresh re-renders keep the order. A cell's
+// data-sort attribute (e.g. seconds behind "5m 3s") wins over its text.
+const gridSort = {};
+function makeSortable(container, key) {
+  const table = container.querySelector("table");
+  if (!table || !table.tHead) return;
+  [...table.tHead.rows[0].cells].forEach((th, i) => {
+    if (!th.textContent.trim()) return;  // button columns
+    th.classList.add("sortable");
+    th.addEventListener("click", () => {
+      const s = gridSort[key];
+      gridSort[key] = { col: i, dir: s && s.col === i ? -s.dir : 1 };
+      applySort(table, key);
+    });
+  });
+  applySort(table, key);
+}
+function applySort(table, key) {
+  const s = gridSort[key];
+  [...table.tHead.rows[0].cells].forEach((th, i) => {
+    th.classList.toggle("sort-asc",  !!s && s.col === i && s.dir > 0);
+    th.classList.toggle("sort-desc", !!s && s.col === i && s.dir < 0);
+  });
+  if (!s || !table.tBodies[0]) return;
+  const body = table.tBodies[0];
+  const val = r => {
+    const c = r.cells[s.col];
+    return c ? (c.dataset.sort !== undefined ? c.dataset.sort : c.textContent.trim()) : "";
+  };
+  const rows = [...body.rows];
+  rows.sort((a, b) => {
+    const x = val(a), y = val(b), nx = Number(x), ny = Number(y);
+    const r = x !== "" && y !== "" && !isNaN(nx) && !isNaN(ny) ? nx - ny
+      : x.localeCompare(y, undefined, { numeric: true, sensitivity: "base" });
+    return r * s.dir;
+  });
+  rows.forEach(r => body.appendChild(r));
+}
+
+// ---- Sessions tab: sessions grid; select one to see its files + locks --
+let sessState = { sel: null, sessions: [], files: [] };
+async function renderSessionsTab() {
+  try {
+    const [data, fdata] = await Promise.all([
+      api("/api/server/sessions"),
+      api("/api/server/files").catch(() => ({ files: [] }))]);
+    sessState.sessions = data.sessions || [];
+    sessState.files = fdata.files || [];
+    $("sessions-status").textContent = `${data.count} active`;
+    $("sessions-status").className = "ok";
+    drawSessions();
+  } catch (e) {
+    $("sessions-body").innerHTML = `<div class="err">${esc(e.message)}</div>`;
+  }
+}
+function sessionLocks(id) {
+  const out = [];
+  sessState.files.forEach(f => (f.locks || []).forEach(l => {
+    if (l.id === id) out.push({ file: f.file, recno: l.recno, type: l.type });
+  }));
+  return out;
+}
+function drawSessions() {
+  const list = sessState.sessions;
+  const keepTop = $("sessions-body").scrollTop;  // survive auto-refresh
+  if (sessState.sel && !list.some(s => s.id === sessState.sel)) {
+    $("sessions-status").textContent += ` · session ${sessState.sel} disconnected`;
+    sessState.sel = null;
+  }
+  if (!list.length) {
+    $("sessions-body").innerHTML = `<div class="empty">No active wire sessions.</div>`;
+  } else {
+    const rows = list.map(s => `<tr class="pick${
+        s.id === sessState.sel ? " sel" : ""}" data-sid="${s.id}">
+      <td>${s.id}</td>
+      <td>${esc(s.peer_ip)}:${s.peer_port}</td>
+      <td>${s.user ? esc(s.user) : "<i style='opacity:0.5'>(none)</i>"}</td>
+      ${whoCells(s)}
+      <td data-sort="${s.connected_secs}">${fmtDuration(s.connected_secs)}</td>
+      <td data-sort="${s.idle_secs}">${fmtDuration(s.idle_secs)}</td>
+      <td>${s.frames_in}</td>
+      <td>${s.frames_out}</td>
+      <td>${s.open_tables}</td>
+      <td>${sessionLocks(s.id).length}</td>
+      <td class="dir" title="${esc(s.data_dir)}">${esc(s.data_dir)}</td>
+      <td><button class="btn btn-danger" data-kill="${s.id}">Kill</button></td>
+      </tr>`).join("");
+    $("sessions-body").innerHTML = `<table>
+      <thead><tr><th>ID</th><th>Peer</th><th>User</th>${WHO_TH}
+      <th>Connected</th><th>Idle</th><th>frames in</th><th>frames out</th>
+      <th>Open files</th><th>Locks</th><th>Data dir</th><th></th></tr></thead>
+      <tbody>${rows}</tbody></table>`;
+    makeSortable($("sessions-body"), "sessions");
+    $("sessions-body").scrollTop = keepTop;
+    document.querySelectorAll("[data-sid]").forEach(tr =>
+      tr.addEventListener("click", () => {
+        sessState.sel = +tr.dataset.sid;
+        drawSessions();
+      }));
+    document.querySelectorAll("[data-kill]").forEach(b =>
+      b.addEventListener("click", async ev => {
+        ev.stopPropagation();
+        if (!confirm(`Kill session ${b.dataset.kill}?\n\nIts open files close and its locks are released.`)) return;
+        try {
+          await api(`/api/server/sessions/${b.dataset.kill}/kill`, { method: "POST" });
+        } catch (e) { alert(e.message); }
+        setTimeout(renderSessionsTab, 300);
+      }));
+  }
+  drawSessionDetail();
+}
+function drawSessionDetail() {
+  const id = sessState.sel;
+  $("sessions-sel").classList.toggle("hidden", !id);
+  if (!id) {  // nothing selected / session gone: leave no stale rows behind
+    ["sessions-files-title", "sessions-files", "sessions-locks-title",
+     "sessions-locks"].forEach(e => $(e).innerHTML = "");
+    return;
+  }
+  const locks = sessionLocks(id);
+  const files = [];
+  sessState.files.forEach(f => {
+    const me = f.sessions.find(s => s.id === id);
+    const n = locks.filter(l => l.file === f.file).length;
+    if (me || n) files.push({ file: f.file, handles: me ? me.handles : 0,
+                              exclusive: me && me.exclusive, locks: n });
+  });
+  $("sessions-files-title").innerHTML = `Files open by session <b>${id}</b> (${files.length})`;
+  $("sessions-files").innerHTML = !files.length
+    ? `<div class="empty">No open files.</div>`
+    : `<table><thead><tr><th>File</th><th>Handles</th><th>Mode</th><th>Locks</th></tr></thead>
+       <tbody>${files.map(f => `<tr>
+         <td class="fname">${esc(f.file)}</td><td>${f.handles}</td>
+         <td>${f.exclusive ? "exclusive" : "shared"}</td><td>${f.locks || ""}</td>
+       </tr>`).join("")}</tbody></table>`;
+  makeSortable($("sessions-files"), "sessionFiles");
+  $("sessions-locks-title").innerHTML = `Locks held by session <b>${id}</b> (${locks.length})`;
+  $("sessions-locks").innerHTML = !locks.length
+    ? `<div class="empty">No record or file locks.</div>`
+    : `<table><thead><tr><th>File</th><th>Record #</th></tr></thead>
+       <tbody>${locks.map(l => `<tr>
+         <td class="fname">${esc(l.file)}</td>
+         <td data-sort="${l.recno}">${l.type === "file" ? "<b>whole file</b>" : l.recno}</td>
+       </tr>`).join("")}</tbody></table>`;
+  makeSortable($("sessions-locks"), "sessionLocks");
+}
+
+// ---- Locks tab: every record / file lock on the server -----------------
+let locksTimer = null, locksList = [];
+function startLocksAutoRefresh() {
+  stopLocksAutoRefresh();
+  if (!$("locks-auto").checked) return;
+  locksTimer = setInterval(loadLocks, 3000);
+}
+function stopLocksAutoRefresh() {
+  if (locksTimer) { clearInterval(locksTimer); locksTimer = null; }
+}
+async function loadLocks() {
+  try {
+    const d = await api("/api/server/files");
+    const out = [];
+    (d.files || []).forEach(f => {
+      const ses = {};
+      f.sessions.forEach(s => ses[s.id] = s);
+      (f.locks || []).forEach(l => out.push(Object.assign({}, l,
+        { file: f.file, idle_secs: ses[l.id] ? ses[l.id].idle_secs : null })));
+    });
+    locksList = out;
+    renderLocks();
+  } catch (e) {
+    $("locks-body").innerHTML = `<div class="err">${esc(e.message)}</div>`;
+  }
+}
+function renderLocks() {
+  const q = $("locks-filter").value.trim().toLowerCase();
+  const list = locksList.filter(l => !q || [l.file, l.user, l.computer,
+    l.os_user, l.program, l.peer_ip, String(l.id)].some(v =>
+      v && String(v).toLowerCase().includes(q)));
+  $("locks-status").textContent = `${locksList.length} lock(s), ` +
+    `${new Set(locksList.map(l => l.id)).size} session(s)`;
+  $("locks-status").className = "ok";
+  const keepTop = $("locks-body").scrollTop;  // survive auto-refresh
+  if (!list.length) {
+    $("locks-body").innerHTML = `<div class="empty">${
+      locksList.length ? "No locks match the filter." : "No record or file locks."}</div>`;
+    return;
+  }
+  const rows = list.map(l => `<tr>
+      <td class="fname">${esc(l.file)}</td>
+      <td data-sort="${l.type === "file" ? 0 : l.recno}">${
+        l.type === "file" ? "<b>whole file</b>" : l.recno}</td>
+      <td>${l.id || ""}</td>
+      <td>${l.user ? esc(l.user) : "<i style='opacity:0.5'>(none)</i>"}</td>
+      ${whoCells(l)}
+      <td>${l.peer_ip ? esc(l.peer_ip) + ":" + l.peer_port : ""}</td>
+      <td data-sort="${l.idle_secs ?? ""}">${
+        l.idle_secs == null ? "" : fmtDuration(l.idle_secs)}</td>
+      <td>${l.id ? `<button class="btn btn-danger" data-lkill="${l.id}">Kill</button>` : ""}</td>
+      </tr>`).join("");
+  $("locks-body").innerHTML = `<table>
+    <thead><tr><th>File</th><th>Record #</th><th>Session</th><th>User</th>${WHO_TH}
+    <th>Peer</th><th>Idle</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+  makeSortable($("locks-body"), "locks");
+  $("locks-body").scrollTop = keepTop;
+  document.querySelectorAll("[data-lkill]").forEach(b =>
+    b.addEventListener("click", async () => {
+      const id = +b.dataset.lkill;
+      const n = locksList.filter(l => l.id === id).length;
+      if (!confirm(`Kill session ${id}?\n\nIt holds ${n} lock(s). All are released ` +
+                   `and its open files close.`)) return;
+      try {
+        await api(`/api/server/sessions/${id}/kill`, { method: "POST" });
+        $("locks-status").textContent = `killed session ${id}`;
+      } catch (e) { alert(e.message); }
+      setTimeout(loadLocks, 300);  // sessions close asynchronously
+    }));
+}
+$("locks-refresh").addEventListener("click", loadLocks);
+$("locks-auto").addEventListener("change", startLocksAutoRefresh);
+$("locks-filter").addEventListener("input", renderLocks);
+
 applyUrlState();
 </script>
 </body>
@@ -1886,12 +2341,15 @@ inline const std::string kSpaIndexHtml = []{
     std::string s;
     s.reserve(72706);
     s += detail::kSpaPart1;
+    s += detail::kSpaPart1b;
     s += detail::kSpaPart2;
+    s += detail::kSpaPart2b;
     s += detail::kSpaPart3;
     s += detail::kSpaPart4;
     s += detail::kSpaPart5;
     s += detail::kSpaPart6;
     s += detail::kSpaPart7;
+    s += detail::kSpaPart7b;
     return s;
 }();
 
