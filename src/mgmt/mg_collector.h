@@ -104,6 +104,7 @@ private:
 struct LockOwner {
     std::string   user;
     std::uint16_t conn_no = 0;
+    std::uint64_t session_id = 0;  // wire session id; 0 = local mode
 };
 
 // Thread-local "who is running on this thread right now". Deep engine
@@ -117,7 +118,8 @@ struct LockOwner {
 // back to the default LockOwner{}, resolved to "(local)"/1 by the caller,
 // matching the rest of local-mode mgmt (see fetch_mg_snapshot in
 // ace_exports.cpp).
-void       set_current_lock_owner(const std::string& user, std::uint16_t conn_no);
+void       set_current_lock_owner(const std::string& user, std::uint16_t conn_no,
+                                  std::uint64_t session_id = 0);
 LockOwner  current_lock_owner();
 
 // Process-global registry of currently-held record/table locks, keyed by

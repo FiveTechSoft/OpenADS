@@ -54,6 +54,10 @@ struct MgLock {
     // here so AdsMgGetLocks / sp_mgGetAllLocks can honor their TableName
     // filter argument.
     std::string   table;
+    // Wire session that took the lock (Server::SessionInfo::id); 0 for
+    // local-mode locks. conn_no above is a list position that shifts as
+    // sessions come and go; this id is stable (Studio "Open Files" view).
+    std::uint64_t session_id = 0;
 };
 
 // One worker thread.

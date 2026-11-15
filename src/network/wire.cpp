@@ -8,6 +8,8 @@ bool valid_opcode(std::uint8_t opcode) noexcept {
     switch (opcode) {
         case static_cast<std::uint8_t>(Opcode::Hello):
         case static_cast<std::uint8_t>(Opcode::HelloAck):
+        case static_cast<std::uint8_t>(Opcode::ClientInfo):
+        case static_cast<std::uint8_t>(Opcode::ClientInfoAck):
         case static_cast<std::uint8_t>(Opcode::Connect):
         case static_cast<std::uint8_t>(Opcode::ConnectAck):
         case static_cast<std::uint8_t>(Opcode::Disconnect):

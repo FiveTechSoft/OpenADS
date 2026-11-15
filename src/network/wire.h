@@ -24,6 +24,11 @@ namespace openads::network {
 enum class Opcode : std::uint8_t {
     Hello              = 0x01,
     HelloAck           = 0x02,
+    // Client identity, sent once after ConnectAck to servers that echo
+    // kCapClientInfo. Payload: [u16 len][computer][u16 len][os_user]
+    // [u16 len][program], UTF-8. Ack payload is empty.
+    ClientInfo         = 0x1D,
+    ClientInfoAck      = 0x1E,
     Connect            = 0x10,
     ConnectAck         = 0x11,
     Disconnect         = 0x12,
@@ -686,6 +691,12 @@ inline constexpr std::uint32_t kCapNavBoundaryPair = 0x00000100u;
 // LockRecord appends u8 wants_row; ack appends the existing row trailer.
 // Both peers must advertise this bit; old peers keep opcode-only locks.
 inline constexpr std::uint32_t kCapLockedRow = 0x00000400u;
+
+// Server caps echo only: the server accepts the ClientInfo opcode (client
+// computer name, OS user, program) shown by the Studio console. Clients
+// send ClientInfo only when the server sets this bit, so old servers never
+// see the opcode.
+inline constexpr std::uint32_t kCapClientInfo = 0x00000800u;
 
 
 // Warm OpenTableAck sections (USE latency). After the fixed

@@ -181,6 +181,11 @@ public:
         std::uint16_t                                       listener_port = 0;  // which port the client connected to
         std::string                                         user;
         std::string                                         data_dir;
+        // Reported by the client's ClientInfo frame (empty for clients
+        // that predate it): workstation name, OS login, program file.
+        std::string                                         client_computer;
+        std::string                                         client_os_user;
+        std::string                                         client_program;
         std::chrono::system_clock::time_point               connected_at{};
         std::chrono::system_clock::time_point               last_activity{};
         std::uint64_t                                       frames_in   = 0;
@@ -210,6 +215,10 @@ public:
         std::chrono::system_clock::time_point               last_sql_at{};
     };
     std::vector<SessionInfo> sessions_snapshot() const;
+    // Resolved table path -> session id holding it ADS_EXCLUSIVE, for the
+    // Studio "Open Files" view. Paths without an exclusive holder are
+    // omitted.
+    std::unordered_map<std::string, std::uint64_t> exclusive_holders();
 
     // 1-based position of this session in sessions_snapshot() order — the
     // same volatile position-based numbering used for MgUser::conn_no and
@@ -323,6 +332,11 @@ public:
     void          set_session_executing(std::uint64_t id, bool executing);
     // Record the text of an ExecuteSQL frame this session just received.
     void          set_session_sql(std::uint64_t id, const std::string& sql);
+    // Store the identity a client reported in its ClientInfo frame.
+    void          set_session_client_info(std::uint64_t id,
+                                          const std::string& computer,
+                                          const std::string& os_user,
+                                          const std::string& program);
     void          set_session_user(std::uint64_t id,
                                     const std::string& user,
                                     const std::string& data_dir);

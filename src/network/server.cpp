@@ -289,7 +289,7 @@ mgmt::MgSnapshot Server::build_mg_snapshot() const {
         mgmt::MgUser u;
         u.name    = s.user.empty() ? "(anonymous)" : s.user;
         u.address = s.peer_ip + ":" + std::to_string(s.peer_port);
-        u.os_login     = u.name;
+        u.os_login     = s.client_os_user.empty() ? u.name : s.client_os_user;
         u.conn_no      = static_cast<std::uint16_t>(conn_no);
         u.connected_at = s.connected_at;
         u.avg_cost_micros = s.op_count > 0
@@ -438,6 +438,18 @@ void Server::set_session_user(std::uint64_t id,
     it->second.data_dir = data_dir;
 }
 
+void Server::set_session_client_info(std::uint64_t id,
+                                     const std::string& computer,
+                                     const std::string& os_user,
+                                     const std::string& program) {
+    std::lock_guard<std::mutex> lk(info_mu_);
+    auto it = sessions_info_.find(id);
+    if (it == sessions_info_.end()) return;
+    it->second.client_computer = computer;
+    it->second.client_os_user  = os_user;
+    it->second.client_program  = program;
+}
+
 void Server::add_session_table(std::uint64_t id, std::int32_t delta,
                                 const std::string& table_name) {
     std::lock_guard<std::mutex> lk(info_mu_);
@@ -465,6 +477,14 @@ void Server::add_session_table(std::uint64_t id, std::int32_t delta,
     auto& stats = openads::mgmt::process_mg_stats();
     openads::mgmt::MgStats::bump_max(stats.max_workareas, open_workareas_);
     openads::mgmt::MgStats::bump_max(stats.max_tables, open_workareas_);
+}
+
+std::unordered_map<std::string, std::uint64_t> Server::exclusive_holders() {
+    std::unordered_map<std::string, std::uint64_t> out;
+    std::lock_guard<std::mutex> lk(open_reg_mu_);
+    for (const auto& [path, e] : open_reg_)
+        if (e.exclusive_sid != 0) out.emplace(path, e.exclusive_sid);
+    return out;
 }
 
 bool Server::try_register_open(std::uint64_t id,

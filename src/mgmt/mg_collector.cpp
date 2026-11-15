@@ -342,9 +342,11 @@ KillUserFn process_kill_user() {
     return g_kill_user_fn;
 }
 
-void set_current_lock_owner(const std::string& user, std::uint16_t conn_no) {
-    g_current_lock_owner.user    = user;
-    g_current_lock_owner.conn_no = conn_no;
+void set_current_lock_owner(const std::string& user, std::uint16_t conn_no,
+                            std::uint64_t session_id) {
+    g_current_lock_owner.user       = user;
+    g_current_lock_owner.conn_no    = conn_no;
+    g_current_lock_owner.session_id = session_id;
 }
 
 LockOwner current_lock_owner() { return g_current_lock_owner; }
@@ -402,6 +404,7 @@ std::vector<MgLock> LockRegistry::snapshot() const {
         l.conn_no = ent.owner.conn_no;
         l.recno   = key.recno;
         l.table   = ent.table;
+        l.session_id = ent.owner.session_id;
         out.push_back(std::move(l));
     }
     for (const auto& [key, ent] : table_locks_) {
@@ -411,6 +414,7 @@ std::vector<MgLock> LockRegistry::snapshot() const {
         l.conn_no = ent.owner.conn_no;
         l.recno   = 0;  // whole-table lock
         l.table   = ent.table;
+        l.session_id = ent.owner.session_id;
         out.push_back(std::move(l));
     }
     return out;

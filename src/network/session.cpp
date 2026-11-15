@@ -650,6 +650,7 @@ void Session::cleanup() {
     }
     tbls_.clear();
     tbl_open_paths_.clear();
+    tbl_mg_names_.clear();
     tbl_open_reg_.clear();
 
     // 5) oads_FOpen / AdsFOpen files for this session.
@@ -1820,6 +1821,42 @@ DispatchResult Session::dispatch(const Frame& f) {
             reply.payload.assign(v.begin(), v.end());
             break;
         }
+        case Opcode::ClientInfo: {
+            // [u16 len][computer][u16 len][os_user][u16 len][program].
+            // Display-only (Studio console, AdsMgGetUserNames os login):
+            // control characters are dropped and each field is capped.
+            if (!sess_conn_) { reply = err("ClientInfo: not connected"); break; }
+            const auto& pl = f.payload;
+            std::size_t p = 0;
+            std::string fields[3];
+            bool ok = true;
+            for (auto& out : fields) {
+                if (p + 2 > pl.size()) { ok = false; break; }
+                const std::size_t n = static_cast<std::size_t>(pl[p]) |
+                                      (static_cast<std::size_t>(pl[p + 1]) << 8);
+                p += 2;
+                if (p + n > pl.size()) { ok = false; break; }
+                // Keep whole UTF-8 sequences only (the console's JSON
+                // encoder rejects malformed UTF-8); anything else -> '?'.
+                for (std::size_t i = 0; i < n && out.size() < 128;) {
+                    const unsigned char c = pl[p + i];
+                    std::size_t len = c < 0x80 ? 1 : (c >> 5) == 0x6 ? 2
+                                    : (c >> 4) == 0xE ? 3 : (c >> 3) == 0x1E ? 4 : 0;
+                    bool good = len != 0 && i + len <= n && out.size() + len <= 128;
+                    for (std::size_t k = 1; good && k < len; ++k)
+                        good = (pl[p + i + k] & 0xC0) == 0x80;
+                    if (!good) { out.push_back('?'); ++i; continue; }
+                    if (len > 1 || (c >= 0x20 && c != 0x7F))
+                        out.append(reinterpret_cast<const char*>(pl.data() + p + i), len);
+                    i += len;
+                }
+                p += n;
+            }
+            if (!ok) { reply = err("ClientInfo: bad payload"); break; }
+            srv_->set_session_client_info(sid_, fields[0], fields[1], fields[2]);
+            reply.opcode = Opcode::ClientInfoAck;
+            break;
+        }
         case Opcode::Connect: {
             // M12.9 — Connect payload format:
             //   [u16 dlen][dir][u16 ulen][user][u16 plen][password]
@@ -2028,6 +2065,11 @@ DispatchResult Session::dispatch(const Frame& f) {
             session_user_ = user;
             session_password_ = pw;
             srv_->set_session_user(sid_, user, dir);
+            // Attribute every lock this session thread takes (including
+            // implicit ones, e.g. append auto-locks) from the start.
+            openads::mgmt::set_current_lock_owner(
+                user.empty() ? "(anonymous)" : user,
+                srv_->conn_no_for_session(sid_), sid_);
             reply.opcode = Opcode::ConnectAck;
             std::string ackmsg = "connected:" + dir;
             reply.payload.assign(ackmsg.begin(), ackmsg.end());
@@ -2043,7 +2085,8 @@ DispatchResult Session::dispatch(const Frame& f) {
                     openads::network::kCapNavOrderFuse |
                     openads::network::kCapFlushTableDurable |
                     openads::network::kCapNavBoundaryPair |
-                    openads::network::kCapLockedRow;
+                    openads::network::kCapLockedRow |
+                    openads::network::kCapClientInfo;
                 // mtfix39 test/diagnostic gate: simulate a pre-fix server
                 // that neither echoes kCapLockedRow nor answers the
                 // current-record flag with a row trailer, so the client
@@ -2243,6 +2286,7 @@ DispatchResult Session::dispatch(const Frame& f) {
                 break;
             }
             std::uint32_t id = next_id_++;
+            std::string mg_name = rel;
             // mtfix11 - enforce ADS_EXCLUSIVE across wire sessions (SAP
             // semantics; the drivers alone treat Exclusive as a plain
             // open, so a reindex/pack exclusive hold never kept a second
@@ -2264,12 +2308,14 @@ DispatchResult Session::dispatch(const Frame& f) {
                         break;
                     }
                     tbl_open_reg_.emplace(id, std::make_pair(canon, excl));
+                    mg_name = canon;
                 }
             }
             tbls_.emplace(id, th.value());
             tbl_open_paths_.emplace(id, rel);
+            tbl_mg_names_.emplace(id, mg_name);
             openads::abi::create_diag::log("server-open-ok");
-            srv_->add_session_table(sid_, +1, rel);
+            srv_->add_session_table(sid_, +1, mg_name);
             reply.opcode = Opcode::OpenTableAck;
             write_u32_le(id, reply.payload);
             // M-AOF.6 mirror: detect the production CDX/ADI on the server
@@ -2390,6 +2436,10 @@ DispatchResult Session::dispatch(const Frame& f) {
             }
             auto it = tbls_.find(id);
             if (it != tbls_.end()) {
+                // Drop registry entries keyed by this Table (e.g. a file
+                // lock still held at close) before its address is freed.
+                if (auto* ct = sess_conn_->lookup_table(it->second))
+                    openads::mgmt::LockRegistry::instance().remove_all_for_table(ct);
                 sess_conn_->close_table(it->second);
                 tbls_.erase(it);
                 if (auto rit = tbl_open_reg_.find(id);
@@ -2399,11 +2449,12 @@ DispatchResult Session::dispatch(const Frame& f) {
                     tbl_open_reg_.erase(rit);
                 }
                 std::string tname;
-                if (auto pit = tbl_open_paths_.find(id); pit != tbl_open_paths_.end())
+                if (auto pit = tbl_mg_names_.find(id); pit != tbl_mg_names_.end())
                     tname = pit->second;
                 srv_->add_session_table(sid_, -1, tname);
             }
             tbl_open_paths_.erase(id);
+            tbl_mg_names_.erase(id);
             if (auto hit = tbls_h_.find(id); hit != tbls_h_.end()) {
                 abi_schema_.erase(hit->second);
                 // Close the shadow ABI handle, not just the map entry.
@@ -3289,7 +3340,7 @@ DispatchResult Session::dispatch(const Frame& f) {
             }
             openads::mgmt::set_current_lock_owner(
                 session_user_.empty() ? "(anonymous)" : session_user_,
-                srv_->conn_no_for_session(sid_));
+                srv_->conn_no_for_session(sid_), sid_);
             // M12.16 dual-handle: appends go through the parallel ABI
             // handle (see AppendBlank), and AdsAppendRecord auto-locks the
             // new record on THAT Table instance. Routing the client's
@@ -3458,7 +3509,7 @@ DispatchResult Session::dispatch(const Frame& f) {
             if (!tbl) { reply = err("LockTable: lookup failed"); break; }
             openads::mgmt::set_current_lock_owner(
                 session_user_.empty() ? "(anonymous)" : session_user_,
-                srv_->conn_no_for_session(sid_));
+                srv_->conn_no_for_session(sid_), sid_);
             if (f.opcode == Opcode::LockTable) {
                 // Fail fast — a single attempt (see LockRecord above: the
                 // client owns the retry loop so the connection stays free
@@ -3469,7 +3520,12 @@ DispatchResult Session::dispatch(const Frame& f) {
                         openads::AE_LOCKED);
                     break;
                 }
+                // Visible to AdsMgGetLocks and the Studio "Open Files" view
+                // (the ABI AdsLockTable path registers the same way).
+                openads::mgmt::LockRegistry::instance().add_table_lock(
+                    tbl, tbl->path());
             } else {
+                openads::mgmt::LockRegistry::instance().remove_table_lock(tbl);
                 // M12.16 dual-handle: route through the ABI shadow handle
                 // when it exists (same as LockRecord/UnlockRecord) so the
                 // ABI-side Table's LockMgr releases its own locks.

@@ -1,4 +1,5 @@
 #include "network/client.h"
+#include "network/client_identity.h"
 
 #include "abi/lock_retry_policy.h"
 #include "engine/table.h"
@@ -501,6 +502,21 @@ RemoteConnection::connect_with_transport(std::unique_ptr<ITransport> transport,
                     (static_cast<std::uint32_t>(c[3]) << 24);
             }
         }
+    }
+    // Tell the server who is connecting (computer, OS user, program) for
+    // its console. Only servers that echo kCapClientInfo know the opcode;
+    // older ones never see it. Best-effort: a failure changes nothing.
+    if ((server_caps_ & kCapClientInfo) != 0) {
+        const ClientIdentity me = local_client_identity();
+        Frame ci;
+        ci.opcode = Opcode::ClientInfo;
+        for (const std::string* s : {&me.computer, &me.os_user, &me.program}) {
+            const std::size_t n = std::min<std::size_t>(s->size(), 1024);
+            write_u16_le(static_cast<std::uint16_t>(n), ci.payload);
+            ci.payload.insert(ci.payload.end(), s->begin(),
+                              s->begin() + static_cast<std::ptrdiff_t>(n));
+        }
+        (void)request(ci);
     }
     // M12.32 — SET DELETED often runs before AdsConnect60 (rddads apps
     // set it in Main, then connect), so the AdsShowDeleted broadcast

@@ -83,6 +83,7 @@ add_library(openads_core STATIC
     network/session.cpp
     network/worker_pool.cpp
     network/client.cpp
+    network/client_identity.cpp
     network/remote_index_nav.cpp
     network/mutex_manager.cpp
     mgmt/mg_collector.cpp

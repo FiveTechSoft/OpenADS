@@ -111,6 +111,10 @@ private:
     // Original OpenTable payload (DD alias or relative path). ensure_abi_handle
     // must reopen the same physical file — basename-only breaks subdir tables.
     std::unordered_map<std::uint32_t, std::string>            tbl_open_paths_;
+    // Name each wire table id was reported under in Server::add_session_table
+    // (the engine's resolved path when known, else the client's name), so
+    // the console groups one file opened by different spellings together.
+    std::unordered_map<std::uint32_t, std::string>            tbl_mg_names_;
     // Diagnostic-only first append marker; no change to table operations.
     std::unordered_set<std::uint32_t>                          diag_first_append_;
     // mtfix11 - Server::try_register_open bookkeeping per wire table id:
