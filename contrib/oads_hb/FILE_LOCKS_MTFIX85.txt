@@ -1,6 +1,12 @@
 OpenADS FS byte locks - mtfix85
 Pritpal Bedi
-2026-11-15 10:59
+2026-11-15 11:01
+
+Remote ownership choice for review: each client connection is a separate
+lock owner, like a separate Harbour process. Within that connection, file
+opens share the merged registry. Different clients can share read locks,
+and WAIT can wait for a different client. They do not all become one
+owner merely because one server process handles them.
 
 OAds_FLock( hFile, nStart, nLen, nType ) -> lOk
 OAds_FUnlock( hFile, nStart, nLen ) -> lOk
@@ -25,18 +31,23 @@ releases the VM. Connection failure or a closed handle ends the call.
 A caller can wait indefinitely if an external owner never releases.
 
 Harbour filebuf.c behavior preserved:
-- Opens of the same physical file share a merged process-local range
+- Opens of the same physical file within one owner share a merged range
   registry and native file. Each public handle keeps its own position.
 - An overlapping lock already in that registry fails immediately,
   including with WAIT. An identical re-lock is not recursive/idempotent.
 - Adjacent registrations merge. Unlock removes/splits a contained range
   after the native OS unlock succeeds.
 - LockTest reports an overlapping own registration as locked. Otherwise
-  Unix F_GETLK returns the external owner PID; Windows returns 1 for
+  Unix queries return the external owner PID where the OS supplies one;
+  OFD locks have no PID, so they return 1. Windows returns 1 for
   conflict. Both return 0 for free, -1 for error. It never waits.
 - Closing one reference does not release shared native-file locks while
   another reference remains. Last close releases the OS locks.
 - Unix read-only opens request shared OS locks, as Harbour does.
+- POSIX uses OFD locks so separate client connections retain independent
+  ownership and closing one cannot drop another's locks. This differs
+  from Harbour's process-owned fcntl locks. OS-reported classic-lock PIDs
+  are returned when available; an OFD owner has no PID and returns 1.
 
 OS behavior is preserved, including:
 - Unix partial unlock and zero-length-to-EOF ranges work through fcntl.
@@ -45,9 +56,7 @@ OS behavior is preserved, including:
   Harbour's Windows backend does. Zero length has Windows native meaning,
   not the Unix to-EOF meaning.
 - Windows locks affect I/O. Unix locks are advisory. Other programs must
-  cooperate. POSIX process locks can be dropped if unrelated code in the
-  same host process closes another descriptor for the same physical file;
-  the OAds FS functions reuse the native file to avoid doing that.
+  cooperate.
 
 Nonnegative file offsets and ranges must fit the signed 64-bit offset
 space used by the cross-platform API. No virtual-file/socket drivers are

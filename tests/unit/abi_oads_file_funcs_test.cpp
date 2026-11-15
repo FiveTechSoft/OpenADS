@@ -701,6 +701,9 @@ static void lock_round_trip( ADSHANDLE h, const fs::path& dir )
     fs::remove(marker);
     std::string command = "\"" + probe.string() + "\" hold \"" +
                            (dir / "locks.bin").string() + "\" \"" + marker.string() + "\"";
+#if defined(_WIN32)
+    command = "\"" + command + "\"";
+#endif
     std::atomic<int> child_rc{-1};
     std::thread holder([&] { child_rc.store(std::system(command.c_str())); });
     bool ready = false;
@@ -998,6 +1001,39 @@ TEST_CASE( "oads_* remote embedded: full round-trip" )
     oads_round_trip( h, "remote-embedded" );
     metadata_round_trip( h, data );
     lock_round_trip( h, data );
+
+    // Different client connections are separate lock owners, like two
+    // Harbour processes. Same-client opens still share merged ranges.
+    auto peer = remote_connect_embedded(data, srv.port());
+    ADSHANDLE left = 0, right = 0;
+    REQUIRE( oads_FOpen(h, (UNSIGNED8*)"locks.bin", 2, &left) == 0 );
+    REQUIRE( oads_FOpen(peer, (UNSIGNED8*)"locks.bin", 2, &right) == 0 );
+    REQUIRE( oads_FLock(left, 0, 16, 0x100) == 0 );
+    REQUIRE( oads_FLock(right, 0, 16, 0x100) == 0 );
+    REQUIRE( oads_FUnlock(left, 0, 16) == 0 );
+    REQUIRE( oads_FUnlock(right, 0, 16) == 0 );
+    REQUIRE( oads_FLock(left, 0, 16, 0) == 0 );
+    CHECK( oads_FLock(right, 0, 16, 0) == 5012 );
+    std::atomic<bool> done{false};
+    std::atomic<UNSIGNED32> wait_rc{999};
+    std::thread waiter([&] { wait_rc.store(oads_FLock(right,0,16,0x200)); done.store(true); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    CHECK_FALSE(done.load());
+    CHECK( oads_FUnlock(left,0,16) == 0 );
+    for (int i=0; i<300 && !done.load(); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    if (!done.load()) oads_FClose(right);
+    waiter.join();
+    CHECK(wait_rc.load() == 0);
+    CHECK(oads_FUnlock(right,0,16) == 0);
+    CHECK(oads_FLock(left,32,16,0) == 0);
+    CHECK(oads_FClose(left) == 0);
+    REQUIRE(AdsDisconnect(h) == 0);
+    CHECK(oads_FLock(right,32,16,0) == 0);
+    CHECK(oads_FUnlock(right,32,16) == 0);
+    CHECK(oads_FClose(right) == 0);
+    REQUIRE(AdsDisconnect(peer) == 0);
+    h = remote_connect_embedded(data,srv.port());
 
     // verify file lands in server data dir, not client cwd
     CHECK_FALSE( fs::exists( app / "oads_test.txt" ) );

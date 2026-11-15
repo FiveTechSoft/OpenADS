@@ -507,6 +507,7 @@ void FsStream::seekg(std::streamoff off, std::ios::seekdir way) {
 }
 
 namespace {
+thread_local std::uint64_t fs_current_owner = 0;
 std::mutex fs_files_mu;
 std::unordered_map<std::string, std::weak_ptr<FsNative>> fs_files;
 std::string fs_identity(const std::string& path) {
@@ -543,6 +544,11 @@ util::Error native_lock_error(const char* msg, const std::string& path) {
     return util::Error{5013, code, msg, path};
 }
 }
+
+FsOwnerScope::FsOwnerScope(std::uint64_t owner) : previous_(fs_current_owner) {
+    fs_current_owner = owner;
+}
+FsOwnerScope::~FsOwnerScope() { fs_current_owner = previous_; }
 
 util::Result<std::int32_t> fs_lock_step(FsFile& f, std::uint64_t start,
                                 std::uint64_t len, std::uint16_t type,
@@ -603,11 +609,21 @@ util::Result<std::int32_t> fs_lock_step(FsFile& f, std::uint64_t start,
     fl.l_start = static_cast<off_t>(start);
     fl.l_len = static_cast<off_t>(len);
     fl.l_type = op == 1 ? F_UNLCK : shared ? F_RDLCK : F_WRLCK;
+    fl.l_pid = 0;
+    // OFD locks preserve ownership for separate clients in one server
+    // process, and closing another client's descriptor cannot drop them.
+#if defined(F_OFD_SETLK) && defined(F_OFD_GETLK)
+    constexpr int set_cmd = F_OFD_SETLK;
+    constexpr int get_cmd = F_OFD_GETLK;
+#else
+#error "FS client-owned locks require OFD byte-range lock support on this POSIX platform"
+#endif
     if (op == 2) {
-        if (::fcntl(fd, F_GETLK, &fl) != 0) return native_lock_error("F_GETLK", f.path);
-        return fl.l_type == F_UNLCK ? 0 : static_cast<std::int32_t>(fl.l_pid);
+        if (::fcntl(fd, get_cmd, &fl) != 0) return native_lock_error("F_OFD_GETLK", f.path);
+        // POSIX reports -1 for an OFD owner: no process ID exists there.
+        return fl.l_type == F_UNLCK ? 0 : fl.l_pid > 0 ? static_cast<std::int32_t>(fl.l_pid) : 1;
     }
-    if (::fcntl(fd, F_SETLK, &fl) != 0) {
+    if (::fcntl(fd, set_cmd, &fl) != 0) {
         if (op == 0 && (errno == EAGAIN || errno == EACCES)) return 0;
         return native_lock_error("F_SETLK", f.path);
     }
@@ -640,7 +656,10 @@ util::Result<std::unique_ptr<FsFile>> fs_open(const std::string& abs_path,
     f->path = abs_path;
     f->writable = create || (mode != ADS_FO_READ && mode != 3);
     std::lock_guard<std::mutex> global(fs_files_mu);
-    auto key = fs_identity(abs_path);
+    auto owner_key = [&](const std::string& identity) {
+        return identity.empty() ? identity : identity + ":owner:" + std::to_string(fs_current_owner);
+    };
+    auto key = owner_key(fs_identity(abs_path));
     std::shared_ptr<FsNative> state;
     if (!key.empty()) state = fs_files[key].lock();
     if (state) {
@@ -648,9 +667,7 @@ util::Result<std::unique_ptr<FsFile>> fs_open(const std::string& abs_path,
         if (f->writable && !state->writable) {
             // Win32 lock ownership is per native handle. Never switch away
             // from a handle that still holds byte ranges.
-#if defined(_WIN32)
             if (!state->ranges.empty()) return io_err(5012, "locked read-only file cannot upgrade", abs_path);
-#endif
             auto upgraded = platform::File::open(abs_path, platform::OpenMode::ReadWrite);
             if (!upgraded) return upgraded.error();
             state->retained.push_back(std::move(state->file));
@@ -673,7 +690,7 @@ util::Result<std::unique_ptr<FsFile>> fs_open(const std::string& abs_path,
         state = std::make_shared<FsNative>();
         state->file = std::move(native.value());
         state->writable = f->writable;
-        key = fs_identity(abs_path);
+        key = owner_key(fs_identity(abs_path));
         if (!key.empty()) fs_files[key] = state;
         // Remove expired weak entries so file churn does not retain names.
         for (auto it = fs_files.begin(); it != fs_files.end();)

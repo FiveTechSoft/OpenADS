@@ -72,12 +72,21 @@ util::Result<bool>          fs_dir_exist(const std::string& abs_path);
 util::Result<void>          fs_dir_make(const std::string& abs_path);
 util::Result<void>          fs_dir_remove(const std::string& abs_path);
 
+// Remote connections own separate native lock state, like separate Harbour
+// processes; within an owner opens share Harbour-style merged byte ranges.
+class FsOwnerScope {
+public:
+    explicit FsOwnerScope(std::uint64_t owner);
+    ~FsOwnerScope();
+private:
+    std::uint64_t previous_;
+};
 // FS-only native state and merged byte ranges, separate from RDD locks.
 struct FsRange { std::uint64_t start, len; };
 struct FsNative {
     platform::File file;
-    // POSIX closing ANY fd drops process locks, so retain an old read-only
-    // descriptor across an upgrade until the last file reference closes.
+    // Keep prior descriptors alive through a read-only to read/write upgrade;
+    // no upgrade is allowed while this owner's file holds byte ranges.
     std::vector<platform::File> retained;
     std::mutex mu;
     std::vector<FsRange> ranges;

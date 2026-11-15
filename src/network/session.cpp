@@ -1658,6 +1658,8 @@ void Session::append_open_warm_sections(std::vector<std::uint8_t>& out,
 }
 
 DispatchResult Session::dispatch(const Frame& f) {
+    // Distinct remote connections behave as distinct Harbour processes.
+    openads::engine::FsOwnerScope fs_owner(reinterpret_cast<std::uintptr_t>(this));
     Frame reply;
     if (srv_->auth_required() && (f.opcode == Opcode::Connect || f.opcode == Opcode::MgConnect))
         return {err("Challenge authentication required", openads::AE_LOGIN_FAILED), true};
