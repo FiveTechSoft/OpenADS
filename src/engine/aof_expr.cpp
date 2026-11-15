@@ -512,6 +512,25 @@ util::Result<NodePtr> parse(const std::string& src) {
     return p.parse_top();
 }
 
+std::optional<bool> constant_literal(const std::string& src) {
+    std::size_t b = 0, e = src.size();
+    auto is_ws = [](char c) {
+        return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+    };
+    for (;;) {
+        while (b < e && is_ws(src[b])) ++b;
+        while (e > b && is_ws(src[e - 1])) --e;
+        if (e - b >= 2 && src[b] == '(' && src[e - 1] == ')') { ++b; --e; continue; }
+        break;
+    }
+    if (e - b != 3 || src[b] != '.' || src[b + 2] != '.') return std::nullopt;
+    switch (src[b + 1]) {
+        case 'T': case 't': case 'Y': case 'y': return true;
+        case 'F': case 'f': case 'N': case 'n': return false;
+        default: return std::nullopt;
+    }
+}
+
 std::string to_string(const Node& n) {
     std::ostringstream os;
     to_string_rec(n, os);

@@ -37,6 +37,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <variant>
 #include <vector>
@@ -100,6 +101,14 @@ inline NodePtr make_not(NodePtr c) {
 // gracefully — the AOF surface treats "cannot parse" as "filter is
 // not optimised" rather than as a hard failure.
 util::Result<NodePtr> parse(const std::string& src);
+
+// Recognise a constant logical filter: `.T.` / `.F.` (also `.Y.` /
+// `.N.`), case-insensitive, optionally wrapped in whitespace and
+// parentheses. Returns the constant's value, or std::nullopt when the
+// expression is anything else. `AdsSetAOF(".F.")` is the classic idiom
+// for "start with an empty AOF, then AdsCustomizeAOF records into it";
+// the AST has no constant node, so callers check this before parse().
+std::optional<bool> constant_literal(const std::string& src);
 
 // Pretty-print for tests / debugging. Format is stable but not
 // part of the public ABI.

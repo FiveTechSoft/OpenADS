@@ -442,17 +442,34 @@ public:
     bool aof_active() const noexcept   { return aof_active_; }
 
     // AdsCustomizeAOF — force a single record into (`include=true`) or out
-    // of (`include=false`) the active AOF result set. Flips its bit in the
-    // retained bitmap and reinstalls so the predicate and the sparse recno
-    // sequence stay consistent. Returns false if no AOF is active or the
-    // recno is invalid.
+    // of (`include=false`) the active AOF result set. Thin wrapper over
+    // customize_aof_records(); returns false if the recno is invalid.
     bool customize_aof_record(std::uint32_t recno, bool include) {
-        if (!aof_active_ || recno < 1) return false;
-        if (recno > record_count()) return false;
-        if (aof_bitmap_.size() < recno) aof_bitmap_.resize(recno, false);
-        aof_bitmap_[recno - 1] = include;
-        install_aof_bitmap(aof_bitmap_);   // rebuilds predicate + seq
+        if (recno < 1 || recno > record_count()) return false;
+        customize_aof_records({recno}, include);
         return true;
+    }
+
+    // AdsCustomizeAOF — batch form. Flips the listed records' bits in the
+    // retained bitmap and reinstalls once (predicate + sparse recno
+    // sequence). Out-of-range recnos are skipped. When no AOF is active,
+    // one is created first, as ADS does: an empty set for an ADD (so
+    // exactly the listed records become visible) and a full set for a
+    // REMOVE (so only the listed records are hidden).
+    void customize_aof_records(const std::vector<std::uint32_t>& recnos,
+                               bool include) {
+        const std::uint32_t n = record_count();
+        if (!aof_active_) {
+            filter_expr_.clear();
+            aof_expr_.clear();
+            aof_bitmap_.assign(n, !include);
+            aof_opt_level_ = 1;            // ADS_OPTIMIZED_FULL
+        }
+        if (aof_bitmap_.size() < n) aof_bitmap_.resize(n, false);
+        for (auto r : recnos) {
+            if (r >= 1 && r <= n) aof_bitmap_[r - 1] = include;
+        }
+        install_aof_bitmap(aof_bitmap_);   // rebuilds predicate + seq
     }
 
     // --- BMDBFCDX bitmap-filter from recno array (M-BM.1) ---------------

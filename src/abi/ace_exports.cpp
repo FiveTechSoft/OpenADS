@@ -22115,6 +22115,14 @@ UNSIGNED32 ENTRYPOINT AdsSetAOF(ADSHANDLE hTable, UNSIGNED8* pucCondition,
         return fail(openads::AE_INTERNAL_ERROR, "AdsSetAOF: NULL condition");
     }
     auto cond = openads::abi::to_internal(pucCondition, 0);
+    // `.T.` / `.F.` -- constant AOF (all / no records). `.F.` is the
+    // usual seed for an AOF built up with AdsCustomizeAOF.
+    if (auto k = openads::engine::aof::constant_literal(cond)) {
+        t->install_aof_bitmap(std::vector<bool>(t->record_count(), *k));
+        t->set_aof_expr(cond);
+        t->set_aof_opt_level(ADS_OPTIMIZED_FULL);
+        return ok();
+    }
     auto ast = openads::engine::aof::parse(cond);
     if (!ast) {
         // An expression outside the optimisable AOF subset (e.g.
@@ -38327,10 +38335,11 @@ UNSIGNED32 ENTRYPOINT AdsCustomizeAOF(ADSHANDLE hTable, UNSIGNED32 ulNumRecords,
 
     Table* t = get_table(hTable);
     if (t == nullptr) return fail(openads::AE_INTERNAL_ERROR, "no table");
-    if (!t->aof_active())
-        return fail(openads::AE_INTERNAL_ERROR, "no active AOF on table");
-    for (UNSIGNED32 i = 0; i < ulNumRecords; ++i)
-        (void)t->customize_aof_record(pulRecords[i], include);
+    // No active AOF: ADS creates one (empty for ADD, full for REMOVE)
+    // rather than failing -- customize_aof_records handles that.
+    t->customize_aof_records(
+        std::vector<std::uint32_t>(pulRecords, pulRecords + ulNumRecords),
+        include);
     return ok();
 }
 UNSIGNED32 ENTRYPOINT AdsData(UNSIGNED16, void*) {
@@ -39409,6 +39418,10 @@ UNSIGNED32 ENTRYPOINT AdsRefreshAOF(ADSHANDLE hTable) {
     // Re-evaluate the stored AOF expression against current data and
     // reinstall the bitmap, so rows that changed since AdsSetAOF are
     // re-classified.
+    if (auto k = openads::engine::aof::constant_literal(cond)) {
+        t->install_aof_bitmap(std::vector<bool>(t->record_count(), *k));
+        return ok();
+    }
     auto ast = openads::engine::aof::parse(cond);
     if (!ast) return ok();
     auto rep = openads::engine::aof::evaluate_optimised(*ast.value(), *t);

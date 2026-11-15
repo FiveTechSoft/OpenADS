@@ -3585,6 +3585,19 @@ DispatchResult Session::dispatch(const Frame& f) {
             if (auto hit = tbls_h_.find(id); hit != tbls_h_.end()) {
                 htwin = hit->second;
             }
+            if (auto k = openads::engine::aof::constant_literal(cond)) {
+                tbl->install_aof_bitmap(
+                    std::vector<bool>(tbl->record_count(), *k));
+                tbl->set_aof_expr(cond);
+                tbl->set_aof_opt_level(ADS_OPTIMIZED_FULL);
+                if (htwin != 0) {
+                    std::vector<UNSIGNED8> tb(cond.size() + 1);
+                    std::memcpy(tb.data(), cond.data(), cond.size());
+                    (void)AdsSetAOF(htwin, tb.data(), 0);
+                }
+                reply.opcode = Opcode::SetAOFAck;
+                break;
+            }
             auto ast = openads::engine::aof::parse(cond);
             if (!ast) {
                 // Expression outside the optimisable AOF subset
@@ -5285,17 +5298,26 @@ DispatchResult Session::dispatch(const Frame& f) {
                 }
                 auto* tbl = sess_conn_->lookup_table(it->second);
                 if (!tbl) { reply = err("CustomizeAOF: lookup failed"); break; }
-                if (!tbl->aof_active()) {
-                    reply = err("CustomizeAOF: no active AOF"); break;
-                }
                 bool include = false;
                 if (opt == 1) include = true;
                 else if (opt == 2) include = false;
                 else { reply = err("CustomizeAOF: invalid option"); break; }
+                std::vector<std::uint32_t> recnos;
+                recnos.reserve(nrecs);
                 for (std::uint16_t i = 0; i < nrecs; ++i) {
-                    std::uint32_t recno = read_u32_le(f.payload.data() + p);
+                    recnos.push_back(read_u32_le(f.payload.data() + p));
                     p += 4;
-                    (void)tbl->customize_aof_record(recno, include);
+                }
+                // Creates the AOF (empty for ADD, full for REMOVE) when
+                // none is active, matching local AdsCustomizeAOF.
+                tbl->customize_aof_records(recnos, include);
+                // Mirror onto the ABI twin used by ordered navigation,
+                // as SetAOF does, or indexed Skip ignores the change.
+                if (auto hit = tbls_h_.find(id);
+                    hit != tbls_h_.end() && !recnos.empty()) {
+                    (void)AdsCustomizeAOF(
+                        hit->second, static_cast<UNSIGNED32>(recnos.size()),
+                        recnos.data(), static_cast<UNSIGNED16>(opt));
                 }
                 reply.opcode = Opcode::CustomizeAOFAck;
                 break;
