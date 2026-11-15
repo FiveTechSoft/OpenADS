@@ -6,11 +6,20 @@ toolchain. They resolve the `Ads*` entry points to `ace64.dll` (x64) /
 the engine at run time.
 
 ```
-x64/                       x86/
-  msvc/    ace64.lib          msvc/    ace32.lib     (COFF — MSVC / cl.exe)
-  mingw/   libace64.a         mingw/   libace32.a    (GNU  — MinGW-w64 / gcc)
-  borland/ ace64.lib          borland/ ace32.lib     (Borland / C++Builder)
+x64/                          x86/
+  msvc/    ace64.lib             msvc/    ace32.lib           (COFF — MSVC / cl.exe)
+  mingw/   libace64.a            mingw/   libace32.a          (GNU  — MinGW-w64 / gcc)
+           libopenace64.dll.a             libopenace32.dll.a  (GNU, for openace<bits>.dll)
+  borland/ ace64.lib             borland/ ace32.lib           (Borland / C++Builder)
 ```
+
+The MinGW `libopenace<bits>.dll.a` libs are the same as `libace<bits>.a` but
+bound to the default `openace<bits>.dll` name; link them with
+`-lopenace32` / `-lopenace64`. GNU ld picks `libX.dll.a` ahead of `libX.a`
+in the same directory, so they never clash with the static
+`libopenace<bits>.a` archive. (In the release zip the static archive sits at
+the root and these under `lib/`, so `-L` order decides which one a
+`-lopenace32` resolves to.)
 
 - **MSVC** — `cl app.c ace64.lib`
 - **MinGW / GCC (Windows)** — `gcc app.c -lace64` (with `-L` pointing here)
@@ -40,6 +49,25 @@ libs use the undecorated `src/openads_ace.def` (x64 has no `@N` decoration).
 
 (Reported by JONSSON RUSSI, RusSoft Ltda.)
 
+### Do not link `openace32.dll` itself with MinGW
+
+GNU ld can link a DLL file directly (`gcc app.o openace32.dll`, or the DLL
+path listed in an `.hbp`). **Do not do this on x86.** ld imports each DLL
+export `X` as the symbol `_X`, so the stdcall exports `_AdsXxx@N` become
+`__AdsXxx@N` and never match. ld's stdcall fixup then silently binds a
+stdcall caller's `_AdsXxx@N` reference to the plain **cdecl** `AdsXxx`
+alias (`Warning: resolving _AdsXxx@N by linking to _AdsXxx`). Every call
+then leaves its arguments on the stack. Harbour rddads built against the
+ACE SDK headers (stdcall) crashes at start-up in `ADS_GETFUNCTABLE` with
+an access violation.
+
+Link an import library instead: `-lopenace32` (`libopenace32.dll.a`) or
+`-lace32` (`libace32.a`). Each maps `_AdsXxx@N` to the stdcall export and
+`_AdsXxx` to the cdecl one, so both kinds of caller balance the stack. With
+hbmk2, use `-L<dir> -lopenace32` rather than a bare `.a` path: a bare path
+can land ahead of `-lrddads` on the link line, and ld only pulls archive
+members for symbols already referenced.
+
 ## Regenerating
 
 These are committed because the release CI runners have no Borland toolchain.
@@ -48,8 +76,14 @@ Regenerate after any change to the export surface (`src/openads_ace.def`,
 
 ```powershell
 cmake --build build/msvc-x64    --config Release --target openads_ace
-cmake --build build-x86         --config Release --target openads_ace
+cmake --build build/msvc-x86    --config Release --target openads_ace
 pwsh dist/import-libs/gen.ps1
 ```
 
-See `gen.ps1` for the exact tool invocations and expected install paths.
+To regenerate just one toolchain, or with tools installed elsewhere:
+
+```powershell
+pwsh dist/import-libs/gen.ps1 -Toolchains mingw -MinGW32Bin S:\mingw492\bin -MinGW64Bin C:\mingw64\bin
+```
+
+See `gen.ps1` for the exact tool invocations and default install paths.
