@@ -477,8 +477,25 @@ public:
             case OADS_VF_LINK:r.value1=hb_fsLink(p,p2);break;
             case OADS_VF_LINKSYM:r.value1=hb_fsLinkSym(p,p2);break;
             case OADS_VF_LINKREAD: {
+#ifdef _WIN32
+                // Harbour's Windows helper omits CloseHandle. A server must
+                // not retain a private lookup handle or prevent later erase.
+                const auto attributes=::GetFileAttributesA(p);
+                const DWORD flags=attributes!=INVALID_FILE_ATTRIBUTES && (attributes&FILE_ATTRIBUTE_DIRECTORY)?FILE_FLAG_BACKUP_SEMANTICS:FILE_ATTRIBUTE_NORMAL;
+                HANDLE lookup=::CreateFileA(p,GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,flags,nullptr);
+                if(lookup==INVALID_HANDLE_VALUE)hb_fsSetIOError(HB_FALSE,0);
+                else {
+                    char target[HB_PATH_MAX];
+                    const auto size=::GetFinalPathNameByHandleA(lookup,target,sizeof(target),0);
+                    const auto error=::GetLastError();::CloseHandle(lookup);::SetLastError(error);
+                    if(size<sizeof(target)){if(size)r.data.assign(target,target+size);hb_fsSetIOError(HB_TRUE,0);}
+                    else hb_fsSetError(9);
+                }
+#else
                 char* target=hb_fsLinkRead(p);
-                if(target){r.data.assign(target,target+std::char_traits<char>::length(target));hb_xfree(target);}break;
+                if(target){r.data.assign(target,target+std::char_traits<char>::length(target));hb_xfree(target);}
+#endif
+                break;
             }
             default:r.error=50;return r;
         }

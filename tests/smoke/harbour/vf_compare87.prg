@@ -4,8 +4,17 @@
  * Run with oads_vf.c and the same Harbour libraries used by the application.
  */
 #include "fileio.ch"
-PROCEDURE Main(cUri)
-   LOCAL h:=VF87Connect(cUri), a, b, n, nBad:=0, nSeed:=hb_RandomInt(1,2147483647)
+PROCEDURE Main(cUri,cLinkName)
+   LOCAL h,a,b,n,nBad:=0,nSeed:=hb_RandomInt(1,2147483647)
+   IF cUri=="--native-linkread".OR.cUri=="--oads-linkread"
+      IF cUri=="--native-linkread"
+         OutStd(hb_jsonEncode({hb_vfLinkRead(cLinkName),FError()}))
+      ELSE
+         OutStd(hb_jsonEncode({OAds_vfLinkRead(cLinkName),FError()}))
+      ENDIF
+      RETURN
+   ENDIF
+   h:=VF87Connect(cUri)
    IF h<=0
       OutStd("CONNECT FAILED"+hb_eol())
       ErrorLevel(1)
@@ -26,7 +35,7 @@ RETURN
 
 FUNCTION ProbeNative( cDir )
    LOCAL a := {}, p, cName := cDir+"/sample.bin", cCopy := cDir+"/copy.bin"
-   LOCAL cBuf, nAttr, ts, cTemp, pTemp, nEvents := 0
+   LOCAL cBuf, nAttr, ts, cTemp, pTemp, nEvents := 0, aLink, nHard, nSym
    LOCAL bCb := {|nDone,nTotal| nEvents++, nDone <= nTotal }
    ErrorBlock({|e| OutStd(e:description+" "+e:operation+hb_eol()),__Quit()})
    IF hb_vfNameExists(cDir)
@@ -68,7 +77,10 @@ FUNCTION ProbeNative( cDir )
    AAdd(a,{hb_vfTimeSet(cName,hb_SToT("20260102123456.789")),FError()})
    AAdd(a,{hb_vfTimeGet(cName,@ts),ts,FError()})
    AAdd(a,{Len(hb_vfDirectory(cDir+"/*","DHS")),hb_vfDirSpace(cDir,3)>0})
-   AAdd(a,{hb_vfLink(cName,cDir+"/hard"),hb_vfLinkSym(cDir+"/sample.bin",cDir+"/sym"),LinkLeaf87(hb_vfLinkRead(cDir+"/sym")),FError()})
+   nHard:=hb_vfLink(cName,cDir+"/hard")
+   nSym:=hb_vfLinkSym(cDir+"/sample.bin",cDir+"/sym")
+   aLink:=IsolatedLinkRead87(cDir+"/sym",.F.)
+   AAdd(a,{nHard,nSym,LinkLeaf87(aLink[1]),aLink[2]})
    AAdd(a,{hb_vfErase(cDir+"/hard"),hb_vfErase(cDir+"/sym"),FError()})
    AAdd(a,{hb_vfRename(cCopy,cDir+"/renamed"),hb_vfMoveFile(cDir+"/renamed",cCopy),FError()})
    AAdd(a,{hb_vfDirMake(cDir+"/one"),hb_vfDirMake(cDir+"/one"),hb_vfDirRemove(cDir+"/one"),FError()})
@@ -84,7 +96,7 @@ RETURN a
 
 FUNCTION ProbeOads( cDir )
    LOCAL a := {}, p, cName := cDir+"/sample.bin", cCopy := cDir+"/copy.bin"
-   LOCAL cBuf, nAttr, ts, cTemp, pTemp, nEvents := 0
+   LOCAL cBuf, nAttr, ts, cTemp, pTemp, nEvents := 0, aLink, nHard, nSym
    LOCAL bCb := {|nDone,nTotal| nEvents++, nDone <= nTotal }
    ErrorBlock({|e| OutStd(e:description+" "+e:operation+hb_eol()),__Quit()})
    IF hb_vfNameExists(cDir)
@@ -126,7 +138,10 @@ FUNCTION ProbeOads( cDir )
    AAdd(a,{OAds_vfTimeSet(cName,hb_SToT("20260102123456.789")),FError()})
    AAdd(a,{OAds_vfTimeGet(cName,@ts),ts,FError()})
    AAdd(a,{Len(OAds_vfDirectory(cDir+"/*","DHS")),OAds_vfDirSpace(cDir,3)>0})
-   AAdd(a,{OAds_vfLink(cName,cDir+"/hard"),OAds_vfLinkSym(cDir+"/sample.bin",cDir+"/sym"),LinkLeaf87(OAds_vfLinkRead(cDir+"/sym")),FError()})
+   nHard:=OAds_vfLink(cName,cDir+"/hard")
+   nSym:=OAds_vfLinkSym(cDir+"/sample.bin",cDir+"/sym")
+   aLink:={OAds_vfLinkRead(cDir+"/sym"),FError()}
+   AAdd(a,{nHard,nSym,LinkLeaf87(aLink[1]),aLink[2]})
    AAdd(a,{OAds_vfErase(cDir+"/hard"),OAds_vfErase(cDir+"/sym"),FError()})
    AAdd(a,{OAds_vfRename(cCopy,cDir+"/renamed"),OAds_vfMoveFile(cDir+"/renamed",cCopy),FError()})
    AAdd(a,{OAds_vfDirMake(cDir+"/one"),OAds_vfDirMake(cDir+"/one"),OAds_vfDirRemove(cDir+"/one"),FError()})
@@ -144,3 +159,24 @@ RETURN a
 // special form. Compare only the final link target name across scratch roots.
 STATIC FUNCTION LinkLeaf87(cName)
 RETURN SubStr(cName,Max(RAt("/",cName),RAt("\",cName))+1)
+
+// Isolate Harbour's Windows LinkRead lookup-handle leak in a child. This
+// still runs the real linked native function, then allows normal cleanup.
+STATIC FUNCTION IsolatedLinkRead87(cName,lOads)
+ LOCAL aResult,cOutput,cError,nExit
+#ifdef __PLATFORM__WINDOWS
+ nExit:=hb_processRun('"'+hb_ProgName()+'" '+iif(lOads,"--oads-linkread","--native-linkread")+' "'+cName+'"',NIL,@cOutput,@cError)
+ aResult:=hb_jsonDecode(cOutput)
+ IF nExit!=0.OR.ValType(aResult)!="A"
+  OutStd("FAIL isolated native LinkRead "+cError+hb_eol())
+  ErrorLevel(1)
+  QUIT
+ ENDIF
+#else
+ IF lOads
+  aResult:={OAds_vfLinkRead(cName),FError()}
+ ELSE
+  aResult:={hb_vfLinkRead(cName),FError()}
+ ENDIF
+#endif
+RETURN aResult

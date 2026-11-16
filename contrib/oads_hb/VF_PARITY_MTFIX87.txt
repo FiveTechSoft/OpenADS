@@ -77,3 +77,11 @@ Platform proof and package hashes accompany the build. These tests do not
 replace Vouch's own application test or authorize a production deployment.
 Existing INI, auth files, data and rollback files must be kept unchanged.
 No automatic deployment, service restart or upstream merge is performed.
+
+Windows LinkRead resource correction
+- The linked Harbour Windows lookup helper does not close its temporary
+  native handle. The remote provider closes its own private lookup handle
+  after getting the same target name. Otherwise a long-running server would
+  leak handles and prevent later erase/rename. Client-local Harbour and the
+  old OAds_F family stay unchanged. Native comparison probes run this call
+  in a short-lived child so Harbour's lookup leak cannot spoil cleanup.
