@@ -137,12 +137,23 @@ util::Result<HANDLE> open_jailed(const std::string& path, DWORD access,
         name.empty() || name.back() == L'.' || name.back() == L' ')
         return jail_refused("open(jail: invalid leaf)");
     const bool truncating = disp == CREATE_ALWAYS;
-    // The new vf family must support native read-only/no-access truncate
-    // opens too. Acquire write access only for the verified truncation, then
-    // reduce the returned duplicate to the caller's original access rights.
-    const bool reduce_access=exact_vf && truncating && !(access&GENERIC_WRITE);
-    HANDLE h = ::CreateFileW((current / leaf).c_str(), reduce_access?access|GENERIC_WRITE:access, share, nullptr,
-        truncating ? OPEN_ALWAYS : disp,
+    // Pin the leaf with attributes-only access before native CREATE_ALWAYS.
+    // DuplicateHandle access reduction retains the original FILE_OBJECT share
+    // access, which is observably different from Harbour's read-only truncate.
+    LockedDirectories leaf_pin;
+    if(exact_vf && truncating) {
+        HANDLE pin=::CreateFileW((current/leaf).c_str(),FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_ALWAYS,
+            attributes|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
+        if(pin==INVALID_HANDLE_VALUE)return os_error("vf truncate pin");
+        leaf_pin.handles.push_back(pin);
+        BY_HANDLE_FILE_INFORMATION metadata{};
+        if(!::GetFileInformationByHandle(pin,&metadata) ||
+           (metadata.dwFileAttributes&(FILE_ATTRIBUTE_REPARSE_POINT|FILE_ATTRIBUTE_DIRECTORY)))
+            return jail_refused("vf truncate reparse/file refused");
+    }
+    HANDLE h = ::CreateFileW((current / leaf).c_str(), access, share, nullptr,
+        truncating && !exact_vf ? OPEN_ALWAYS : disp,
         attributes | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
     if (h == INVALID_HANDLE_VALUE) return os_error("CreateFileW(jail)");
     BY_HANDLE_FILE_INFORMATION info{};
@@ -151,19 +162,11 @@ util::Result<HANDLE> open_jailed(const std::string& path, DWORD access,
         ::CloseHandle(h);
         return jail_refused("open(jail: reparse/file refused)");
     }
-    if (truncating) {
+    if (truncating && !exact_vf) {
         LARGE_INTEGER zero{};
         if (!::SetFilePointerEx(h, zero, nullptr, FILE_BEGIN) || !::SetEndOfFile(h)) {
             auto e = os_error("open(jail: truncate)"); ::CloseHandle(h); return e;
         }
-    }
-    if(reduce_access) {
-        HANDLE reduced=nullptr;
-        const DWORD rights=access==GENERIC_READ?FILE_GENERIC_READ:0;
-        if(!::DuplicateHandle(::GetCurrentProcess(),h,::GetCurrentProcess(),&reduced,rights,FALSE,0)) {
-            auto e=os_error("vf access reduction");::CloseHandle(h);return e;
-        }
-        ::CloseHandle(h);h=reduced;
     }
     return h;
 }

@@ -1,7 +1,7 @@
 #include "fileio.ch"
 #include "directry.ch"
 PROCEDURE Main(cUri,cNativeRoot)
- LOCAL h:=VF87Connect(cUri),cBase,a,b,n,p,aNative
+ LOCAL h:=VF87Connect(cUri),cBase,a,b,n,p,aNative,cTarget
  ErrorBlock({|e| OutStd("ERROR "+e:description+" "+e:operation+hb_eol()),ErrorLevel(1),__Quit()})
  Check(h>0,"connect")
  cBase:=OAds_vfPath(h,"boundary/")
@@ -20,6 +20,9 @@ PROCEDURE Main(cUri,cNativeRoot)
   Check(Len(b)==1,"explicit L includes inside link")
   Check("L"$b[1][F_ATTR],"explicit L reports link attribute")
   Check(OAds_vfLoad(cBase+"inside-link")=="inside content","inside link remains usable")
+  cTarget:=OAds_vfLinkRead(cBase+"inside-link")
+  Check(!Empty(cTarget).AND.FError()==0,"in-root link target read")
+  Check(!(Left(cTarget,1)$"/\").AND.At(":",cTarget)==0,"link target never leaks absolute server path")
  ENDIF
  IF OAds_vfExists(cBase+"directory-links-ready")
   Check(OAds_vfSave(cBase+"inside-dir/owned-alias.bin","alias body"),"save through inside directory link")

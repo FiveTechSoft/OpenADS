@@ -82,6 +82,9 @@ TEST_CASE("vf path spelling keeps canonical targets inside the selected root") {
     ec.clear();fs::create_symlink(base/"outside"/"file",base/"root"/"outside-link",ec);
     if(!ec)CHECK_FALSE(resolve_path((base/"root").string(),"outside-link"));
 #ifdef _WIN32
+    auto extended=fs::path(L"\\\\?\\"+fs::absolute(base/"root"/"folder"/"file").wstring());
+    CHECK(canonical_path(extended,ec)==canonical_path(base/"root"/"folder"/"file",ec));
+    CHECK(normalized_path(extended).is_absolute());
     CHECK(normalized_path(L"\\\\?\\C:\\data\\file")==fs::path(L"C:\\data\\file"));
     CHECK(normalized_path(L"\\\\?\\UNC\\server\\share\\file")==fs::path(L"\\\\server\\share\\file"));
 #endif

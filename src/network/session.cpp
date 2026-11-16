@@ -4839,7 +4839,7 @@ DispatchResult Session::dispatch(const Frame& f) {
                     // Never disclose an absolute server-native link target.
                     if(q.op==OADS_VF_LINKREAD && !result.data.empty()) {
                         std::string target(result.data.begin(),result.data.end());
-                        std::filesystem::path target_path(target);
+                        auto target_path=openads::engine::vf::normalized_path(std::filesystem::path(target));
                         auto root=resolve_vf(".");
                         std::error_code ec;
                         auto check=openads::engine::vf::canonical_path(target_path.is_absolute()?target_path:std::filesystem::path(q.path1).parent_path()/target_path,ec);

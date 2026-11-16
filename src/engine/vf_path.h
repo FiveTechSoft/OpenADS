@@ -29,7 +29,7 @@ inline std::filesystem::path normalized_path(const std::filesystem::path& path) 
 }
 inline std::filesystem::path canonical_path(const std::filesystem::path& path,std::error_code& error) {
     // MinGW GCC10 rejects a final '/.' although it names the parent itself.
-    auto input=path;
+    auto input=normalized_path(path);
     while(input.filename()=="." && input!=input.root_path())input=input.parent_path();
 #ifdef _WIN32
     // GCC10 canonical/read_symlink can retain a reparse spelling instead of
