@@ -10742,6 +10742,31 @@ UNSIGNED32 ENTRYPOINT AdsExtractKey(ADSHANDLE hIndex, UNSIGNED8* pucBuf,
                          UNSIGNED16* pusLen) {
     arc2_trace("AdsExtractKey");
     if (pusLen == nullptr) return fail(openads::AE_INTERNAL_ERROR, "null len");
+    // rddads' OrdKeyVal ignores this function's return code and decodes
+    // pucBuf for *pusLen bytes regardless, so every failure must report an
+    // EMPTY key -- leaving the caller's length untouched made OrdKeyVal()
+    // return MAX_STR_LEN bytes of uninitialised buffer ("garbage").
+    const std::uint16_t cap = *pusLen;
+    *pusLen = 0;
+    // Remote index: the server computes the key for our current record.
+    if (auto* ri = get_remote_index(hIndex)) {
+        auto* rt = ri->parent;
+        if (rt == nullptr || rt->conn == nullptr ||
+            !rt->conn->server_extract_key()) {
+            return fail(openads::AE_FUNCTION_NOT_AVAILABLE,
+                        "AdsExtractKey: server too old");
+        }
+        // Buffered field writes belong in the key (OrdKeyVal after REPLACE
+        // and before commit), and the server cursor must be on our row.
+        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
+        remote_settle_cursor(rt);
+        const std::uint32_t recno = rt->row_valid ? rt->current_recno : 0u;
+        auto r = rt->conn->extract_key(rt->id, ri->id, recno);
+        if (!r) return fail(r.error());
+        *pusLen = cap;
+        openads::abi::copy_to_caller(pucBuf, pusLen, r.value());
+        return ok();
+    }
     Table* t = lookup_table_by_index(hIndex);
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown index");
     if (auto rc = native_table_authorize(t, openads::engine::DataDict::DD_PERM_SELECT)) return rc;
@@ -10768,6 +10793,7 @@ UNSIGNED32 ENTRYPOINT AdsExtractKey(ADSHANDLE hIndex, UNSIGNED8* pucBuf,
         if (!k) return fail(k.error());
         key = std::move(k).value();
     }
+    *pusLen = cap;
     openads::abi::copy_to_caller(pucBuf, pusLen, key);
     return ok();
 }

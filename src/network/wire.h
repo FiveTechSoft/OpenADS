@@ -29,6 +29,14 @@ enum class Opcode : std::uint8_t {
     // [u16 len][program], UTF-8. Ack payload is empty.
     ClientInfo         = 0x1D,
     ClientInfoAck      = 0x1E,
+    // AdsExtractKey over the wire (rddads OrdKeyVal): the key of the
+    // current record for a remote index, in the index's stored encoding
+    // (text, or the 8-byte order-preserving double for numeric/date tags).
+    // Sent only to servers that echo kCapExtractKey.
+    // Request: [u32 table_id][u32 index_id][u32 recno, 0 = where it is]
+    // Reply:   [u16 len LE][key bytes]
+    ExtractKey         = 0x24,
+    ExtractKeyAck      = 0x25,
     Connect            = 0x10,
     ConnectAck         = 0x11,
     Disconnect         = 0x12,
@@ -697,6 +705,12 @@ inline constexpr std::uint32_t kCapLockedRow = 0x00000400u;
 // send ClientInfo only when the server sets this bit, so old servers never
 // see the opcode.
 inline constexpr std::uint32_t kCapClientInfo = 0x00000800u;
+
+// Server caps echo only: the server answers ExtractKey (AdsExtractKey /
+// OrdKeyVal on a remote index). Old servers never see the opcode; against
+// them the client returns an empty key instead of a failure that rddads
+// ignores (it then read an unfilled buffer: "OrdKeyVal() returns garbage").
+inline constexpr std::uint32_t kCapExtractKey = 0x00001000u;
 
 
 // Warm OpenTableAck sections (USE latency). After the fixed

@@ -2086,7 +2086,8 @@ DispatchResult Session::dispatch(const Frame& f) {
                     openads::network::kCapFlushTableDurable |
                     openads::network::kCapNavBoundaryPair |
                     openads::network::kCapLockedRow |
-                    openads::network::kCapClientInfo;
+                    openads::network::kCapClientInfo |
+                    openads::network::kCapExtractKey;
                 // mtfix39 test/diagnostic gate: simulate a pre-fix server
                 // that neither echoes kCapLockedRow nor answers the
                 // current-record flag with a row trailer, so the client
@@ -4710,6 +4711,41 @@ DispatchResult Session::dispatch(const Frame& f) {
             reply.opcode = Opcode::GetKeyTypeAck;
             reply.payload.push_back(static_cast<std::uint8_t>(kt & 0xFF));
             reply.payload.push_back(static_cast<std::uint8_t>((kt >> 8) & 0xFF));
+            break;
+        }
+        case Opcode::ExtractKey: {
+            // OrdKeyVal on a remote index. The client settled its cursor
+            // first, so the ABI twin normally sits on `recno` already; if
+            // not (the twin is only the cursor for ordered tables), move it
+            // there so the key is computed from the client's record.
+            if (f.payload.size() < 12) {
+                reply = err("ExtractKey: bad payload"); break;
+            }
+            std::uint32_t tid   = read_u32_le(f.payload.data());
+            std::uint32_t iid   = read_u32_le(f.payload.data() + 4);
+            std::uint32_t recno = read_u32_le(f.payload.data() + 8);
+            auto iit = index_h_.find(iid);
+            if (iit == index_h_.end()) {
+                reply = err("ExtractKey: bad index id"); break;
+            }
+            if (recno != 0) {
+                if (ADSHANDLE ht = ensure_abi_handle(tid); ht != 0) {
+                    UNSIGNED32 cur = 0;
+                    AdsGetRecordNum(ht, ADS_IGNOREFILTERS, &cur);
+                    if (cur != recno) AdsGotoRecord(ht, recno);
+                }
+            }
+            // Room for the longest key (240) plus the terminator that
+            // AdsExtractKey writes.
+            UNSIGNED8 kbuf[ADS_MAX_KEY_LENGTH + 16] = {0};
+            UNSIGNED16 klen = static_cast<UNSIGNED16>(sizeof(kbuf));
+            UNSIGNED32 rrc = AdsExtractKey(iit->second, kbuf, &klen);
+            if (rrc != 0) { reply = err("ExtractKey", rrc); break; }
+            if (klen > ADS_MAX_KEY_LENGTH) klen = ADS_MAX_KEY_LENGTH;
+            reply.opcode = Opcode::ExtractKeyAck;
+            reply.payload.push_back(static_cast<std::uint8_t>(klen & 0xFF));
+            reply.payload.push_back(static_cast<std::uint8_t>(klen >> 8));
+            reply.payload.insert(reply.payload.end(), kbuf, kbuf + klen);
             break;
         }
         case Opcode::ShowDeleted: {

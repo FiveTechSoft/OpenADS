@@ -3344,6 +3344,29 @@ RemoteConnection::get_key_type(std::uint32_t index_id) {
     return read_u16_le(rep.value().payload.data());
 }
 
+// AdsExtractKey over the wire: the current record's key in the index's
+// stored encoding. Only call when server_extract_key().
+util::Result<std::string>
+RemoteConnection::extract_key(std::uint32_t table_id, std::uint32_t index_id,
+                              std::uint32_t recno) {
+    Frame req;
+    req.opcode = Opcode::ExtractKey;
+    write_u32_le(table_id, req.payload);
+    write_u32_le(index_id, req.payload);
+    write_u32_le(recno, req.payload);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    const auto& p = rep.value().payload;
+    if (rep.value().opcode != Opcode::ExtractKeyAck || p.size() < 2) {
+        return util::Error{5000, 0, "ExtractKey: server error", ""};
+    }
+    const std::size_t n = read_u16_le(p.data());
+    if (p.size() < 2 + n) {
+        return util::Error{5000, 0, "ExtractKey: short reply", ""};
+    }
+    return std::string(reinterpret_cast<const char*>(p.data()) + 2, n);
+}
+
 // M12.32 — distributed mutex service.
 
 util::Result<void> RemoteConnection::mutex_create(const std::string& name) {

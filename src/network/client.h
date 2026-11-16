@@ -387,6 +387,13 @@ public:
     // M12.35 — query the server for the key expression result type of a
     // remote index (ADS_STRING, ADS_DATE, ADS_NUMERIC, ADS_LOGICAL).
     util::Result<std::uint16_t> get_key_type(std::uint32_t index_id);
+    // AdsExtractKey on a remote index (needs server_extract_key()).
+    util::Result<std::string> extract_key(std::uint32_t table_id,
+                                          std::uint32_t index_id,
+                                          std::uint32_t recno);
+    bool server_extract_key() const noexcept {
+        return (server_caps_ & kCapExtractKey) != 0;
+    }
     util::Result<std::uint32_t> create_index(std::uint32_t table_id,
                                               const std::string& path,
                                               const std::string& tag,
