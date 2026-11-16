@@ -34,7 +34,12 @@ util::Result<std::string> PathGuard::pin(const std::string& root,const std::stri
     if(ec)return denied(5);
     // Destructive operations act on the named leaf itself, not its target.
     // Follow-only operations first validate the target, then open NOFOLLOW.
-    auto path=leaf?canonical_path(name,ec):fs::path(name).lexically_normal();
+    auto path=fs::path(name).lexically_normal();
+    // Follow validated directory aliases, but never follow the final name of
+    // erase/rename/link operations. Pinning below still refuses any reparse
+    // replacement between canonicalization and the actual native operation.
+    if(leaf)path=canonical_path(path,ec);
+    else if(path.has_filename())path=canonical_path(path.parent_path(),ec)/path.filename();
     if(ec)return denied(5);
     auto rel=path.lexically_relative(base);
     if(rel.empty() && path!=base)return denied(5);

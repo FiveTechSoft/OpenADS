@@ -69,6 +69,16 @@ TEST_CASE("vf path spelling keeps canonical targets inside the selected root") {
         CHECK(canonical_path(base/"root"/"inside-link",ec)==canonical_path(base/"root"/"folder"/"file",ec));
         PathGuard pin;CHECK(pin.pin((base/"root").string(),(base/"root"/"inside-link").string(),true));
     }
+    ec.clear();fs::create_directory_symlink(base/"root"/"folder",base/"root"/"inside-dir",ec);
+    if(!ec) {
+        PathGuard pin;
+        CHECK(pin.pin((base/"root").string(),(base/"root"/"inside-dir"/"file").string(),false));
+    }
+    ec.clear();fs::create_directory_symlink(base/"outside",base/"root"/"outside-dir",ec);
+    if(!ec) {
+        PathGuard pin;
+        CHECK_FALSE(pin.pin((base/"root").string(),(base/"root"/"outside-dir"/"file").string(),false));
+    }
     ec.clear();fs::create_symlink(base/"outside"/"file",base/"root"/"outside-link",ec);
     if(!ec)CHECK_FALSE(resolve_path((base/"root").string(),"outside-link"));
 #ifdef _WIN32

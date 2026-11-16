@@ -31,6 +31,12 @@ def main():
             (boundary/'links-ready').touch()
         except OSError:
             pass
+        try:
+            (boundary/'inside-dir').symlink_to(boundary, target_is_directory=True)
+            (boundary/'outside-dir').symlink_to(outside, target_is_directory=True)
+            (boundary/'directory-links-ready').touch()
+        except OSError:
+            pass
         if hasattr(os,'mkfifo'):
             os.mkfifo(boundary/'fifo')
             (boundary/'fifo-ready').touch()
