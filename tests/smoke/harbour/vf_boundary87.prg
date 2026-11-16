@@ -1,7 +1,7 @@
 #include "fileio.ch"
 #include "directry.ch"
-PROCEDURE Main(cUri)
- LOCAL h:=VF87Connect(cUri),cBase,a,b,n,p
+PROCEDURE Main(cUri,cNativeRoot)
+ LOCAL h:=VF87Connect(cUri),cBase,a,b,n,p,aNative
  ErrorBlock({|e| OutStd("ERROR "+e:description+" "+e:operation+hb_eol()),ErrorLevel(1),__Quit()})
  Check(h>0,"connect")
  cBase:=OAds_vfPath(h,"boundary/")
@@ -13,7 +13,9 @@ PROCEDURE Main(cUri)
   Check(AScan(a,{|e|e[F_NAME]=="outside-link"})==0,"listing omits outside link metadata")
   n:=AScan(a,{|e|e[F_NAME]=="inside-link"})
   Check(n>0,"listing includes inside link")
-  Check(a[n][F_SIZE]==14,"inside link size follows target")
+  aNative:=hb_vfDirectory(cNativeRoot+"/boundary/inside-link","DHS")
+  Check(Len(aNative)==1,"native inside-link metadata fixture")
+  Check(a[n][F_SIZE]==aNative[1][F_SIZE],"inside link size matches native platform")
   b:=OAds_vfDirectory(cBase+"inside-link","L")
   Check(Len(b)==1,"explicit L includes inside link")
   Check("L"$b[1][F_ATTR],"explicit L reports link attribute")

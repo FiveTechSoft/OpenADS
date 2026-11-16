@@ -304,7 +304,7 @@ public:
             // Windows hard-link creation follows the source pathname. Keep
             // the validated leaf pinned too so it cannot become a reparse
             // point between the boundary check and CreateHardLink.
-            if(q.op==OADS_VF_LINK)follows=true;
+            if(q.op==OADS_VF_LINK || q.op==OADS_VF_LINKREAD)follows=true;
 #endif
             if(q.op!=OADS_VF_LINKSYM) {
                 auto pin=first_guard.pin(q.root,q.path1,follows);

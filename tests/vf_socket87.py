@@ -62,7 +62,7 @@ def main():
                 failures=[]
                 for probe in args.probe:
                     try:
-                        result = subprocess.run([str(pathlib.Path(probe).resolve()), uri], cwd=root,
+                        result = subprocess.run([str(pathlib.Path(probe).resolve()), uri, str(data)], cwd=root,
                                                 capture_output=True, text=True, timeout=90)
                         print(result.stdout, end='')
                         if result.returncode or ('PASS' not in result.stdout and 'differences=0' not in result.stdout):
