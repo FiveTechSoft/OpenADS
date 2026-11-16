@@ -58,7 +58,7 @@ util::Result<std::string> PathGuard::pin(const std::string& root,const std::stri
         HANDLE h=::CreateFileW(current.c_str(),FILE_READ_ATTRIBUTES,
             FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,
             FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
-        if(h==INVALID_HANDLE_VALUE){const auto e=::GetLastError();return denied(static_cast<int>(!leaf && e==ERROR_FILE_NOT_FOUND?ERROR_PATH_NOT_FOUND:e));}
+        if(h==INVALID_HANDLE_VALUE){const auto e=::GetLastError();return denied(static_cast<int>((i<count || !leaf) && e==ERROR_FILE_NOT_FOUND?ERROR_PATH_NOT_FOUND:e));}
         handles_.push_back(h);
         BY_HANDLE_FILE_INFORMATION info{};
         if(!::GetFileInformationByHandle(h,&info) || (info.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT) ||

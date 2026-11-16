@@ -3,6 +3,16 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <vector>
+#endif
 namespace openads::engine::vf {
 // New vf namespace only. Windows canonical() can return an extended spelling
 // for a symlink target and an ordinary spelling for its data root. Compare
@@ -21,7 +31,37 @@ inline std::filesystem::path canonical_path(const std::filesystem::path& path,st
     // MinGW GCC10 rejects a final '/.' although it names the parent itself.
     auto input=path;
     while(input.filename()=="." && input!=input.root_path())input=input.parent_path();
+#ifdef _WIN32
+    // GCC10 canonical/read_symlink can retain a reparse spelling instead of
+    // its final target. Resolve the existing ancestor through a native handle,
+    // append only missing suffixes, then let PathGuard/native open pin it.
+    input=std::filesystem::absolute(input,error);
+    if(error)return {};
+    std::vector<std::filesystem::path> missing;
+    for(;;) {
+        HANDLE handle=::CreateFileW(input.c_str(),FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,
+            OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS,nullptr);
+        if(handle!=INVALID_HANDLE_VALUE) {
+            const DWORD needed=::GetFinalPathNameByHandleW(handle,nullptr,0,0);
+            if(!needed){const auto code=::GetLastError();::CloseHandle(handle);error=std::error_code(code,std::system_category());return {};}
+            std::vector<wchar_t> text(static_cast<std::size_t>(needed)+1);
+            const DWORD used=::GetFinalPathNameByHandleW(handle,text.data(),static_cast<DWORD>(text.size()),0);
+            const auto code=::GetLastError();::CloseHandle(handle);
+            if(!used || used>=text.size()){error=std::error_code(used?ERROR_INSUFFICIENT_BUFFER:code,std::system_category());return {};}
+            auto result=normalized_path(std::filesystem::path(std::wstring(text.data(),used)));
+            for(auto i=missing.rbegin();i!=missing.rend();++i)result/=*i;
+            error.clear();return result.lexically_normal();
+        }
+        const auto code=::GetLastError();
+        if((code!=ERROR_FILE_NOT_FOUND && code!=ERROR_PATH_NOT_FOUND && code!=ERROR_INVALID_NAME) || input==input.root_path() || input.filename().empty()) {
+            error=std::error_code(code,std::system_category());return {};
+        }
+        missing.push_back(input.filename());input=input.parent_path();
+    }
+#else
     return normalized_path(std::filesystem::weakly_canonical(input,error));
+#endif
 }
 inline bool inside_path(const std::filesystem::path& path,const std::filesystem::path& root) {
     auto base=root.generic_string();

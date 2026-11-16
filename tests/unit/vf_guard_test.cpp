@@ -58,12 +58,15 @@ TEST_CASE("vf path spelling keeps canonical targets inside the selected root") {
     std::ofstream(base/"outside"/"file")<<"outside";
     CHECK(resolve_path((base/"root").string(),"."));
     CHECK(resolve_path((base/"root").string(),"folder/."));
+    CHECK(resolve_path((base/"root").string(),"folder/new/child"));
+    CHECK(resolve_path((base/"root").string(),"folder/*"));
     CHECK(resolve_path((base/"root").string(),"folder/../folder/file"));
     CHECK_FALSE(resolve_path((base/"root").string(),"../outside/file"));
     std::error_code ec;
     fs::create_symlink(base/"root"/"folder"/"file",base/"root"/"inside-link",ec);
     if(!ec) {
         CHECK(resolve_path((base/"root").string(),"inside-link"));
+        CHECK(canonical_path(base/"root"/"inside-link",ec)==canonical_path(base/"root"/"folder"/"file",ec));
         PathGuard pin;CHECK(pin.pin((base/"root").string(),(base/"root"/"inside-link").string(),true));
     }
     ec.clear();fs::create_symlink(base/"outside"/"file",base/"root"/"outside-link",ec);
