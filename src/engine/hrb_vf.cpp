@@ -205,7 +205,7 @@ class HarbourVfService final:public Service {
 #if defined(HB_USE_SHARELOCKS) && !defined(HB_USE_BSDLOCKS)
         if(o.share_lock && o.access==0 && !shared) { o.share=3;shared=true; }
         if(o.share_lock && o.access==1 && shared) {
-            if(::access(q.path1.c_str(),R_OK)==0 || ::access(q.path1.c_str(),F_OK)!=0)o.access=2;
+            if(::access(q.path1.c_str(),R_OK)==0 || ::access(q.path1.c_str(),F_OK)!=0){o.access=2;logical_mode=2;}
             else o.share_lock=false;
         }
 #endif
