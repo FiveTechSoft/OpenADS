@@ -19,7 +19,11 @@ TEST_CASE("vf metadata pins survive parent and leaf substitution") {
         const auto pin=guard.pin(root.string(),(root/"parent"/"file").string(),false);
         REQUIRE(pin);
         fs::rename(root/"parent",root/"saved");fs::create_directory_symlink(outside,root/"parent");
+#ifdef __APPLE__
+        CHECK(::unlinkat(guard.descriptor(),guard.leaf_name().c_str(),0)==0);
+#else
         CHECK(::unlink(pin.value().c_str())==0);
+#endif
         CHECK(fs::exists(outside/"file"));CHECK_FALSE(fs::exists(root/"saved"/"file"));
     }
     {

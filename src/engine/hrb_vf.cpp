@@ -16,6 +16,12 @@
 #ifndef _WIN32
 #include <sys/stat.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <dirent.h>
+#include <fcntl.h>
+#include <sys/mount.h>
+#include <ctime>
+#endif
 #endif
 
 #if defined(__clang__)
@@ -35,6 +41,7 @@
 #include "hbapi.h"
 #include "hbapifs.h"
 #include "hbapiitm.h"
+#include "hbdate.h"
 #include "hbvm.h"
 #include "fileio.ch"
 #include "directry.ch"
@@ -71,6 +78,7 @@ void os_error(const util::Error& e) {
 // Enumerate links without following them. Only a separately pinned in-jail
 // target may supply followed-link metadata. This avoids a directory listing
 // becoming an indirect read of metadata outside the selected data root.
+#ifndef __APPLE__
 PHB_ITEM jailed_directory(const Request& q,const Request& original) {
     const std::string enumerate_attributes=q.path2+"DHSL";
     PHB_ITEM names=hb_fsDirectory(q.path1.c_str(),enumerate_attributes.c_str(),HB_TRUE);
@@ -114,6 +122,53 @@ PHB_ITEM jailed_directory(const Request& q,const Request& original) {
     hb_itemRelease(names);
     return result;
 }
+#endif
+#ifdef __APPLE__
+// Darwin's /dev/fd entries support final-descriptor metadata, but not child
+// traversal. Use *at operations and fdopendir for pinned parent directories.
+PHB_ITEM mac_directory(const Request& original,const PathGuard& parent) {
+    PHB_ITEM result=hb_itemArrayNew(0);
+    HB_FATTR wanted=HB_FA_ARCHIVE|HB_FA_READONLY|hb_fsAttrEncode(original.path2.c_str());
+    const auto pattern=parent.leaf_name();
+    if(!pattern.empty() && pattern[0]=='.')wanted|=HB_FA_HIDDEN;
+    DIR* dir=::fdopendir(::dup(parent.descriptor()));
+    if(!dir){hb_fsSetIOError(HB_FALSE,0);return result;}
+    const auto directory=std::filesystem::path(original.path1).parent_path();
+    const bool root_spec=std::filesystem::path(original.path1).lexically_normal()==std::filesystem::path(original.root).lexically_normal();
+    while(auto* entry=::readdir(dir)) {
+        const std::string name=entry->d_name;
+        if(!hb_strMatchFile(name.c_str(),pattern.c_str()))continue;
+        struct stat st{};
+        if(::fstatat(parent.descriptor(),name.c_str(),&st,AT_SYMLINK_NOFOLLOW)!=0)continue;
+        const bool link=S_ISLNK(st.st_mode);
+        const auto spelling=root_spec?original.root:(directory/name).string();
+        PathGuard target;
+        const auto pin=target.pin(original.root,spelling,true);
+        if(!pin && !(link && pin.error().sub_code==ENOENT))continue;
+        if(link && pin && !(wanted&HB_FA_LINK) && ::fstat(target.descriptor(),&st)!=0)continue;
+        HB_FATTR attr=hb_fsAttrFromRaw(st.st_mode);
+        if(link)attr|=HB_FA_LINK;
+        if(name.size()>1 && name[0]=='.' && name!="..")attr|=HB_FA_HIDDEN;
+        const HB_FATTR restricted=HB_FA_HIDDEN|HB_FA_SYSTEM|HB_FA_LABEL|HB_FA_DIRECTORY;
+        if(attr&restricted&~wanted)continue;
+        const time_t seconds=st.st_mtime;struct tm local{};
+        if(!::localtime_r(&seconds,&local))continue;
+        PHB_ITEM row=hb_itemArrayNew(F_LEN);char attributes[32],clock[16];
+        hb_snprintf(clock,sizeof(clock),"%02d:%02d:%02d",local.tm_hour,local.tm_min,local.tm_sec);
+        std::string output_name=name;
+        if(root_spec){output_name=std::filesystem::path(original.client_path1).filename().string();if(output_name.empty())output_name=".";}
+        char* converted=nullptr;const char* decoded=hb_osDecodeCP(output_name.c_str(),&converted,nullptr);
+        hb_arraySetC(row,F_NAME,decoded);if(converted)hb_xfree(converted);
+        hb_arraySetNInt(row,F_SIZE,st.st_size);
+        hb_arraySetC(row,F_TIME,clock);hb_arraySetC(row,F_ATTR,hb_fsAttrDecode(attr,attributes));
+        // Harbour's Darwin finder has second, not nanosecond, precision.
+        hb_arraySetTDT(row,F_DATE,hb_dateEncode(local.tm_year+1900,local.tm_mon+1,local.tm_mday),hb_timeEncode(local.tm_hour,local.tm_min,local.tm_sec,0));
+        hb_arrayAddForward(result,row);hb_itemRelease(row);
+    }
+    ::closedir(dir);hb_fsSetError(0);return result;
+}
+#endif
+
 struct Entry {
     std::shared_ptr<FsNative> native;
     std::string path;
@@ -243,8 +298,14 @@ public:
         }
         PathGuard first_guard,second_guard;
         if(q.op>=OADS_VF_EXISTS && q.op<=OADS_VF_LINKREAD) {
-            const bool follows=q.op==OADS_VF_EXISTS || q.op==OADS_VF_DIREXISTS || q.op==OADS_VF_DIRSPACE ||
+            bool follows=q.op==OADS_VF_EXISTS || q.op==OADS_VF_DIREXISTS || q.op==OADS_VF_DIRSPACE ||
                 q.op==OADS_VF_TIMEGET || q.op==OADS_VF_TIMESET || q.op==OADS_VF_ATTRGET || q.op==OADS_VF_ATTRSET;
+#ifdef _WIN32
+            // Windows hard-link creation follows the source pathname. Keep
+            // the validated leaf pinned too so it cannot become a reparse
+            // point between the boundary check and CreateHardLink.
+            if(q.op==OADS_VF_LINK)follows=true;
+#endif
             if(q.op!=OADS_VF_LINKSYM) {
                 auto pin=first_guard.pin(q.root,q.path1,follows);
                 if(!pin){os_error(pin.error());r.error=hb_fsError();return r;}q.path1=pin.value();
@@ -283,29 +344,45 @@ public:
             if(q.op==OADS_VF_READ || q.op==OADS_VF_READAT) {
                 if(q.value1<0 || q.value1>OADS_VF_CHUNK_MAX) { r.error=87;return r; }
                 r.data.resize(static_cast<std::size_t>(q.value1));
+#ifdef _WIN32
+                // Native Windows filebuf uses the OS file position. ReadAt on
+                // its synchronous handle can move that position too.
+                const auto n=q.op==OADS_VF_READAT?hb_fsReadAt(h,r.data.data(),r.data.size(),q.value2):hb_fsReadLarge(h,r.data.data(),r.data.size());
+#else
                 const auto pos=q.op==OADS_VF_READAT?q.value2:e.pos;
                 const auto n=hb_fsReadAt(h,r.data.data(),r.data.size(),pos);
-                r.error=hb_fsError();r.data.resize(n);r.value1=static_cast<std::int64_t>(n);
-                if(q.op==OADS_VF_READ)e.pos+=r.value1;
-            } else if(q.op==OADS_VF_WRITE || q.op==OADS_VF_WRITEAT) {
-                const auto pos=q.op==OADS_VF_WRITEAT?q.value2:e.pos;
-                HB_SIZE n;
-#ifdef _WIN32
-                if(q.op==OADS_VF_WRITE && q.data.empty()) {
-                    hb_fsSeekLarge(h,pos,FS_SET);n=hb_fsWriteLarge(h,q.data.data(),0);
-                } else
 #endif
-                n=hb_fsWriteAt(h,q.data.data(),q.data.size(),pos);
+                r.error=hb_fsError();r.data.resize(n);r.value1=static_cast<std::int64_t>(n);
+#ifndef _WIN32
+                if(q.op==OADS_VF_READ)e.pos+=r.value1;
+#endif
+            } else if(q.op==OADS_VF_WRITE || q.op==OADS_VF_WRITEAT) {
+#ifdef _WIN32
+                const auto n=q.op==OADS_VF_WRITEAT?hb_fsWriteAt(h,q.data.data(),q.data.size(),q.value2):hb_fsWriteLarge(h,q.data.data(),q.data.size());
+#else
+                const auto pos=q.op==OADS_VF_WRITEAT?q.value2:e.pos;
+                const auto n=hb_fsWriteAt(h,q.data.data(),q.data.size(),pos);
+#endif
                 r.error=hb_fsError();r.value1=static_cast<std::int64_t>(n);
+#ifndef _WIN32
                 if(q.op==OADS_VF_WRITE)e.pos+=r.value1;
+#endif
             } else if(q.op==OADS_VF_COMMIT) {
                 hb_fsCommit(h);r.error=hb_fsError();
             } else if(q.op==OADS_VF_FLUSH) {
                 // Native filebuf.c has no additional buffered bytes.
             } else if(q.op==OADS_VF_TRUNC) {
                 r.value1=hb_fsTruncAt(h,q.value1);r.error=hb_fsError();
+#ifndef _WIN32
                 if(r.value1)e.pos=q.value1;
+#endif
             } else {
+#ifdef _WIN32
+                if(q.op==OADS_VF_SEEK)r.value1=hb_fsSeekLarge(h,q.value1,static_cast<HB_USHORT>(q.flags));
+                else if(q.op==OADS_VF_EOF)r.value1=hb_fsEof(h);
+                else r.value1=hb_fsGetSize(h);
+                r.error=hb_fsError();
+#else
                 auto size=file.size();
                 if(!size){os_error(size.error());r.error=hb_fsError();return r;}
                 if(size.value()>static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())){r.error=25;return r;}
@@ -319,9 +396,41 @@ public:
                     else e.pos=base+q.value1;
                     r.value1=e.pos;
                 }
+#endif
             }
             return r;
         }
+#ifdef __APPLE__
+        // These operations name a leaf, not its target. Descriptor-relative
+        // syscalls preserve the pinned parent even if its pathname is moved.
+        int mac_status=0;bool mac_done=true;
+        switch(q.op) {
+            case OADS_VF_ERASE:mac_status=::unlinkat(first_guard.descriptor(),first_guard.leaf_name().c_str(),0);break;
+            case OADS_VF_RENAME:mac_status=::renameat(first_guard.descriptor(),first_guard.leaf_name().c_str(),second_guard.descriptor(),second_guard.leaf_name().c_str());break;
+            case OADS_VF_DIRMAKE:mac_status=::mkdirat(first_guard.descriptor(),first_guard.leaf_name().c_str(),0777);break;
+            case OADS_VF_DIRREMOVE:mac_status=::unlinkat(first_guard.descriptor(),first_guard.leaf_name().c_str(),AT_REMOVEDIR);break;
+            case OADS_VF_LINK:mac_status=::linkat(first_guard.descriptor(),first_guard.leaf_name().c_str(),second_guard.descriptor(),second_guard.leaf_name().c_str(),0);break;
+            case OADS_VF_LINKSYM:mac_status=::symlinkat(p,second_guard.descriptor(),second_guard.leaf_name().c_str());break;
+            case OADS_VF_LINKREAD: {
+                std::vector<char> target(65536);
+                const auto n=::readlinkat(first_guard.descriptor(),first_guard.leaf_name().c_str(),target.data(),target.size());
+                if(n<0)mac_status=-1;else if(static_cast<std::size_t>(n)==target.size()){errno=ENAMETOOLONG;mac_status=-1;}
+                else r.data.assign(target.begin(),target.begin()+n);
+                break;
+            }
+            case OADS_VF_ATTRGET: {
+                struct stat metadata{};mac_status=::fstat(first_guard.descriptor(),&metadata);
+                if(!mac_status){r.value1=1;r.value2=hb_fsAttrFromRaw(metadata.st_mode);}break;
+            }
+            case OADS_VF_DIRSPACE: {
+                struct statfs disk{};mac_status=::fstatfs(first_guard.descriptor(),&disk);
+                if(!mac_status){const auto count=q.flags==1?disk.f_bfree:q.flags==2?disk.f_blocks-disk.f_bfree:q.flags==3?disk.f_blocks:disk.f_bavail;r.value1=static_cast<std::int64_t>(static_cast<double>(count)*static_cast<double>(disk.f_bsize));}
+                break;
+            }
+            default:mac_done=false;break;
+        }
+        if(mac_done){hb_fsSetIOError(mac_status==0,0);r.error=hb_fsError();if(q.op!=OADS_VF_LINKREAD && q.op!=OADS_VF_DIRSPACE && q.op!=OADS_VF_ATTRGET)r.value1=mac_status==0;return r;}
+#endif
         switch(q.op) {
             case OADS_VF_EXISTS:r.value1=hb_fsFileExists(p);break;
             case OADS_VF_ERASE:r.value1=hb_fsDelete(p);break;
@@ -334,7 +443,11 @@ public:
                 r.value1=static_cast<std::int64_t>(n);break;
             }
             case OADS_VF_DIRECTORY: {
+#ifdef __APPLE__
+                PHB_ITEM array=mac_directory(input,first_guard);
+#else
                 PHB_ITEM array=jailed_directory(q,input);
+#endif
                 HB_SIZE size=0;char* bytes=hb_itemSerialize(array,0,&size);
                 hb_itemRelease(array);
                 r.value1=static_cast<std::int64_t>(size);

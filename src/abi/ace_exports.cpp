@@ -11406,7 +11406,9 @@ UNSIGNED32 ENTRYPOINT AdsVfRequest(ADSHANDLE hConn, const void* request,
     std::memcpy(out,r.value().data(),r.value().size());
     *reply=out;*reply_length=static_cast<UNSIGNED32>(r.value().size());return ok();
 }
-void ENTRYPOINT AdsVfFree(void* reply) { std::free(reply); }
+void ENTRYPOINT AdsVfFree(void* reply) {
+    std::free(reply);
+}
 
 UNSIGNED32 ENTRYPOINT AdsFReadAt(ADSHANDLE hFile, UNSIGNED64 ullOffset,
                                  void* pBuf, UNSIGNED32 ulLen,

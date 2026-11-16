@@ -24,6 +24,9 @@ PROCEDURE Main(cUri)
   Check(p==NIL,"remote FIFO refused without blocking")
  ENDIF
  Check(!OAds_vfExists(OAds_vfPath(h,"../outside/marker.bin")),"outside explicit path refused")
+ Check(!OAds_vfSave("oads18446744073709551617:must-not-exist.bin","denied"),"connection prefix overflow refused")
+ Check(!OAds_vfSave("oads0:must-not-exist.bin","denied"),"zero connection prefix refused")
+ Check(!OAds_vfSave("oads123invalid:must-not-exist.bin","denied"),"malformed prefix cannot become a local file")
  VF87Disconnect(h)
  OutStd("VF87-TCP-BOUNDARY PASS"+hb_eol())
 RETURN

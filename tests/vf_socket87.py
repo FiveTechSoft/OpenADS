@@ -16,7 +16,7 @@ def main():
     p.add_argument('--large-directory', action='store_true')
     args = p.parse_args()
     with tempfile.TemporaryDirectory(prefix='openads-vf87-') as tmp:
-        root = pathlib.Path(tmp)
+        root = pathlib.Path(tmp).resolve()
         data = root / 'data'
         data.mkdir()
         outside=root/'outside'
@@ -59,13 +59,21 @@ def main():
                             raise
                         time.sleep(.1)
                 uri = 'tcp://127.0.0.1:%d/' % port + data.as_posix()
+                failures=[]
                 for probe in args.probe:
-                    result = subprocess.run([str(pathlib.Path(probe).resolve()), uri], cwd=root,
-                                            capture_output=True, text=True, timeout=90)
-                    print(result.stdout, end='')
-                    if result.returncode or ('PASS' not in result.stdout and 'differences=0' not in result.stdout):
-                        raise RuntimeError('vf87 probe failed: ' + result.stdout + result.stderr)
+                    try:
+                        result = subprocess.run([str(pathlib.Path(probe).resolve()), uri], cwd=root,
+                                                capture_output=True, text=True, timeout=90)
+                        print(result.stdout, end='')
+                        if result.returncode or ('PASS' not in result.stdout and 'differences=0' not in result.stdout):
+                            failures.append(probe)
+                            print('VF87-PROBE-FAILED ' + probe + ': ' + result.stderr)
+                    except subprocess.TimeoutExpired:
+                        failures.append(probe)
+                        print('VF87-PROBE-TIMED-OUT ' + probe)
                 assert (outside/'marker.bin').read_bytes()==b'outside untouched'
+                if failures:
+                    raise RuntimeError('vf87 probes failed: ' + ', '.join(failures))
                 print('VF87-ACTUAL-TCP PASS')
             finally:
                 server.terminate()

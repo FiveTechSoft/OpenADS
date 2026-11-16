@@ -48,6 +48,7 @@ util::Result<std::string> PathGuard::pin(const std::string& root,const std::stri
             parts.push_back(p);
         }
     }
+    leaf_name_=parts.empty()?".":parts.back().string();
 #ifdef _WIN32
     fs::path current=base;
     const auto count=leaf?parts.size():(parts.empty()?0:parts.size()-1);

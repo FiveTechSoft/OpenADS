@@ -29,7 +29,11 @@ static HB_BOOL vf_path(const char* name,ADSHANDLE* conn,const char** path) {
     const char* p;HB_U64 n=0;
     if(!name || hb_strnicmp(name,"oads",4)!=0)return HB_FALSE;
     p=name+4;if(*p<'0'||*p>'9')return HB_FALSE;
-    while(*p>='0'&&*p<='9'){n=n*10+(unsigned)(*p++-'0');if(n>0xffffffffUL)return HB_FALSE;}
+    while(*p>='0'&&*p<='9') {
+        const unsigned digit=(unsigned)(*p++-'0');
+        if(n>(0xffffffffUL-digit)/10)return HB_FALSE;
+        n=n*10+digit;
+    }
     if(*p!=':' || n==0)return HB_FALSE;
     *conn=(ADSHANDLE)n;++p;while(*p=='/'||*p=='\\')++p;*path=p;return HB_TRUE;
 }
