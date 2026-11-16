@@ -1,0 +1,83 @@
+Exact Harbour vf family - mtfix87 work in progress
+Pritpal Bedi
+2026-11-15 18:35
+
+Not a released kit. Remote and cross-platform validation is unfinished.
+
+Decisions
+1. Keep existing OAds_F* functions and signatures unchanged. New OAds_vf*
+   functions call Harbour's real vf front end, so argument checks, pointer
+   handles, return types and FError follow the linked Harbour runtime.
+2. Plain paths stay local. OAds_vfPath(hConn,cName) creates a remote name for
+   an existing remote connection. It does not connect or change the default.
+   Names currently use oads<connection>:<relative-path>. The helper hides
+   this spelling. This drive-like form works with Harbour's DirBuild and
+   DirUnbuild path splitting without creating local prefix directories.
+3. The same prefixed names also work with hb_vf* after the driver is loaded.
+   All remote files remain behind EnableFileFunc and the server data jail.
+4. OAds_vfTempFile stays Harbour's client-local operation, with the same
+   arguments and an open native pointer result. It never chooses a server.
+5. OAds_vfTempFileServer(@cName,cRemoteDir[,cPrefix,cExt,nAttr]) is separate.
+   cRemoteDir must be built with OAds_vfPath; an explicit directory prevents
+   a temp file being created on an accidentally selected server. It returns
+   an open remote pointer. The returned name can be passed to OAds_vfErase.
+6. Remote Handle returns FS_ERROR (-1), not a server OS handle or socket.
+   Client-local Handle and FromSocket use Harbour unchanged. FromSocket
+   lives in a separate archive member and needs Harbour's hbtcpio library.
+7. Config's driver name is OADS: for remote files, FILE: for native files.
+   Unsupported native-disk config values remain unchanged, like Harbour.
+8. CopyFileEx runs Harbour's copy loop and callback on the client. Both
+   endpoints may be local or explicitly remote. No callback is sent to the
+   server. Load/Save and I/O use chunks; the old 64 MiB whole-file cap is not
+   imposed on this family. Directory responses are chunked when necessary.
+9. Links cannot point outside the server root. Absolute native server paths
+   are not returned. LinkRead returns a jail-relative target for an absolute
+   in-jail link; existing relative targets are returned as relative targets.
+10. DirUnbuild removes empty directories upward but cannot remove the root
+    or any parent. Normal destructive operations inside the jail retain
+    Harbour behavior. This restriction does not disable Erase or truncate.
+11. Each remote client connection remains a separate byte-lock owner, as
+    accepted for mtfix85. The new family retains Harbour's server-platform
+    distinction: Unix merges opens/ranges until last close; Windows uses
+    separate native handles, so closing one releases that handle's locks.
+    Existing OAds_F* retains its tested behavior. WAIT is a client loop;
+    a server request never waits for a byte lock. These are not RDD locks.
+12. Transport errors remain distinct from Harbour filesystem errors. A
+    request that changes a file is executed once; output size discovery
+    never repeats an open, write, rename or delete.
+
+Current findings
+- The older streaming reader omitted the mtfix82-85 file opcode additions.
+  Direct-dispatch tests missed this. The FS opcode list is corrected and a
+  regression now compares streaming acceptance with the normal decoder.
+- Initial actual-socket checks pass open/read/write/seek, metadata, Load,
+  server TempFile, cleanup, two-client lock conflicts, last-reference close,
+  own-overlap WAIT rejection and WAIT wake after the other client unlocks.
+- Local front-end checks: 18 read-only groups and 29 mutation groups pass.
+- The remote 29-group comparison passes apart from the intended IsLocal
+  result; that assertion is being made explicit rather than hidden.
+- Final CI, MinGW test packaging and the release are still pending.
+
+2026-11-15 18:45 validation checkpoint
+- Linux native-vs-remote flags: 1,024 groups, zero differences. This covers
+  read/write modes, sharing bits, missing/existing files and create variants.
+- Linux paired opens: 289 groups, zero differences, including Harbour's
+  distinction between a merged file's logical mode and actual FD access.
+- Metadata calls now pin parents or leaf handles for the duration of the
+  operation. Parent/leaf substitution tests leave the outside file intact.
+- Linux client-local comparisons: 18 read-only and 29 mutation groups, zero
+  differences. Real TCP remote comparison: 29 groups, zero differences.
+- Real TCP checks pass chunked binary Load/Save, a directory result over one
+  response chunk, both directions of local/remote CopyFileEx, callbacks on
+  the client, reading through an in-root link, root/parent rejection, SET
+  PATH, resolved by-reference Open names and two-client lock tests.
+- Not yet a released kit. Windows, macOS, full unit suites and packaging
+  remain. These results are not Vouch certification.
+
+Boundary decisions
+- Directory listings omit links whose targets are outside the root. Link
+  metadata is first collected without following links. Followed metadata
+  comes only from a separately pinned target inside the root.
+- Remote data handles are regular disk files only. Named pipes, sockets and
+  devices are refused rather than blocking a server request indefinitely.
+  Client-local files and FromSocket keep Harbour's behavior unchanged.

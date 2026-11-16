@@ -659,6 +659,7 @@ void Session::cleanup() {
 
     // 5) oads_FOpen / AdsFOpen files for this session.
     files_.clear();
+    vf_service_.reset();
 
     // 6) ABI SQL statement + connection (AdsDisconnect closes any leftover
     //    tables that somehow escaped the loops above).
@@ -4794,6 +4795,66 @@ DispatchResult Session::dispatch(const Frame& f) {
                 reply.payload.push_back(
                     (cur < 0 || (end >= 0 && cur >= end)) ? 1 : 0);
             } else if (f.opcode == Opcode::FileLockOp) {
+                if (vf::is_extension(f.payload)) {
+                    vf::Request q;vf::Reply result;
+                    if(!vf::decode(f.payload,q)) { reply=err("vf: bad request");break; }
+                    q.client_path1=q.path1;
+                    bool allowed=true;
+                    if(q.op>=OADS_VF_EXISTS && q.op!=OADS_VF_BLOBREAD) {
+                        auto abs=resolve_fs_client_path(q.path1.empty()?".":q.path1);
+                        if(!abs)allowed=false;else q.path1=*abs;
+                        if(q.op==OADS_VF_RENAME || q.op==OADS_VF_LINK || q.op==OADS_VF_LINKSYM) {
+                            auto second=resolve_fs_client_path(q.path2);
+                            if(!second)allowed=false;else q.path2=*second;
+                        }
+                        if(q.op==OADS_VF_DIRREMOVE) {
+                            std::error_code ec;
+                            auto root=resolve_fs_client_path(".");
+                            if(!root || std::filesystem::weakly_canonical(q.path1,ec)==std::filesystem::weakly_canonical(*root,ec))allowed=false;
+                        }
+                    } else if(q.op==OADS_VF_OPEN) {
+                        auto abs=resolve_fs_client_path(q.path1);
+                        if(!abs)allowed=false;
+                        else {
+                            // Resolve only after the jail membership check. The
+                            // native opener still refuses any changed symlink
+                            // component, so in-jail links work without a follow
+                            // race into another root.
+                            std::error_code ec;
+                            auto canonical=std::filesystem::weakly_canonical(*abs,ec);
+                            if(ec)allowed=false;else q.path1=canonical.string();
+                        }
+                    }
+                    if(auto root=resolve_fs_client_path("."))q.root=*root;else allowed=false;
+                    if(!allowed)result.error=5;
+                    else {
+                        if(!vf_service_)vf_service_=openads::engine::vf::make_service();
+                        if(!vf_service_)result.error=50;else result=vf_service_->execute(q);
+                    }
+                    // Never disclose an absolute server-native link target.
+                    if(q.op==OADS_VF_LINKREAD && !result.data.empty()) {
+                        std::string target(result.data.begin(),result.data.end());
+                        std::filesystem::path target_path(target);
+                        auto root=resolve_fs_client_path(".");
+                        std::error_code ec;
+                        auto check=std::filesystem::weakly_canonical(target_path.is_absolute()?target_path:std::filesystem::path(q.path1).parent_path()/target_path,ec);
+                        auto base=root?std::filesystem::weakly_canonical(*root,ec):std::filesystem::path();
+                        if(ec || !root || !openads::platform::path_has_prefix(check.generic_string(),base.generic_string(),
+#ifdef _WIN32
+                            true
+#else
+                            false
+#endif
+                        )) { result.data.clear();result.error=5; }
+                        else if(target_path.is_absolute()) {
+                            auto relative=check.lexically_relative(base).generic_string();
+                            result.data.assign(relative.begin(),relative.end());
+                        }
+                    }
+                    reply.opcode=Opcode::FileLockOp;
+                    if(!vf::encode(result,reply.payload))reply=err("vf: reply size");
+                    break;
+                }
                 if (f.payload.size() != 23) { reply = err("FileLockOp: bad payload"); break; }
                 auto id = read_u32_le(f.payload.data());
                 auto it = files_.find(id);

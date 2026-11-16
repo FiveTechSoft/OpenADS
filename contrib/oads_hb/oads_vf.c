@@ -1,0 +1,101 @@
+/*
+ * Exact Harbour vf front end for OpenADS.
+ *
+ * Keep the historical OADS_F* glue in oads_hb.c unchanged. These symbols
+ * deliberately call Harbour itself so its argument validation, GC file
+ * pointers, by-reference buffers, return values and FError rules remain
+ * those of the Harbour runtime linked by the application.
+ *
+ * Build as its own archive member: legacy callers must not acquire any
+ * new vf or socket-library dependencies merely by using oads_hb.o.
+ */
+#include "hbapi.h"
+
+extern void oads_vf_register(void);
+
+HB_FUNC_EXTERN( HB_VFISLOCAL );
+HB_FUNC( OADS_VFISLOCAL ) { oads_vf_register(); HB_FUNC_EXEC( HB_VFISLOCAL ); }
+HB_FUNC_EXTERN( HB_VFEXISTS );
+HB_FUNC( OADS_VFEXISTS ) { oads_vf_register(); HB_FUNC_EXEC( HB_VFEXISTS ); }
+HB_FUNC_EXTERN( HB_VFERASE );
+HB_FUNC( OADS_VFERASE ) { oads_vf_register(); HB_FUNC_EXEC( HB_VFERASE ); }
+HB_FUNC_EXTERN( HB_VFRENAME );
+HB_FUNC( OADS_VFRENAME ) { oads_vf_register(); HB_FUNC_EXEC( HB_VFRENAME ); }
+HB_FUNC_EXTERN( HB_VFCOPYFILE );
+HB_FUNC( OADS_VFCOPYFILE ) { oads_vf_register(); HB_FUNC_EXEC( HB_VFCOPYFILE ); }
+HB_FUNC_EXTERN( HB_VFCOPYFILEEX );
+HB_FUNC( OADS_VFCOPYFILEEX ) { oads_vf_register(); HB_FUNC_EXEC( HB_VFCOPYFILEEX ); }
+HB_FUNC_EXTERN( HB_VFMOVEFILE );
+HB_FUNC( OADS_VFMOVEFILE ) { oads_vf_register(); HB_FUNC_EXEC( HB_VFMOVEFILE ); }
+HB_FUNC_EXTERN( HB_VFDIREXISTS );
+HB_FUNC( OADS_VFDIREXISTS ) { oads_vf_register(); HB_FUNC_EXEC( HB_VFDIREXISTS ); }
+HB_FUNC_EXTERN( HB_VFDIRMAKE );
+HB_FUNC( OADS_VFDIRMAKE ) { oads_vf_register(); HB_FUNC_EXEC( HB_VFDIRMAKE ); }
+HB_FUNC_EXTERN( HB_VFDIRREMOVE );
+HB_FUNC( OADS_VFDIRREMOVE ) { oads_vf_register(); HB_FUNC_EXEC( HB_VFDIRREMOVE ); }
+HB_FUNC_EXTERN( HB_VFDIRECTORY );
+HB_FUNC( OADS_VFDIRECTORY ) { oads_vf_register(); HB_FUNC_EXEC( HB_VFDIRECTORY ); }
+HB_FUNC_EXTERN( HB_VFDIRSPACE );
+HB_FUNC( OADS_VFDIRSPACE ) { oads_vf_register(); HB_FUNC_EXEC( HB_VFDIRSPACE ); }
+HB_FUNC_EXTERN( HB_VFATTRGET );
+HB_FUNC( OADS_VFATTRGET ) { oads_vf_register(); HB_FUNC_EXEC( HB_VFATTRGET ); }
+HB_FUNC_EXTERN( HB_VFATTRSET );
+HB_FUNC( OADS_VFATTRSET ) { oads_vf_register(); HB_FUNC_EXEC( HB_VFATTRSET ); }
+HB_FUNC_EXTERN( HB_VFTIMEGET );
+HB_FUNC( OADS_VFTIMEGET ) { oads_vf_register(); HB_FUNC_EXEC( HB_VFTIMEGET ); }
+HB_FUNC_EXTERN( HB_VFTIMESET );
+HB_FUNC( OADS_VFTIMESET ) { oads_vf_register(); HB_FUNC_EXEC( HB_VFTIMESET ); }
+HB_FUNC_EXTERN( HB_VFLINK );
+HB_FUNC( OADS_VFLINK ) { oads_vf_register(); HB_FUNC_EXEC( HB_VFLINK ); }
+HB_FUNC_EXTERN( HB_VFLINKSYM );
+HB_FUNC( OADS_VFLINKSYM ) { oads_vf_register(); HB_FUNC_EXEC( HB_VFLINKSYM ); }
+HB_FUNC_EXTERN( HB_VFLINKREAD );
+HB_FUNC( OADS_VFLINKREAD ) { oads_vf_register(); HB_FUNC_EXEC( HB_VFLINKREAD ); }
+HB_FUNC_EXTERN( HB_VFOPEN );
+HB_FUNC( OADS_VFOPEN ) { oads_vf_register(); HB_FUNC_EXEC( HB_VFOPEN ); }
+HB_FUNC_EXTERN( HB_VFCLOSE );
+HB_FUNC( OADS_VFCLOSE ) { oads_vf_register(); HB_FUNC_EXEC( HB_VFCLOSE ); }
+HB_FUNC_EXTERN( HB_VFLOCK );
+HB_FUNC( OADS_VFLOCK ) { oads_vf_register(); HB_FUNC_EXEC( HB_VFLOCK ); }
+HB_FUNC_EXTERN( HB_VFUNLOCK );
+HB_FUNC( OADS_VFUNLOCK ) { oads_vf_register(); HB_FUNC_EXEC( HB_VFUNLOCK ); }
+HB_FUNC_EXTERN( HB_VFLOCKTEST );
+HB_FUNC( OADS_VFLOCKTEST ) { oads_vf_register(); HB_FUNC_EXEC( HB_VFLOCKTEST ); }
+HB_FUNC_EXTERN( HB_VFREAD );
+HB_FUNC( OADS_VFREAD ) { oads_vf_register(); HB_FUNC_EXEC( HB_VFREAD ); }
+HB_FUNC_EXTERN( HB_VFREADLEN );
+HB_FUNC( OADS_VFREADLEN ) { oads_vf_register(); HB_FUNC_EXEC( HB_VFREADLEN ); }
+HB_FUNC_EXTERN( HB_VFWRITE );
+HB_FUNC( OADS_VFWRITE ) { oads_vf_register(); HB_FUNC_EXEC( HB_VFWRITE ); }
+HB_FUNC_EXTERN( HB_VFREADAT );
+HB_FUNC( OADS_VFREADAT ) { oads_vf_register(); HB_FUNC_EXEC( HB_VFREADAT ); }
+HB_FUNC_EXTERN( HB_VFWRITEAT );
+HB_FUNC( OADS_VFWRITEAT ) { oads_vf_register(); HB_FUNC_EXEC( HB_VFWRITEAT ); }
+HB_FUNC_EXTERN( HB_VFSEEK );
+HB_FUNC( OADS_VFSEEK ) { oads_vf_register(); HB_FUNC_EXEC( HB_VFSEEK ); }
+HB_FUNC_EXTERN( HB_VFTRUNC );
+HB_FUNC( OADS_VFTRUNC ) { oads_vf_register(); HB_FUNC_EXEC( HB_VFTRUNC ); }
+HB_FUNC_EXTERN( HB_VFSIZE );
+HB_FUNC( OADS_VFSIZE ) { oads_vf_register(); HB_FUNC_EXEC( HB_VFSIZE ); }
+HB_FUNC_EXTERN( HB_VFEOF );
+HB_FUNC( OADS_VFEOF ) { oads_vf_register(); HB_FUNC_EXEC( HB_VFEOF ); }
+HB_FUNC_EXTERN( HB_VFFLUSH );
+HB_FUNC( OADS_VFFLUSH ) { oads_vf_register(); HB_FUNC_EXEC( HB_VFFLUSH ); }
+HB_FUNC_EXTERN( HB_VFCOMMIT );
+HB_FUNC( OADS_VFCOMMIT ) { oads_vf_register(); HB_FUNC_EXEC( HB_VFCOMMIT ); }
+HB_FUNC_EXTERN( HB_VFCONFIG );
+HB_FUNC( OADS_VFCONFIG ) { oads_vf_register(); HB_FUNC_EXEC( HB_VFCONFIG ); }
+HB_FUNC_EXTERN( HB_VFHANDLE );
+HB_FUNC( OADS_VFHANDLE ) { oads_vf_register(); HB_FUNC_EXEC( HB_VFHANDLE ); }
+HB_FUNC_EXTERN( HB_VFTEMPFILE );
+HB_FUNC( OADS_VFTEMPFILE ) { oads_vf_register(); HB_FUNC_EXEC( HB_VFTEMPFILE ); }
+HB_FUNC_EXTERN( HB_VFLOAD );
+HB_FUNC( OADS_VFLOAD ) { oads_vf_register(); HB_FUNC_EXEC( HB_VFLOAD ); }
+HB_FUNC_EXTERN( HB_VFSAVE );
+HB_FUNC( OADS_VFSAVE ) { oads_vf_register(); HB_FUNC_EXEC( HB_VFSAVE ); }
+HB_FUNC_EXTERN( HB_VFDIRBUILD );
+HB_FUNC( OADS_VFDIRBUILD ) { oads_vf_register(); HB_FUNC_EXEC( HB_VFDIRBUILD ); }
+HB_FUNC_EXTERN( HB_VFDIRUNBUILD );
+HB_FUNC( OADS_VFDIRUNBUILD ) { oads_vf_register(); HB_FUNC_EXEC( HB_VFDIRUNBUILD ); }
+HB_FUNC_EXTERN( HB_VFNAMEEXISTS );
+HB_FUNC( OADS_VFNAMEEXISTS ) { oads_vf_register(); HB_FUNC_EXEC( HB_VFNAMEEXISTS ); }

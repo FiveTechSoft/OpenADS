@@ -112,6 +112,12 @@ UNSIGNED32 ENTRYPOINT AdsLoadFile      (ADSHANDLE  hConnect, UNSIGNED8* pucName,
 // Whole-file save (hb_vfSave): creates or truncates.
 UNSIGNED32 ENTRYPOINT AdsSaveFile      (ADSHANDLE  hConnect, UNSIGNED8* pucName,
                               const void* pBuf, UNSIGNED32 ulLen);
+// Allocated exact-vf transport reply. Exactly one request is executed; there
+// is no size-query/replay contract for operations that create or change files.
+UNSIGNED32 ENTRYPOINT AdsVfRequest(ADSHANDLE hConnect, const void* pRequest,
+                                  UNSIGNED32 ulRequestLen, void** ppReply,
+                                  UNSIGNED32* pulReplyLen);
+void ENTRYPOINT AdsVfFree(void* pReply);
 UNSIGNED32 ENTRYPOINT AdsFReadAt       (ADSHANDLE  hFile, UNSIGNED64 ullOffset,
                               void* pBuf, UNSIGNED32 ulLen,
                               UNSIGNED32* pulRead);

@@ -3134,6 +3134,15 @@ RemoteConnection::file_lock_step(std::uint32_t id, std::uint64_t start,
     return static_cast<std::int32_t>(read_u32_le(rep.value().payload.data()));
 }
 
+util::Result<std::vector<std::uint8_t>>
+RemoteConnection::vf_request(const std::vector<std::uint8_t>& payload) {
+    Frame req;req.opcode=Opcode::FileLockOp;req.payload=payload;
+    auto rep=request(req);
+    if(!rep)return rep.error();
+    if(rep.value().opcode!=Opcode::FileLockOp)return fs_wire_err(rep.value(),"exact vf");
+    return std::move(rep.value().payload);
+}
+
 util::Result<void>
 RemoteConnection::ftruncate(std::uint32_t file_id, std::uint64_t size) {
     Frame req;

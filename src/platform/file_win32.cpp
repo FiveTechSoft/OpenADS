@@ -92,7 +92,7 @@ util::Result<void> lock_directory(const std::wstring& path,
 }
 
 util::Result<HANDLE> open_jailed(const std::string& path, DWORD access,
-                              DWORD share, DWORD disp) {
+                              DWORD share, DWORD disp, DWORD attributes = FILE_ATTRIBUTE_NORMAL) {
     namespace fs = std::filesystem;
     std::vector<JailRootW> roots;
     { std::lock_guard<std::mutex> lk(g_jail_mu); roots = g_jail_roots; }
@@ -139,7 +139,7 @@ util::Result<HANDLE> open_jailed(const std::string& path, DWORD access,
     const bool truncating = disp == CREATE_ALWAYS;
     HANDLE h = ::CreateFileW((current / leaf).c_str(), access, share, nullptr,
         truncating ? OPEN_ALWAYS : disp,
-        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+        attributes | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
     if (h == INVALID_HANDLE_VALUE) return os_error("CreateFileW(jail)");
     BY_HANDLE_FILE_INFORMATION info{};
     if (!::GetFileInformationByHandle(h, &info) ||
@@ -213,6 +213,24 @@ util::Result<File> File::open(const std::string& path, OpenMode mode) {
     HANDLE h = ::CreateFileA(path.c_str(), access, share, nullptr, disp,
                              FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return os_error("CreateFileA");
+    return File{h};
+}
+
+util::Result<File> File::open_vf(const std::string& path, const VfOpenOptions& o) {
+    if (o.access > 3 || o.share > 3) { ::SetLastError(ERROR_INVALID_PARAMETER); return os_error("vf open flags"); }
+    DWORD access = o.access == 0 ? GENERIC_READ : o.access == 1 ? GENERIC_WRITE : o.access == 2 ? GENERIC_READ | GENERIC_WRITE : 0;
+    DWORD share = o.share == 0 ? 0 : o.share == 1 ? FILE_SHARE_READ :
+                  o.share == 2 ? FILE_SHARE_WRITE : FILE_SHARE_READ | FILE_SHARE_WRITE;
+    DWORD disp = o.create ? (o.exclusive ? CREATE_NEW : o.truncate ? CREATE_ALWAYS : OPEN_ALWAYS) : OPEN_EXISTING;
+    const DWORD attrs = o.native_attributes ? o.native_attributes : FILE_ATTRIBUTE_NORMAL;
+    if (data_jail_active()) {
+        auto opened = open_jailed(path, access, share, disp, attrs);
+        if (!opened) return opened.error();
+        return File{opened.value()};
+    }
+    SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, o.private_handle ? FALSE : TRUE};
+    HANDLE h = ::CreateFileA(path.c_str(), access, share, &sa, disp, attrs, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return os_error("vf CreateFile");
     return File{h};
 }
 

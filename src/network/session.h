@@ -1,6 +1,7 @@
 #pragma once
 
 #include "engine/server_fs.h"
+#include "engine/vf_service.h"
 #include "network/frame_reader.h"
 #include "network/server.h"
 #include "network/socket.h"
@@ -170,6 +171,7 @@ private:
     std::unordered_map<std::uint32_t,
                        std::unique_ptr<openads::engine::FsFile>> files_;
     std::uint32_t next_file_id_ = 1;
+    std::shared_ptr<openads::engine::vf::Service> vf_service_;
 
     // Resolve client path under session data dir (or server data roots).
     std::optional<std::string> resolve_fs_client_path(

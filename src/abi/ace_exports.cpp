@@ -1,3 +1,4 @@
+#include "network/vf_codec.h"
 #include "engine/sql_input_limits.h"
 #include "engine/sql_work_limits.h"
 #include "engine/sql_execution_budget.h"
@@ -11382,6 +11383,30 @@ UNSIGNED32 ENTRYPOINT AdsSaveFile(ADSHANDLE hConn, UNSIGNED8* pucName,
     if (!r) return fail(r.error());
     return ok();
 }
+
+UNSIGNED32 ENTRYPOINT AdsVfRequest(ADSHANDLE hConn, const void* request,
+                                    UNSIGNED32 length, void** reply,
+                                    UNSIGNED32* reply_length) {
+    if(!reply || !reply_length || !request)return fail(openads::AE_INTERNAL_ERROR,"null vf arg");
+    *reply=nullptr;*reply_length=0;
+    if(length<OADS_VF_REQUEST_SIZE || length>OADS_VF_REQUEST_SIZE+2u*OADS_VF_PATH_MAX+OADS_VF_CHUNK_MAX)
+        return fail(openads::AE_INTERNAL_ERROR,"vf request size");
+    const auto* p=static_cast<const std::uint8_t*>(request);
+    std::vector<std::uint8_t> payload(p,p+length);
+    openads::network::vf::Request decoded;
+    if(!openads::network::vf::decode(payload,decoded))return fail(openads::AE_INTERNAL_ERROR,"vf request format");
+    auto ctx=resolve_fs_conn(hConn);
+    if(!ctx.remote)return fail(openads::AE_INVALID_CONNECTION_HANDLE,"vf path needs a remote connection; use a plain path for local files");
+    auto r=ctx.remote->vf_request(payload);
+    if(!r)return fail(r.error());
+    openads::network::vf::Reply checked;
+    if(!openads::network::vf::decode(r.value(),checked))return fail(openads::AE_INTERNAL_ERROR,"vf reply format");
+    void* out=std::malloc(r.value().size());
+    if(!out)return fail(openads::AE_INTERNAL_ERROR,"vf reply allocation");
+    std::memcpy(out,r.value().data(),r.value().size());
+    *reply=out;*reply_length=static_cast<UNSIGNED32>(r.value().size());return ok();
+}
+void ENTRYPOINT AdsVfFree(void* reply) { std::free(reply); }
 
 UNSIGNED32 ENTRYPOINT AdsFReadAt(ADSHANDLE hFile, UNSIGNED64 ullOffset,
                                  void* pBuf, UNSIGNED32 ulLen,
