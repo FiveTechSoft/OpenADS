@@ -1,4 +1,5 @@
 #include "engine/vf_guard.h"
+#include "engine/vf_path.h"
 #include <filesystem>
 #include <cerrno>
 #ifdef _WIN32
@@ -29,16 +30,16 @@ util::Result<std::string> PathGuard::pin(const std::string& root,const std::stri
     namespace fs=std::filesystem;
     if(root.empty())return denied(5);
     std::error_code ec;
-    auto base=fs::weakly_canonical(root,ec);
+    auto base=canonical_path(root,ec);
     if(ec)return denied(5);
     // Destructive operations act on the named leaf itself, not its target.
     // Follow-only operations first validate the target, then open NOFOLLOW.
-    auto path=leaf?fs::weakly_canonical(name,ec):fs::path(name).lexically_normal();
+    auto path=leaf?canonical_path(name,ec):fs::path(name).lexically_normal();
     if(ec)return denied(5);
     auto rel=path.lexically_relative(base);
     if(rel.empty() && path!=base)return denied(5);
     std::vector<fs::path> parts;
-    for(auto& p:rel) {
+    for(const auto& p:rel) {
         if(p==".." || p.is_absolute())return denied(5);
         if(p!="." && !p.empty()) {
 #ifdef _WIN32
@@ -57,7 +58,7 @@ util::Result<std::string> PathGuard::pin(const std::string& root,const std::stri
         HANDLE h=::CreateFileW(current.c_str(),FILE_READ_ATTRIBUTES,
             FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,
             FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
-        if(h==INVALID_HANDLE_VALUE)return denied(static_cast<int>(::GetLastError()));
+        if(h==INVALID_HANDLE_VALUE){const auto e=::GetLastError();return denied(static_cast<int>(!leaf && e==ERROR_FILE_NOT_FOUND?ERROR_PATH_NOT_FOUND:e));}
         handles_.push_back(h);
         BY_HANDLE_FILE_INFORMATION info{};
         if(!::GetFileInformationByHandle(h,&info) || (info.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT) ||

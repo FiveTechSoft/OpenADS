@@ -45,3 +45,31 @@ TEST_CASE("vf metadata pins survive parent and leaf substitution") {
     }
 }
 #endif
+
+#include "engine/vf_path.h"
+TEST_CASE("vf path spelling keeps canonical targets inside the selected root") {
+    namespace fs=std::filesystem;
+    using namespace openads::engine::vf;
+    const auto stamp=std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto base=fs::temp_directory_path()/("openads-vf-path-"+std::to_string(stamp));
+    struct Cleanup { fs::path p;~Cleanup(){std::error_code e;fs::remove_all(p,e);} } cleanup{base};
+    fs::create_directories(base/"root"/"folder");fs::create_directories(base/"outside");
+    std::ofstream(base/"root"/"folder"/"file")<<"inside";
+    std::ofstream(base/"outside"/"file")<<"outside";
+    CHECK(resolve_path((base/"root").string(),"."));
+    CHECK(resolve_path((base/"root").string(),"folder/."));
+    CHECK(resolve_path((base/"root").string(),"folder/../folder/file"));
+    CHECK_FALSE(resolve_path((base/"root").string(),"../outside/file"));
+    std::error_code ec;
+    fs::create_symlink(base/"root"/"folder"/"file",base/"root"/"inside-link",ec);
+    if(!ec) {
+        CHECK(resolve_path((base/"root").string(),"inside-link"));
+        PathGuard pin;CHECK(pin.pin((base/"root").string(),(base/"root"/"inside-link").string(),true));
+    }
+    ec.clear();fs::create_symlink(base/"outside"/"file",base/"root"/"outside-link",ec);
+    if(!ec)CHECK_FALSE(resolve_path((base/"root").string(),"outside-link"));
+#ifdef _WIN32
+    CHECK(normalized_path(L"\\\\?\\C:\\data\\file")==fs::path(L"C:\\data\\file"));
+    CHECK(normalized_path(L"\\\\?\\UNC\\server\\share\\file")==fs::path(L"\\\\server\\share\\file"));
+#endif
+}

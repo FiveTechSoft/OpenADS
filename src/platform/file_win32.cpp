@@ -92,7 +92,7 @@ util::Result<void> lock_directory(const std::wstring& path,
 }
 
 util::Result<HANDLE> open_jailed(const std::string& path, DWORD access,
-                              DWORD share, DWORD disp, DWORD attributes = FILE_ATTRIBUTE_NORMAL) {
+                              DWORD share, DWORD disp, DWORD attributes = FILE_ATTRIBUTE_NORMAL, bool exact_vf = false) {
     namespace fs = std::filesystem;
     std::vector<JailRootW> roots;
     { std::lock_guard<std::mutex> lk(g_jail_mu); roots = g_jail_roots; }
@@ -137,7 +137,11 @@ util::Result<HANDLE> open_jailed(const std::string& path, DWORD access,
         name.empty() || name.back() == L'.' || name.back() == L' ')
         return jail_refused("open(jail: invalid leaf)");
     const bool truncating = disp == CREATE_ALWAYS;
-    HANDLE h = ::CreateFileW((current / leaf).c_str(), access, share, nullptr,
+    // The new vf family must support native read-only/no-access truncate
+    // opens too. Acquire write access only for the verified truncation, then
+    // reduce the returned duplicate to the caller's original access rights.
+    const bool reduce_access=exact_vf && truncating && !(access&GENERIC_WRITE);
+    HANDLE h = ::CreateFileW((current / leaf).c_str(), reduce_access?access|GENERIC_WRITE:access, share, nullptr,
         truncating ? OPEN_ALWAYS : disp,
         attributes | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
     if (h == INVALID_HANDLE_VALUE) return os_error("CreateFileW(jail)");
@@ -152,6 +156,14 @@ util::Result<HANDLE> open_jailed(const std::string& path, DWORD access,
         if (!::SetFilePointerEx(h, zero, nullptr, FILE_BEGIN) || !::SetEndOfFile(h)) {
             auto e = os_error("open(jail: truncate)"); ::CloseHandle(h); return e;
         }
+    }
+    if(reduce_access) {
+        HANDLE reduced=nullptr;
+        const DWORD rights=access==GENERIC_READ?FILE_GENERIC_READ:0;
+        if(!::DuplicateHandle(::GetCurrentProcess(),h,::GetCurrentProcess(),&reduced,rights,FALSE,0)) {
+            auto e=os_error("vf access reduction");::CloseHandle(h);return e;
+        }
+        ::CloseHandle(h);h=reduced;
     }
     return h;
 }
@@ -224,7 +236,7 @@ util::Result<File> File::open_vf(const std::string& path, const VfOpenOptions& o
     DWORD disp = o.create ? (o.exclusive ? CREATE_NEW : o.truncate ? CREATE_ALWAYS : OPEN_ALWAYS) : OPEN_EXISTING;
     const DWORD attrs = o.native_attributes ? o.native_attributes : FILE_ATTRIBUTE_NORMAL;
     if (data_jail_active()) {
-        auto opened = open_jailed(path, access, share, disp, attrs);
+        auto opened = open_jailed(path, access, share, disp, attrs, true);
         if (!opened) return opened.error();
         return File{opened.value()};
     }

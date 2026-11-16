@@ -1,3 +1,4 @@
+#include "engine/vf_path.h"
 #include "network/checked_record_flush.h"
 #include "network/session.h"
 #include "network/mutual_auth.h"
@@ -4799,21 +4800,25 @@ DispatchResult Session::dispatch(const Frame& f) {
                     vf::Request q;vf::Reply result;
                     if(!vf::decode(f.payload,q)) { reply=err("vf: bad request");break; }
                     q.client_path1=q.path1;
+                    const auto vf_root=resolve_fs_client_path(".");
+                    const auto resolve_vf=[&](const std::string& name)->std::optional<std::string> {
+                        return vf_root?openads::engine::vf::resolve_path(*vf_root,openads::platform::fold_absolute_to_relative(name)):std::nullopt;
+                    };
                     bool allowed=true;
                     if(q.op>=OADS_VF_EXISTS && q.op!=OADS_VF_BLOBREAD) {
-                        auto abs=resolve_fs_client_path(q.path1.empty()?".":q.path1);
+                        auto abs=resolve_vf(q.path1.empty()?".":q.path1);
                         if(!abs)allowed=false;else q.path1=*abs;
                         if(q.op==OADS_VF_RENAME || q.op==OADS_VF_LINK || q.op==OADS_VF_LINKSYM) {
-                            auto second=resolve_fs_client_path(q.path2);
+                            auto second=resolve_vf(q.path2);
                             if(!second)allowed=false;else q.path2=*second;
                         }
                         if(q.op==OADS_VF_DIRREMOVE) {
                             std::error_code ec;
-                            auto root=resolve_fs_client_path(".");
-                            if(!root || std::filesystem::weakly_canonical(q.path1,ec)==std::filesystem::weakly_canonical(*root,ec))allowed=false;
+                            auto root=resolve_vf(".");
+                            if(!root || openads::engine::vf::canonical_path(q.path1,ec)==openads::engine::vf::canonical_path(*root,ec))allowed=false;
                         }
                     } else if(q.op==OADS_VF_OPEN) {
-                        auto abs=resolve_fs_client_path(q.path1);
+                        auto abs=resolve_vf(q.path1);
                         if(!abs)allowed=false;
                         else {
                             // Resolve only after the jail membership check. The
@@ -4821,11 +4826,11 @@ DispatchResult Session::dispatch(const Frame& f) {
                             // component, so in-jail links work without a follow
                             // race into another root.
                             std::error_code ec;
-                            auto canonical=std::filesystem::weakly_canonical(*abs,ec);
+                            auto canonical=openads::engine::vf::canonical_path(*abs,ec);
                             if(ec)allowed=false;else q.path1=canonical.string();
                         }
                     }
-                    if(auto root=resolve_fs_client_path("."))q.root=*root;else allowed=false;
+                    if(auto root=resolve_vf("."))q.root=*root;else allowed=false;
                     if(!allowed)result.error=5;
                     else {
                         if(!vf_service_)vf_service_=openads::engine::vf::make_service();
@@ -4835,10 +4840,10 @@ DispatchResult Session::dispatch(const Frame& f) {
                     if(q.op==OADS_VF_LINKREAD && !result.data.empty()) {
                         std::string target(result.data.begin(),result.data.end());
                         std::filesystem::path target_path(target);
-                        auto root=resolve_fs_client_path(".");
+                        auto root=resolve_vf(".");
                         std::error_code ec;
-                        auto check=std::filesystem::weakly_canonical(target_path.is_absolute()?target_path:std::filesystem::path(q.path1).parent_path()/target_path,ec);
-                        auto base=root?std::filesystem::weakly_canonical(*root,ec):std::filesystem::path();
+                        auto check=openads::engine::vf::canonical_path(target_path.is_absolute()?target_path:std::filesystem::path(q.path1).parent_path()/target_path,ec);
+                        auto base=root?openads::engine::vf::canonical_path(*root,ec):std::filesystem::path();
                         if(ec || !root || !openads::platform::path_has_prefix(check.generic_string(),base.generic_string(),
 #ifdef _WIN32
                             true
