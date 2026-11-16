@@ -896,18 +896,23 @@ UNSIGNED32 ENTRYPOINT AdsExecuteSQLDirectW  (ADSHANDLE hStatement, UNSIGNED16* p
 #define ADS_PROPRIETARY_LOCKING  1
 #define ADS_COMPATIBLE_LOCKING   2
 
-// AdsGetTableFilename `usOption` values.
-#define ADS_FULLPATHNAME    1
+// AdsGetTableFilename / AdsGetIndexFilename `usOption` values. Must match
+// the ACE SDK's ace.h byte for byte: rddads is compiled against the SDK
+// header, so OrdBagName() (DBOI_BAGNAME) sends 1 for ADS_BASENAME. These
+// were once swapped here, and OrdBagName() returned the full path.
+#define ADS_BASENAME        1
 #define ADS_BASENAMEANDEXT  2
-#define ADS_BASENAME        3
+#define ADS_FULLPATHNAME    3
 
 // Key buffer encodings for AdsSeek / AdsSetScope `usDataType`.
 // NOT the AdsGetKeyType return domain — AdsGetKeyType reports the
 // field-type constants (ADS_STRING / ADS_NUMERIC / ADS_DATE /
-// ADS_LOGICAL / ADS_RAW) above.
-#define ADS_RAWKEY     0
-#define ADS_STRINGKEY  1
-#define ADS_DOUBLEKEY  2
+// ADS_LOGICAL / ADS_RAW) above. Values match the ACE SDK ace.h (rddads
+// and X# send these): RAWKEY 1, STRINGKEY 2, DOUBLEKEY 4. They were once
+// 0/1/2 here, so an SDK numeric scope (4) missed the DOUBLEKEY branch.
+#define ADS_RAWKEY     1
+#define ADS_STRINGKEY  2
+#define ADS_DOUBLEKEY  4
 
 // Misc query / filter flags.
 #define ADS_DEFCONNECTION    1

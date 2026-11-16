@@ -21,14 +21,17 @@ namespace openads::sql {
 enum class WhereOp {
     Eq, Ne, Lt, Gt, Le, Ge,
     Contains, Between, Like,
-    IsNull, IsNotNull        // M10.44
+    IsNull, IsNotNull,       // M10.44
+    Empty                    // ADS/xBase `EMPTY(<col>)` used as a predicate
 };
 
 // ADS dialect — optional case-folding function wrapping the WHERE
 // left-hand side: `UPPER(<col>) <op> <lit>` / `LOWER(<col>) <op> <lit>`.
 // Applied to the cell value (right-trimmed Character text) before the
 // comparison; the literal is taken verbatim, matching ADS semantics.
-enum class WhereFn { None, Upper, Lower };
+// `TRIM(<col>)` / `ALLTRIM(<col>)` / `LTRIM(<col>)` strip blanks (both
+// sides / leading); RTRIM is a no-op under PAD SPACE comparison.
+enum class WhereFn { None, Upper, Lower, Trim, Ltrim };
 
 // Forward declaration so WhereCmp + InClause + WhereExpr can hold
 // optional sub-SelectStmts without seeing the full struct yet.

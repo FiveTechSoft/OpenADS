@@ -194,7 +194,8 @@ inline constexpr const char kSpaPart1[] = R"OPENADS_SPA(
                word-break: break-all; max-height: 70vh; overflow: auto;
                border: 1px solid var(--border); }
 )OPENADS_SPA";
-inline constexpr const char kSpaPart1b[] = R"OPENADS_SPA(  /* SQL editor syntax highlight overlay */
+inline constexpr const char kSpaPart1b[] = R"OPENADS_SPA(  td.nowrap { white-space: nowrap; }
+  /* SQL editor syntax highlight overlay */
   .sql-kw     { color: #569cd6; font-weight: 600; }
   .sql-str    { color: #ce9178; }
   .sql-num    { color: #b5cea8; }
@@ -491,8 +492,10 @@ inline constexpr const char kSpaPart2b[] = R"OPENADS_SPA(    <div id="pane-locks
         <span id="locks-status"></span>
       </div>
       <div style="font-size:12px;opacity:0.7;margin-bottom:6px">
-        Kill drops the whole client connection holding the lock: all its locks
-        are released and its open files close.
+        Release frees just that lock; the session stays connected, and its
+        program gets error 5035 if it then saves without locking again.
+        Kill drops the whole client connection: all its locks are released
+        and its open files close.
       </div>
       <div id="locks-body" class="grid"><div class="empty">Loading…</div></div>
     </div>
@@ -2061,12 +2064,17 @@ function renderFileLocks(f) {
       <td>${l.user ? esc(l.user) : "<i style='opacity:0.5'>(none)</i>"}</td>
       ${whoCells(l)}
       <td>${l.peer_ip ? esc(l.peer_ip) + ":" + l.peer_port : ""}</td>
-      <td>${l.id ? `<button class="btn btn-danger" data-skill="${l.id}">Kill</button>` : ""}</td>
+      <td class="nowrap">${l.id ? `<button class="btn btn-secondary" data-frel="${locks.indexOf(l)}"
+        title="Release only this lock; the session stays connected">Release</button>
+        <button class="btn btn-danger" data-skill="${l.id}">Kill</button>` : ""}</td>
       </tr>`).join("");
   $("files-locks").innerHTML = `<table>
     <thead><tr><th>Record #</th><th>Session</th><th>User</th>${WHO_TH}
     <th>Peer</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
   makeSortable($("files-locks"), "fileLocks");
+  $("files-locks").querySelectorAll("[data-frel]").forEach(b =>
+    b.addEventListener("click", () => releaseLock(
+      Object.assign({ file: f.file }, locks[+b.dataset.frel]), () => loadFiles())));
 }
 // Computer / OS user / program cells for any session-shaped object.
 // A computer name found by reverse DNS (client did not report one) is
@@ -2167,7 +2175,8 @@ async function renderSessionsTab() {
 function sessionLocks(id) {
   const out = [];
   sessState.files.forEach(f => (f.locks || []).forEach(l => {
-    if (l.id === id) out.push({ file: f.file, recno: l.recno, type: l.type });
+    if (l.id === id) out.push({ file: f.file, recno: l.recno, type: l.type,
+                                id: l.id, user: l.user, table: l.table });
   }));
   return out;
 }
@@ -2248,12 +2257,17 @@ function drawSessionDetail() {
   $("sessions-locks-title").innerHTML = `Locks held by session <b>${id}</b> (${locks.length})`;
   $("sessions-locks").innerHTML = !locks.length
     ? `<div class="empty">No record or file locks.</div>`
-    : `<table><thead><tr><th>File</th><th>Record #</th></tr></thead>
-       <tbody>${locks.map(l => `<tr>
+    : `<table><thead><tr><th>File</th><th>Record #</th><th></th></tr></thead>
+       <tbody>${locks.map((l, i) => `<tr>
          <td class="fname">${esc(l.file)}</td>
          <td data-sort="${l.recno}">${l.type === "file" ? "<b>whole file</b>" : l.recno}</td>
+         <td><button class="btn btn-secondary" data-srel="${i}"
+           title="Release only this lock; the session stays connected">Release</button></td>
        </tr>`).join("")}</tbody></table>`;
   makeSortable($("sessions-locks"), "sessionLocks");
+  $("sessions-locks").querySelectorAll("[data-srel]").forEach(b =>
+    b.addEventListener("click", () => releaseLock(locks[+b.dataset.srel],
+      () => renderSessionsTab())));
 }
 
 // ---- Locks tab: every record / file lock on the server -----------------
@@ -2306,13 +2320,18 @@ function renderLocks() {
       <td>${l.peer_ip ? esc(l.peer_ip) + ":" + l.peer_port : ""}</td>
       <td data-sort="${l.idle_secs ?? ""}">${
         l.idle_secs == null ? "" : fmtDuration(l.idle_secs)}</td>
-      <td>${l.id ? `<button class="btn btn-danger" data-lkill="${l.id}">Kill</button>` : ""}</td>
+      <td class="nowrap">${l.id ? `<button class="btn btn-secondary" data-lrel="${list.indexOf(l)}"
+        title="Release only this lock; the session stays connected">Release</button>
+        <button class="btn btn-danger" data-lkill="${l.id}">Kill</button>` : ""}</td>
       </tr>`).join("");
   $("locks-body").innerHTML = `<table>
     <thead><tr><th>File</th><th>Record #</th><th>Session</th><th>User</th>${WHO_TH}
     <th>Peer</th><th>Idle</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
   makeSortable($("locks-body"), "locks");
   $("locks-body").scrollTop = keepTop;
+  document.querySelectorAll("[data-lrel]").forEach(b =>
+    b.addEventListener("click", () => releaseLock(list[+b.dataset.lrel],
+      msg => { $("locks-status").textContent = msg; loadLocks(); })));
   document.querySelectorAll("[data-lkill]").forEach(b =>
     b.addEventListener("click", async () => {
       const id = +b.dataset.lkill;
@@ -2325,6 +2344,26 @@ function renderLocks() {
       } catch (e) { alert(e.message); }
       setTimeout(loadLocks, 300);  // sessions close asynchronously
     }));
+}
+// Release one lock without disconnecting its holder. `l` is a lock row
+// from /api/server/files plus its file; `done(msg)` refreshes the caller.
+async function releaseLock(l, done) {
+  const rec = l.type !== "file";
+  const what = rec ? `record ${l.recno}` : "the file lock";
+  if (!confirm(`Release ${what} on\n${l.file}\nheld by session ${l.id}` +
+      `${l.user ? " (" + l.user + ")" : ""}?\n\nThe session stays connected, ` +
+      `but its program is not told. If it then saves ${rec ? "this record" :
+      "to this file"} without locking again, it gets error 5035 ` +
+      `"record not locked" and that change is lost.`)) return;
+  let msg;
+  try {
+    await api("/api/server/locks/release", { method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session: l.id, table: l.table || l.file,
+                             recno: rec ? l.recno : 0 }) });
+    msg = `released ${what} held by session ${l.id}`;
+  } catch (e) { alert(e.message); msg = e.message; }
+  if (done) done(msg);
 }
 $("locks-refresh").addEventListener("click", loadLocks);
 $("locks-auto").addEventListener("change", startLocksAutoRefresh);

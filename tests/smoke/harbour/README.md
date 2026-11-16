@@ -11,7 +11,7 @@ against `rddads.lib` + OpenADS `ace64.lib` and must be built with
 | File | Covers | Verdict file |
 |------|--------|--------------|
 | `navcmp.prg` | Navigation: dbGoTop/GoBottom/Skip(±1,±n)/dbGoto at and past both boundaries, empty-table Limbo, SET DELETED on/off, structural-CDX auto-open staying in natural order, USE...INDEX, seek+skip | `navcmp_verdict.txt` |
-| `dballcmp.prg` | Every `Db*` and `Ord*` user function in Harbour's `src/rdd/dbcmd*.c` (state, fields, append/put, delete/recall, orders, scopes, seek, filters, relations, locking, dbEval, PACK/ZAP, file ops, dbInfo/dbFieldInfo/dbRecordInfo) | `dballcmp_verdict.txt` |
+| `dballcmp.prg` | Every `Db*` and `Ord*` user function in Harbour's `src/rdd/dbcmd*.c` (state, fields, append/put, delete/recall, orders, scopes, seek, filters, relations, locking, dbEval, PACK/ZAP, file ops, dbInfo/dbFieldInfo/dbRecordInfo), plus one table in two work areas and separate `.IDX` bags (plain, ADDITIVE, USECURRENT under a scope, OrdListClear/OrdListAdd, SET INDEX, REINDEX). Three passes: DBFCDX, ADSCDX local, ADSCDX through `openads_serverd`; verdicts local-vs-DBFCDX, remote-vs-DBFCDX, remote-vs-local. Build + run everything: `dballcmp_run.bat` | `dballcmp_verdict.txt` |
 | `memocmp.prg` | Memo fields: same rows+payloads written through both RDDs, then byte-compares the `.dbf` and `.fpt` files and cross-reads each RDD's files with the other | `memocmp_verdict.txt` |
 
 Known, documented deltas (deliberately normalised in the harnesses;

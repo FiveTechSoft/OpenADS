@@ -174,6 +174,7 @@ public:
         std::string   expression;
         bool          is_unique = false;
         bool          is_descending = false;
+        std::string   condition;  // FOR expression (AdsGetIndexCondition)
     };
     // M12.14 — remote field metadata + extended cursor state.
     struct FieldDesc {
@@ -273,7 +274,9 @@ public:
     util::Result<std::vector<OpenIndexEntry>>
                                 open_index(std::uint32_t table_id,
                                            const std::string& path);
-    util::Result<void>          close_index(std::uint32_t index_id);
+    // destroy = OrdDestroy: the server also deletes the tag from its bag.
+    util::Result<void>          close_index(std::uint32_t index_id,
+                                            bool destroy = false);
 
     // M12.29 — AdsDD* Data Dictionary property API, phase 1. `subName` is
     // only meaningful for DDObjectKind::Field (the field name within the
@@ -752,6 +755,11 @@ struct RemoteTable {
     bool          open_exclusive = false;  // mapped mode (never pooled)
     bool          ever_locked = false;     // AppendBlank/LockRecord/Table
     bool          scope_touched = false;   // SetScope (server state unclear)
+    // Scopes set through AdsSetScope, keyed by server index id, so
+    // AdsGetScope (OrdScope() read-back, rddads' USECURRENT WHILE) can
+    // answer without a frame. Raw key bytes as the caller passed them.
+    std::unordered_map<std::uint32_t, std::string> scope_top;
+    std::unordered_map<std::uint32_t, std::string> scope_bottom;
     // Client-side lock ledger (WAN chattiness): mirrors the record and
     // table locks this connection is known to hold on the server. Lets
     // AdsUnlockTable skip the frame when nothing is held (rddads
@@ -1111,6 +1119,7 @@ struct RemoteIndex {
     std::string       expression;    // key expression (AdsGetIndexExpr)
     bool              is_unique = false;      // AdsIsIndexUnique
     bool              is_descending = false;  // AdsIsIndexDescending (physical flag)
+    std::string       condition;     // FOR expression (AdsGetIndexCondition / OrdFor)
     // M12.17 — back-pointer so AdsSeek / AdsSeekLast / AdsSkipUnique
     // can invalidate the parent table's row cache after the cursor
     // moves on the server side.

@@ -11,3 +11,6 @@ not bypass the limit. Partition large maintenance work or run it locally.
 This is not a deadline or rollback guarantee. Memo values, expensive expressions,
 repeated statements, INSERT sources, external backends and native DLL calls
 still require separate controls. The remote lock-ledger cap remains in force.
+
+The limits are configurable on the server (`remote_sql_*` in openads.ini,
+0 = unlimited). See [Configuring the remote SQL work limits](security-sql-limits-config.md).

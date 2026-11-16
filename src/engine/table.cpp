@@ -1567,8 +1567,17 @@ bool Table::is_deleted() const noexcept {
 }
 
 util::Result<bool> Table::deleted_at(std::uint32_t recno) {
-    if (recno == 0 || recno > driver_->record_count()) {
+    if (recno == 0) {
         return util::Error{5000, 0, "record number out of range", ""};
+    }
+    if (recno > driver_->record_count()) {
+        // A shared index can name a record another station appended after
+        // our cached header count (the peer updated the bag): re-read the
+        // count before calling it out of range. Otherwise SET DELETED ON
+        // key counts (count_live_recnos) dropped every peer append.
+        (void)driver_->refresh_record_count_from_disk();
+        if (recno > driver_->record_count())
+            return util::Error{5000, 0, "record number out of range", ""};
     }
     auto rec = driver_->read_record_raw(recno);
     if (!rec) return rec.error();
@@ -1857,6 +1866,27 @@ util::Result<void> Table::reindex() {
     return {};
 }
 
+// A record committed by navigation (GoCold on Seek / Skip / Goto, i.e. an
+// app that REPLACEs and moves on without dbCommit) inserts its keys into
+// this handle's CDX page cache only; the pages, and the CDX write lock,
+// stay private until something flushes. Nothing did on unlock, so a second
+// work area on the same file -- or another station -- never saw the new
+// keys: an appended record was missing from every index seek/walk outside
+// the area that added it (field report, AC / T_AC44, 2026-11-15). ACE
+// publishes changes when the lock is released, so do the same: write the
+// dirty index pages (no fsync unless OPENADS_FSYNC=1; clean indexes are a
+// no-op) before the lock goes.
+util::Result<void> Table::publish_index_pages_() {
+    if (order_ && order_->index()) {
+        if (auto r = order_->index()->flush(); !r) return r.error();
+    }
+    for (auto* extra : extra_index_views_) {
+        if (extra == nullptr) continue;
+        if (auto r = extra->flush(); !r) return r.error();
+    }
+    return {};
+}
+
 util::Result<void> Table::flush() {
     // Settle the dirty record buffer before OS-level fsync so
     // AdsWriteRecord / AdsFlushFileBuffers persist field edits.
@@ -1963,6 +1993,8 @@ util::Result<void> Table::unlock_record(std::uint32_t recno) {
     if (record_dirty_ && (recno == 0 || recno == recno_)) {
         if (auto r = commit_dirty_record(); !r) return r.error();
     }
+    // Publish index pages before the lock goes (see publish_index_pages_).
+    if (auto r = publish_index_pages_(); !r) return r.error();
     auto it = recno_locks_.find(recno);
     if (it != recno_locks_.end()) {
         if (table_lock_) {
@@ -2067,6 +2099,7 @@ util::Result<void> Table::unlock_table() {
     if (record_dirty_) {
         if (auto r = commit_dirty_record(); !r) return r.error();
     }
+    if (auto r = publish_index_pages_(); !r) return r.error();
     if (table_lock_) {
         if (locks_.unlock_table(driver_->file(), to_lock_type_(), locking_)) {
             table_lock_->release();

@@ -175,3 +175,75 @@ TEST_CASE("multiuser: peer append with production CDX is visible on ordered brow
     REQUIRE(AdsDisconnect(h2) == 0);
     fs::remove_all(dir, ec);
 }
+
+TEST_CASE("multiuser: peer append with production CDX is visible on ordered browse (SET DELETED ON)") {
+    struct Restore { ~Restore() { AdsShowDeleted(1); } } restore_show_deleted;
+    AdsShowDeleted(0);   // rddads SET DELETED ON, before the connections open
+    auto dir = fs::temp_directory_path() / "openads_mu_nav_index_sdon";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+
+    auto h1 = connect(dir);
+    auto h2 = connect(dir);
+
+    UNSIGNED8 flds[] = "NAME,C,20,0";
+    UNSIGNED8 nm[]   = "T";
+    ADSHANDLE t1 = 0;
+    REQUIRE(AdsCreateTable(h1, nm, nm, ADS_CDX, ADS_ANSI, 0, ADS_SHARED, 0,
+                           flds, &t1) == 0);
+    append_name(t1, "Charlie");
+    append_name(t1, "Alice");
+    append_name(t1, "Bob");
+    // Production bag while table still open on A.
+    UNSIGNED8 bag[]  = "T.cdx";
+    UNSIGNED8 tag[]  = "BYNAME";
+    UNSIGNED8 expr[] = "NAME";
+    ADSHANDLE hIdx = 0;
+    REQUIRE(AdsCreateIndex61(t1, bag, tag, expr, nullptr, nullptr,
+                             ADS_COMPOUND, 512, &hIdx) == 0);
+    REQUIRE(AdsCloseIndex(hIdx) == 0);
+    REQUIRE(AdsCloseTable(t1) == 0);
+
+    // Both stations open table (production CDX auto-open) + explicit bag.
+    REQUIRE(AdsOpenTable(h1, nm, nm, ADS_CDX, 1, ADS_SHARED, 0, 1, &t1) == 0);
+    ADSHANDLE t2 = 0;
+    REQUIRE(AdsOpenTable(h2, nm, nm, ADS_CDX, 1, ADS_SHARED, 0, 1, &t2) == 0);
+
+    std::array<ADSHANDLE, 4> a1{}, a2{};
+    UNSIGNED16 n1 = 4, n2 = 4;
+    REQUIRE(AdsOpenIndex(t1, bag, a1.data(), &n1) == 0);
+    REQUIRE(AdsOpenIndex(t2, bag, a2.data(), &n2) == 0);
+    REQUIRE(n1 >= 1u);
+    REQUIRE(n2 >= 1u);
+
+    UNSIGNED32 kc = 0;
+    REQUIRE(AdsGetKeyCount(a1[0], ADS_IGNOREFILTERS, &kc) == 0);
+    CHECK(kc == 3u);
+    CHECK(walk_count(t1, a1[0]) == 3);
+
+    // B appends with order open → bag grows.
+    append_name(t2, "Diana");
+    REQUIRE(AdsGetKeyCount(a2[0], ADS_IGNOREFILTERS, &kc) == 0);
+    CHECK(kc == 4u);
+
+    // A must see 4 keys after peer write (reload CDX header/counter).
+    REQUIRE(AdsGetKeyCount(a1[0], ADS_IGNOREFILTERS, &kc) == 0);
+    CHECK(kc == 4u);
+    CHECK(walk_count(t1, a1[0]) == 4);
+
+    // Ordered top should still be Alice after Diana is added.
+    REQUIRE(AdsGotoTop(a1[0]) == 0);
+    UNSIGNED8 buf[32] = {};
+    UNSIGNED32 bl = sizeof(buf);
+    REQUIRE(AdsGetString(t1, reinterpret_cast<UNSIGNED8*>(const_cast<char*>("NAME")),
+                         buf, &bl, ADS_NONE) == 0);
+    std::string name(reinterpret_cast<char*>(buf));
+    while (!name.empty() && name.back() == ' ') name.pop_back();
+    CHECK(name == "Alice");
+
+    REQUIRE(AdsCloseTable(t1) == 0);
+    REQUIRE(AdsCloseTable(t2) == 0);
+    REQUIRE(AdsDisconnect(h1) == 0);
+    REQUIRE(AdsDisconnect(h2) == 0);
+    fs::remove_all(dir, ec);
+}

@@ -11,3 +11,6 @@ eluden el límite. Divida el mantenimiento grande o ejecútelo localmente.
 No es un plazo ni garantiza rollback. Los memos, expresiones costosas,
 sentencias repetidas, fuentes INSERT, backends externos y DLLs nativas aún
 necesitan controles propios. Sigue activo el límite del ledger de locks remoto.
+
+Los límites se pueden configurar en el servidor (`remote_sql_*` en openads.ini,
+0 = sin límite). Vea [Configuración de los límites de trabajo SQL remoto](security-sql-limits-config.md).

@@ -222,6 +222,19 @@ bool parse_ini(const std::string& text, IniConfig& out, std::string& error) {
             }
             out.error_log_max_kb = static_cast<std::uint32_t>(n);
             out.has_error_log_max = true;
+        } else if (key == "remote_sql_max_rows" ||
+                   key == "remote_sql_max_mb" ||
+                   key == "remote_sql_max_steps" ||
+                   key == "remote_sql_timeout_ms") {
+            // Remote SQL work limits (0 = unlimited). Consumed by the engine
+            // through util::client_setting (this file is exported as
+            // OPENADS_INI); validated here so a typo fails at startup.
+            unsigned long n = 0;
+            if (!parse_uint(val, 0xFFFFFFFFul, n)) {
+                error = "line " + std::to_string(lineno) + ": " + key +
+                        " must be a number (0 = unlimited)";
+                return false;
+            }
         } else if (key == "http_user") {
             auto colon = val.find(':');
             if (colon == std::string::npos) {

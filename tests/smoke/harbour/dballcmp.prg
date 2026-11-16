@@ -1,24 +1,40 @@
 /* dballcmp.prg -- exhaustive Db and Ord function conformance comparison:
- * ADSCDX (OpenADS) vs DBFCDX (Harbour reference).
+ * ADSCDX (OpenADS) vs DBFCDX (Harbour reference), locally AND through
+ * openads_serverd.
  *
  * Function surface enumerated from the Harbour 3.2 sources
  * (src/rdd/dbcmd.c + dbcmd53.c + dbcmdhb.c -- every HB_FUNC(DB*),
  * HB_FUNC(ORD*), and the workarea state/field functions). Each battery
- * logs comparable values to a per-RDD transcript
- * (dballcmp_dbfcdx.txt / dballcmp_adscdx.txt); the verdict byte-compares
- * the two transcripts.
+ * logs comparable values to a per-pass transcript; the verdicts
+ * byte-compare them.
+ *
+ * Passes (each writes dballcmp_<pass>.txt):
+ *   dbfcdx     Harbour DBFCDX -- the reference
+ *   adscdx     ADSCDX over OpenADS, ADS_LOCAL_SERVER
+ *   adsremote  ADSCDX over OpenADS through the server (tcp://). Runs only
+ *              when OPENADS_TEST_URI names a server whose data root is
+ *              this folder (dballcmp_run.bat starts one).
+ * Verdicts (dballcmp_verdict.txt):
+ *   local  vs dbfcdx -- OpenADS engine vs Harbour
+ *   remote vs dbfcdx -- server path vs Harbour
+ *   remote vs local  -- server-only bugs. Same rddads build on both
+ *                       sides, so rddads-version gaps cancel out.
  *
  * Values that are RDD-identity by definition (RDDNAME()) are logged as
  * an OK/FAIL check against the expected name instead of the raw value,
  * so the transcripts stay comparable.
+ *
+ * rddads built against an ACE SDK older than 9.0 (ADS_LIB_VERSION < 900)
+ * never forwards OrdDescend(,,lSet) or OrdSkipUnique() to ACE, so those
+ * lines differ from DBFCDX with ANY ACE server (real ADS included); they
+ * still match between local and remote.
  *
  * Intentionally NOT covered (Harbour RTL-level, RDD-agnostic, or UI):
  *   dbEdit (UI), COPY TO / APPEND FROM / SORT / JOIN / TOTAL (__dbCopy /
  *   __dbArrange / __dbTrans -- same Harbour RTL code drives both RDDs),
  *   dbLocate/dbContinue (RTL on top of skip/eval).
  *
- * Build:  see build line in navcmp.prg (same flags, this file).
- * Run:    dballcmp.exe   (needs ace64.dll on PATH or next to the exe)
+ * Build + run (server pass included): dballcmp_run.bat
  */
 #include "ads.ch"
 #include "dbinfo.ch"
@@ -28,29 +44,107 @@ REQUEST ADS, ADSCDX, DBFCDX
 
 STATIC nLog := -1
 STATIC cRDD := ""
+STATIC cTmp := ""        /* absolute folder for separate .IDX bags */
 
 PROCEDURE Main()
-   LOCAL cD, cA, h
+   LOCAL h, cUri, lFail := .F.
 
    ErrorBlock( {|oErr| MyHandler( oErr ) } )
    SET DELETED OFF
    SET EXACT OFF
 
-   RunRDD( "DBFCDX" )
-   RunRDD( "ADSCDX" )
+   cTmp := hb_cwd() + "tmpidx" + hb_ps()
+   hb_DirCreate( cTmp )
 
-   cD := Memoread( "dballcmp_dbfcdx.txt" )
-   cA := Memoread( "dballcmp_adscdx.txt" )
+   RunRDD( "DBFCDX", "dbfcdx", "" )
+   RunRDD( "ADSCDX", "adscdx", "" )
+   cUri := GetEnv( "OPENADS_TEST_URI" )
+   IF ! Empty( cUri )
+      RunRDD( "ADSCDX", "adsremote", cUri )
+   ENDIF
+
    h := FCreate( "dballcmp_verdict.txt" )
-   IF cD == cA
-      FWrite( h, "DBALLCMP PASS: ADSCDX transcript identical to DBFCDX" + hb_eol() )
-      ? "DBALLCMP PASS"
+   IF Verdict( h, "local  vs dbfcdx", "adscdx", "dbfcdx", .T. )
+      lFail := .T.
+   ENDIF
+   IF ! Empty( cUri )
+      IF Verdict( h, "remote vs dbfcdx", "adsremote", "dbfcdx", .T. )
+         lFail := .T.
+      ENDIF
+      IF Verdict( h, "remote vs local ", "adsremote", "adscdx", .F. )
+         lFail := .T.
+      ENDIF
    ELSE
-      FWrite( h, "DBALLCMP FAIL: transcripts differ" + hb_eol() )
-      ? "DBALLCMP FAIL"
+      FWrite( h, "remote: SKIPPED (OPENADS_TEST_URI not set)" + hb_eol() )
    ENDIF
    FClose( h )
+   ? MemoRead( "dballcmp_verdict.txt" )
+   ErrorLevel( iif( lFail, 1, 0 ) )
    RETURN
+
+/* Compare two transcripts section by section ("-- name" lines), so one
+ * extra or missing line only affects its own section. Every differing
+ * line goes into the verdict file with its section name.
+ * lVsDbf: comparing an ADSCDX pass with DBFCDX -- the rddads-version
+ * gaps (KnownGap()) are listed as KNOWN and do not fail the verdict. */
+STATIC FUNCTION Verdict( h, cTitle, cA, cB, lVsDbf )
+   LOCAL hA := Sections( "dballcmp_" + cA + ".txt" )
+   LOCAL hB := Sections( "dballcmp_" + cB + ".txt" )
+   LOCAL aKeys := {}, cKey, aA, aB, i, nDiff := 0, nKnown := 0, cTag
+   LOCAL nW := Max( Len( cA ), Len( cB ) )
+   hb_HEval( hB, {|k| AAdd( aKeys, k ) } )
+   hb_HEval( hA, {|k| iif( hb_HHasKey( hB, k ), NIL, AAdd( aKeys, k ) ) } )
+   FOR EACH cKey IN aKeys
+      aA := hb_HGetDef( hA, cKey, { "<section missing>" } )
+      aB := hb_HGetDef( hB, cKey, { "<section missing>" } )
+      FOR i := 1 TO Max( Len( aA ), Len( aB ) )
+         IF i > Len( aA ) .OR. i > Len( aB ) .OR. !( aA[ i ] == aB[ i ] )
+            IF lVsDbf .AND. i <= Len( aB ) .AND. KnownGap( cKey, aB[ i ] )
+               nKnown++
+               cTag := "KNOWN rddads<9.0 "
+            ELSE
+               nDiff++
+               cTag := ""
+            ENDIF
+            FWrite( h, "   " + cTag + "[" + cKey + "]" + hb_eol() + ;
+                       "     " + PadR( cA, nW ) + ": " + iif( i <= Len( aA ), aA[ i ], "<missing>" ) + hb_eol() + ;
+                       "     " + PadR( cB, nW ) + ": " + iif( i <= Len( aB ), aB[ i ], "<missing>" ) + hb_eol() )
+         ENDIF
+      NEXT
+   NEXT
+   FWrite( h, cTitle + ": " + iif( nDiff == 0, "PASS", "FAIL" ) + ;
+              " (" + LTrim( Str( nDiff ) ) + " differing" + ;
+              iif( nKnown > 0, ", " + LTrim( Str( nKnown ) ) + " known", "" ) + ;
+              ")" + hb_eol() + hb_eol() )
+   RETURN nDiff > 0
+
+/* rddads compiled against an ACE SDK < 9.0 never forwards these to ACE
+ * (ads1.c: #if ADS_LIB_VERSION >= 900), so with ANY ACE server -- real
+ * ADS included -- they keep DBFCDX's "not supported" shape differently. */
+STATIC FUNCTION KnownGap( cSect, cLine )
+   RETURN cSect == "ord full" .AND. ;
+          ( Left( cLine, 12 ) == "descend-set=" .OR. ;
+            Left( cLine, 11 ) == "desc gotop=" .OR. ;
+            Left( cLine, 11 ) == "skipunique=" )
+
+/* transcript -> { "section" => { lines } }, in file order */
+STATIC FUNCTION Sections( cFile )
+   LOCAL hS := { => }, cLine, cSect := "(start)"
+   hb_HKeepOrder( hS, .T. )
+   FOR EACH cLine IN hb_ATokens( MemoRead( cFile ), hb_eol() )
+      IF Left( cLine, 3 ) == "-- "
+         cSect := SubStr( cLine, 4 )
+         IF ! hb_HHasKey( hS, cSect )
+            hS[ cSect ] := {}
+         ENDIF
+      ELSEIF ! Empty( cLine )
+         IF ! hb_HHasKey( hS, cSect )
+            hS[ cSect ] := {}
+         ENDIF
+         AAdd( hS[ cSect ], cLine )
+      ENDIF
+   NEXT
+   RETURN hS
 
 /* -------------------------------------------------- fixtures -------- */
 
@@ -93,37 +187,75 @@ PROCEDURE MakeChild( cName )
 
 /* -------------------------------------------------- driver ---------- */
 
-PROCEDURE RunRDD( c )
+PROCEDURE RunRDD( c, cName, cUri )
+   LOCAL hConn := 0
+   dbCloseAll()
+   dbSelectArea( 1 )     /* every pass starts in work area 1 (Select()) */
    cRDD := c
-   fErase( "dballcmp_" + Lower( c ) + ".txt" )
-   nLog := FCreate( "dballcmp_" + Lower( c ) + ".txt" )
+   fErase( "dballcmp_" + cName + ".txt" )
+   nLog := FCreate( "dballcmp_" + cName + ".txt" )
+
+   /* Fresh fixtures per pass (DBFCDX-made, before any connection):
+    * some batteries are destructive */
+   MakeMain( "da_main" )
+   MakeChild( "da_child" )
+   MakeChild( "da_two" )
+   AEval( Directory( cTmp + "*.*" ), {|a| fErase( cTmp + a[ 1 ] ) } )
 
    IF c == "ADSCDX"
       AdsSetFileType( ADS_CDX )
-      AdsSetServerType( ADS_LOCAL_SERVER )
+      IF ! Empty( cUri )
+         AdsSetServerType( ADS_REMOTE_SERVER )
+         IF ! AdsConnect60( cUri, ADS_REMOTE_SERVER, "", "", 0, @hConn )
+            LogIt( "ERROR: AdsConnect60 failed for " + cUri + " ace=" + ;
+                   LTrim( Str( AdsGetLastError() ) ) )
+            FClose( nLog )
+            nLog := -1
+            RETURN
+         ENDIF
+      ELSE
+         AdsSetServerType( ADS_LOCAL_SERVER )
+      ENDIF
    ENDIF
 
-   /* Fresh fixtures per pass: some batteries are destructive */
-   MakeMain( "da_main" )
-   MakeChild( "da_child" )
-
-   BattState()
-   BattFields()
-   BattAppendPut()
-   BattDeleteRecall()
-   BattOrders()
-   BattSeekFound()
-   BattFilter()
-   BattRelation()
-   BattLocking()
-   BattEval()
-   BattPackZap()
-   BattFileOps()
-   BattInfo()
+   Batt( {|| BattState() } )
+   Batt( {|| BattFields() } )
+   Batt( {|| BattAppendPut() } )
+   Batt( {|| BattDeleteRecall() } )
+   Batt( {|| BattOrders() } )
+   Batt( {|| BattSeekFound() } )
+   Batt( {|| BattFilter() } )
+   Batt( {|| BattRelation() } )
+   Batt( {|| BattLocking() } )
+   Batt( {|| BattEval() } )
+   Batt( {|| BattTwoAreas() } )
+   Batt( {|| BattSeparateBag() } )
+   Batt( {|| BattPackZap() } )
+   Batt( {|| BattFileOps() } )
+   Batt( {|| BattInfo() } )
 
    dbCloseAll()
+   IF hConn != 0
+      AdsDisconnect( hConn )
+   ENDIF
    FClose( nLog )
    nLog := -1
+   RETURN
+
+/* Run one battery; an RTE is logged into the transcript (so it shows up
+ * as a diff) and the next battery still runs. */
+STATIC PROCEDURE Batt( b )
+   LOCAL oErr, oldErr := ErrorBlock( {|e| Break( e ) } )
+   BEGIN SEQUENCE
+      Eval( b )
+   RECOVER USING oErr
+      LogIt( "ERROR: " + oErr:Description + " [" + ;
+             LTrim( Str( oErr:GenCode ) ) + "/" + ;
+             LTrim( Str( oErr:SubCode ) ) + "] op=" + oErr:Operation + ;
+             " (" + ProcName( 2 ) + ")" )
+      dbCloseAll()
+   END SEQUENCE
+   ErrorBlock( oldErr )
    RETURN
 
 /* -------------------------------------------------- batteries ------- */
@@ -415,6 +547,173 @@ PROCEDURE BattEval()
    LogIt( "dbeval count=" + N( n ) )
    USE
    RETURN
+
+/* The same table open in two work areas (field report 2026-11-15:
+ * "appending in one area is not visible in the 2nd area"). Area A
+ * appends -- committed explicitly, by navigation (no dbCommit: the next
+ * seek commits), and bare -- then edits and deletes; area B must see
+ * every change through counts, seeks and index walks. */
+PROCEDURE BattTwoAreas()
+   Sect( "two areas" )
+   USE da_two ALIAS ta NEW SHARED VIA ( cRDD )
+   OrdSetFocus( "KEY" )
+   USE da_two ALIAS tb NEW SHARED VIA ( cRDD )
+   OrdSetFocus( "KEY" )
+   /* B browses first: warms every cached count / row it has */
+   tb->( dbGoTop() )
+   tb->( dbSkip( 3 ) )
+   LogIt( "b before: lastrec=" + N( tb->( LastRec() ) ) + ;
+          " keycount=" + TryStr( {|| N( tb->( OrdKeyCount() ) ) } ) + ;
+          " reccount=" + N( tb->( RecCount() ) ) )
+
+   /* append + replace + dbCommit + unlock */
+   ta->( dbAppend() )
+   ta->KEY := PadR( "zz_commit", 20 )
+   ta->VAL := "c1"
+   ta->( dbCommit() )
+   ta->( dbUnlock() )
+   LogIt( "b after commit: lastrec=" + N( tb->( LastRec() ) ) + ;
+          " keycount=" + TryStr( {|| N( tb->( OrdKeyCount() ) ) } ) + ;
+          " seek=" + B( tb->( dbSeek( "zz_commit" ) ) ) + ;
+          " rec=" + N( tb->( RecNo() ) ) )
+
+   /* append + replace, NO dbCommit: the next seek in A commits it */
+   ta->( dbAppend() )
+   ta->KEY := PadR( "zz_navcommit", 20 )
+   ta->VAL := "c2"
+   ta->( dbSeek( "name1" ) )
+   ta->( dbUnlock() )
+   LogIt( "b after nav-commit: lastrec=" + N( tb->( LastRec() ) ) + ;
+          " seek=" + B( tb->( dbSeek( "zz_navcommit" ) ) ) + ;
+          " val=[" + tb->VAL + "]" )
+
+   /* bare append (blank key sorts first) */
+   ta->( dbAppend() )
+   ta->( dbCommit() )
+   ta->( dbUnlock() )
+   tb->( dbGoTop() )
+   LogIt( "b after bare: lastrec=" + N( tb->( LastRec() ) ) + ;
+          " keycount=" + TryStr( {|| N( tb->( OrdKeyCount() ) ) } ) + ;
+          " top rec=" + N( tb->( RecNo() ) ) + ;
+          " top key=[" + RTrim( tb->KEY ) + "]" )
+   tb->( dbGoBottom() )
+   LogIt( "b bottom key=[" + RTrim( tb->KEY ) + "]" )
+
+   /* edit an existing key in A; B seeks the new and the old key */
+   ta->( dbGoto( 2 ) )
+   IF ta->( dbRLock() )
+      ta->KEY := PadR( "aa_edited", 20 )
+      ta->( dbCommit() )
+      ta->( dbRUnlock() )
+   ENDIF
+   LogIt( "b after edit: seek new=" + B( tb->( dbSeek( "aa_edited" ) ) ) + ;
+          " rec=" + N( tb->( RecNo() ) ) + ;
+          " seek old=" + B( tb->( dbSeek( "name2" ) ) ) )
+
+   /* delete / recall in A, read in B */
+   ta->( dbGoto( 3 ) )
+   IF ta->( dbRLock() )
+      ta->( dbDelete() )
+      ta->( dbCommit() )
+      ta->( dbRUnlock() )
+   ENDIF
+   tb->( dbGoto( 3 ) )
+   LogIt( "b deleted(3)=" + B( tb->( Deleted() ) ) )
+   ta->( dbGoto( 3 ) )
+   IF ta->( dbRLock() )
+      ta->( dbRecall() )
+      ta->( dbCommit() )
+      ta->( dbRUnlock() )
+   ENDIF
+   tb->( dbGoto( 3 ) )
+   LogIt( "b recalled(3)=" + B( tb->( Deleted() ) ) )
+
+   /* the reverse direction: B appends, A sees it */
+   tb->( dbAppend() )
+   tb->KEY := PadR( "zz_from_b", 20 )
+   tb->( dbCommit() )
+   tb->( dbUnlock() )
+   LogIt( "a after b append: lastrec=" + N( ta->( LastRec() ) ) + ;
+          " seek=" + B( ta->( dbSeek( "zz_from_b" ) ) ) )
+   ta->( dbCloseArea() )
+   tb->( dbCloseArea() )
+   RETURN
+
+/* Indexes in a separate bag next to the structural CDX (field report
+ * 2026-11-16: INDEX ON ... TO K:\TEMP\x.IDX closed the CDX and OrdKey()
+ * on the IDX tag was ""; with a scope, ordCreate() failed 5000). The
+ * bags live in an ABSOLUTE folder, like the field's K:\TEMP. */
+PROCEDURE BattSeparateBag()
+   LOCAL cPlain := cTmp + "plain.idx", cAdd := cTmp + "addit.idx"
+   LOCAL cCur := cTmp + "cur.idx"
+   Sect( "separate bag" )
+   USE da_two SHARED VIA ( cRDD )
+   LogIt( "open: " + Orders() )
+
+   /* plain INDEX ON VAL TO <file> */
+   OrdSetFocus( "KEY" )
+   LogIt( "index-to=" + TryStr( {|| dbCreateIndex( cPlain, "VAL", {|| Field->VAL } ), "OK" } ) )
+   LogIt( "after index-to: " + Orders() + " focus=[" + OrdName() + "]" + ;
+          " ordkey=[" + OrdKey() + "]" + ;
+          " keycount=" + TryStr( {|| N( OrdKeyCount() ) } ) )
+   dbGoTop()
+   LogIt( "idx gotop=[" + RTrim( Field->VAL ) + "]" + ;
+          " keyval=[" + TryStr( {|| RTrim( OrdKeyVal() ) } ) + "]" )
+   OrdSetFocus( "KEY" )
+   LogIt( "cdx tag still usable: seek=" + B( dbSeek( "name5" ) ) + ;
+          " rec=" + N( RecNo() ) )
+
+   /* ADDITIVE keeps whatever is open */
+   LogIt( "additive=" + TryStr( {|| OrdCondSet( , , , , , , , , , , , , .T. ), ;
+                                    OrdCreate( cAdd, , "UPPER(VAL)" ), "OK" } ) )
+   LogIt( "after additive: " + Orders() )
+
+   /* USECURRENT under a scope: only the scoped keys (name3..name6) */
+   OrdSetFocus( "KEY" )
+   OrdScope( 0, "name3" )
+   OrdScope( 1, "name6" )
+   LogIt( "usecurrent=" + TryStr( {|| OrdCondSet( , , , , , , , , , , , , , .T. ), ;
+                                      OrdCreate( cCur, , "VAL" ), "OK" } ) )
+   LogIt( "after usecurrent: focus=[" + OrdName() + "]" + ;
+          " ordkey=[" + OrdKey() + "]" + ;
+          " keycount=" + TryStr( {|| N( OrdKeyCount() ) } ) )
+   OrdSetFocus( "KEY" )
+   OrdScope( 0, NIL )
+   OrdScope( 1, NIL )
+
+   /* OrdListClear keeps the structural bag; OrdListAdd brings an IDX back */
+   OrdListClear()
+   LogIt( "ordlistclear: " + Orders() )
+   LogIt( "ordlistadd idx=" + TryStr( {|| OrdListAdd( cPlain ), "OK" } ) + ;
+          " " + Orders() + " focus=[" + OrdName() + "] ordkey=[" + OrdKey() + "]" )
+   OrdSetFocus( "KEY" )
+   LogIt( "cdx after ordlistadd: seek=" + B( dbSeek( "name7" ) ) + ;
+          " rec=" + N( RecNo() ) )
+   USE
+
+   /* SET INDEX TO / dbClearIndex / dbReindex */
+   USE da_two SHARED VIA ( cRDD )
+   LogIt( "setindex=" + TryStr( {|| dbSetIndex( cPlain ), "OK" } ) + " " + Orders() )
+   dbClearIndex()
+   LogIt( "clearindex: " + Orders() )
+   USE
+   USE da_two EXCLUSIVE VIA ( cRDD )
+   dbSetIndex( cPlain )
+   LogIt( "reindex=" + TryStr( {|| dbReindex(), "OK" } ) + " " + Orders() )
+   OrdSetFocus( "KEY" )
+   dbGoBottom()
+   LogIt( "after reindex: key bottom=[" + RTrim( Field->KEY ) + "]" )
+   USE
+   RETURN
+
+/* "n:tag(bag)=key" for every open order */
+STATIC FUNCTION Orders()
+   LOCAL i, c := "ordcount=" + N( OrdCount() )
+   FOR i := 1 TO OrdCount()
+      c += " " + N( i ) + ":" + OrdName( i ) + "(" + Lower( OrdBagName( i ) ) + ;
+           ")=" + OrdKey( i )
+   NEXT
+   RETURN c
 
 PROCEDURE BattPackZap()
    Sect( "pack/zap" )

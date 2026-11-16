@@ -34,6 +34,7 @@
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <cstring>
 #include <fstream>
 #include <iterator>
@@ -323,6 +324,19 @@ bool load_config_and_args(int argc, char** argv, Args& out) {
             return false;
         }
         apply_ini(cfg, out);
+        // Engine-side keys (remote_sql_* limits, ...) are read through
+        // util::client_setting, which finds openads.ini beside the DLL/exe;
+        // point it at the --config file wherever that lives.
+        if (std::getenv("OPENADS_INI") == nullptr) {
+            std::error_code ec;
+            std::string abs = std::filesystem::absolute(config_path, ec).string();
+            if (ec) abs = config_path;
+#if defined(_WIN32)
+            _putenv_s("OPENADS_INI", abs.c_str());
+#else
+            setenv("OPENADS_INI", abs.c_str(), 0);
+#endif
+        }
     }
     // Second pass: CLI flags overlay the file.
     return parse_args(argc, argv, out);

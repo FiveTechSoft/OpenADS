@@ -279,6 +279,7 @@ json open_files_json(openads::network::Server& srv,
             }
             j["recno"] = l.recno;
             j["type"]  = l.recno == 0 ? "file" : "record";
+            j["table"] = l.table;  // exact path for /api/server/locks/release
             ls.push_back(std::move(j));
         }
         arr.push_back(json{{"key", key}, {"file", native_slashes(f.name)},
@@ -1963,6 +1964,39 @@ bool HttpConsole::start(const std::string& host,
         }
         res.set_content(json{{"ok", true}, {"key", key}, {"killed", killed}}.dump(),
                         "application/json");
+    });
+
+    // Release one lock without disconnecting its holder. Body:
+    // {"session": <id>, "table": "<lock's table path>", "recno": <n>}
+    // (recno 0 = the file lock). The holder's program is not told: its
+    // next write to that record fails with 5035 "record not locked".
+    srv.Post("/api/server/locks/release",
+             [this](const httplib::Request& req, httplib::Response& res) {
+        auto fail = [&](int code, const std::string& msg) {
+            res.status = code;
+            res.set_content(json_error(msg, code).dump(), "application/json");
+        };
+        if (wire_srv_ == nullptr) return fail(503, "wire server unavailable");
+        json body;
+        try { body = json::parse(req.body); } catch (...) {}
+        if (!body.is_object() || !body.contains("session") ||
+            !body["session"].is_number_unsigned() || !body.contains("table") ||
+            !body["table"].is_string() || body["table"].get<std::string>().empty())
+            return fail(400, "need {\"session\", \"table\", \"recno\"}");
+        const auto id    = body["session"].get<std::uint64_t>();
+        const auto table = body["table"].get<std::string>();
+        const auto recno = body.contains("recno") && body["recno"].is_number_unsigned()
+                               ? body["recno"].get<std::uint32_t>() : 0u;
+        using R = openads::network::Server::ReleaseResult;
+        switch (wire_srv_->release_lock(id, table, recno)) {
+        case R::Released:
+            res.set_content(json{{"ok", true}, {"session", id}, {"table", table},
+                                 {"recno", recno}}.dump(), "application/json");
+            return;
+        case R::NotHeld:   return fail(409, "that session no longer holds this lock");
+        case R::NoSession: return fail(404, "unknown session id");
+        case R::Timeout:   return fail(504, "the session is busy; the release will run when it finishes its current request");
+        }
     });
 
     srv.Get("/api/server/sessions",

@@ -19,3 +19,6 @@ vigentes los límites anteriores de input SQL y recursión.
 
 Los destinos UPDATE/DELETE/MERGE ya usan el mismo preflight de source. Ver
 [Prevalidación DML remota](security-sql-dml-preflight.md).
+
+Los límites se pueden configurar en el servidor (`remote_sql_*` en openads.ini,
+0 = sin límite). Vea [Configuración de los límites de trabajo SQL remoto](security-sql-limits-config.md).

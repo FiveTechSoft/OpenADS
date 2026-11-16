@@ -1,5 +1,6 @@
 #pragma once
 
+#include "engine/sql_execution_budget.h"   // remote_sql_limit()
 #include "util/result.h"
 #include <cstddef>
 #include <cstdint>
@@ -8,9 +9,24 @@ namespace openads::engine {
 
 // Conservative preflight, not a time deadline. Estimate worst-case Cartesian
 // fanout before materializing a remote join, even when WHERE may later prune.
+//
+// Limits (0 = unlimited) come from remote_sql_max_rows (default 100,000
+// records per source table) and remote_sql_max_mb (default 64 MiB), env
+// OPENADS_REMOTE_SQL_MAX_ROWS / OPENADS_REMOTE_SQL_MAX_MB overriding.
 struct RemoteSqlShapeBudget {
-    static constexpr std::uint64_t kRows = 100000;
-    static constexpr std::uint64_t kBytes = 64 * 1024 * 1024;
+    static std::uint64_t max_rows() {
+        return remote_sql_limit("OPENADS_REMOTE_SQL_MAX_ROWS",
+                                "remote_sql_max_rows", 100000);
+    }
+    static std::uint64_t max_bytes() {
+        const std::uint64_t mb = remote_sql_limit(
+            "OPENADS_REMOTE_SQL_MAX_MB", "remote_sql_max_mb", 64);
+        return mb >= (std::uint64_t{1} << 43)
+                   ? std::numeric_limits<std::uint64_t>::max()
+                   : mb * 1024 * 1024;
+    }
+    const std::uint64_t kRows  = max_rows();
+    const std::uint64_t kBytes = max_bytes();
     std::uint64_t combinations = 1;
     std::uint64_t width = 0;
     util::Result<void> add_source(std::uint64_t rows, std::uint64_t row_width) {
@@ -36,8 +52,8 @@ struct RemoteSqlUnionBudget {
     std::uint64_t rows = 0;
     std::uint64_t bytes = 0;
     util::Result<void> add(std::uint64_t count, std::uint64_t width) {
-        constexpr auto max_rows = RemoteSqlShapeBudget::kRows;
-        constexpr auto max_bytes = RemoteSqlShapeBudget::kBytes;
+        const auto max_rows  = RemoteSqlShapeBudget::max_rows();
+        const auto max_bytes = RemoteSqlShapeBudget::max_bytes();
         if (count > max_rows - rows || width > max_bytes ||
             (count != 0 && width > (max_bytes - bytes) / count))
             return util::Error{7079, 0, "remote SQL UNION budget exceeded", ""};

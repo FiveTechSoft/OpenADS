@@ -768,11 +768,26 @@ UNSIGNED32 remote_flush_order(openads::network::RemoteTable* rt) {
 
 UNSIGNED32 remote_flush_teardown(openads::network::RemoteTable* rt);
 UNSIGNED32 remote_flush_sets(openads::network::RemoteTable* rt);
+// Structural-bag tags survive OrdListClear (see remote_structural_parked).
+struct ParkedTag {
+    std::pair<std::string, std::uint32_t> tag;
+    std::uint64_t handle;
+};
+std::vector<ParkedTag> remote_structural_parked(openads::network::RemoteTable* rt);
+std::vector<ParkedTag> remote_structural_live(openads::network::RemoteTable* rt);
+void remote_readd_structural(openads::network::RemoteTable* rt,
+                             const std::vector<ParkedTag>& tags);
+void remote_forget_index(openads::network::RemoteTable* rt, std::uint32_t id);
 // Send a real CloseAllIndexes frame and forget every binding (live
 // maps + parked snapshot): the server dropped them all, so any
 // client reference would be a dead id (SetOrder 5000 on next use).
 UNSIGNED32 remote_emit_close_all(openads::network::RemoteTable* rt) {
     if (rt == nullptr || rt->conn == nullptr) return ok();
+    // The server's CloseAll clears the ENGINE order only; the twin keeps
+    // its bindings, so the structural bag's ids stay valid and come back
+    // into the maps (it survives OrdListClear, as locally).
+    std::vector<ParkedTag> structural = rt->indexes_parked
+        ? remote_structural_parked(rt) : remote_structural_live(rt);
     if (auto r = rt->conn->close_all_indexes(rt->id); !r) {
         return fail(r.error());
     }
@@ -787,6 +802,7 @@ UNSIGNED32 remote_emit_close_all(openads::network::RemoteTable* rt) {
     rt->last_nav = 0;
     rt->pair_valid = false;
     rt->anchor_ok = false;
+    remote_readd_structural(rt, structural);
     return ok();
 }
 // Parked-index truth enforcement (see the nav entries): order-dependent
@@ -811,6 +827,45 @@ UNSIGNED32 remote_close_parked_indexes(openads::network::RemoteTable* rt) {
     }
     return remote_emit_close_all(rt);
 }
+// The same file open in two work areas of one program is two RemoteTables
+// on one connection. Each caches its record count and key counts (M12.19)
+// and drops them only on its OWN writes, so an append in area 1 left area
+// 2's LastRec()/RecCount()/OrdKeyCount() at the old value until area 2
+// wrote something itself (field report: "appending in one area is not
+// visible in the 2nd area"). Local tables re-read the count every call.
+// Called after every content-changing frame: expire the cached counts of
+// every OTHER handle on this connection that has the same file open.
+// Purely local (no wire I/O), so holding s.mu is fine. The read-ahead
+// queue is left alone on purpose: dropping it without settling the
+// server cursor (cursor_lag) would desync that handle.
+std::string remote_table_file_key(const std::string& name) {
+    std::string k = name;
+    const auto slash = k.find_last_of("/\\");
+    if (slash != std::string::npos) k.erase(0, slash + 1);
+    const auto dot = k.find_last_of('.');
+    if (dot != std::string::npos && dot > 0) k.erase(dot);
+    for (auto& c : k) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return k;
+}
+void remote_expire_sibling_counts(openads::network::RemoteTable* src) {
+    if (src == nullptr || src->conn == nullptr) return;
+    const std::string key = remote_table_file_key(src->name);
+    auto& s = state();
+    std::lock_guard<std::recursive_mutex> lk(s.mu);
+    s.registry.for_each_handle([&](Handle, HandleKind k, void* p) {
+        if (k != HandleKind::RemoteTable) return;
+        auto* rt = static_cast<openads::network::RemoteTable*>(p);
+        if (rt == nullptr || rt == src || rt->conn != src->conn) return;
+        if (remote_table_file_key(rt->name) != key) return;
+        rt->rec_count_cached = false;
+        rt->key_count_cached = false;
+        rt->key_counts.clear();
+        rt->count_bound_ok   = false;
+        rt->keyno_valid      = false;
+        rt->pair_valid       = false;   // its blob/counts predate the write
+    });
+}
+
 UNSIGNED32 remote_flush_pending(openads::network::RemoteTable* rt) {
     if (UNSIGNED32 orc = remote_flush_order(rt); orc != 0) return orc;
     if (UNSIGNED32 rc = remote_flush_sets(rt); rc != 0) return rc;
@@ -2376,6 +2431,7 @@ ADSHANDLE get_or_create_default_connection() {
     if (!opened) return 0;
     auto holder = std::make_unique<Connection>(std::move(opened).value());
     Connection* raw = holder.get();
+    raw->set_show_deleted(openads::engine::show_deleted());   // process-wide
     Handle h = s.registry.register_object(HandleKind::Connection, raw);
     s.conns.emplace(h, std::move(holder));
     cached = to_ads_handle(h);
@@ -7617,6 +7673,14 @@ UNSIGNED32 ENTRYPOINT AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 usServerType
     if (!opened) return fail(opened.error());
     auto holder = std::make_unique<Connection>(std::move(opened).value());
     Connection* raw = holder.get();
+    // AdsShowDeleted is process-wide in ACE: a connection opened after
+    // AdsShowDeleted(0) (rddads SET DELETED ON) must hide deleted rows
+    // too. The per-connection flag defaulted to TRUE, so an app that
+    // connects per statement (xoffice3 Sanitize/DoSql) had its SQL see
+    // deleted DBF rows -- GROUP BY ... MIN(ROWID) then kept a deleted
+    // duplicate and deleted the live row. (Remote connects push the flag
+    // in RemoteConnection's connect path.)
+    raw->set_show_deleted(openads::engine::show_deleted());
     // DD authentication: if the DD has LOG_IN_REQUIRED set, validate
     // the supplied credentials before registering the connection.
     if (raw->has_dd()) {
@@ -9349,9 +9413,646 @@ static inline std::string apply_where_fn(std::string s,
     } else if (fn == openads::sql::WhereFn::Lower) {
         for (char& ch : s)
             ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    } else if (fn == openads::sql::WhereFn::Trim ||
+               fn == openads::sql::WhereFn::Ltrim) {
+        std::size_t b = s.find_first_not_of(' ');
+        s = (b == std::string::npos) ? std::string() : s.substr(b);
+        if (fn == openads::sql::WhereFn::Trim)
+            while (!s.empty() && s.back() == ' ') s.pop_back();
     }
     return s;
 }
+
+// xBase EMPTY() semantics for the SQL `EMPTY(<col>)` predicate: blank or
+// NULL cells, numeric zero, logical false.
+static inline bool sql_field_is_empty(openads::engine::Table& t,
+                                      std::uint16_t fi) {
+    if (t.is_field_empty(fi)) return true;
+    auto v = t.read_field(fi);
+    if (!v) return false;
+    if (v.value().is_null) return true;
+    using FT = openads::drivers::DbfFieldType;
+    switch (t.field_descriptor(fi).type) {
+        case FT::Numeric: case FT::Float: case FT::Integer:
+        case FT::Currency: case FT::Double: case FT::ShortInt:
+        case FT::AdtMoney: case FT::AutoInc:
+            return v.value().as_double == 0.0;
+        case FT::Logical:
+            return !v.value().as_bool;
+        default:
+            break;
+    }
+    return v.value().as_string.find_first_not_of(' ') == std::string::npos;
+}
+
+// ---- UPDATE / DELETE WHERE compiler ---------------------------------------
+// One compiler shared by the UPDATE and DELETE executors. Beyond plain
+// `<col> <op> <literal>` it handles what maintenance scripts written for
+// ADS use (xoffice3 Sanitize):
+//   * EMPTY(<col>), TRIM()/LTRIM() on the LHS, LIKE, BETWEEN, IS [NOT] NULL
+//   * `<col> <op> <othercol>` (same row)
+//   * the ROWID pseudo-column (the record number; ROWIDs of one table
+//     order like their record numbers)
+//   * `<col> [NOT] IN (<list> | <subquery>)`, `EXISTS (<subquery>)` and
+//     `<col> <op> (<scalar subquery>)`, where the subquery may carry
+//     `GROUP BY` with a MIN()/MAX() projection and may be correlated
+//     through equalities `inner.x = outer.y`. Every subquery runs ONCE:
+//     its rows go into a hash keyed by (value, correlated inner columns)
+//     and each outer row probes it with (value, correlated outer columns)
+//     -- a per-row rescan would be O(outer x inner) on multi-million-row
+//     tables.
+namespace dmlw {
+
+using TableT = openads::engine::Table;
+using Pred   = std::function<bool(TableT&)>;
+using Conn   = openads::session::Connection;
+namespace osql = openads::sql;
+
+constexpr char kSep = '\x1f';
+
+inline std::string lower(std::string s) {
+    for (auto& ch : s)
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    return s;
+}
+
+// Lower-cased file stem of a table name or path (`K:\x\Items.dbf` -> items).
+inline std::string stem(const std::string& p) {
+    std::size_t b = p.find_last_of("/\\:");
+    std::string s = (b == std::string::npos) ? p : p.substr(b + 1);
+    std::size_t d = s.find_last_of('.');
+    if (d != std::string::npos) s = s.substr(0, d);
+    return lower(s);
+}
+
+inline openads::util::Error err(const std::string& m) {
+    return openads::util::Error{7200, 0, m, ""};
+}
+
+struct Col {
+    std::int32_t fi      = -1;
+    bool         rowid   = false;
+    bool         numeric = false;
+    bool         ci      = false;
+};
+
+inline bool type_is_numeric(openads::drivers::DbfFieldType t) {
+    using FT = openads::drivers::DbfFieldType;
+    return t == FT::Numeric || t == FT::Float || t == FT::Integer ||
+           t == FT::Currency || t == FT::Double || t == FT::ShortInt ||
+           t == FT::AdtMoney || t == FT::AutoInc;
+}
+
+inline openads::util::Result<Col> resolve(TableT& t, const std::string& name) {
+    Col c;
+    c.fi = t.field_index(name);
+    if (c.fi < 0) {
+        if (lower(name) == "rowid") {
+            c.rowid = c.numeric = true;
+            return c;
+        }
+        return openads::util::Error{openads::AE_COLUMN_NOT_FOUND, 0,
+                                    name, ""};
+    }
+    const auto& fd = t.field_descriptor(static_cast<std::uint16_t>(c.fi));
+    c.numeric = type_is_numeric(fd.type);
+    c.ci      = fd.type == openads::drivers::DbfFieldType::CiCharacter;
+    return c;
+}
+
+inline std::string num_key(double d) {
+    char b[48];
+    std::snprintf(b, sizeof(b), "%.15g", d);
+    return b;
+}
+
+// Hash key of one cell: PAD SPACE (trailing blanks dropped), CICHAR folded,
+// numerics canonical. `ok` is false when the cell cannot be read.
+inline std::string key_of(TableT& t, const Col& c, bool* ok = nullptr) {
+    if (ok) *ok = true;
+    if (c.rowid) return std::to_string(t.recno());
+    auto v = t.read_field(static_cast<std::uint16_t>(c.fi));
+    if (!v) {
+        if (ok) *ok = false;
+        return std::string();
+    }
+    if (c.numeric) return num_key(v.value().as_double);
+    std::string s = v.value().as_string;
+    while (!s.empty() && s.back() == ' ') s.pop_back();
+    if (c.ci)
+        for (auto& ch : s)
+            ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+    return s;
+}
+
+inline std::string literal_key(const std::string& lit, const Col& c) {
+    if (c.numeric) {
+        char* end = nullptr;
+        double d = std::strtod(lit.c_str(), &end);
+        if (end != lit.c_str()) return num_key(d);
+    }
+    std::string s = lit;
+    while (!s.empty() && s.back() == ' ') s.pop_back();
+    if (c.ci)
+        for (auto& ch : s)
+            ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+    return s;
+}
+
+// A materialised subquery.
+struct Sub {
+    std::vector<Col> outer_corr;   // outer columns probed for correlation
+    // IN / EXISTS: "<value>\x1f<corr>" (EXISTS: "\x1f<corr>")
+    std::unordered_set<std::string> keys;
+    // scalar: "<corr>" -> projected cell
+    std::unordered_map<std::string, openads::drivers::DbfFieldValue> vals;
+    bool val_numeric = false;
+
+    std::string corr_key(TableT& outer) const {
+        std::string k;
+        for (const auto& c : outer_corr) {
+            k.push_back(kSep);
+            k += key_of(outer, c);
+        }
+        return k;
+    }
+};
+
+enum class SubMode { In, Exists, Scalar };
+
+openads::util::Result<Pred> compile(Conn* c, openads::engine::TableType tt,
+                                    TableT& t, const std::string& alias,
+                                    const osql::WhereExpr& node);
+
+// Run `sub` once and fill `out`. `outer` is the table the subquery is
+// correlated against, `outer_alias` the name it is referred to by.
+inline openads::util::Result<std::monostate>
+run_sub(Conn* c, openads::engine::TableType tt, TableT& outer,
+        const std::string& outer_alias, const osql::SelectStmt& sub,
+        SubMode mode, Sub& out) {
+    if (!sub.unions.empty() || !sub.derived_sql.empty() ||
+        sub.from_tables.size() > 1 || sub.inner_join || sub.having ||
+        sub.table.empty())
+        return err("subquery form not supported in UPDATE/DELETE "
+                   "(single table, optional WHERE / GROUP BY only)");
+
+    // Same file as the statement's target: scan that instance (a second
+    // handle could trip over the statement's own write lock).
+    TableT* in = nullptr;
+    Handle  ih = 0;
+    if (stem(sub.table) == stem(outer.path()) &&
+        sub.table.find_first_of("/\\:") == std::string::npos) {
+        in = &outer;
+    } else {
+        auto h = c->open_table(sub.table, tt, openads::engine::OpenMode::Read);
+        if (!h) return h.error();
+        ih = h.value();
+        in = c->lookup_table(ih);
+        if (in == nullptr) {
+            c->close_table(ih);
+            return openads::util::Error{openads::AE_INTERNAL_ERROR, 0,
+                                        "subquery table lookup", ""};
+        }
+    }
+    struct Closer {
+        Conn* c; Handle h;
+        ~Closer() { if (h) c->close_table(h); }
+    } closer{c, ih};
+
+    std::unordered_set<std::string> outer_names{stem(outer.path()), lower(outer_alias)};
+    std::unordered_set<std::string> sub_names{stem(sub.table)};
+    if (!sub.table_alias.empty()) sub_names.insert(lower(sub.table_alias));
+    outer_names.erase(std::string());
+
+    // Split the WHERE into correlation equalities and inner residue.
+    std::vector<const osql::WhereExpr*> conj;
+    std::function<void(const osql::WhereExpr*)> flat =
+        [&](const osql::WhereExpr* n) {
+            if (n->kind == osql::WhereExpr::Kind::And) {
+                for (auto& ch : n->children) flat(ch.get());
+            } else {
+                conj.push_back(n);
+            }
+        };
+    if (sub.where) flat(sub.where.get());
+
+    std::vector<Col> inner_corr;
+    std::vector<Pred> residue;
+    auto is_inner = [&](const std::string& alias, const std::string& col) {
+        if (!alias.empty()) return sub_names.count(lower(alias)) > 0;
+        return in->field_index(col) >= 0 || lower(col) == "rowid";
+    };
+    for (const auto* n : conj) {
+        if (n->kind == osql::WhereExpr::Kind::Cmp && n->cmp.is_outer_ref) {
+            const auto& w = n->cmp;
+            bool l_in = is_inner(w.column_alias, w.column);
+            bool r_in = is_inner(w.outer_column_alias, w.outer_column);
+            if (!(l_in && r_in)) {
+                if (w.op != osql::WhereOp::Eq || w.lhs_fn != osql::WhereFn::None)
+                    return err("correlated subquery in UPDATE/DELETE: only "
+                               "'inner.col = outer.col' correlation is "
+                               "supported");
+                const std::string& icol = l_in ? w.column : w.outer_column;
+                const std::string& ocol = l_in ? w.outer_column : w.column;
+                if (!l_in && !r_in)
+                    return err("subquery column not found: " + w.column);
+                auto ic = resolve(*in, icol);
+                if (!ic) return ic.error();
+                auto oc = resolve(outer, ocol);
+                if (!oc) return oc.error();
+                inner_corr.push_back(ic.value());
+                out.outer_corr.push_back(oc.value());
+                continue;
+            }
+        }
+        auto p = compile(c, tt, *in, sub.table_alias.empty()
+                                         ? sub.table : sub.table_alias, *n);
+        if (!p) return p.error();
+        residue.push_back(std::move(p).value());
+    }
+
+    // Projection: one column, or one MIN()/MAX() (optionally grouped).
+    Col  vcol;
+    bool agg = false, agg_max = false;
+    std::vector<Col> gcols;
+    if (mode != SubMode::Exists) {
+        if (sub.aggregates.empty()) {
+            if (sub.projection.size() != 1 || sub.projection[0] == "*" ||
+                sub.projection[0].rfind("$", 0) == 0)
+                return err("subquery in UPDATE/DELETE must select exactly "
+                           "one column");
+            std::string pc = sub.projection[0];
+            if (auto d = pc.find('.'); d != std::string::npos)
+                pc = pc.substr(d + 1);
+            auto r = resolve(*in, pc);
+            if (!r) return r.error();
+            vcol = r.value();
+        } else {
+            const auto& a = sub.aggregates[0];
+            if (sub.aggregates.size() != 1 ||
+                (a.kind != osql::AggregateKind::Min &&
+                 a.kind != osql::AggregateKind::Max) || a.arg_expr)
+                return err("subquery in UPDATE/DELETE: only MIN(col) / "
+                           "MAX(col) aggregates are supported");
+            auto r = resolve(*in, a.column);
+            if (!r) return r.error();
+            vcol    = r.value();
+            agg     = true;
+            agg_max = a.kind == osql::AggregateKind::Max;
+            for (const auto& g : sub.group_by) {
+                auto gr = resolve(*in, g);
+                if (!gr) return gr.error();
+                gcols.push_back(gr.value());
+            }
+        }
+    }
+    out.val_numeric = vcol.numeric;
+
+    struct Best {
+        std::string corr;
+        std::string key;
+        double      num = 0.0;
+        openads::drivers::DbfFieldValue cell;
+    };
+    std::unordered_map<std::string, Best> best;   // agg: group -> extreme
+
+    const std::uint32_t rc = in->record_count();
+    for (std::uint32_t r = 1; r <= rc; ++r) {
+        if (auto g = in->goto_record(r); !g) continue;
+        // SQL sees deleted DBF rows unless AdsShowDeleted(0) (SET DELETED
+        // ON) -- the same rule as every other SQL walk.
+        if (!in->show_deleted_records() && in->is_deleted()) continue;
+        bool pass = true;
+        for (auto& p : residue)
+            if (!p(*in)) { pass = false; break; }
+        if (!pass) continue;
+        std::string corr;
+        for (const auto& ic : inner_corr) {
+            corr.push_back(kSep);
+            corr += key_of(*in, ic);
+        }
+        if (mode == SubMode::Exists) {
+            out.keys.insert(std::string(1, kSep) + corr);
+            continue;
+        }
+        bool okv = true;
+        std::string vk = key_of(*in, vcol, &okv);
+        if (!okv) continue;
+        openads::drivers::DbfFieldValue cell;
+        if (mode == SubMode::Scalar) {
+            if (vcol.rowid) {
+                cell.as_string = vk;
+                cell.as_double = static_cast<double>(r);
+            } else if (auto v = in->read_field(
+                           static_cast<std::uint16_t>(vcol.fi))) {
+                cell = v.value();
+            }
+        }
+        if (!agg) {
+            if (mode == SubMode::In)
+                out.keys.insert(vk + kSep + corr);
+            else
+                out.vals.emplace(corr, std::move(cell));
+            continue;
+        }
+        std::string grp = corr;
+        for (const auto& gc : gcols) {
+            grp.push_back(kSep);
+            grp += key_of(*in, gc);
+        }
+        double num = vcol.rowid ? static_cast<double>(r) : 0.0;
+        if (vcol.numeric && !vcol.rowid)
+            if (auto v = in->read_field(static_cast<std::uint16_t>(vcol.fi)))
+                num = v.value().as_double;
+        auto it = best.find(grp);
+        bool take = it == best.end();
+        if (!take) {
+            int cmp = vcol.numeric
+                ? (num < it->second.num ? -1 : (num > it->second.num ? 1 : 0))
+                : where_str_cmp(vk, it->second.key, vcol.ci);
+            take = agg_max ? cmp > 0 : cmp < 0;
+        }
+        if (take) {
+            Best b;
+            b.corr = corr;
+            b.key  = vk;
+            b.num  = num;
+            b.cell = std::move(cell);
+            best[grp] = std::move(b);
+        }
+    }
+    // Engine scans skip a row whose read fails, and an exhausted remote
+    // work budget fails every read: a "complete" scan could then be a
+    // truncated one, and `x NOT IN (<truncated list>)` deletes rows it must
+    // keep. Refuse instead.
+    if (openads::engine::sql_execution_exhausted())
+        return openads::util::Error{7079, 0, "SQL execution budget exceeded", ""};
+    if (agg) {
+        for (auto& kv : best) {
+            if (mode == SubMode::In)
+                out.keys.insert(kv.second.key + kSep + kv.second.corr);
+            else
+                out.vals.emplace(kv.second.corr, std::move(kv.second.cell));
+        }
+    }
+    return std::monostate{};
+}
+
+inline int str_or_num_cmp(bool numeric, double a, double b,
+                          const std::string& sa, const std::string& sb,
+                          bool ci) {
+    if (numeric) return a < b ? -1 : (a > b ? 1 : 0);
+    return where_str_cmp(sa, sb, ci);
+}
+
+inline bool op_holds(osql::WhereOp op, int cmp) {
+    switch (op) {
+        case osql::WhereOp::Eq: return cmp == 0;
+        case osql::WhereOp::Ne: return cmp != 0;
+        case osql::WhereOp::Lt: return cmp <  0;
+        case osql::WhereOp::Gt: return cmp >  0;
+        case osql::WhereOp::Le: return cmp <= 0;
+        case osql::WhereOp::Ge: return cmp >= 0;
+        default:                return false;
+    }
+}
+
+// Cell as (string, number) for comparisons; ROWID is the record number.
+inline bool cell_of(TableT& t, const Col& c, std::string& s, double& d) {
+    if (c.rowid) {
+        d = static_cast<double>(t.recno());
+        s = std::to_string(t.recno());
+        return true;
+    }
+    auto v = t.read_field(static_cast<std::uint16_t>(c.fi));
+    if (!v) return false;
+    s = std::move(v.value().as_string);
+    d = v.value().as_double;
+    return true;
+}
+
+inline openads::util::Result<Pred>
+compile(Conn* c, openads::engine::TableType tt, TableT& t,
+        const std::string& alias, const osql::WhereExpr& node) {
+    using Kind = osql::WhereExpr::Kind;
+    if (node.kind == Kind::And || node.kind == Kind::Or) {
+        std::vector<Pred> ks;
+        for (auto& cn : node.children) {
+            auto r = compile(c, tt, t, alias, *cn);
+            if (!r) return r.error();
+            ks.push_back(std::move(r).value());
+        }
+        if (node.kind == Kind::And)
+            return Pred{[ks = std::move(ks)](TableT& x) {
+                for (auto& k : ks) if (!k(x)) return false;
+                return true;
+            }};
+        return Pred{[ks = std::move(ks)](TableT& x) {
+            for (auto& k : ks) if (k(x)) return true;
+            return false;
+        }};
+    }
+    if (node.kind == Kind::Not) {
+        auto inner = compile(c, tt, t, alias, *node.child);
+        if (!inner) return inner.error();
+        return Pred{[p = std::move(inner).value()](TableT& x) {
+            return !p(x);
+        }};
+    }
+    if (node.kind == Kind::Exists) {
+        auto sub = std::make_shared<Sub>();
+        auto r = run_sub(c, tt, t, alias, *node.exists_subquery,
+                         SubMode::Exists, *sub);
+        if (!r) return r.error();
+        return Pred{[sub](TableT& x) {
+            return sub->keys.count(std::string(1, kSep) +
+                                   sub->corr_key(x)) > 0;
+        }};
+    }
+    if (node.kind == Kind::In) {
+        auto col = resolve(t, node.in_clause.column);
+        if (!col) return col.error();
+        Col lc = col.value();
+        auto sub = std::make_shared<Sub>();
+        if (node.in_clause.subquery) {
+            auto r = run_sub(c, tt, t, alias, *node.in_clause.subquery,
+                             SubMode::In, *sub);
+            if (!r) return r.error();
+            // a numeric subquery column against a character probe (or the
+            // reverse) still matches on the canonical text
+        } else {
+            for (const auto& l : node.in_clause.literals)
+                sub->keys.insert(literal_key(l, lc) + kSep);
+        }
+        return Pred{[sub, lc](TableT& x) {
+            bool ok = true;
+            std::string k = key_of(x, lc, &ok);
+            if (!ok) return false;
+            k.push_back(kSep);
+            k += sub->corr_key(x);
+            return sub->keys.count(k) > 0;
+        }};
+    }
+
+    // Kind::Cmp
+    const auto& w = node.cmp;
+    auto col = resolve(t, w.column);
+    if (!col) return col.error();
+    Col lc = col.value();
+    const osql::WhereOp op = w.op;
+    const osql::WhereFn fn = w.lhs_fn;
+
+    if (op == osql::WhereOp::Contains)
+        return err("CONTAINS is not supported in UPDATE/DELETE WHERE");
+    if (op == osql::WhereOp::Empty) {
+        if (lc.rowid) return Pred{[](TableT&) { return false; }};
+        auto fi = static_cast<std::uint16_t>(lc.fi);
+        return Pred{[fi](TableT& x) { return sql_field_is_empty(x, fi); }};
+    }
+    if (op == osql::WhereOp::IsNull || op == osql::WhereOp::IsNotNull) {
+        if (lc.rowid)
+            return Pred{[op](TableT&) { return op == osql::WhereOp::IsNotNull; }};
+        auto fi = static_cast<std::uint16_t>(lc.fi);
+        return Pred{[fi, op](TableT& x) {
+            bool n = x.is_field_empty(fi);
+            return op == osql::WhereOp::IsNull ? n : !n;
+        }};
+    }
+    if (op == osql::WhereOp::Like) {
+        std::string pat = w.literal;
+        return Pred{[lc, pat, fn](TableT& x) {
+            std::string s; double d;
+            if (!cell_of(x, lc, s, d)) return false;
+            s = apply_where_fn(std::move(s), fn);
+            while (!s.empty() && s.back() == ' ') s.pop_back();
+            return sql_like_match_t(s, pat, lc.ci);
+        }};
+    }
+    if (op == osql::WhereOp::Between) {
+        bool num = w.is_numeric || lc.numeric;
+        double n1 = w.number, n2 = w.number2;
+        if (lc.numeric && !w.is_numeric) {
+            n1 = std::strtod(w.literal.c_str(), nullptr);
+            n2 = std::strtod(w.literal2.c_str(), nullptr);
+        }
+        std::string l1 = w.literal, l2 = w.literal2;
+        return Pred{[lc, fn, num, n1, n2, l1, l2](TableT& x) {
+            std::string s; double d;
+            if (!cell_of(x, lc, s, d)) return false;
+            if (num) return d >= n1 && d <= n2;
+            s = apply_where_fn(std::move(s), fn);
+            return where_str_cmp(s, l1, lc.ci) >= 0 &&
+                   where_str_cmp(s, l2, lc.ci) <= 0;
+        }};
+    }
+    // `<col> <op> (<scalar subquery>)`
+    if (w.subquery) {
+        auto sub = std::make_shared<Sub>();
+        auto r = run_sub(c, tt, t, alias, *w.subquery, SubMode::Scalar, *sub);
+        if (!r) return r.error();
+        return Pred{[sub, lc, fn, op](TableT& x) {
+            auto it = sub->vals.find(sub->corr_key(x));
+            if (it == sub->vals.end()) return false;   // NULL compares false
+            std::string s; double d;
+            if (!cell_of(x, lc, s, d)) return false;
+            bool num = lc.numeric && sub->val_numeric;
+            return op_holds(op, str_or_num_cmp(
+                num, d, it->second.as_double,
+                apply_where_fn(std::move(s), fn), it->second.as_string,
+                lc.ci));
+        }};
+    }
+    // `<col> <op> <othercol>` -- in UPDATE/DELETE a bare RHS identifier
+    // is a column of the same row.
+    if (w.is_outer_ref) {
+        auto rcol = resolve(t, w.outer_column);
+        if (!rcol) return rcol.error();
+        Col rc = rcol.value();
+        bool num = lc.numeric && rc.numeric;
+        bool ci  = lc.ci || rc.ci;
+        return Pred{[lc, rc, fn, op, num, ci](TableT& x) {
+            std::string a, b; double da, db;
+            if (!cell_of(x, lc, a, da) || !cell_of(x, rc, b, db)) return false;
+            return op_holds(op, str_or_num_cmp(
+                num, da, db, apply_where_fn(std::move(a), fn), b, ci));
+        }};
+    }
+    bool num = w.is_numeric || lc.rowid;
+    double n = w.is_numeric ? w.number
+                            : std::strtod(w.literal.c_str(), nullptr);
+    std::string lit = w.literal;
+    return Pred{[lc, fn, op, num, n, lit](TableT& x) {
+        std::string s; double d;
+        if (!cell_of(x, lc, s, d)) return false;
+        return op_holds(op, str_or_num_cmp(
+            num, d, n, apply_where_fn(std::move(s), fn), lit, lc.ci));
+    }};
+}
+
+// UPDATE SET right-hand sides beyond literals/expressions: a bare column
+// of the same row, or a (possibly correlated) scalar subquery.
+struct SetSource {
+    Col                  col;          // column copy when `sub` is null
+    std::shared_ptr<Sub> sub;
+};
+
+inline std::string trim_ws(const std::string& s) {
+    auto b = s.find_first_not_of(" \t\r\n");
+    auto e = s.find_last_not_of(" \t\r\n");
+    return b == std::string::npos ? std::string() : s.substr(b, e - b + 1);
+}
+
+// nullopt: not one of the special forms (leave it to the script engine).
+inline openads::util::Result<std::optional<SetSource>>
+set_source(Conn* c, openads::engine::TableType tt, TableT& t,
+           const std::string& alias, const std::string& text) {
+    std::string e = trim_ws(text);
+    bool ident = !e.empty();
+    for (char ch : e)
+        if (!(std::isalnum(static_cast<unsigned char>(ch)) || ch == '_' ||
+              ch == '.'))
+            ident = false;
+    if (ident) {
+        std::string nm = e;
+        if (auto d = nm.find('.'); d != std::string::npos) nm = nm.substr(d + 1);
+        if (t.field_index(nm) >= 0) {
+            auto r = resolve(t, nm);
+            if (!r) return r.error();
+            return std::optional<SetSource>(SetSource{r.value(), nullptr});
+        }
+        return std::optional<SetSource>();
+    }
+    if (e.size() > 2 && e.front() == '(' && e.back() == ')') {
+        std::string inner = trim_ws(e.substr(1, e.size() - 2));
+        if (inner.size() > 7 && lower(inner.substr(0, 7)) == "select ") {
+            auto ps = osql::parse_select(inner);
+            if (!ps) return ps.error();
+            auto sub = std::make_shared<Sub>();
+            auto r = run_sub(c, tt, t, alias, ps.value(), SubMode::Scalar,
+                             *sub);
+            if (!r) return r.error();
+            return std::optional<SetSource>(SetSource{Col{}, sub});
+        }
+    }
+    return std::optional<SetSource>();
+}
+
+// The value a SetSource yields for the current row.
+inline openads::script::Value set_value(TableT& t, const SetSource& s) {
+    using V = openads::script::Value;
+    if (s.sub) {
+        auto it = s.sub->vals.find(s.sub->corr_key(t));
+        if (it == s.sub->vals.end() || it->second.is_null) return V::null();
+        if (s.sub->val_numeric) return V::real(it->second.as_double);
+        return V::character(it->second.as_string);
+    }
+    std::string str; double d;
+    if (!cell_of(t, s.col, str, d)) return V::null();
+    if (s.col.numeric) return V::real(d);
+    return V::character(str);
+}
+
+} // namespace dmlw
 
 // Map an rddads type name (Character, Numeric, Date, ...) to the
 // DBF field-descriptor type byte plus a default length / decimals
@@ -13192,6 +13893,13 @@ UNSIGNED32 ENTRYPOINT AdsGetRecordCount(ADSHANDLE hTable, UNSIGNED16 bFilterOpti
                 : static_cast<UNSIGNED32>(adi->ordered_recnos_cached().size());
             return ok();
         }
+        // NTX-format order (also what a non-compound INDEX ON ... TO x.IDX
+        // writes): same rule -- the order's key count, never the table's.
+        // Fell through to record_count(), so OrdKeyCount() on a FOR /
+        // USECURRENT .idx reported every row (dballcmp "separate bag").
+        if (dynamic_cast<openads::drivers::ntx::NtxIndex*>(idx) != nullptr) {
+            return AdsGetKeyCount(hTable, bFilterOption, pulRecordCount);
+        }
     }
     // M10.31 / M10.32 -- when SQL has materialised a traversal sequence
     // (DISTINCT / LIMIT / OFFSET / ORDER BY), report that sequence's
@@ -13755,6 +14463,7 @@ UNSIGNED32 ENTRYPOINT AdsAppendRecord(ADSHANDLE hTable) {
         rt->keyno_valid      = false;
         remote_clear_nav_boundaries(rt);
         rt->invalidate_prefetch();
+        remote_expire_sibling_counts(rt);  // other areas on this file
         auto r = rt->conn->append_blank(rt->id);
         if (!r) {
             openads::abi::create_diag::log("client-append-fail", r.error().code,
@@ -13914,6 +14623,7 @@ UNSIGNED32 ENTRYPOINT AdsWriteRecord(ADSHANDLE hTable) {
             cli_trace_tbl(rt, "AdsWriteRecord", "clean: flush skipped");
             return ok();
         }
+        remote_expire_sibling_counts(rt);  // other areas on this file
         auto r = rt->conn->flush_table(rt->id);
         if (!r) return fail(r.error());
         // kCapFlushTableDurable servers run the full file-buffers
@@ -14122,6 +14832,7 @@ UNSIGNED32 ENTRYPOINT AdsDeleteRecord(ADSHANDLE hTable) {
         rt->keyno_valid      = false;               // order position may shift
         remote_clear_nav_boundaries(rt);
         rt->invalidate_prefetch();
+        remote_expire_sibling_counts(rt);  // other areas on this file
         auto r = rt->conn->delete_record(rt->id);
         if (!r) return fail(r.error());
         rt->write_dirty = true;
@@ -14294,6 +15005,7 @@ UNSIGNED32 ENTRYPOINT AdsRecallRecord(ADSHANDLE hTable) {
         rt->keyno_valid      = false;               // order position may shift
         remote_clear_nav_boundaries(rt);
         rt->invalidate_prefetch();
+        remote_expire_sibling_counts(rt);  // other areas on this file
         auto r = rt->conn->recall_record(rt->id);
         if (!r) return fail(r.error());
         rt->write_dirty = true;
@@ -15755,6 +16467,100 @@ std::string bag_stem_ci(const std::string& p) {
     return b;
 }
 
+// The structural (production) bag survives OrdListClear: DBFCDX and the
+// local AdsCloseAllIndexes keep the tags of the bag named after the
+// table. The remote CloseAll parks EVERY tag for zero-frame rotation, so
+// an operation that discards the park (a create into, or an open of, a
+// different bag -- rddads INDEX ON ... TO K:\TEMP\x.IDX) must carry the
+// structural tags back into the live maps first. Field report: "indexing
+// to an IDX file closes the CDX file". Returns the tags to re-add.
+std::vector<ParkedTag> remote_structural_parked(openads::network::RemoteTable* rt) {
+    std::vector<ParkedTag> out;
+    if (rt == nullptr || !rt->indexes_parked) return out;
+    const std::string tstem = bag_stem_ci(rt->name);
+    if (tstem.empty()) return out;
+    const std::size_t n = std::min(rt->parked_by_tag.size(),
+                                   rt->parked_handles.size());
+    for (std::size_t i = 0; i < n; ++i) {
+        std::string bag;
+        if (auto* ri = get_remote_index(static_cast<ADSHANDLE>(rt->parked_handles[i])))
+            bag = ri->bag_path;
+        const std::string stem = bag.empty() ? rt->parked_bag_stem : bag_stem_ci(bag);
+        if (stem == tstem)
+            out.push_back({rt->parked_by_tag[i], rt->parked_handles[i]});
+    }
+    return out;
+}
+// A tag closed (AdsCloseIndex) or destroyed (AdsDeleteIndex) leaves the
+// client's tag/handle lists, the park and the scope cache.
+void remote_forget_index(openads::network::RemoteTable* rt, std::uint32_t id) {
+    if (rt == nullptr) return;
+    auto drop = [id](std::vector<std::pair<std::string, std::uint32_t>>& tags,
+                     std::vector<std::uint64_t>& handles) {
+        for (std::size_t i = tags.size(); i-- > 0;) {
+            if (tags[i].second != id) continue;
+            tags.erase(tags.begin() + static_cast<std::ptrdiff_t>(i));
+            if (i < handles.size())
+                handles.erase(handles.begin() + static_cast<std::ptrdiff_t>(i));
+        }
+    };
+    drop(rt->index_by_tag, rt->index_handles);
+    drop(rt->parked_by_tag, rt->parked_handles);
+    rt->scope_top.erase(id);
+    rt->scope_bottom.erase(id);
+    if (rt->active_index_id == id) rt->active_index_id = 0;
+    if (rt->parked_active == id) rt->parked_active = 0;
+    if (rt->pending_order && rt->pending_order_id == id) rt->pending_order = false;
+    if (rt->server_order_id == id)
+        rt->server_order_id = openads::network::RemoteTable::kOrderUnknown;
+    rt->key_count_cached = false;
+    rt->key_counts.clear();
+    rt->keyno_valid = false;
+    rt->last_nav = 0;
+    rt->pair_valid = false;
+    rt->invalidate_prefetch();
+}
+
+// Same, from the LIVE maps (a real close is about to drop them).
+std::vector<ParkedTag> remote_structural_live(openads::network::RemoteTable* rt) {
+    std::vector<ParkedTag> out;
+    if (rt == nullptr) return out;
+    const std::string tstem = bag_stem_ci(rt->name);
+    if (tstem.empty()) return out;
+    const std::size_t n = std::min(rt->index_by_tag.size(),
+                                   rt->index_handles.size());
+    for (std::size_t i = 0; i < n; ++i) {
+        std::string bag;
+        if (auto* ri = get_remote_index(static_cast<ADSHANDLE>(rt->index_handles[i])))
+            bag = ri->bag_path;
+        if (bag.empty()) bag = rt->prod_bag_path;
+        if (!bag.empty() && bag_stem_ci(bag) == tstem)
+            out.push_back({rt->index_by_tag[i], rt->index_handles[i]});
+    }
+    return out;
+}
+void remote_readd_structural(openads::network::RemoteTable* rt,
+                             const std::vector<ParkedTag>& tags) {
+    if (rt == nullptr || tags.empty()) return;
+    std::vector<std::pair<std::string, std::uint32_t>> by_tag;
+    std::vector<std::uint64_t> handles;
+    for (const auto& p : tags) {
+        by_tag.push_back(p.tag);
+        handles.push_back(p.handle);
+    }
+    // Structural tags keep the leading ordinals (OrdNumber 1..n).
+    for (std::size_t i = 0; i < rt->index_by_tag.size(); ++i) {
+        bool dup = false;
+        for (const auto& p : tags)
+            if (p.tag.first == rt->index_by_tag[i].first) { dup = true; break; }
+        if (dup) continue;
+        by_tag.push_back(rt->index_by_tag[i]);
+        if (i < rt->index_handles.size()) handles.push_back(rt->index_handles[i]);
+    }
+    rt->index_by_tag  = std::move(by_tag);
+    rt->index_handles = std::move(handles);
+}
+
 // Harbour INDEX ON TO cIdxFile passes a client-absolute bag
 // ("C:/Creative.RAM/T.Z01"). Table opens remount that spelling under
 // --data when --legacy-paths is on; the bag must follow or the .z01
@@ -15970,24 +16776,60 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
                               rt->parked_bag_stem.c_str());
                 auto& s = state();
                 std::lock_guard<std::recursive_mutex> lk(s.mu);
+                // The park can span several bags (a pooled reopen keeps
+                // a temp IDX bound next to the structural CDX). The open
+                // answers with the REQUESTED bag's tags only; the live
+                // maps keep those plus the structural bag (which survives
+                // OrdListClear) and drop any other bag.
+                const std::string want_stem = bag_stem_ci(path);
+                const std::string tstem = bag_stem_ci(rt->name);
+                std::vector<std::pair<std::string, std::uint32_t>> keep_tags;
+                std::vector<std::uint64_t> keep_handles;
+                std::vector<std::uint64_t> answer;
+                for (std::size_t i = 0; i < rt->index_by_tag.size(); ++i) {
+                    std::string stem = want_stem;
+                    if (auto* pri = get_remote_index(static_cast<ADSHANDLE>(
+                            rt->index_handles[i]));
+                        pri != nullptr && !pri->bag_path.empty())
+                        stem = bag_stem_ci(pri->bag_path);
+                    if (stem == want_stem) answer.push_back(rt->index_handles[i]);
+                    if (stem == want_stem || stem == tstem) {
+                        keep_tags.push_back(rt->index_by_tag[i]);
+                        keep_handles.push_back(rt->index_handles[i]);
+                    }
+                }
+                if (answer.empty()) {   // no bag metadata: legacy answer
+                    answer = rt->index_handles;
+                } else {
+                    rt->index_by_tag  = std::move(keep_tags);
+                    rt->index_handles = std::move(keep_handles);
+                    bool active_kept = false;
+                    for (const auto& kv : rt->index_by_tag)
+                        if (kv.second == rt->active_index_id) { active_kept = true; break; }
+                    if (!active_kept) rt->active_index_id = 0;
+                }
                 const std::uint16_t cap =
                     (pu16ArrayLen != nullptr) ? *pu16ArrayLen : 0;
                 std::uint16_t count = 0;
-                for (std::size_t i = 0; i < rt->index_by_tag.size(); ++i) {
+                for (const auto h : answer) {
                     if (count < cap) {
-                        ahIndex[count] = to_ads_handle(static_cast<Handle>(
-                            rt->index_handles[i]));
+                        ahIndex[count] = to_ads_handle(static_cast<Handle>(h));
                     }
                     ++count;
                 }
-                if (rt->active_index_id == 0)
+                if (rt->active_index_id == 0 && !rt->index_by_tag.empty())
                     rt->active_index_id = rt->index_by_tag.front().second;
                 if (pu16ArrayLen != nullptr) *pu16ArrayLen = count;
                 return ok();
             }
+            // The real close drops the server ENGINE order only; the
+            // twin's bindings (and so the parked structural ids) stay
+            // valid, so the structural bag comes straight back.
+            const auto structural = remote_structural_parked(rt);
             if (auto r = remote_emit_close_all(rt); r != 0) {
                 return r;
             }
+            remote_readd_structural(rt, structural);
             cli_trace_tbl(rt, "AdsOpenIndex", "unpark miss %.32s",
                           path.c_str());
         }
@@ -16059,6 +16901,7 @@ UNSIGNED32 ENTRYPOINT AdsOpenIndex(ADSHANDLE hTable, UNSIGNED8* pucName,
             ri->expression    = ent.expression;
             ri->is_unique     = ent.is_unique;
             ri->is_descending = ent.is_descending;
+            ri->condition     = ent.condition;
             Handle gh = s.registry.register_object(
                 HandleKind::RemoteIndex, ri.get());
             if (count < cap) {
@@ -16464,8 +17307,12 @@ UNSIGNED32 ENTRYPOINT AdsCloseIndex(ADSHANDLE hIndex) {
     }
 #endif
     if (auto* ri = get_remote_index(hIndex)) {
+        if (ri->parent) {
+            if (UNSIGNED32 frc = remote_flush_pending(ri->parent); frc != 0) return frc;
+        }
         auto r = ri->conn->close_index(ri->id);
         if (!r) return fail(r.error());
+        remote_forget_index(ri->parent, ri->id);
         return ok();
     }
     auto& m = index_bindings();
@@ -16527,7 +17374,7 @@ UNSIGNED32 ENTRYPOINT AdsCloseAllIndexes(ADSHANDLE hTable) {
         // RDD issues OrdListClear twice per rotation) must NOT
         // overwrite a good snapshot with empty maps — snapshot only
         // when something is live.
-        if (!rt->index_by_tag.empty()) {
+        if (!rt->index_by_tag.empty() && !rt->indexes_parked) {
             const unsigned ntags =
                 static_cast<unsigned>(rt->index_by_tag.size());
             rt->parked_by_tag = std::move(rt->index_by_tag);
@@ -16548,6 +17395,10 @@ UNSIGNED32 ENTRYPOINT AdsCloseAllIndexes(ADSHANDLE hTable) {
             rt->parked_nav_order = rt->last_nav_order;
             rt->parked_nav_row   = rt->last_nav_row;
             rt->parked_nav_seq   = rt->last_nav_seq;
+            // The structural bag stays visible (OrdCount(), tag lookups)
+            // like the local AdsCloseAllIndexes / DBFCDX; its tags are
+            // in the snapshot too, so an unpark restores the full set.
+            remote_readd_structural(rt, remote_structural_parked(rt));
             cli_trace_tbl(rt, "AdsCloseAllIndexes", "parked %u tags", ntags);
         } else if (rt->indexes_parked) {
             cli_trace_tbl(rt, "AdsCloseAllIndexes", "repeat clear, park kept");
@@ -16649,6 +17500,86 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
         pucIndexName == nullptr || pucExpr == nullptr) {
         create_index_diag("61 EXIT null-arg 5000 h=%llu", static_cast<unsigned long long>(hTable));
         return fail(openads::AE_INTERNAL_ERROR, "null arg");
+    }
+    // INDEX ON <key> TO <file> (no TAG): rddads passes an empty tag. The
+    // order is still named -- DBFCDX and ADS use the bag's base name
+    // (OrdName() "PLAIN" for plain.idx); an empty name made OrdName() ""
+    // and OrdSetFocus(<name>) impossible. CDX tag names are <= 10 chars.
+    std::vector<UNSIGNED8> auto_tag_buf;
+    if (pucIndexName[0] == 0) {
+        std::string stem = std::filesystem::path(normalize_index_path(
+            openads::abi::to_internal(pucFileName, 0))).stem().string();
+        for (auto& c : stem)
+            c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        if (stem.size() > 10) stem.resize(10);
+        if (!stem.empty()) {
+            auto_tag_buf.assign(stem.begin(), stem.end());
+            auto_tag_buf.push_back(0);
+            pucIndexName = auto_tag_buf.data();
+        }
+    }
+    // Built from an INDEX handle (rddads USECURRENT / WHILE pass
+    // hOrdCurrent): DBFCDX builds such an index from the current order
+    // INSIDE its scope. rddads only forwards the bottom scope (as the
+    // WHILE), so a top scope was ignored and the temp index held every
+    // key below the bottom (dballcmp "separate bag": 8 or 14 keys instead
+    // of 4). Fold both scopes of a character order into the condition.
+    std::vector<UNSIGNED8> scope_kf_buf;
+    {
+        bool is_index_handle = get_remote_index(hTable) != nullptr;
+        if (!is_index_handle) {
+            std::lock_guard<std::recursive_mutex> lk(index_bindings_mu());
+            is_index_handle = index_bindings().count(hTable) != 0;
+        }
+        UNSIGNED16 kt = 0;
+        if (is_index_handle && AdsGetKeyType(hTable, &kt) == 0 && kt == ADS_STRING) {
+            UNSIGNED8 eb[1024] = {0};
+            UNSIGNED16 el = sizeof(eb) - 1;
+            std::string kexpr;
+            if (AdsGetIndexExpr(hTable, eb, &el) == 0 && el > 0)
+                kexpr.assign(reinterpret_cast<char*>(eb), el);
+            auto scope_of = [&](UNSIGNED16 which) -> std::string {
+                UNSIGNED8 sb[ADS_MAX_KEY_LENGTH + 1] = {0};
+                UNSIGNED16 sl = ADS_MAX_KEY_LENGTH;
+                if (AdsGetScope(hTable, which, sb, &sl) != 0) return {};
+                std::string v(reinterpret_cast<char*>(sb), sl);
+                while (!v.empty() && (v.back() == ' ' || v.back() == '\0')) v.pop_back();
+                return v;
+            };
+            auto quote = [](const std::string& v) {
+                if (v.find('"') == std::string::npos) return "\"" + v + "\"";
+                if (v.find('\'') == std::string::npos) return "'" + v + "'";
+                return "[" + v + "]";
+            };
+            std::string cond;
+            if (!kexpr.empty()) {
+                // A bare field stays bare: the index-expression evaluator
+                // does not resolve "(NAME)" as the field (the FOR then
+                // matched every row). Computed keys keep their parens.
+                bool simple = true;
+                for (char ch : kexpr)
+                    if (!(std::isalnum(static_cast<unsigned char>(ch)) || ch == '_' ||
+                          ch == '-' || ch == '>'))
+                        simple = false;
+                const std::string lhs = simple ? kexpr : "(" + kexpr + ")";
+                const std::string top = scope_of(ADS_TOP);
+                const std::string bottom = scope_of(ADS_BOTTOM);
+                if (!top.empty())
+                    cond = lhs + ">=" + quote(top);
+                if (!bottom.empty())
+                    cond += (cond.empty() ? "" : ".AND.") + (lhs + "<=" + quote(bottom));
+            }
+            if (!cond.empty()) {
+                if (pucKeyFilter != nullptr && pucKeyFilter[0] != 0)
+                    cond = "(" + std::string(reinterpret_cast<const char*>(pucKeyFilter)) +
+                           ").AND.(" + cond + ")";
+                scope_kf_buf.assign(cond.begin(), cond.end());
+                scope_kf_buf.push_back(0);
+                pucKeyFilter = scope_kf_buf.data();
+                create_index_diag("61 SCOPE-FOLD h=%llu keyfilter=%.300s",
+                    static_cast<unsigned long long>(hTable), cond.c_str());
+            }
+        }
     }
 #if defined(OPENADS_WITH_SQLITE)
     if (auto* st = get_sqlite_table(hTable)) {
@@ -16817,7 +17748,16 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
         return ok();
     }
 #endif
-    if (auto* rt = get_remote_table(hTable)) {
+    // ACE accepts an index handle here too: rddads' ordCreate() passes
+    // hOrdCurrent whenever the area has a scope or an ordCondSet() WHILE
+    // (the scope arrives as the WHILE text in pucKeyFilter). The local path
+    // already resolves it through get_table(); the remote one did not and
+    // failed with 5000 "unknown table" (D1TTYPE INQUIRE, K:\TEMP\*.IDX).
+    openads::network::RemoteTable* rt_for_create = get_remote_table(hTable);
+    if (rt_for_create == nullptr) {
+        if (auto* ri = get_remote_index(hTable)) rt_for_create = ri->parent;
+    }
+    if (auto* rt = rt_for_create) {
         create_index_diag("61 ROUTE remote h=%llu table_id=%u", static_cast<unsigned long long>(hTable), static_cast<unsigned>(rt->id));
         std::string path = openads::abi::to_internal(pucFileName, 0);
         path = normalize_index_path(std::move(path));
@@ -16850,6 +17790,25 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
         auto refr = rt->conn->open_index(rt->id, path);
         auto& s = state();
         std::lock_guard<std::recursive_mutex> lk(s.mu);
+        // OrdListClear parked every tag; the structural bag stays open
+        // across it (see remote_structural_parked). The other parked
+        // server bindings are left bound server-side, exactly like an
+        // adopted parked close, so the deferred close is dropped too --
+        // emitted later it would wipe the bag created here.
+        if (rt->indexes_parked) {
+            const auto structural = remote_structural_parked(rt);
+            rt->indexes_parked = false;
+            rt->parked_by_tag.clear();
+            rt->parked_handles.clear();
+            rt->close_all_indexes_pending = false;
+            remote_readd_structural(rt, structural);
+        } else if (rt->close_all_indexes_pending && rt->index_by_tag.empty()) {
+            // OrdListClear with nothing open ("nothing open" -- a table
+            // whose first INDEX ON creates the bag): the deferred close
+            // has nothing to close, and sent after this create it would
+            // wipe the new tag (OrdSetFocus(tag) -> 0, OrdCount() 0).
+            rt->close_all_indexes_pending = false;
+        }
         static std::unordered_map<Handle,
             std::unique_ptr<openads::network::RemoteIndex>> remote_indexes;
         auto ri = std::make_unique<openads::network::RemoteIndex>();
@@ -16858,6 +17817,11 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
         ri->tbl_id   = rt->id;
         ri->parent   = rt;
         ri->tag_name = tag;
+        ri->bag_path = path;
+        ri->expression = expr;   // OrdKey() on the new tag
+        ri->condition  = cond;   // OrdFor()
+        ri->is_unique = (ulOptions & ADS_UNIQUE) != 0;
+        ri->is_descending = (ulOptions & ADS_DESCENDING) != 0;
         Handle gh = s.registry.register_object(
             HandleKind::RemoteIndex, ri.get());
         *phIndex = to_ads_handle(gh);
@@ -16890,6 +17854,19 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
                         break;
                     }
                 }
+                // A reused handle takes the server's metadata (the
+                // create-time handle knew only what the caller passed).
+                if (egh != 0) {
+                    if (auto* known = get_remote_index(static_cast<ADSHANDLE>(egh))) {
+                        if (!ent.bag_path.empty()) known->bag_path = ent.bag_path;
+                        if (!ent.expression.empty()) {
+                            known->expression = ent.expression;
+                            known->condition  = ent.condition;
+                        }
+                        known->is_unique     = ent.is_unique;
+                        known->is_descending = ent.is_descending;
+                    }
+                }
                 if (egh == 0) {
                     auto nri = std::make_unique<openads::network::RemoteIndex>();
                     nri->conn          = rt->conn;
@@ -16901,6 +17878,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
                     nri->expression    = ent.expression;
                     nri->is_unique     = ent.is_unique;
                     nri->is_descending = ent.is_descending;
+                    nri->condition     = ent.condition;
                     Handle nh = s.registry.register_object(
                         HandleKind::RemoteIndex, nri.get());
                     remote_indexes.emplace(nh, std::move(nri));
@@ -16967,7 +17945,7 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
     // already take it. (state().mu is recursive, so nested handle lookups are
     // safe.)
     // (no whole-path state().mu â€” see index_bindings_mu for map ops)
-    (void)pucKeyFilter; (void)usPageSize;
+    (void)usPageSize;
     auto bag  = normalize_index_path(
         openads::abi::to_internal(pucFileName, 0));
     auto tag  = openads::abi::to_internal(pucIndexName, 0);
@@ -16981,6 +17959,19 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
     std::string for_expr = pucCondition != nullptr
         ? openads::abi::to_internal(pucCondition, 0)
         : std::string{};
+    // WHILE condition (pucKeyFilter). rddads' ordCreate() sends the active
+    // scope here as "key>=top .AND. key<=bottom" (plus any ordCondSet()
+    // WHILE). It used to be ignored, so a temp index built under a scope
+    // held every record of the table. A scope is a contiguous key range,
+    // so applying the WHILE as an extra FOR gives exactly the scoped set.
+    if (pucKeyFilter != nullptr && pucKeyFilter[0] != 0) {
+        const std::string while_expr = openads::abi::to_internal(pucKeyFilter, 0);
+        if (!while_expr.empty()) {
+            for_expr = for_expr.empty()
+                ? while_expr
+                : "(" + for_expr + ").AND.(" + while_expr + ")";
+        }
+    }
 
     namespace fs = std::filesystem;
     // An ADT table is not always named .adt (ExtFile='.DAT'), so ask the
@@ -17846,6 +18837,19 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex(ADSHANDLE hTable, UNSIGNED8* pucFile,
 
 UNSIGNED32 ENTRYPOINT AdsDeleteIndex(ADSHANDLE hIndex) {
     arc2_trace("AdsDeleteIndex");
+    // Remote OrdDestroy: the server deletes the tag from the bag (flag
+    // byte on CloseIndex) and the client drops it from its tag list --
+    // a plain close left it in both (OrdCount() unchanged, the tag back
+    // on the next USE).
+    if (auto* ri = get_remote_index(hIndex)) {
+        if (ri->parent) {
+            if (UNSIGNED32 frc = remote_flush_pending(ri->parent); frc != 0) return frc;
+        }
+        auto r = ri->conn->close_index(ri->id, /*destroy=*/true);
+        if (!r) return fail(r.error());
+        remote_forget_index(ri->parent, ri->id);
+        return ok();
+    }
     // OrdDestroy semantics (rddads DBOI_DESTROY): drop the tag from the
     // CDX bag on disk, not just detach the handle -- the old close-only
     // behaviour left the tag in the bag, so it reappeared on the next
@@ -21694,6 +22698,13 @@ UNSIGNED32 ENTRYPOINT AdsSetScope(ADSHANDLE hIndex, UNSIGNED16 usScope,
         auto r = ri->conn->set_scope(ri->id, usScope, key,
                                      usDataType);
         if (!r) return fail(r.error());
+        if (ri->parent != nullptr) {
+            const std::string raw = pucScope
+                ? std::string(reinterpret_cast<const char*>(pucScope), usLen)
+                : std::string();
+            (usScope == ADS_TOP ? ri->parent->scope_top
+                                : ri->parent->scope_bottom)[ri->id] = raw;
+        }
         // The scoped key count and every keyno/rel-pos value derived
         // from it just changed; recompute lazily on next use. Also drop
         // read-ahead rows -- they were read under the old scope.
@@ -21805,6 +22816,10 @@ UNSIGNED32 ENTRYPOINT AdsClearScope(ADSHANDLE hIndex, UNSIGNED16 usScope) {
         auto r = ri->conn->clear_scope(ri->id, usScope);
         if (!r) return fail(r.error());
         if (ri->parent != nullptr) {
+            (usScope == ADS_TOP ? ri->parent->scope_top
+                                : ri->parent->scope_bottom).erase(ri->id);
+        }
+        if (ri->parent != nullptr) {
             ri->parent->key_count_cached = false;
             ri->parent->key_counts.clear();
             ri->parent->keyno_valid      = false;
@@ -21836,7 +22851,22 @@ UNSIGNED32 ENTRYPOINT AdsGetScope(ADSHANDLE hIndex, UNSIGNED16 usScope,
     // enter the key-walk branch -- which returns KeyCount=0 and blanks
     // FWH xBrowse over remote tables/indexes. Remote handles carry no
     // client-side scope; report empty scope explicitly.
-    if (get_remote_index(hIndex) != nullptr || get_remote_table(hIndex)) {
+    // Scopes set through this client are tracked per server index id
+    // (AdsSetScope), so OrdScope() reads back what was set and rddads'
+    // USECURRENT builds its WHILE from the real bottom scope.
+    if (auto* ri = get_remote_index(hIndex)) {
+        const std::string* v = nullptr;
+        if (ri->parent != nullptr) {
+            auto& m = (usScope == ADS_TOP) ? ri->parent->scope_top
+                                           : ri->parent->scope_bottom;
+            auto it = m.find(ri->id);
+            if (it != m.end()) v = &it->second;
+        }
+        if (v == nullptr) { *pusLen = 0; return ok(); }
+        openads::abi::copy_to_caller(pucBuf, pusLen, *v);
+        return ok();
+    }
+    if (get_remote_table(hIndex)) {
         *pusLen = 0;
         return ok();
     }
@@ -21861,6 +22891,7 @@ UNSIGNED32 ENTRYPOINT AdsPackTable(ADSHANDLE hTable) {
         rt->key_counts.clear();
         rt->nav_not_bof = false;  // row removal can empty the cursor
         rt->nav_not_eof = false;
+        remote_expire_sibling_counts(rt);  // other areas on this file
         auto r = rt->conn->pack_table(rt->id);
         if (!r) return fail(r.error());
         return ok();
@@ -21895,6 +22926,7 @@ UNSIGNED32 ENTRYPOINT AdsZapTable(ADSHANDLE hTable) {
         rt->key_counts.clear();
         rt->nav_not_bof = false;  // row removal can empty the cursor
         rt->nav_not_eof = false;
+        remote_expire_sibling_counts(rt);  // other areas on this file
         auto r = rt->conn->zap_table(rt->id);
         if (!r) return fail(r.error());
         return ok();
@@ -22065,6 +23097,7 @@ UNSIGNED32 ENTRYPOINT AdsReindex(ADSHANDLE hTable) {
     arc2_trace("AdsReindex");
     if (auto* rt = get_remote_table(hTable)) {
         if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
+        remote_expire_sibling_counts(rt);  // other areas on this file
         auto r = rt->conn->reindex(rt->id);
         if (!r) return fail(r.error());
         return ok();
@@ -29647,6 +30680,38 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
             std::size_t np = into_pos == std::string::npos
                            ? std::string::npos : into_pos + 6;
             if (np != std::string::npos) skip_ws2(np);
+            // `SELECT <items> INTO <table> FROM ...` with a real (non-#)
+            // target creates that table from the result -- the same
+            // operation as CREATE TABLE <table> AS SELECT, which already
+            // builds the schema from the cursor and copies the rows.
+            if (np != std::string::npos && np < sql.size() &&
+                sql[np] != '#') {
+                std::size_t tp = np;
+                std::string target = read_word(tp);
+                std::size_t rp = tp;
+                skip_ws2(rp);
+                if (!target.empty() &&
+                    up5.compare(rp, 4, "FROM") == 0) {
+                    std::string rest = sql.substr(rp);
+                    while (!rest.empty() &&
+                           (rest.back() == ';' ||
+                            std::isspace(static_cast<unsigned char>(
+                                rest.back()))))
+                        rest.pop_back();
+                    std::string ctas = "CREATE TABLE " + target + " AS " +
+                                       sql.substr(sp, into_pos - sp) + " " +
+                                       rest;
+                    std::vector<UNSIGNED8> cbuf(ctas.size() + 1);
+                    std::memcpy(cbuf.data(), ctas.c_str(), ctas.size() + 1);
+                    ADSHANDLE hct = 0;
+                    UNSIGNED32 rct =
+                        AdsExecuteSQLDirect(hStatement, cbuf.data(), &hct);
+                    if (rct != 0) return rct;
+                    if (hct != 0) AdsCloseTable(hct);
+                    *phCursor = 0;
+                    return ok();
+                }
+            }
             if (np != std::string::npos && np < sql.size() &&
                 sql[np] == '#') {
                 std::string tmp_name = read_word(np);
@@ -30294,20 +31359,71 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
             }
             ADSHANDLE hTable = 0;
+            // A create that fails after writing the file (e.g. the remote
+            // work budget runs out mid-create) must not leave an empty
+            // table behind -- but never touch a file that existed before.
+            std::string ctas_new_file;
+            {
+                auto ctype =   // resolve_table_file may adjust it
+                    ctas_tgt_type == ADS_ADT ? openads::engine::TableType::Adt
+                    : ctas_tgt_type == ADS_VFP ? openads::engine::TableType::Vfp
+                    : openads::engine::TableType::Cdx;
+                std::string f = c->resolve_table_file(ct.value().table, ctype,
+                                                      /*for_create=*/true);
+                std::error_code fec;
+                if (!f.empty() && !std::filesystem::exists(f, fec))
+                    ctas_new_file = f;
+            }
             UNSIGNED32 rc = AdsCreateTable(conn_h, name_buf.data(), nullptr,
                                            ctas_tgt_type, 0, 0, 0, 0,
                                            def_buf.data(), &hTable);
             if (rc != openads::AE_SUCCESS) {
                 AdsCloseTable(srcCur);
+                if (!ctas_new_file.empty()) {
+                    std::error_code fec;
+                    std::filesystem::remove(ctas_new_file, fec);
+                }
                 return rc;
             }
             openads::engine::Table* tgt =
                 s.registry.lookup<openads::engine::Table>(
                     hTable, HandleKind::Table);
-            if (!tgt) {
+            // A CTAS / SELECT INTO that fails after the target exists must
+            // not leave a half-filled table behind: scripts that continue
+            // past a failed statement (xoffice3 Sanitize builds TempItems
+            // this way, then DELETEs every row NOT IN it) would act on a
+            // partial list. Close and remove the new table's files.
+            const std::string ctas_path = tgt ? tgt->path() : std::string();
+            auto ctas_abort = [&](UNSIGNED32 rc_fail) -> UNSIGNED32 {
+                // Cleanup must finish even when the statement died of an
+                // exhausted remote work budget: closing writes the header,
+                // and a handle left open keeps Windows from removing the
+                // file. Lift the (thread-local) budget for the teardown.
+                const auto saved_budget = openads::engine::sql_execution_budget;
+                openads::engine::sql_execution_budget.active = false;
+                struct RestoreBudget {
+                    openads::engine::SqlExecutionBudget b;
+                    ~RestoreBudget() { openads::engine::sql_execution_budget = b; }
+                } restore_budget{saved_budget};
                 AdsCloseTable(srcCur);
                 AdsCloseTable(hTable);
-                return fail(openads::AE_INTERNAL_ERROR, "CTAS post-create");
+                if (!ctas_path.empty()) {
+                    namespace fs = std::filesystem;
+                    std::error_code ec;
+                    fs::path base(ctas_path);
+                    fs::remove(base, ec);
+                    for (const char* ext : {".fpt", ".FPT", ".dbt", ".DBT",
+                                            ".cdx", ".CDX", ".adm", ".adi"}) {
+                        fs::path side = base;
+                        side.replace_extension(ext);
+                        fs::remove(side, ec);
+                    }
+                }
+                return rc_fail;
+            };
+            if (!tgt) {
+                return ctas_abort(fail(openads::AE_INTERNAL_ERROR,
+                                       "CTAS post-create"));
             }
             // Walk source rows.
             std::vector<std::uint32_t> recnos;
@@ -30323,39 +31439,50 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     recnos.push_back(r);
                 }
             }
-            // Pre-resolve src column Ã¢â€ â€™ tgt column by name match.
+            // A budget-exhausted scan "succeeds" with missing rows (failed
+            // reads are skipped): never materialise a truncated copy.
+            if (openads::engine::sql_execution_exhausted()) {
+                return ctas_abort(fail(7079, "SQL execution budget exceeded"));
+            }
+            // Pre-resolve src column -> tgt column by name match.
             std::vector<std::uint16_t> src_cols(schema.size());
             std::vector<std::uint16_t> tgt_cols(schema.size());
             for (std::size_t i = 0; i < schema.size(); ++i) {
                 src_cols[i] = proj ? (*proj)[i] : static_cast<std::uint16_t>(i);
                 std::int32_t fi = tgt->field_index(schema[i].name);
                 if (fi < 0) {
-                    AdsCloseTable(srcCur);
-                    AdsCloseTable(hTable);
-                    return fail(openads::AE_INTERNAL_ERROR,
-                                "CTAS target field missing");
+                    return ctas_abort(fail(openads::AE_INTERNAL_ERROR,
+                                           "CTAS target field missing"));
                 }
                 tgt_cols[i] = static_cast<std::uint16_t>(fi);
             }
             for (std::uint32_t r : recnos) {
                 if (auto g = src->goto_record(r); !g) continue;
                 if (auto ar = tgt->append_record(); !ar) {
-                    AdsCloseTable(srcCur);
-                    AdsCloseTable(hTable);
-                    return fail(ar.error());
+                    return ctas_abort(fail(ar.error()));
                 }
                 for (std::size_t i = 0; i < schema.size(); ++i) {
                     auto v = src->read_field(src_cols[i]);
                     std::string sv = v ? v.value().as_string : std::string();
                     auto wr = tgt->set_field(tgt_cols[i], sv);
                     if (!wr) {
-                        AdsCloseTable(srcCur);
-                        AdsCloseTable(hTable);
-                        return fail(wr.error());
+                        return ctas_abort(fail(wr.error()));
                     }
                 }
+                // Write the row and drop its append auto-lock: the target is
+                // this statement's own new table, and holding one lock per
+                // copied row tripped the remote per-table record-lock cap
+                // (4096) -- SELECT INTO of 133K items failed half-way.
+                if (auto ul = tgt->unlock_record(tgt->recno()); !ul) {
+                    return ctas_abort(fail(ul.error()));
+                }
             }
-            (void)tgt->flush();
+            if (auto fl = tgt->flush(); !fl) {
+                return ctas_abort(fail(fl.error()));
+            }
+            if (openads::engine::sql_execution_exhausted()) {
+                return ctas_abort(fail(7079, "SQL execution budget exceeded"));
+            }
             AdsCloseTable(srcCur);
             AdsCloseTable(hTable);
             *phCursor = 0;
@@ -30771,6 +31898,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         (openads::engine::Table& t) {
                 auto v = t.read_field(fi);
                 if (!v) return false;
+                if (op == openads::sql::WhereOp::Empty)
+                    return sql_field_is_empty(t, fi);
                 if (op == openads::sql::WhereOp::IsNull ||
                     op == openads::sql::WhereOp::IsNotNull) {
                     bool null_ish = t.is_field_empty(fi);
@@ -31089,98 +32218,25 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         }
         // Walk every live record, run optional WHERE via the same
         // engine filter machinery, and apply the assignments inline.
+        // SET <col> = <othercol> / (<scalar subquery>): resolved once here
+        // (subqueries materialised) and read per row below.
+        std::vector<std::optional<dmlw::SetSource>> set_srcs(assns.size());
+        for (std::size_t i2 = 0; i2 < assns.size(); ++i2) {
+            if (!assns[i2].value.is_expr) continue;
+            auto ss = dmlw::set_source(c, stmt_table_type(*it->second), *tbl,
+                                       upd.value().table,
+                                       assns[i2].value.text);
+            if (!ss) { c->close_table(th.value()); return fail(ss.error()); }
+            set_srcs[i2] = std::move(ss).value();
+        }
         if (upd.value().where) {
-            // Leverage the same compile path as SELECT -- but inline
-            // a smaller version that walks the AST recursively. Reuse
-            // is fine: same structure, no SQL features missing.
-            // (Helper extraction is deferred until UPDATE picks up
-            // CONTAINS or AND/OR -- for now the closures below fully
-            // cover the tree.)
-            using Pred = std::function<bool(openads::engine::Table&)>;
-            std::function<openads::util::Result<Pred>(
-                const openads::sql::WhereExpr&)> compile;
-            compile = [&](const openads::sql::WhereExpr& node)
-                      -> openads::util::Result<Pred> {
-                using Kind = openads::sql::WhereExpr::Kind;
-                if (node.kind == Kind::And) {
-                    std::vector<Pred> ks;
-                    for (auto& cn : node.children) {
-                        auto r = compile(*cn);
-                        if (!r) return r.error();
-                        ks.push_back(std::move(r).value());
-                    }
-                    return Pred{[ks = std::move(ks)](openads::engine::Table& t) {
-                        for (auto& k : ks) if (!k(t)) return false;
-                        return true;
-                    }};
-                }
-                if (node.kind == Kind::Or) {
-                    std::vector<Pred> ks;
-                    for (auto& cn : node.children) {
-                        auto r = compile(*cn);
-                        if (!r) return r.error();
-                        ks.push_back(std::move(r).value());
-                    }
-                    return Pred{[ks = std::move(ks)](openads::engine::Table& t) {
-                        for (auto& k : ks) if (k(t)) return true;
-                        return false;
-                    }};
-                }
-                if (node.kind == Kind::Not) {
-                    auto inner = compile(*node.child);
-                    if (!inner) return inner.error();
-                    return Pred{[p = std::move(inner).value()]
-                                (openads::engine::Table& t){return !p(t);}};
-                }
-                const auto& w = node.cmp;
-                std::int32_t fidx = tbl->field_index(w.column);
-                if (fidx < 0) {
-                    return openads::util::Error{
-                        openads::AE_COLUMN_NOT_FOUND, 0,
-                        w.column.c_str(), ""};
-                }
-                std::uint16_t fi = static_cast<std::uint16_t>(fidx);
-                openads::sql::WhereOp op = w.op;
-                std::string lit = w.literal;
-                bool is_num     = w.is_numeric;
-                double num      = w.number;
-                openads::sql::WhereFn lhs_fn = w.lhs_fn;
-                bool ci_f = field_is_cichar(*tbl, fi);
-                return Pred{[fi, op, lit, is_num, num, lhs_fn, ci_f]
-                            (openads::engine::Table& t) {
-                    auto v = t.read_field(fi);
-                    if (!v) return false;
-                    if (op == openads::sql::WhereOp::IsNull ||
-                        op == openads::sql::WhereOp::IsNotNull) {
-                        bool null_ish = t.is_field_empty(fi);
-                        return op == openads::sql::WhereOp::IsNull
-                            ? null_ish : !null_ish;
-                    }
-                    int cmp = 0;
-                    if (is_num) {
-                        double d = v.value().as_double;
-                        if      (d < num) cmp = -1;
-                        else if (d > num) cmp =  1;
-                    } else {
-                        cmp = where_str_cmp(
-                            apply_where_fn(v.value().as_string, lhs_fn),
-                            lit, ci_f);
-                    }
-                    switch (op) {
-                        case openads::sql::WhereOp::Eq: return cmp == 0;
-                        case openads::sql::WhereOp::Ne: return cmp != 0;
-                        case openads::sql::WhereOp::Lt: return cmp <  0;
-                        case openads::sql::WhereOp::Gt: return cmp >  0;
-                        case openads::sql::WhereOp::Le: return cmp <= 0;
-                        case openads::sql::WhereOp::Ge: return cmp >= 0;
-                        case openads::sql::WhereOp::Contains: return false;
-                        default: return false;
-                    }
-                    return false;
-                }};
-            };
-            auto compiled = compile(*upd.value().where);
-            if (!compiled) return fail(compiled.error());
+            auto compiled = dmlw::compile(c, stmt_table_type(*it->second),
+                                          *tbl, upd.value().table,
+                                          *upd.value().where);
+            if (!compiled) {
+                c->close_table(th.value());
+                return fail(compiled.error());
+            }
             tbl->set_filter(std::move(compiled).value());
         }
         // Triggers are ROW-LEVEL (SAP semantics): each matching row fires
@@ -31204,8 +32260,11 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 // bind the row's CURRENT -- pre-write -- column values).
                 std::vector<openads::script::Value> assn_vals;
                 assn_vals.reserve(assns.size());
-                for (const auto& a : assns) {
-                    if (a.value.is_expr) {
+                for (std::size_t ai = 0; ai < assns.size(); ++ai) {
+                    const auto& a = assns[ai];
+                    if (set_srcs[ai]) {
+                        assn_vals.push_back(dmlw::set_value(*tbl, *set_srcs[ai]));
+                    } else if (a.value.is_expr) {
                         auto pr = scriptbridge::compiled(
                             "RETURN " + a.value.text + ";");
                         if (!pr) return fail(pr.error());
@@ -31330,94 +32389,13 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
         // Reuse the WHERE filter machinery for SELECT: it's already
         // wired and the predicate semantics match exactly.
         if (del.value().where) {
-            // The compile lambda from the SELECT branch lives below;
-            // copy a minimal bool-tree walker inline so DELETE isn't
-            // forced to call into SELECT's path.
-            using Pred = std::function<bool(openads::engine::Table&)>;
-            std::function<openads::util::Result<Pred>(
-                const openads::sql::WhereExpr&)> compile;
-            compile = [&](const openads::sql::WhereExpr& node)
-                      -> openads::util::Result<Pred> {
-                using Kind = openads::sql::WhereExpr::Kind;
-                if (node.kind == Kind::And) {
-                    std::vector<Pred> ks;
-                    for (auto& cn : node.children) {
-                        auto r = compile(*cn);
-                        if (!r) return r.error();
-                        ks.push_back(std::move(r).value());
-                    }
-                    return Pred{[ks = std::move(ks)](openads::engine::Table& t) {
-                        for (auto& k : ks) if (!k(t)) return false;
-                        return true;
-                    }};
-                }
-                if (node.kind == Kind::Or) {
-                    std::vector<Pred> ks;
-                    for (auto& cn : node.children) {
-                        auto r = compile(*cn);
-                        if (!r) return r.error();
-                        ks.push_back(std::move(r).value());
-                    }
-                    return Pred{[ks = std::move(ks)](openads::engine::Table& t) {
-                        for (auto& k : ks) if (k(t)) return true;
-                        return false;
-                    }};
-                }
-                if (node.kind == Kind::Not) {
-                    auto inner = compile(*node.child);
-                    if (!inner) return inner.error();
-                    return Pred{[p = std::move(inner).value()]
-                                (openads::engine::Table& t){return !p(t);}};
-                }
-                const auto& w = node.cmp;
-                std::int32_t fidx = tbl->field_index(w.column);
-                if (fidx < 0) {
-                    return openads::util::Error{
-                        openads::AE_COLUMN_NOT_FOUND, 0,
-                        w.column.c_str(), ""};
-                }
-                std::uint16_t fi = static_cast<std::uint16_t>(fidx);
-                openads::sql::WhereOp op = w.op;
-                std::string lit = w.literal;
-                bool is_num     = w.is_numeric;
-                double num      = w.number;
-                openads::sql::WhereFn lhs_fn = w.lhs_fn;
-                bool ci_f = field_is_cichar(*tbl, fi);
-                return Pred{[fi, op, lit, is_num, num, lhs_fn, ci_f]
-                            (openads::engine::Table& t) {
-                    auto v = t.read_field(fi);
-                    if (!v) return false;
-                    if (op == openads::sql::WhereOp::IsNull ||
-                        op == openads::sql::WhereOp::IsNotNull) {
-                        bool null_ish = t.is_field_empty(fi);
-                        return op == openads::sql::WhereOp::IsNull
-                            ? null_ish : !null_ish;
-                    }
-                    int cmp = 0;
-                    if (is_num) {
-                        double d = v.value().as_double;
-                        if      (d < num) cmp = -1;
-                        else if (d > num) cmp =  1;
-                    } else {
-                        cmp = where_str_cmp(
-                            apply_where_fn(v.value().as_string, lhs_fn),
-                            lit, ci_f);
-                    }
-                    switch (op) {
-                        case openads::sql::WhereOp::Eq: return cmp == 0;
-                        case openads::sql::WhereOp::Ne: return cmp != 0;
-                        case openads::sql::WhereOp::Lt: return cmp <  0;
-                        case openads::sql::WhereOp::Gt: return cmp >  0;
-                        case openads::sql::WhereOp::Le: return cmp <= 0;
-                        case openads::sql::WhereOp::Ge: return cmp >= 0;
-                        case openads::sql::WhereOp::Contains: return false;
-                        default: return false;
-                    }
-                    return false;
-                }};
-            };
-            auto compiled = compile(*del.value().where);
-            if (!compiled) return fail(compiled.error());
+            auto compiled = dmlw::compile(c, stmt_table_type(*it->second),
+                                          *tbl, del.value().table,
+                                          *del.value().where);
+            if (!compiled) {
+                c->close_table(th.value());
+                return fail(compiled.error());
+            }
             tbl->set_filter(std::move(compiled).value());
         }
         // Triggers are ROW-LEVEL (SAP semantics): each matching row fires
@@ -33739,6 +34717,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                         }
                         auto v = t.read_field(f);
                         if (!v) return false;
+                        if (op == openads::sql::WhereOp::Empty)
+                            return sql_field_is_empty(t, f);
                         if (op == openads::sql::WhereOp::IsNull ||
                             op == openads::sql::WhereOp::IsNotNull) {
                             bool null_ish = t.is_field_null(f);
@@ -35411,6 +36391,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     }
                     auto v = t.read_field(f);
                     if (!v) return false;
+                    if (op == openads::sql::WhereOp::Empty)
+                        return sql_field_is_empty(t, f);
                     if (op == openads::sql::WhereOp::IsNull ||
                         op == openads::sql::WhereOp::IsNotNull) {
                         bool null_ish = t.is_field_null(f);
@@ -36460,6 +37442,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                     while (!sv.empty() && sv.back() == ' ') sv.pop_back();
                     return sql_like_match(sv, term.literal);
                 }
+                if (term.op == openads::sql::WhereOp::Empty)
+                    return sql_field_is_empty(t, term.field_index);
                 if (term.op == openads::sql::WhereOp::IsNull ||
                     term.op == openads::sql::WhereOp::IsNotNull) {
                     // M10.44 / M11.6 -- prefer the VFP NULL bitmap
@@ -36964,6 +37948,8 @@ static UNSIGNED32 exec_sql_direct_impl(ADSHANDLE hStatement, UNSIGNED8* pucSQL,
                 }
                 auto v = t.read_field(f);
                 if (!v) return false;
+                if (op == openads::sql::WhereOp::Empty)
+                    return sql_field_is_empty(t, f);
                 if (op == openads::sql::WhereOp::IsNull ||
                     op == openads::sql::WhereOp::IsNotNull) {
                     bool null_ish = t.is_field_null(f);
@@ -38568,6 +39554,10 @@ UNSIGNED32 ENTRYPOINT AdsGetIndexCondition(ADSHANDLE hIndex, UNSIGNED8* p,
                                UNSIGNED16* l) {
     arc2_trace("AdsGetIndexCondition");
     if (l == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
+    if (auto* ri = get_remote_index(hIndex)) {
+        openads::abi::copy_to_caller(p, l, ri->condition);
+        return ok();
+    }
     auto& m = index_bindings();
     // Storm fix: reader must hold index_bindings_mu (binds are unlocked now).
     std::lock_guard<std::recursive_mutex> _rc_lk(index_bindings_mu());
@@ -38591,8 +39581,8 @@ UNSIGNED32 ENTRYPOINT AdsGetIndexFilename(ADSHANDLE hIndex, UNSIGNED16 usOption,
                                UNSIGNED8* p, UNSIGNED16* l) {
     arc2_trace("AdsGetIndexFilename");
     if (l == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
-    // usOption: ADS_FULLPATHNAME (1) / ADS_BASENAMEANDEXT (2) /
-    // ADS_BASENAME (3). rddads' DBOI_BAGNAME passes ADS_BASENAME and
+    // usOption (ACE SDK values): ADS_BASENAME (1) / ADS_BASENAMEANDEXT (2)
+    // / ADS_FULLPATHNAME (3). rddads' DBOI_BAGNAME passes ADS_BASENAME and
     // Harbour compares it against DBFCDX's extension-less bag name
     // ("da_main"); the option used to be ignored and every caller got
     // the stored (full-ish) path.

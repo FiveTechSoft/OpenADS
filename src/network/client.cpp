@@ -2311,12 +2311,29 @@ RemoteConnection::parse_open_index_reply(const std::vector<std::uint8_t>& pl, co
         out[i].is_descending = pl[off + 1] != 0;
         off += 2;
     }
+    // Optional trailing FOR conditions (u16 len + bytes per entry), same
+    // order. Older servers stop before this block.
+    for (std::uint16_t i = 0; i < n; ++i) {
+        if (off + 2 > pl.size()) break;
+        std::uint16_t clen = read_u16_le(pl.data() + off);
+        off += 2;
+        if (off + clen > pl.size()) break;
+        if (clen > 0) {
+            out[i].condition.assign(
+                reinterpret_cast<const char*>(pl.data() + off), clen);
+        }
+        off += clen;
+    }
     return out;
 }
 
-util::Result<void> RemoteConnection::close_index(std::uint32_t index_id) {
+util::Result<void> RemoteConnection::close_index(std::uint32_t index_id,
+                                                 bool destroy) {
     Frame req; req.opcode = Opcode::CloseIndex;
     write_u32_le(index_id, req.payload);
+    // Optional flag byte: 1 = delete the tag from its bag (OrdDestroy).
+    // Older servers read only the id and just close.
+    if (destroy) req.payload.push_back(1);
     auto rep = request(req);
     if (!rep) return rep.error();
     if (rep.value().opcode != Opcode::CloseIndexAck) {

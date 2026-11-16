@@ -329,6 +329,8 @@ public:
     util::Result<void> unlock_record    (std::uint32_t recno);
     util::Result<void> lock_table_excl();
     util::Result<void> unlock_table();
+    // Write this handle's dirty index pages (see table.cpp).
+    util::Result<void> publish_index_pages_();
 
     // Non-blocking variants (M9.18). Used by the ABI retry loop so an
     // already-locked range surfaces as AE_LOCKED instead of blocking

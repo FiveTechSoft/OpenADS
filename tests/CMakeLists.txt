@@ -168,6 +168,7 @@ add_executable(openads_unit_tests
     unit/engine_navigation_empty_test.cpp
     unit/abi_deleted_records_test.cpp
     unit/abi_sql_show_deleted_test.cpp
+    unit/abi_sql_dml_subquery_test.cpp
     unit/abi_scoped_deleted_keycount_test.cpp
     unit/abi_keycount_deleted_scan_test.cpp
     unit/abi_index_key_count_test.cpp
@@ -220,6 +221,9 @@ add_executable(openads_unit_tests
     unit/abi_remote_index_nav_test.cpp
     unit/abi_remote_date_index_scope_test.cpp
     unit/abi_remote_extract_key_test.cpp
+    unit/server_lock_release_test.cpp
+    unit/abi_remote_two_areas_append_test.cpp
+    unit/abi_create_index_from_index_handle_test.cpp
     unit/abi_remote_prodcdx_test.cpp
     unit/abi_append_autolock_test.cpp
     unit/abi_remote_only_access_test.cpp

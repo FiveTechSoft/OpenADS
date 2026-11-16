@@ -63,7 +63,9 @@ public:
     bool expired_at(std::chrono::steady_clock::time_point now) const noexcept;
     std::uint8_t poll_events() const noexcept;
     bool buffered_read() const noexcept;
-
+    // Carry out console lock releases queued by Server::release_lock.
+    // Called by the driving loop on every pass, on this session's thread.
+    void service_lock_releases();
 
 private:
     // Telemetry + dispatch + reply for one complete frame. Shared by the
@@ -125,6 +127,10 @@ private:
     std::unordered_map<std::uint32_t, ADSHANDLE>                cursor_tbls_;
     // M12.16 — lazy-promoted ABI handle parallel to tbls_.
     std::unordered_map<std::uint32_t, ADSHANDLE>                tbls_h_;
+    // Wire table id -> recno of an append made through its ABI twin and
+    // not yet committed. FlushTable (the client's AdsWriteRecord) commits
+    // it with AdsWriteRecord so a bare append gets its index keys.
+    std::unordered_map<std::uint32_t, std::uint32_t>            twin_pending_append_;
     // M12.16 — index_h_[index_id] holds the ABI hIndex.
     std::unordered_map<std::uint32_t, ADSHANDLE>                index_h_;
     // M12.16 — reverse map index_id -> table_id.
@@ -175,7 +181,8 @@ private:
         const std::string& client_path) const;
 
     // Resolve a remote CreateIndex bag path server-side (see session.cpp).
-    std::string resolve_index_bag_path(const std::string& bag) const;
+    std::string resolve_index_bag_path(const std::string& bag,
+                                       bool for_create = true) const;
 
     // ---- M12.22 read-ahead ramp -------------------------------------------
     // RCB 07/14/2026: why sequential-access detection lives on the SERVER and
@@ -243,6 +250,10 @@ private:
     // Moved helpers (were [&] lambdas in session_loop) -> private
     // methods; bodies unchanged except member renames.
     void      cleanup();
+    // Release one lock this session holds on `table_path` (recno 0 = the
+    // file lock), as the client's UNLOCK would. True if one was released.
+    bool      release_lock_now(const std::string& table_path,
+                               std::uint32_t recno);
     bool      ensure_abi_conn();
     ADSHANDLE ensure_abi_handle(std::uint32_t id);
     bool      pack_one_row_engine(std::vector<std::uint8_t>& dst,

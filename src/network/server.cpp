@@ -565,6 +565,44 @@ bool Server::kill_session(std::uint64_t id) {
     return true;
 }
 
+Server::ReleaseResult Server::release_lock(std::uint64_t id,
+                                          const std::string& table_path,
+                                          std::uint32_t recno,
+                                          std::chrono::milliseconds wait) {
+    {
+        std::lock_guard<std::mutex> lk(info_mu_);
+        if (sockets_.find(id) == sockets_.end()) return ReleaseResult::NoSession;
+    }
+    auto req = std::make_shared<LockReleaseRequest>();
+    req->table_path = table_path;
+    req->recno = recno;
+    {
+        std::lock_guard<std::mutex> lk(release_mu_);
+        releases_[id].push_back(req);
+        releases_pending_.fetch_add(1);
+    }
+    std::unique_lock<std::mutex> lk(req->mu);
+    if (!req->cv.wait_for(lk, wait, [&] { return req->done; })) {
+        // Leave it queued: a session busy with a long request still
+        // releases when it gets back to its loop.
+        return ReleaseResult::Timeout;
+    }
+    return req->released ? ReleaseResult::Released : ReleaseResult::NotHeld;
+}
+
+std::vector<std::shared_ptr<Server::LockReleaseRequest>>
+Server::take_lock_releases(std::uint64_t id) {
+    std::vector<std::shared_ptr<LockReleaseRequest>> out;
+    if (releases_pending_.load() == 0) return out;
+    std::lock_guard<std::mutex> lk(release_mu_);
+    auto it = releases_.find(id);
+    if (it == releases_.end()) return out;
+    out.swap(it->second);
+    releases_.erase(it);
+    releases_pending_.fetch_sub(static_cast<std::uint32_t>(out.size()));
+    return out;
+}
+
 bool Server::kill_session_by_conn_no(std::uint16_t conn_no) {
     auto sessions = sessions_snapshot();
     if (conn_no == 0 || conn_no > sessions.size()) return false;
@@ -921,6 +959,7 @@ void Server::session_loop(Socket s, std::string default_data_dir,
         std::vector<PollItem> ready{{s, sess.poll_events()}};
         auto polled = socket_poll(ready, 200);
         if (!polled) break;
+        sess.service_lock_releases();
         if ((polled.value() != 0 || sess.buffered_read()) && !sess.handle_readable()) break;
     }
     sock_close(s);

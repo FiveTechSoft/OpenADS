@@ -389,7 +389,91 @@ bool Session::flush_reply() {
 Session::~Session() {
     cleanup();
     srv_->erase_session_socket(sid_);
+    // cleanup() released every lock; answer anything still queued.
+    for (auto& r : srv_->take_lock_releases(sid_)) r->finish(false);
     srv_->unregister_session(sid_);
+}
+
+namespace {
+// Compare table paths the way the console groups them: slash style and
+// case do not matter on the file systems the server runs on.
+std::string release_path_key(std::string p) {
+    for (auto& c : p) {
+        if (c == '\\') c = '/';
+        else c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return p;
+}
+} // namespace
+
+void Session::service_lock_releases() {
+    auto reqs = srv_->take_lock_releases(sid_);
+    for (auto& r : reqs) r->finish(release_lock_now(r->table_path, r->recno));
+}
+
+bool Session::release_lock_now(const std::string& table_path,
+                               std::uint32_t recno) {
+    if (!sess_conn_) return false;
+    const std::string want = release_path_key(table_path);
+    bool released = false;
+    for (const auto& [id, h] : tbls_) {
+        auto* tbl = sess_conn_->lookup_table(h);
+        if (!tbl) continue;
+        bool match = release_path_key(tbl->path()) == want;
+        if (!match) {
+            if (auto n = tbl_mg_names_.find(id); n != tbl_mg_names_.end())
+                match = release_path_key(n->second) == want;
+        }
+        if (!match) continue;
+        const auto twin = tbls_h_.find(id);
+        if (recno == 0) {
+            // File lock: the wire LockTable takes it on the engine table.
+            // Same release as the client's UnlockTable (which, per ACE,
+            // also drops that handle's engine record locks).
+            if (!tbl->is_table_locked()) continue;
+            openads::mgmt::LockRegistry::instance().remove_all_for_table(tbl);
+            if (tbl->unlock_table()) released = true;
+            for (auto it = explicit_record_locks_.begin();
+                 it != explicit_record_locks_.end();) {
+                if ((*it >> 32) == id) it = explicit_record_locks_.erase(it);
+                else ++it;
+            }
+        } else {
+            bool held = false;
+            if (twin != tbls_h_.end()) {
+                UNSIGNED16 b = 0;
+                if (AdsIsRecordLocked(twin->second, recno, &b) == 0 && b) {
+                    held = true;
+                    (void)AdsUnlockRecord(twin->second, recno);
+                }
+            }
+            for (std::uint32_t r : tbl->held_record_locks()) {
+                if (r == recno) { held = true; break; }
+            }
+            if (held) (void)tbl->unlock_record(recno);
+            openads::mgmt::LockRegistry::instance().remove_record_lock(tbl, recno);
+            explicit_record_locks_.erase(
+                (static_cast<std::uint64_t>(id) << 32) | recno);
+            if (held) released = true;
+        }
+        if (released) {
+            WTRACE("[wire] console released %s lock id=%u recno=%u table=%s\n",
+                   recno == 0 ? "file" : "record", id, (unsigned)recno,
+                   tbl->path().c_str());
+        }
+    }
+    if (released) {
+        openads::mgmt::ErrorLog::instance().log(
+            0, "RELEASE", 0,
+            "Console released " +
+                (recno == 0 ? std::string("the file lock")
+                            : "record " + std::to_string(recno)) +
+                " of " + table_path + " held by session " +
+                std::to_string(sid_) + " (" +
+                (session_user_.empty() ? "(anonymous)" : session_user_) +
+                " " + peer_str_ + ")");
+    }
+    return released;
 }
 
 bool Session::process_frame(const Frame& f) {
@@ -2468,6 +2552,7 @@ DispatchResult Session::dispatch(const Frame& f) {
                 (void)AdsCloseTable(hit->second);
                 tbls_h_.erase(hit);
             }
+            twin_pending_append_.erase(id);
             // Index ids resolved through the shadow handle died with it
             // (AdsCloseTable purges the table's index bindings); drop the
             // session's entries so a stale id can't be re-used.
@@ -3359,8 +3444,10 @@ DispatchResult Session::dispatch(const Frame& f) {
                 // Also release any stale engine-side lock taken before
                 // the ABI handle existed (best-effort; not holding the
                 // lock is fine).
-                if (f.opcode == Opcode::UnlockRecord)
+                if (f.opcode == Opcode::UnlockRecord) {
                     (void)tbl->unlock_record(rn);
+                    openads::mgmt::LockRegistry::instance().remove_record_lock(tbl, rn);
+                }
                 if (rrc != 0) {
                     // Trace the holder so a field log shows WHO is blocking
                     // a record lock (Pritpal's GN_COUNT retry loop).
@@ -3401,6 +3488,10 @@ DispatchResult Session::dispatch(const Frame& f) {
                         openads::AE_LOCKED);
                     break;
                 }
+                // Visible to the console Locks view (the ABI path above
+                // registers inside AdsLockRecord).
+                openads::mgmt::LockRegistry::instance().add_record_lock(
+                    tbl, tbl->path(), rn);
                 WTRACE("[wire] LockRecord id=%u recno=%u ok (engine) user=%s conn=%u table=%s\n",
                        id, (unsigned)rn,
                        session_user_.empty() ? "(anonymous)" : session_user_.c_str(),
@@ -3408,6 +3499,7 @@ DispatchResult Session::dispatch(const Frame& f) {
                        tbl_open_paths_.count(id) ? tbl_open_paths_[id].c_str() : "?");
             } else {
                 auto r = tbl->unlock_record(rn);
+                openads::mgmt::LockRegistry::instance().remove_record_lock(tbl, rn);
                 if (!r) { reply = err("UnlockRecord: failed",
                     static_cast<UNSIGNED32>(r.error().code)); break; }
                 WTRACE("[wire] UnlockRecord id=%u recno=%u ok (engine) user=%s conn=%u table=%s\n",
@@ -3526,7 +3618,8 @@ DispatchResult Session::dispatch(const Frame& f) {
                 openads::mgmt::LockRegistry::instance().add_table_lock(
                     tbl, tbl->path());
             } else {
-                openads::mgmt::LockRegistry::instance().remove_table_lock(tbl);
+                // Engine unlock_table also drops this Table's record locks.
+                openads::mgmt::LockRegistry::instance().remove_all_for_table(tbl);
                 // M12.16 dual-handle: route through the ABI shadow handle
                 // when it exists (same as LockRecord/UnlockRecord) so the
                 // ABI-side Table's LockMgr releases its own locks.
@@ -3748,6 +3841,20 @@ DispatchResult Session::dispatch(const Frame& f) {
             std::string path(reinterpret_cast<const char*>(
                                  f.payload.data() + 4),
                              f.payload.size() - 4);
+            // A client-absolute bag (rddads ordCreate() TO K:\TEMP\x.IDX,
+            // then AdsOpenIndex of the same spelling) must resolve exactly
+            // as CreateIndex resolved it, or the open misses the file the
+            // create just wrote (5018) -- the client then never learns the
+            // new tag's expression (OrdKey() "") and loses the structural
+            // CDX it parked at OrdListClear. Relative bags keep their
+            // table-folder resolution.
+            {
+                std::string ps = path;
+                for (char& ch : ps) if (ch == '\\') ch = '/';
+                const bool client_abs = !ps.empty() &&
+                    (ps[0] == '/' || (ps.size() > 1 && ps[1] == ':'));
+                if (client_abs) path = resolve_index_bag_path(path, false);
+            }
             auto& oi_st = openads::mgmt::process_mg_stats();
             auto oi_us = [](auto a, auto b) {
                 return static_cast<std::uint64_t>(
@@ -3869,6 +3976,20 @@ DispatchResult Session::dispatch(const Frame& f) {
                 reply.payload.push_back(uniq != 0 ? 1 : 0);
                 reply.payload.push_back(desc != 0 ? 1 : 0);
             }
+            // Per-tag FOR condition (remote OrdFor()); older clients
+            // stop parsing before this block.
+            for (std::uint16_t i = 0; i < alen; ++i) {
+                UNSIGNED8 cbuf[1024] = {0};
+                UNSIGNED16 clen = static_cast<UNSIGNED16>(sizeof(cbuf) - 1);
+                std::string cond;
+                if (AdsGetIndexCondition(arr[i], cbuf, &clen) == 0 && clen > 0) {
+                    cond.assign(reinterpret_cast<char*>(cbuf), clen);
+                }
+                auto cn = static_cast<std::uint16_t>(cond.size());
+                reply.payload.push_back(static_cast<std::uint8_t>( cn       & 0xFFu));
+                reply.payload.push_back(static_cast<std::uint8_t>((cn >> 8) & 0xFFu));
+                reply.payload.insert(reply.payload.end(), cond.begin(), cond.end());
+            }
             {
                 auto& t = oi_st.op_timing_oi[3];
                 auto us = oi_us(oi_t3, std::chrono::steady_clock::now());
@@ -3883,9 +4004,17 @@ DispatchResult Session::dispatch(const Frame& f) {
         case Opcode::CloseIndex: {
             if (f.payload.size() < 4) { reply = err("CloseIndex: bad payload"); break; }
             std::uint32_t iid = read_u32_le(f.payload.data());
+            // Optional flag byte 1 = OrdDestroy: delete the tag from its
+            // bag on disk too (AdsDeleteIndex closes the handle as well).
+            const bool destroy = f.payload.size() >= 5 && f.payload[4] == 1;
             auto iit = index_h_.find(iid);
             if (iit != index_h_.end()) {
-                AdsCloseIndex(iit->second);
+                if (destroy) {
+                    UNSIGNED32 drc = AdsDeleteIndex(iit->second);
+                    if (drc != 0) { reply = err("CloseIndex: delete failed", drc); break; }
+                } else {
+                    AdsCloseIndex(iit->second);
+                }
                 index_h_.erase(iit);
             }
             index_table_.erase(iid);
@@ -4832,7 +4961,35 @@ DispatchResult Session::dispatch(const Frame& f) {
                 break;
             }
             if (rrc != 0) {
-                reply = err("ExecuteSQL: server-side exec failed", rrc);
+                // The wire text stays generic on purpose (no server paths
+                // or internals reach remote clients), EXCEPT the fixed name
+                // of a server work limit: an operator must be able to tell
+                // which remote_sql_* / lock limit stopped the statement.
+                UNSIGNED32 lec = 0;
+                UNSIGNED8  lbuf[600] = {0};
+                UNSIGNED16 llen = static_cast<UNSIGNED16>(sizeof(lbuf) - 1);
+                std::string limit;
+                if (AdsGetLastError(&lec, lbuf, &llen) == 0 && llen > 0) {
+                    std::string t(reinterpret_cast<const char*>(lbuf), llen);
+                    for (const char* phrase : {
+                             "remote SQL source budget exceeded",
+                             "remote SQL join fanout budget exceeded",
+                             "remote SQL row-width budget exceeded",
+                             "remote SQL materialization budget exceeded",
+                             "remote SQL UNION budget exceeded",
+                             "SQL execution budget exceeded",
+                             "remote table record-lock limit"}) {
+                        if (t.find(phrase) != std::string::npos) {
+                            limit = phrase;
+                            break;
+                        }
+                    }
+                }
+                reply = err(limit.empty()
+                                ? std::string("ExecuteSQL: server-side exec failed")
+                                : "ExecuteSQL: server-side exec failed (" +
+                                      limit + ")",
+                            rrc);
                 break;
             }
             std::uint32_t id = 0;
@@ -4881,6 +5038,9 @@ DispatchResult Session::dispatch(const Frame& f) {
                 // still delivered at commit time.
                 sync_engine_cursor(id);
                 tbl->set_pending_append(true);
+                UNSIGNED32 newrec = 0;
+                if (AdsGetRecordNum(hit->second, ADS_IGNOREFILTERS, &newrec) == 0)
+                    twin_pending_append_[id] = newrec;
             } else {
                 auto r = tbl->append_record();
                 if (!r) {
@@ -4896,6 +5056,19 @@ DispatchResult Session::dispatch(const Frame& f) {
                 openads::abi::create_diag::log("server-first-append-ok");
             // Include automatic append locks in the session ledger, not only explicit LockRecord.
             explicit_record_locks_.insert((static_cast<std::uint64_t>(id) << 32) | tbl->recno());
+            // Same file open in another work area of this session: its
+            // engine Table keeps its own in-memory record count, which
+            // the nav-ack tail certifies to the client (no disk refresh).
+            // Re-read it now, or that area's LastRec() stays one short
+            // after a bare append (dballcmp "two areas").
+            for (const auto& [oid, oh] : tbls_) {
+                if (oid == id) continue;
+                if (auto* other = sess_conn_->lookup_table(oh);
+                    other != nullptr && other != tbl &&
+                    release_path_key(other->path()) == release_path_key(tbl->path())) {
+                    (void)other->refresh_record_count_from_disk();
+                }
+            }
             reply.opcode = Opcode::AppendBlankAck;
             break;
         }
@@ -5100,6 +5273,25 @@ DispatchResult Session::dispatch(const Frame& f) {
             if (!tbl) { reply = err("FlushTable: lookup failed"); break; }
             // Flush the ABI twin first (holds open index bags), then engine.
             if (auto hit = tbls_h_.find(id); hit != tbls_h_.end()) {
+                // Remote AdsWriteRecord lands here. Commit a pending append
+                // the way the local AdsWriteRecord does: a BARE append (no
+                // field writes) is only keyed by AdsWriteRecord's
+                // commit_bare_append -- AdsFlushFileBuffers alone left it
+                // out of every index for good, so the record was invisible
+                // to any index walk, in this or any other work area.
+                if (auto pa = twin_pending_append_.find(id);
+                    pa != twin_pending_append_.end()) {
+                    UNSIGNED32 cur = 0;
+                    if (AdsGetRecordNum(hit->second, ADS_IGNOREFILTERS, &cur) == 0 &&
+                        cur == pa->second) {
+                        if (UNSIGNED32 wrc = AdsWriteRecord(hit->second); wrc != 0) {
+                            twin_pending_append_.erase(pa);
+                            reply = err("FlushTable: write failed", wrc);
+                            break;
+                        }
+                    }
+                    twin_pending_append_.erase(pa);
+                }
                 (void)AdsFlushFileBuffers(hit->second);
             }
             // Remote AdsWriteRecord lands here: the append is now committed,
@@ -6305,7 +6497,8 @@ DispatchResult Session::dispatch(const Frame& f) {
 //   - absolute outside data root -> drive/root folded, remainder joined
 //                                   under the data root
 // A jail escape (".." outside the root) degrades to the bare filename.
-std::string Session::resolve_index_bag_path(const std::string& bag) const {
+std::string Session::resolve_index_bag_path(const std::string& bag,
+                                            bool for_create) const {
     namespace fs = std::filesystem;
     if (!sess_conn_ || sess_conn_->data_dir().empty()) return bag;
     std::string s = bag;
@@ -6318,9 +6511,11 @@ std::string Session::resolve_index_bag_path(const std::string& bag) const {
     // tree while the table updated in the jail (Pritpal Bedi, 12/08/2026).
     auto type = openads::engine::TableType::Cdx;
     std::string resolved =
-        sess_conn_->resolve_table_file(s, type, /*for_create=*/true);
-    std::error_code ec;
-    fs::create_directories(fs::path(resolved).parent_path(), ec);
+        sess_conn_->resolve_table_file(s, type, for_create);
+    if (for_create) {
+        std::error_code ec;
+        fs::create_directories(fs::path(resolved).parent_path(), ec);
+    }
     return resolved;
 }
 

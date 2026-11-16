@@ -18,3 +18,6 @@ budgets. The existing SQL input and recursion limits remain in force.
 
 UPDATE/DELETE/MERGE target scans now use the same source preflight. See
 [Remote DML target preflight](security-sql-dml-preflight.md).
+
+The limits are configurable on the server (`remote_sql_*` in openads.ini,
+0 = unlimited). See [Configuring the remote SQL work limits](security-sql-limits-config.md).

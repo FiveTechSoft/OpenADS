@@ -387,18 +387,39 @@ parse_cmp(Cursor& c, const std::string& sql) {
             upper.push_back(static_cast<char>(
                 std::toupper(static_cast<unsigned char>(ch))));
         }
-        if ((upper == "UPPER" || upper == "LOWER") && c.match_char('(')) {
+        if (upper == "EMPTY" && c.match_char('(')) {
+            // `EMPTY(<col>)` as a boolean predicate (ADS SQL accepts the
+            // xBase function in WHERE: `delete from t where empty(id)`).
+            node->cmp.column = c.read_identifier(&node->cmp.column_alias);
+            if (node->cmp.column.empty()) {
+                return util::Error{7200, 0,
+                    "expected column inside EMPTY()", sql};
+            }
+            if (!c.match_char(')')) {
+                return util::Error{7200, 0,
+                    "expected ')' after EMPTY() column", sql};
+            }
+            node->cmp.op = WhereOp::Empty;
+            return node;
+        }
+        const bool trim_fn = upper == "TRIM" || upper == "ALLTRIM" ||
+                             upper == "LTRIM" || upper == "RTRIM";
+        if ((upper == "UPPER" || upper == "LOWER" || trim_fn) &&
+            c.match_char('(')) {
             node->cmp.lhs_fn =
-                (upper == "UPPER") ? WhereFn::Upper : WhereFn::Lower;
+                (upper == "UPPER") ? WhereFn::Upper :
+                (upper == "LOWER") ? WhereFn::Lower :
+                (upper == "LTRIM") ? WhereFn::Ltrim :
+                (upper == "RTRIM") ? WhereFn::None  : WhereFn::Trim;
             // drops the <alias>. prefix but keeps the alias for the N-way path
             node->cmp.column = c.read_identifier(&node->cmp.column_alias);
             if (node->cmp.column.empty()) {
                 return util::Error{7200, 0,
-                    "expected column inside UPPER()/LOWER()", sql};
+                    "expected column inside " + upper + "()", sql};
             }
             if (!c.match_char(')')) {
                 return util::Error{7200, 0,
-                    "expected ')' after UPPER()/LOWER() column", sql};
+                    "expected ')' after " + upper + "() column", sql};
             }
         } else {
             node->cmp.column       = std::move(head);
@@ -410,6 +431,28 @@ parse_cmp(Cursor& c, const std::string& sql) {
             "expected column name in WHERE clause", sql};
     }
     c.skip_ws();
+
+    // `<col> NOT IN (…)` / `NOT LIKE` / `NOT BETWEEN`: parse the positive
+    // form and wrap it in a Not node.
+    bool negate = false;
+    {
+        std::size_t nsave = c.save();
+        if (c.match_keyword("NOT")) {
+            if (c.peek_keyword("IN") || c.peek_keyword("LIKE") ||
+                c.peek_keyword("BETWEEN"))
+                negate = true;
+            else
+                c.restore(nsave);
+        }
+    }
+    auto wrap = [negate](std::unique_ptr<WhereExpr> n)
+        -> util::Result<std::unique_ptr<WhereExpr>> {
+        if (!negate) return n;
+        auto w = std::make_unique<WhereExpr>();
+        w->kind  = WhereExpr::Kind::Not;
+        w->child = std::move(n);
+        return w;
+    };
 
     // M10.15: `<col> IN (<lit>, <lit>, …)` or `<col> IN (<sub-SELECT>)`.
     if (c.match_keyword("IN")) {
@@ -461,7 +504,7 @@ parse_cmp(Cursor& c, const std::string& sql) {
                     "expected ')' to close IN list", sql};
             }
         }
-        return node;
+        return wrap(std::move(node));
     }
 
     // M10.44 — `<col> IS [NOT] NULL`. No RHS. For DBFs without an
@@ -512,7 +555,7 @@ parse_cmp(Cursor& c, const std::string& sql) {
             std::snprintf(tmp, sizeof(tmp), "%.17g", n.value());
             node->cmp.literal2 = tmp;
         }
-        return node;
+        return wrap(std::move(node));
     }
     if (c.match_keyword("LIKE")) {
         node->cmp.op = WhereOp::Like;
@@ -524,7 +567,7 @@ parse_cmp(Cursor& c, const std::string& sql) {
         if (!lit) return lit.error();
         node->cmp.literal    = std::move(lit).value();
         node->cmp.is_numeric = false;
-        return node;
+        return wrap(std::move(node));
     }
 
     if      (c.match_seq("<=")) node->cmp.op = WhereOp::Le;

@@ -10,6 +10,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -379,7 +380,40 @@ public:
     void          install_session_socket(std::uint64_t id, Socket s);
     void          erase_session_socket  (std::uint64_t id);
 
+    // Console "Release": drop one lock held by session `id` without
+    // disconnecting it. Engine tables belong to their session's thread,
+    // so the request is queued and that session carries it out on its
+    // next loop pass (at most ~200 ms when its client is idle), exactly
+    // as if its client had sent UNLOCK. `table_path` is the path the lock
+    // registry reports; recno 0 = the file lock. Blocks up to `wait`.
+    enum class ReleaseResult { Released, NotHeld, NoSession, Timeout };
+    ReleaseResult release_lock(std::uint64_t id, const std::string& table_path,
+                               std::uint32_t recno,
+                               std::chrono::milliseconds wait =
+                                   std::chrono::milliseconds(5000));
+    struct LockReleaseRequest {
+        std::string   table_path;
+        std::uint32_t recno = 0;
+        std::mutex    mu;
+        std::condition_variable cv;
+        bool          done = false;
+        bool          released = false;
+        void finish(bool ok) {
+            { std::lock_guard<std::mutex> lk(mu); done = true; released = ok; }
+            cv.notify_all();
+        }
+    };
+    // Session side: the requests queued for `id` (empty almost always;
+    // checked lock-free first).
+    std::vector<std::shared_ptr<LockReleaseRequest>>
+                  take_lock_releases(std::uint64_t id);
+
 private:
+    std::mutex release_mu_;
+    std::atomic<std::uint32_t> releases_pending_{0};
+    std::unordered_map<std::uint64_t,
+        std::vector<std::shared_ptr<LockReleaseRequest>>> releases_;
+
     // Kill the session whose 1-based position in sessions_snapshot()
     // order equals conn_no. Returns true if one was found.
     bool kill_session_by_conn_no(std::uint16_t conn_no);

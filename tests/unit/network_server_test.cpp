@@ -2488,3 +2488,128 @@ TEST_CASE("SQL execution budget returns failure rather than a partial success cu
     REQUIRE(AdsDisconnect(conn) == 0);
     fs::remove_all(dir, ec);
 }
+
+namespace {
+// Scoped environment override (the in-process server reads its remote_sql_*
+// limits through util::client_setting, environment first).
+struct ScopedEnv {
+    std::string name;
+    ScopedEnv(const char* n, const char* v) : name(n) {
+#if defined(_WIN32)
+        _putenv_s(n, v);
+#else
+        setenv(n, v, 1);
+#endif
+    }
+    ~ScopedEnv() {
+#if defined(_WIN32)
+        _putenv_s(name.c_str(), "");
+#else
+        unsetenv(name.c_str());
+#endif
+    }
+};
+
+struct RemoteSql {
+    Server    server;
+    ADSHANDLE connection = 0, statement = 0;
+    explicit RemoteSql(const std::filesystem::path& dir) {
+        REQUIRE(server.start("127.0.0.1", 0).has_value());
+        std::string uri = "tcp://127.0.0.1:" + std::to_string(server.port()) +
+                          "/" + dir.string();
+        REQUIRE(AdsConnect60(reinterpret_cast<UNSIGNED8*>(uri.data()),
+                             ADS_REMOTE_SERVER, nullptr, nullptr, 0,
+                             &connection) == 0);
+        REQUIRE(AdsCreateSQLStatement(connection, &statement) == 0);
+    }
+    ~RemoteSql() {
+        AdsCloseSQLStatement(statement);
+        AdsDisconnect(connection);
+        server.stop();
+    }
+    UNSIGNED32 exec(const std::string& query, ADSHANDLE* cursor = nullptr) {
+        std::vector<UNSIGNED8> sql(query.begin(), query.end());
+        sql.push_back(0);
+        ADSHANDLE c = 0;
+        UNSIGNED32 rc = AdsExecuteSQLDirect(statement, sql.data(), &c);
+        if (cursor) *cursor = c; else if (c) AdsCloseTable(c);
+        return rc;
+    }
+    std::string last_error() {
+        UNSIGNED32 code = 0;
+        UNSIGNED16 length = 2048;
+        UNSIGNED8 message[2048]{};
+        AdsGetLastError(&code, message, &length);
+        return reinterpret_cast<char*>(message);
+    }
+    long count(const std::string& table) {
+        ADSHANDLE cur = 0;
+        REQUIRE(exec("SELECT COUNT(*) AS n FROM " + table, &cur) == 0);
+        REQUIRE(AdsGotoTop(cur) == 0);
+        UNSIGNED8 buf[32] = {0};
+        UNSIGNED32 len = sizeof(buf);
+        REQUIRE(AdsGetField(cur, (UNSIGNED8*)"n", buf, &len, 0) == 0);
+        AdsCloseTable(cur);
+        return std::stol(std::string(reinterpret_cast<char*>(buf), len));
+    }
+};
+}  // namespace
+
+TEST_CASE("remote SELECT INTO a new table copies more than 4096 rows") {
+    // CTAS kept every appended row's auto-lock; past the per-table remote
+    // record-lock cap (4096) the copy failed half-way and left a partial
+    // table that a following `... NOT IN (SELECT ... FROM <it>)` acted on.
+    namespace fs = std::filesystem;
+    const auto dir = fs::temp_directory_path() / "openads_remote_select_into";
+    std::error_code error;
+    fs::remove_all(dir, error);
+    fs::create_directories(dir);
+    std::vector<std::string> tags;
+    for (int i = 0; i < 5000; ++i) tags.push_back(std::to_string(i % 9000));
+    m12_write_dbf(dir / "src.dbf", tags);
+    {
+        RemoteSql r(dir);
+        INFO(r.last_error());
+        REQUIRE(r.exec("SELECT TAG INTO dst FROM src") == 0);
+        CHECK(r.count("dst") == 5000);
+    }
+    fs::remove_all(dir, error);
+}
+
+TEST_CASE("remote SQL limits: reported by name, raised via remote_sql_* settings, "
+          "and a SELECT INTO stopped by a limit leaves no table") {
+    namespace fs = std::filesystem;
+    const auto dir = fs::temp_directory_path() / "openads_remote_sql_limits";
+    std::error_code error;
+    fs::remove_all(dir, error);
+    fs::create_directories(dir);
+    m12_write_dbf(dir / "big.dbf", std::vector<std::string>(100001, "SAME"));
+    m12_write_dbf(dir / "src.dbf", std::vector<std::string>(5000, "SAME"));
+    {
+        RemoteSql r(dir);
+        // Default limits: refused, and the client learns which limit.
+        CHECK(r.exec("DELETE FROM big.dbf WHERE TAG = 'NONE'") != 0);
+        const std::string msg = r.last_error();
+        CHECK(msg.find("server-side exec failed") != std::string::npos);
+        CHECK(msg.find("remote SQL source budget exceeded") != std::string::npos);
+        // Operator override (0 = unlimited): the same statement runs.
+        {
+            ScopedEnv rows("OPENADS_REMOTE_SQL_MAX_ROWS", "0");
+            ScopedEnv mb("OPENADS_REMOTE_SQL_MAX_MB", "0");
+            ScopedEnv steps("OPENADS_REMOTE_SQL_MAX_STEPS", "0");
+            ScopedEnv ms("OPENADS_REMOTE_SQL_TIMEOUT_MS", "0");
+            INFO(r.last_error());
+            CHECK(r.exec("DELETE FROM big.dbf WHERE TAG = 'NONE'") == 0);
+        }
+        // A step budget too small for the copy: wherever it runs out (inner
+        // SELECT or the row copy), no target table may be left behind.
+        {
+            ScopedEnv steps("OPENADS_REMOTE_SQL_MAX_STEPS", "3000");
+            CHECK(r.exec("SELECT TAG INTO dst FROM src") != 0);
+        }
+        CHECK_FALSE(fs::exists(dir / "dst.dbf"));
+        CHECK(r.exec("SELECT TAG INTO dst FROM src") == 0);
+        CHECK(r.count("dst") == 5000);
+    }
+    fs::remove_all(dir, error);
+}
