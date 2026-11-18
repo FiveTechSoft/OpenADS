@@ -605,17 +605,18 @@ int main(int argc,char** argv){
     if(!read_auth_module(argv[1],module))return 1;
     // HB_HRBLOAD accepts in-memory HRB bytes: no check/reopen race.
     if(!backend.load(module,err))return 1;
-    if(!backend.has("OADS_AUTH_V1"))return 1;
+    const bool server_v2=backend.has("OADS_AUTH_SERVER_V2"),verify_v2=backend.has("OADS_AUTH_VERIFY_V2");
+    if(server_v2!=verify_v2||(!server_v2&&!backend.has("OADS_AUTH_V1")))return 1;
     std::string input;char b[1024];
     while(std::cin.read(b,sizeof(b))||std::cin.gcount()){input.append(b,static_cast<std::size_t>(std::cin.gcount()));if(input.size()>16384)return 1;}
-    if(input=="P"){std::cout<<"READY";return 0;}
-    if(input.size()<41||input[0]!='A')return 1;
+    if(input=="P"){std::cout<<(backend.has("OADS_AUTH_SERVER_V2")&&backend.has("OADS_AUTH_VERIFY_V2")?"READY2":"READY");return 0;}
+    if(input.size()<41||(input[0]!='A'&&input[0]!='B'&&input[0]!='M'))return 1;
     using Scalar=openads::engine::hrb_udf::Scalar;Scalar args[3],out;
     args[0].kind=Scalar::Kind::String;args[0].s=input.substr(1,32);
     std::size_t pos=33;
     for(unsigned i=1;i<3;++i){if(pos+4>input.size())return 1;std::size_t n=0;for(unsigned j=0;j<4;++j)n|=std::size_t(static_cast<unsigned char>(input[pos++]))<<(8*j);if(n>input.size()-pos)return 1;args[i].kind=Scalar::Kind::String;args[i].s=input.substr(pos,n);pos+=n;}
     if(pos!=input.size())return 1;
-    const char* hook="OADS_AUTH_V1";
+    const char* hook=input[0]=='B'?"OADS_AUTH_SERVER_V2":input[0]=='M'?"OADS_AUTH_VERIFY_V2":"OADS_AUTH_V1";
     if(!backend.has(hook)||!backend.call(hook,args,3,out,err)||out.kind!=Scalar::Kind::String||out.s.size()>4363)return 1;
     std::cout.write(out.s.data(),static_cast<std::streamsize>(out.s.size()));std::cout.flush();
     // Process exits immediately; no reusable Harbour heap holding credentials.

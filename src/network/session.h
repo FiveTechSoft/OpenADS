@@ -82,6 +82,8 @@ private:
     std::chrono::steady_clock::time_point reply_since_ = std::chrono::steady_clock::now();
     AuthAttempt auth_attempt_;
     std::string auth_dir_;
+    bool mutual_auth_=false;
+    std::string mutual_transcript_;
     Server*       srv_;
     Socket        s_;
     std::uint64_t sid_;

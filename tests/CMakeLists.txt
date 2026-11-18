@@ -597,3 +597,13 @@ find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
     add_test(NAME mingw_import_parser COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/mingw_import_parser_test.py)
 endif()
+
+# Native mutual-auth proof uses a public mock HRB, not production material.
+# Windows fixture ACL setup remains a separate acceptance step.
+if(UNIX AND TARGET auth_mutual_probe)
+    add_dependencies(openads_unit_tests auth_mutual_probe)
+    add_test(NAME auth_mutual_v2 COMMAND auth_mutual_probe
+        $<TARGET_FILE:openads_auth_worker>
+        "${CMAKE_BINARY_DIR}/tools/serverd/mutual-test-only.hrb")
+    set_tests_properties(auth_mutual_v2 PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
+endif()

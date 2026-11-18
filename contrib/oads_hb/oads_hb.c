@@ -1420,6 +1420,17 @@ HB_FUNC( OADS_ZIPFILELIST )
 
 extern UNSIGNED32 ENTRYPOINT OAdsBeginAuth(const char*,ADSHANDLE*,UNSIGNED8*);
 extern UNSIGNED32 ENTRYPOINT OAdsCompleteAuth(ADSHANDLE,const UNSIGNED8*,UNSIGNED32,ADSHANDLE*);
+extern UNSIGNED32 ENTRYPOINT OAdsBeginMutualAuth(const char*,const char*,ADSHANDLE*,UNSIGNED8*,UNSIGNED8*,UNSIGNED8*,UNSIGNED32*);
+extern UNSIGNED32 ENTRYPOINT OAdsCancelAuth(ADSHANDLE);
+/* Explicit binary challenge auth, separate from RDDADS core. */
+/* OADS_BEGINMUTUAL(url,firm,@pending,@nonce,@binding) -> opaque server proof.
+   Build transcript locally in Vouch, verify proof BEFORE OADS_COMPLETEAUTH. */
+HB_FUNC( OADS_BEGINMUTUAL ) {
+ ADSHANDLE pending=0;UNSIGNED8 c[32]={0},b[32]={0},proof[4096];UNSIGNED32 n=sizeof(proof);
+ UNSIGNED32 rc=OAdsBeginMutualAuth(hb_parc(1),hb_parc(2),&pending,c,b,proof,&n);
+ hb_stornint((HB_MAXINT)pending,3);hb_storclen((const char*)c,32,4);hb_storclen((const char*)b,32,5);
+ if(rc==0)hb_retclen((const char*)proof,n);else hb_retc("");
+}
 HB_FUNC( OADS_BEGINAUTH ) {
     ADSHANDLE pending=0;UNSIGNED8 challenge[32]={0};
     UNSIGNED32 rc=OAdsBeginAuth(hb_parc(1),&pending,challenge);

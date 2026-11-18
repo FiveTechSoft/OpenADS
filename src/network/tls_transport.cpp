@@ -197,6 +197,30 @@ public:
     bool encrypted_ready() const noexcept override { return handshake_done_ && !closed_; }
     // RFC8446 section7.5 exporter, pinned mbedTLS3.6.2 session layout.
     // Never export master/traffic secrets. Caller gets only domain-specific32B.
+    bool channel_binding(std::array<std::uint8_t,32>& out) const override {
+        out.fill(0);
+        if (!encrypted_ready() || mbedtls_ssl_get_version_number(&ssl_) != MBEDTLS_SSL_VERSION_TLS1_3)
+            return false;
+        const auto* session=ssl_.MBEDTLS_PRIVATE(session);
+        if (!session) return false;
+        const int suite=mbedtls_ssl_get_ciphersuite_id_from_ssl(&ssl_);
+        const auto* md=mbedtls_md_info_from_type(suite==0x1302 ? MBEDTLS_MD_SHA384 : MBEDTLS_MD_SHA256);
+        if (!md || (suite<0x1301 || suite>0x1305)) return false;
+        const size_t hn=mbedtls_md_get_size(md);
+        unsigned char empty[48]={},derived[48]={};
+        bool good=mbedtls_md(md,nullptr,0,empty)==0;
+        auto expand=[&](const unsigned char* secret,const char* label,const unsigned char* context,size_t cn,unsigned char* dst,size_t n) {
+            const std::string full=std::string("tls13 ")+label;
+            std::vector<unsigned char> info{static_cast<unsigned char>(n>>8),static_cast<unsigned char>(n),static_cast<unsigned char>(full.size())};
+            info.insert(info.end(),full.begin(),full.end());info.push_back(static_cast<unsigned char>(cn));info.insert(info.end(),context,context+cn);
+            return mbedtls_hkdf_expand(md,secret,hn,info.data(),info.size(),dst,n)==0;
+        };
+        good=good && expand(session->MBEDTLS_PRIVATE(app_secrets).exporter_master_secret,"EXPORTER-OpenADS-Mutual-v2",empty,hn,derived,hn);
+        good=good && expand(derived,"exporter",empty,hn,out.data(),out.size());
+        mbedtls_platform_zeroize(derived,sizeof(derived));
+        if(!good)out.fill(0);
+        return good;
+    }
 
     bool wants_write() const noexcept override { return want_write_; }
     bool buffered_read() const noexcept override {
