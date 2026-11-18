@@ -105,6 +105,8 @@ void usage(const char* argv0) {
         "               ini: error_log_max. See docs/en/error-log.md\n"
         "  --http_user  user:password — register a Studio login\n"
         "               (repeatable; if none given, console is open)\n"
+        "  --auth_module PATH  unmerged encrypted challenge auth, isolated HRB worker\n"
+        "               requires TLS + Harbour build; dedicated listener, no HTTP\n"
         "  --tls_cert FILE --tls_key FILE  PEM certificate chain and unencrypted key\n"
         "               All TCP data listeners require TLS when configured.\n"
         "               Needs OPENADS_WITH_TLS=ON. Studio HTTP is unchanged.\n"
@@ -129,6 +131,8 @@ void usage(const char* argv0) {
 struct Args {
     std::string   host        = "127.0.0.1";
     bool          allow_anonymous = false;
+    std::string auth_module;
+    unsigned auth_worker_concurrency = openads::network::AuthWorker::kDefaultConcurrency;
     std::string tls_cert_file;
     std::string tls_key_file;
     std::uint16_t port        = 6262;
@@ -203,6 +207,7 @@ bool parse_args(int argc, char** argv, Args& out) {
         }
         else if (flag_eq(a, "http_port") && i + 1 < argc) out.http_port = static_cast<std::uint16_t>(std::atoi(argv[++i]));
         else if (flag_eq(a, "data")      && i + 1 < argc) out.data_dir = argv[++i];
+        else if (flag_eq(a, "auth_module") && i + 1 < argc) out.auth_module=argv[++i];
         else if (flag_eq(a, "tls_cert") && i + 1 < argc) out.tls_cert_file = argv[++i];
         else if (flag_eq(a, "tls_key") && i + 1 < argc) out.tls_key_file = argv[++i];
         else if (flag_eq(a, "allow_anonymous")) out.allow_anonymous = true;
@@ -279,8 +284,8 @@ bool parse_args(int argc, char** argv, Args& out) {
 // file actually set are touched, so this sits cleanly between the built-in
 // defaults (Args ctor) and the command line: defaults < config file < CLI.
 void apply_ini(const openads::serverd::IniConfig& cfg, Args& out) {
-    if (cfg.has_host)      out.host      = cfg.host;
     if (cfg.has_allow_anonymous) out.allow_anonymous = cfg.allow_anonymous;
+    if (cfg.has_host)      out.host      = cfg.host;
     if (cfg.has_port)      out.port      = cfg.port;
     if (cfg.has_backlog)   out.backlog   = cfg.backlog;
     if (cfg.has_established_session_idle_seconds)
@@ -410,7 +415,7 @@ int run_server(const Args& args, bool console) {
     // to a public interface, so fail closed rather than infer its safety.
     const bool loopback = args.host == "127.0.0.1" || args.host == "::1";
     if (!loopback) {
-        if (args.auth_users.empty() && !args.allow_anonymous) {
+        if (args.auth_users.empty() && args.auth_module.empty() && !args.allow_anonymous) {
             std::fprintf(stderr,
                 "Refusing non-loopback anonymous TCP listener. Configure "
                 "auth_user or explicitly pass --allow_anonymous.\n");
@@ -422,7 +427,7 @@ int run_server(const Args& args, bool console) {
                 "http_user or explicitly pass --allow_anonymous.\n");
             return 1;
         }
-        if (args.tls_cert_file.empty()) std::fprintf(stderr,
+        if (args.tls_cert_file.empty() && args.auth_module.empty()) std::fprintf(stderr,
             "WARNING: TCP listener has no native TLS. Credentials and data "
             "travel in cleartext. Use a TLS proxy and firewall the backend.\n");
         if (args.auth_users.empty() || (args.http_port != 0 && args.http_users.empty()))
@@ -499,6 +504,25 @@ int run_server(const Args& args, bool console) {
 
     openads::network::Server srv;
     srv.set_established_session_idle_seconds(args.established_session_idle_seconds);
+    if(!args.auth_module.empty()) {
+#if defined(OPENADS_WITH_TLS) && defined(OPENADS_WITH_HARBOUR_UDF)
+        if(!args.tls_cert_file.empty() || args.http_port!=0) {
+            std::fprintf(stderr,"Auth spike requires dedicated listener (no explicit TLS/HTTP).\n");return 1;
+        }
+        std::string worker_path=args.exe_dir+"/openads_auth_worker";
+#ifdef _WIN32
+        worker_path+=".exe";
+#endif
+        auto worker=std::make_shared<openads::network::AuthWorker>(worker_path,args.auth_module,args.auth_worker_concurrency);
+        std::fprintf(stderr,"Auth worker concurrency: %u (no queue).\n",args.auth_worker_concurrency);
+        if(!worker->probe()){std::fprintf(stderr,"Auth worker/module probe failed.\n");return 1;}
+        auto tls=openads::network::make_auth_tls_config();
+        if(!tls || !srv.set_tls(tls.value())){std::fprintf(stderr,"Auth TLS initialization failed.\n");return 1;}
+        srv.set_auth_worker(std::move(worker));
+#else
+        std::fprintf(stderr,"Auth spike requires TLS and Harbour worker build.\n");return 1;
+#endif
+    }
     if (!args.tls_cert_file.empty()) {
 #if defined(OPENADS_WITH_TLS)
         auto read_pem = [](const std::string& path) {

@@ -2043,6 +2043,61 @@ TEST_CASE("mtfix41 daemon TLS established idle resumes in dedicated and reactor"
 }
 #endif
 
+TEST_CASE("daemon policy preserves AdsConnect60 authenticated table reads") {
+    namespace fs = std::filesystem;
+    auto dir = fs::temp_directory_path() / "openads_daemon_table_regression";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+    m12_write_dbf(dir / "data.dbf", {"AAAA", "BBBB"});
+
+    Server srv;
+    srv.add_credential("reader", "secret");
+    REQUIRE(srv.start("127.0.0.1", 0).has_value());
+
+    char uri[256];
+    std::snprintf(uri, sizeof(uri),
+                  "tcp://127.0.0.1:%u/%s",
+                  static_cast<unsigned>(srv.port()),
+                  dir.string().c_str());
+
+    UNSIGNED8 srvbuf[256];
+    std::memcpy(srvbuf, uri, std::strlen(uri) + 1);
+    UNSIGNED8 leaf[64] = "data.dbf";
+
+    ADSHANDLE hConn = 0;
+    REQUIRE(AdsConnect60(srvbuf, ADS_REMOTE_SERVER,
+                         (UNSIGNED8*)"reader", (UNSIGNED8*)"secret", 0, &hConn) == 0);
+
+    ADSHANDLE hTable = 0;
+    REQUIRE(AdsOpenTable(hConn, leaf, nullptr, ADS_CDX,
+                         0, 0, 0, 0, &hTable) == 0);
+
+    UNSIGNED32 cnt = 0;
+    REQUIRE(AdsGetRecordCount(hTable, 0, &cnt) == 0);
+    CHECK(cnt == 2);
+
+    REQUIRE(AdsGotoTop(hTable) == 0);
+    UNSIGNED8  buf[16] = {0};
+    UNSIGNED32 cap = sizeof(buf);
+    REQUIRE(AdsGetField(hTable, (UNSIGNED8*)"TAG", buf, &cap, 0) == 0);
+    std::string s((char*)buf, cap);
+    while (!s.empty() && s.back() == ' ') s.pop_back();
+    CHECK(s == "AAAA");
+
+    REQUIRE(AdsSkip(hTable, 1) == 0);
+    cap = sizeof(buf); std::memset(buf, 0, sizeof(buf));
+    REQUIRE(AdsGetField(hTable, (UNSIGNED8*)"TAG", buf, &cap, 0) == 0);
+    std::string s2((char*)buf, cap);
+    while (!s2.empty() && s2.back() == ' ') s2.pop_back();
+    CHECK(s2 == "BBBB");
+
+    REQUIRE(AdsCloseTable(hTable) == 0);
+    REQUIRE(AdsDisconnect(hConn) == 0);
+
+    srv.stop();
+}
+
 TEST_CASE("remote SQL shape budget checks overflow and conservative outer-join fanout") {
     using Budget = openads::engine::RemoteSqlShapeBudget;
     Budget boundary;

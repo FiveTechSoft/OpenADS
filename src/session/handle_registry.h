@@ -48,7 +48,8 @@ enum class HandleKind {
     MssqlIndex      = 26,
     // Server filesystem low-level file handles (oads_FOpen / AdsFOpen).
     LocalFile       = 27,
-    RemoteFile      = 28
+    RemoteFile      = 28,
+    PendingAuth     = 29
 };
 
 using Handle = std::uint64_t;

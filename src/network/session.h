@@ -80,6 +80,8 @@ private:
     std::vector<std::uint8_t> reply_bytes_;
     std::size_t reply_offset_ = 0;
     std::chrono::steady_clock::time_point reply_since_ = std::chrono::steady_clock::now();
+    AuthAttempt auth_attempt_;
+    std::string auth_dir_;
     Server*       srv_;
     Socket        s_;
     std::uint64_t sid_;

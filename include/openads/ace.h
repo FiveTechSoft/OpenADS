@@ -1564,6 +1564,10 @@ UNSIGNED32 ENTRYPOINT AdsSetDefaultConnection(ADSHANDLE hConn);
 UNSIGNED32 ENTRYPOINT AdsGetDefaultConnection(ADSHANDLE* phConn);
 // OpenADS extension: process-wide logging kill-switch (audit + arc
 // traces). 0 = silent (production), non-zero = enabled (default).
+/* Explicit encrypted-unverified two-step auth. Binary length-bearing buffers. */
+UNSIGNED32 ENTRYPOINT OAdsBeginAuth(const char* url, ADSHANDLE* pending, UNSIGNED8* challenge32);
+UNSIGNED32 ENTRYPOINT OAdsCompleteAuth(ADSHANDLE pending, const UNSIGNED8* blob, UNSIGNED32 bytes, ADSHANDLE* connection);
+UNSIGNED32 ENTRYPOINT OAdsCancelAuth(ADSHANDLE pending);
 UNSIGNED32 ENTRYPOINT OAdsSetLogging(UNSIGNED16 usOn);
 // Aggregate health JSON from an AdsMgConnect handle (NOT a data connection).
 // *pulLen is buffer capacity incl. NUL; out is required size incl. NUL.

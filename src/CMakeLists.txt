@@ -79,6 +79,7 @@ add_library(openads_core STATIC
     drivers/memory/memory_driver.cpp
     network/wire.cpp
     network/frame_reader.cpp
+    network/auth_worker.cpp
     network/server.cpp
     network/session.cpp
     network/worker_pool.cpp
@@ -469,6 +470,10 @@ if(WIN32 AND MINGW AND OPENADS_BUILD_ACE_STATIC)
     set(_ace_static_out "${CMAKE_CURRENT_BINARY_DIR}/lib${_ace_static_name}.a")
     set(_ace_static_mri "${CMAKE_CURRENT_BINARY_DIR}/merge_ace_static.mri")
     set(_mri "create ${_ace_static_out}.tmp\naddlib ${_ace_static_out}\naddlib $<TARGET_FILE:openads_core>\n")
+    # Include the bundled ZIP dependencies in the delivered raw engine archive.
+    if(TARGET openads_minizip)
+        string(APPEND _mri "addlib $<TARGET_FILE:openads_minizip>\naddlib $<TARGET_FILE:${_openads_zlib_target}>\n")
+    endif()
     if(TARGET openads_sqlite3)
         string(APPEND _mri "addlib $<TARGET_FILE:openads_sqlite3>\n")
     endif()

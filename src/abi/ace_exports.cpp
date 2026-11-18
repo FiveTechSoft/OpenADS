@@ -1781,8 +1781,17 @@ void remote_clear_nav_boundaries(openads::network::RemoteTable* rt) {
     rt->nav_not_eof = false;
 }
 
+// Owner-selected mtfix32 compatibility by default. Fresh mode is opt-in;
+// cached mode can miss a peer append until its normal invalidation path.
+// Read on each call so a caller can deliberately select either policy.
+bool remote_fresh_counts_enabled() {
+    const char* value = std::getenv("OPENADS_FRESH_COUNTS");
+    return value != nullptr && std::strcmp(value, "1") == 0;
+}
+
 void remote_ensure_rec_count(openads::network::RemoteTable* rt) {
-    if (rt == nullptr || rt->rec_count_cached) return;
+    if (rt == nullptr || (rt->rec_count_cached && !remote_fresh_counts_enabled())) return;
+    rt->rec_count_cached = false;
     if (auto r = rt->conn->record_count(rt->id)) {
         rt->cached_rec_count = r.value();
         rt->rec_count_cached = true;
@@ -7240,6 +7249,63 @@ static void arc2_log(const char* fmt, ...) {
         fputc('\n', f);
         fclose(f);
     }
+}
+
+namespace {
+struct PendingAuthConnection {
+    std::unique_ptr<openads::network::RemoteConnection> connection;
+    std::chrono::steady_clock::time_point deadline;
+};
+std::unordered_map<Handle,PendingAuthConnection> auth_pending_connections;
+std::unordered_map<Handle,std::unique_ptr<openads::network::RemoteConnection>> auth_connections;
+void expire_auth_pending() {
+    auto& s=state();auto now=std::chrono::steady_clock::now();
+    for(auto it=auth_pending_connections.begin();it!=auth_pending_connections.end();) {
+        if(now>=it->second.deadline){s.registry.release(it->first);it=auth_pending_connections.erase(it);}else ++it;
+    }
+}
+}
+UNSIGNED32 ENTRYPOINT OAdsBeginAuth(const char* url,ADSHANDLE* pending,UNSIGNED8* challenge32) {
+    if (cli_trace_on()) openads::network::set_frame_trace_hook(&cli_trace_frame_hook);
+    if(pending)*pending=0;
+    if(challenge32)std::fill(challenge32,challenge32+32,0);
+    if(!url || !pending || !challenge32)return fail(openads::AE_LOGIN_FAILED,"Auth arguments invalid");
+#if defined(OPENADS_WITH_TLS)
+    std::string path(url),host,dir;std::uint16_t port=0;
+    // Dedicated scheme never touches AdsConnect60's insecure settings.
+    if(path.rfind("auth://",0)!=0)return fail(openads::AE_LOGIN_FAILED,"auth:// URL required");
+    path.replace(0,7,"tls://");
+    if(!openads::network::parse_tls_uri(path,host,port,dir))return fail(openads::AE_LOGIN_FAILED,"Auth URL invalid");
+    auto& s=state();std::lock_guard<std::recursive_mutex> lk(s.mu);expire_auth_pending();
+    if(auth_pending_connections.size()>=64)return fail(openads::AE_LOGIN_FAILED,"Pending auth limit");
+    openads::network::TlsConfig cfg;cfg.insecure_skip_verify=true;cfg.auth_tls13_only=true;cfg.sni_hostname=host;
+    auto t=openads::network::connect_tls(host,port,cfg);if(!t)return fail(t.error());
+    auto conn=std::make_unique<openads::network::RemoteConnection>();
+    auto challenge=conn->begin_auth(std::move(t).value(),dir);if(!challenge)return fail(challenge.error());
+    auto h=s.registry.register_object(HandleKind::PendingAuth,conn.get());
+    auth_pending_connections.emplace(h,PendingAuthConnection{std::move(conn),std::chrono::steady_clock::now()+std::chrono::seconds(30)});
+    std::copy(challenge.value().begin(),challenge.value().end(),challenge32);*pending=to_ads_handle(h);return ok();
+#else
+    return fail(openads::AE_FUNCTION_NOT_AVAILABLE,"Auth requires TLS build");
+#endif
+}
+UNSIGNED32 ENTRYPOINT OAdsCompleteAuth(ADSHANDLE pending,const UNSIGNED8* blob,UNSIGNED32 bytes,ADSHANDLE* connection) {
+    if(connection)*connection=0;
+    auto& s=state();std::lock_guard<std::recursive_mutex> lk(s.mu);expire_auth_pending();
+    auto h=static_cast<Handle>(pending);auto it=auth_pending_connections.find(h);
+    if(it==auth_pending_connections.end())return fail(openads::AE_LOGIN_FAILED,"No pending auth");
+    auto conn=std::move(it->second.connection);auth_pending_connections.erase(it);s.registry.release(h);
+    if(!connection || !blob || !bytes || bytes>4096)return fail(openads::AE_LOGIN_FAILED,"Auth blob invalid");
+    std::string opaque(reinterpret_cast<const char*>(blob),bytes);
+    auto result=conn->complete_auth(opaque);volatile char* p=&opaque[0];for(std::size_t i=0;i<opaque.size();++i)p[i]=0;
+    if(!result)return fail(result.error());
+    auto ch=s.registry.register_object(HandleKind::RemoteConnection,conn.get());auth_connections.emplace(ch,std::move(conn));
+    *connection=to_ads_handle(ch);rddads_default_connection()=*connection;return ok();
+}
+UNSIGNED32 ENTRYPOINT OAdsCancelAuth(ADSHANDLE pending) {
+    auto& s=state();std::lock_guard<std::recursive_mutex> lk(s.mu);auto h=static_cast<Handle>(pending);
+    auto it=auth_pending_connections.find(h);if(it==auth_pending_connections.end())return fail(openads::AE_LOGIN_FAILED,"No pending auth");
+    s.registry.release(h);auth_pending_connections.erase(it);return ok();
 }
 
 UNSIGNED32 ENTRYPOINT AdsConnect60(UNSIGNED8* pucServer, UNSIGNED16 usServerType,
@@ -13041,7 +13107,6 @@ SqlStatement* stmt_lookup(ADSHANDLE h);
 UNSIGNED32 ENTRYPOINT AdsGetRecordCount(ADSHANDLE hTable, UNSIGNED16 bFilterOption,
                              UNSIGNED32* pulRecordCount) {
     arc2_trace("AdsGetRecordCount");
-    arc2_trace("AdsGetRecordCount");
     // SAP ACE also accepts a SQL *statement* handle here (rows affected /
     // returned by the last execute). ARC relies on this immediately after
     // AdsExecuteSQLDirectW(stmt, sql, NULL) â€” e.g. sp_SetApplicationID â€”
@@ -13069,25 +13134,20 @@ UNSIGNED32 ENTRYPOINT AdsGetRecordCount(ADSHANDLE hTable, UNSIGNED16 bFilterOpti
     }
     if (auto* rt = get_remote_table(hTable)) {
         if (pulRecordCount == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
-        // M12.19 -- record count is invariant outside of explicit
-        // writes (AppendBlank / DeleteRecord / RecallRecord / Pack
-        // / Zap), so cache the value on first hit and serve every
-        // subsequent AdsGetRecordCount + AdsGetRelKeyPos (scrollbar)
-        // call from cache. Each cache hit saves one wire RTT.
-        if (rt->rec_count_cached) {
-            *pulRecordCount = rt->cached_rec_count;
-            return ok();
+        if (!remote_fresh_counts_enabled()) {
+            if (rt->rec_count_cached) {
+                *pulRecordCount = rt->cached_rec_count;
+                return ok();
+            }
+            if (rt->count_bound_ok && rt->count_bound_seq == rt->conn->nav_seq()) {
+                *pulRecordCount = rt->count_bound;
+                rt->cached_rec_count = rt->count_bound;
+                rt->rec_count_cached = true;
+                return ok();
+            }
         }
-        // Certified count from the last nav ack tail (same trust as
-        // the cache above — in-memory server count). Covers the
-        // open→goto→count USE flow with zero extra frames.
-        if (rt->count_bound_ok &&
-            rt->count_bound_seq == rt->conn->nav_seq()) {
-            *pulRecordCount = rt->count_bound;
-            rt->cached_rec_count = rt->count_bound;
-            rt->rec_count_cached = true;
-            return ok();
-        }
+        // Opt-in mode never treats an earlier reply as peer-fresh.
+        rt->rec_count_cached = false;
         auto r = rt->conn->record_count(rt->id);
         if (!r) return fail(r.error());
         rt->cached_rec_count = static_cast<UNSIGNED32>(r.value());
@@ -39986,7 +40046,7 @@ struct MgBackend {
     // round-trip so the mgmt session registers under a real name instead
     // of "(anonymous)". Empty is still valid (pre-existing behavior).
     std::string   mg_user;
-    std::string   mg_password;
+    std::string   mg_password; // remote management only
 };
 
 // MgConnect payload: [u16 user_len][user][u16 password_len][password].
@@ -40169,7 +40229,8 @@ bool send_mg_mutator(const MgBackend& be,
     if (!sock.has_value()) return false;
     openads::network::Socket s = sock.value();
     if (!authenticate_mg_socket(s, be)) {
-        openads::network::sock_close(s); return false;
+        openads::network::sock_close(s);
+        return false;
     }
     openads::network::Frame req;
     req.opcode = openads::network::Opcode::MgRequest;
@@ -40177,8 +40238,8 @@ bool send_mg_mutator(const MgBackend& be,
     req.payload.assign(body.begin(), body.end());
     bool ok = openads::network::write_frame(s, req).has_value();
     if (ok) {
-        auto ack = openads::network::read_frame(s);
-        ok = ack && ack.value().opcode == openads::network::Opcode::MgReplyAck;
+        auto reply = openads::network::read_frame(s);
+        ok = reply && reply.value().opcode == openads::network::Opcode::MgReplyAck;
     }
     openads::network::sock_close(s);
     return ok;
@@ -40239,6 +40300,9 @@ UNSIGNED32 ENTRYPOINT AdsMgConnect(UNSIGNED8* pucServer, UNSIGNED8* pucUser,
     }
 
     if (be.remote) {
+        be.mg_password = pucPwd ? reinterpret_cast<const char*>(pucPwd) : std::string();
+        if (be.mg_user.size() > 256 || be.mg_password.size() > 4096)
+            return openads::AE_LOGIN_FAILED;
         // Validate the server is reachable up front with a MgConnect
         // handshake, so a down server fails here (AE_NO_CONNECTION)
         // rather than later with a misleading handle error.

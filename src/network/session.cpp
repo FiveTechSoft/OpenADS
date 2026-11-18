@@ -1,4 +1,5 @@
 #include "network/session.h"
+#include "network/auth_result.h"
 #include "engine/pbkdf2.h"
 #include "engine/data_dict.h"
 #include "engine/sql_input_limits.h"
@@ -1682,7 +1683,9 @@ void Session::append_open_warm_sections(std::vector<std::uint8_t>& out,
 
 DispatchResult Session::dispatch(const Frame& f) {
     Frame reply;
-    if (!sess_conn_ && !mg_connected_ && f.opcode != Opcode::Hello && f.opcode != Opcode::Connect &&
+    if (srv_->auth_required() && (f.opcode == Opcode::Connect || f.opcode == Opcode::MgConnect))
+        return {err("Challenge authentication required", openads::AE_LOGIN_FAILED), true};
+    if (!sess_conn_ && !mg_connected_ && f.opcode != Opcode::BeginAuth && f.opcode != Opcode::CompleteAuth && f.opcode != Opcode::Hello && f.opcode != Opcode::Connect &&
         f.opcode != Opcode::Disconnect && f.opcode != Opcode::MgConnect)
         return {err("Connect required", openads::AE_NO_CONNECTION), true};
     if (mg_connected_ && f.opcode != Opcode::Hello && f.opcode != Opcode::Disconnect &&
@@ -1776,7 +1779,7 @@ DispatchResult Session::dispatch(const Frame& f) {
         }
     }
     WTRACE("[wire] op=%u\n", (unsigned)f.opcode);
-    if (wire_trace_on() && f.payload.size() >= 4) {
+    if (f.opcode!=Opcode::CompleteAuth && f.opcode!=Opcode::BeginAuth && wire_trace_on() && f.payload.size() >= 4) {
         std::uint32_t tid0 = read_u32_le(f.payload.data());
         if (ordered_tables_.count(tid0)) {
             if (auto hit0 = tbls_h_.find(tid0); hit0 != tbls_h_.end()) {
@@ -1820,13 +1823,78 @@ DispatchResult Session::dispatch(const Frame& f) {
             reply.payload.assign(v.begin(), v.end());
             break;
         }
+        case Opcode::BeginAuth: {
+            if(!srv_->login_allowed(peer_ip_,"<auth:"+peer_ip_+">"))return {err("Auth throttled",openads::AE_LOGIN_FAILED),true};
+            if (!srv_->auth_required() || sess_conn_ || mg_connected_ ||
+                !tls_transport_ || !tls_transport_->encrypted_ready() ||
+                f.payload.size()>4376)
+                return {err("Auth denied",openads::AE_LOGIN_FAILED),true};
+            AuthAttempt::Challenge challenge{};
+#if defined(OPENADS_WITH_TLS)
+            if (!auth_random_bytes(challenge.data(),challenge.size()))
+                return {err("Auth denied",openads::AE_LOGIN_FAILED),true};
+#else
+            return {err("TLS unavailable",openads::AE_LOGIN_FAILED),true};
+#endif
+            if(!auth_attempt_.begin(challenge,true,srv_->session_now(),std::chrono::seconds(30)))
+                return {err("Auth denied",openads::AE_LOGIN_FAILED),true};
+            std::string begin(f.payload.begin(),f.payload.end());
+            if(begin.size()>4096||begin.find('\0')!=std::string::npos)return {err("Auth denied",openads::AE_LOGIN_FAILED),true};
+            auth_dir_=begin;
+            // Resolve before invoking application auth. Pass normalized root.
+            const auto& effective=default_data_dir_.empty()?srv_->data_dir_:default_data_dir_;
+            if(!effective.empty()) {
+                auto roots=openads::platform::split_data_roots(effective);
+                auto jail=srv_->legacy_paths()?openads::platform::resolve_client_path(roots,auth_dir_):openads::platform::resolve_under_any_root(roots,auth_dir_);
+                if(!jail)return {err("Auth path denied",openads::AE_LOGIN_FAILED),true};
+                auth_dir_=*jail;
+            }
+            reply.opcode=Opcode::BeginAuthAck;
+            reply.payload.assign(challenge.begin(),challenge.end());
+            break;
+        }
+        case Opcode::CompleteAuth:
         case Opcode::Connect: {
+            AuthResult hrb_result;
+            Frame auth_connect;
+            if(f.opcode==Opcode::CompleteAuth) {
+                AuthAttempt::Challenge challenge{};
+                if(!srv_->auth_required() || sess_conn_ || mg_connected_ ||
+                   !tls_transport_ || !tls_transport_->encrypted_ready() ||
+                   !auth_attempt_.take(srv_->session_now(),f.payload.size(),challenge))
+                    return {err("Auth denied",openads::AE_LOGIN_FAILED),true};
+                // Server-owned context, not a claimed username/root from the blob.
+                std::string context="v1;session="+std::to_string(sid_)+";tls=1.3;requested_path="+auth_dir_;
+                std::string blob(f.payload.begin(),f.payload.end());
+                bool capacity_busy=false;
+                bool accepted=srv_->auth_worker_->authenticate(challenge,blob,context,hrb_result,&capacity_busy);
+                volatile char* bp=blob.empty()?nullptr:&blob[0];
+                for(std::size_t i=0;i<blob.size();++i)bp[i]=0;
+                if(capacity_busy)
+                    return {err("Auth busy",openads::AE_LOGIN_FAILED),true};
+                if(!accepted || !hrb_result.allow) {
+                    srv_->login_failed(peer_ip_,"<auth:"+peer_ip_+">");
+                    return {err("Auth denied",openads::AE_LOGIN_FAILED),true};
+                }
+                srv_->login_succeeded(peer_ip_,"<auth:"+peer_ip_+">");
+                auto pack=[&](const std::string& text) {
+                    auth_connect.payload.push_back(static_cast<std::uint8_t>(text.size()));
+                    auth_connect.payload.push_back(static_cast<std::uint8_t>(text.size()>>8));
+                    auth_connect.payload.insert(auth_connect.payload.end(),text.begin(),text.end());
+                };
+                pack(auth_dir_);pack(hrb_result.user);pack(hrb_result.password);
+                const std::uint32_t caps=kCapPrefetchConsume|kCapPrefetchBackward|kCapOpenTableMode|
+                    kCapSetFieldsBatch|kCapFlushInCloseAll|kCapNavOrderFuse|kCapNavBoundaryPair|kCapOpenSetupMetadata|kCapLockedRow;
+                for(unsigned i=0;i<4;++i)auth_connect.payload.push_back(static_cast<std::uint8_t>(caps>>(8*i)));
+            }
             // M12.9 — Connect payload format:
             //   [u16 dlen][dir][u16 ulen][user][u16 plen][password]
             // All three lengths are required; user/password may be
             // empty when the server doesn't require auth.
-            const auto& pl = f.payload;
+            const auto& pl = f.opcode==Opcode::CompleteAuth ? auth_connect.payload : f.payload;
+            struct PayloadWipe { std::vector<std::uint8_t>& p; ~PayloadWipe(){ volatile std::uint8_t* w=p.data();for(std::size_t i=0;i<p.size();++i)w[i]=0; } } wipe{auth_connect.payload};
             std::string dir, user, pw;
+            struct PasswordWipe { std::string& p; ~PasswordWipe(){ volatile char* w=p.empty()?nullptr:&p[0];for(std::size_t i=0;i<p.size();++i)w[i]=0; } } pw_wipe{pw};
             std::size_t p = 0;
             auto readlen = [&](std::uint16_t& out)->bool {
                 if (p + 2 > pl.size()) return false;

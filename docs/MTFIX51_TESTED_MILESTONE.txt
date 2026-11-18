@@ -1,0 +1,45 @@
+MTFIX49/50/51 tested milestone, fork main integration
+
+Pritpal Bedi's fork of FiveTechSoft/OpenADS.
+Source: mtfix49 candidate45752b9a, mtfix50 BeginAuth error propagation,
+mtfix51 minimal self-directory resolver fix. Diagnostic build/publishing
+workflows are excluded from this product-only merge branch.
+
+Pritpal cleared localhost Vouch testing on16October2026: duplicate user,
+multi-instance, multi-thread and indexes, all through auth:// URIs with
+mtfix51 server, mtfix49 worker, mtfix50 DLL and his private auth HRB.
+His clearance: "You can merge in main."
+
+The legacy root fix retains canonical containment and no-follow/reparse
+checks. Legacy mode remains off by default; strict C:/ outside C:/Temp
+remains refused. Legacy C:/,D:/,C:/Temp,C: and empty roots use the restored
+self-directory case. Table remapping is unchanged.
+
+Windows proof:22 focused unit tests/88 assertions;132 root-mode TCP/auth
+rows across44,49,51;16 junction/traversal creates refused. The original
+CI assertion omitted restored legacy C: from its expected-change list.
+The corrected review accepts all five existing legacy self-root forms;
+34 other candidate rows match49 exactly, and44/49 results match.
+Test-only temp-directory fixtures avoid pinned GCC10.2 temp_directory_path.
+
+Speed,30 whole-flow samples each:49 median473.30ms,51 median480.80ms
+(+1.58%); mean+1.18%. Includes process startup/scheduling/disk IO, not
+an isolated resolver benchmark. No claim of literally zero overhead.
+
+Build/proof references:
+https://github.com/bedipritpal/OpenADS/actions/runs/38938650173
+https://github.com/bedipritpal/OpenADS/actions/runs/38943917533
+https://github.com/bedipritpal/OpenADS/releases/tag/v1.09.74-mtfix51-legacy-root-test
+No upstream submission or Lightsail deployment is authorized by this merge.
+
+PR CI build-only follow-up: explicit size_t promotion for two unsigned
+length bytes in auth_result.h; no wire/protocol or bounds change.
+Original header SHA256 cde28b5e96d96022ac0f3ebc744b5741b8fd513d2d07ec869a441c554200103a
+Corrected header SHA256 3ed043631b3a5f0973b554e641e36b686aff550d3b8a91216b097db58f729dbc
+Manifest uses standard checksum text to avoid API-key false positives.
+The existing private-key test fixture scan failure is identical on main.
+
+Portable POSIX-only follow-up replaces unavailable macOS sigtimedwait
+with blocked pending-signal inspection and sigwait consumption.
+Windows AuthWorker run branch is byte-identical. Two focused tests
+cover no pending signal and a real EPIPE/SIGPIPE before mask restore.

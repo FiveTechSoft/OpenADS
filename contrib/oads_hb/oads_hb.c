@@ -1417,3 +1417,20 @@ HB_FUNC( OADS_ZIPFILELIST )
     hb_xfree( buf );
     hb_itemReturnRelease( pArray );
 }
+
+extern UNSIGNED32 ENTRYPOINT OAdsBeginAuth(const char*,ADSHANDLE*,UNSIGNED8*);
+extern UNSIGNED32 ENTRYPOINT OAdsCompleteAuth(ADSHANDLE,const UNSIGNED8*,UNSIGNED32,ADSHANDLE*);
+HB_FUNC( OADS_BEGINAUTH ) {
+    ADSHANDLE pending=0;UNSIGNED8 challenge[32]={0};
+    UNSIGNED32 rc=OAdsBeginAuth(hb_parc(1),&pending,challenge);
+    hb_stornint((HB_MAXINT)pending,2);
+    if(rc==0)hb_retclen((const char*)challenge,32);else hb_retc("");
+}
+HB_FUNC( OADS_COMPLETEAUTH ) {
+    ADSHANDLE connection=0;
+    OAdsCompleteAuth((ADSHANDLE)hb_parnint(1),(const UNSIGNED8*)hb_parc(2),(UNSIGNED32)hb_parclen(2),&connection);
+    hb_retnint((HB_MAXINT)connection);
+}
+HB_FUNC( OADS_CANCELAUTH ) {
+    hb_retl(OAdsCancelAuth((ADSHANDLE)hb_parnint(1))==0);
+}

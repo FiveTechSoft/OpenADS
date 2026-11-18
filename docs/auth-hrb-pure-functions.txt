@@ -1,0 +1,38 @@
+New worker-only callable functions (explicit registration, not blanket exports)
+
+legacy crypto: HB_MD5 HB_HMAC_MD5 HB_BLOWFISHKEY HB_BLOWFISHENCRYPT HB_BLOWFISHDECRYPT HB_BLOWFISHENCRYPT_CFB HB_BLOWFISHDECRYPT_CFB
+math: ABS INT ROUND MIN MAX EXP LOG SQRT
+date/time: CTOD DTOC DTOS HB_STOD YEAR MONTH DAY DOW DATE TIME HB_DATE HB_DTOT HB_TTOD HB_TTON HB_NTOT HB_TTOC HB_CTOT HB_HOUR HB_MINUTE HB_SEC HB_WEEK
+arrays: ARRAY AADD ASIZE ATAIL AINS ADEL AFILL ASCAN HB_ASCAN HB_RASCAN HB_AINS HB_ADEL ACOPY ACLONE
+hashes: HB_HASH HB_HHASKEY HB_HPOS HB_HGET HB_HGETDEF HB_HSET HB_HDEL HB_HKEYAT HB_HVALUEAT HB_HKEYS HB_HVALUES HB_HCLEAR HB_HFILL HB_HCLONE HB_HCOPY
+values: EMPTY VALTYPE HB_ISNIL HB_ISNUMERIC HB_ISSTRING HB_ISDATE HB_ISTIMESTAMP HB_ISLOGICAL HB_ISARRAY HB_ISHASH HB_ISBLOCK HB_ISPOINTER
+
+Also added SHA256/384/512, HMAC-SHA384/512 and OADS_RANDOMBYTES.
+Existing HMAC-SHA256/base64/hex/string/UTC surface retained.
+
+Excluded: MD5File/file/directory/DBF/RDD/config/environment/process/shell/network/socket functions; dynamic loaders/macros; sleeps; global runtime setters; arbitrary memory/pointer operations and dedicated callback-evaluation helpers (AEVAL/HB_HEVAL); array scan functions retain their normal Harbour semantics. Existing core VM capabilities are not a security sandbox.
+
+MD5 is weak: checksums only, not proof of identity. Blowfish ECB/CFB is legacy, unauthenticated encryption, not a signature or a replacement for TLS/HMAC. Use unique unpredictable CFB seeds; Harbour transforms the seed into its internal IV.
+
+OADS_RANDOMBYTES(n): integer1..1024, binary result; NIL for invalid input or entropy failure. mbedTLS entropy + CTR_DRBG, independently seeded per call; no weak fallback.
+
+Resource containment in this test candidate:
+- Worker only, before untrusted HRB starts: Windows Job object, suspended spawn,
+ 256MiB process memory, one active process,1s user CPU, kill-on-job-close.
+- Linux: RLIMIT_AS256MiB, RLIMIT_CPU1s, RLIMIT_CORE0 before Harbour startup.
+- Refuse worker/session if limit setup fails. Existing parent deadline2s remains.
+- HRB input16KiB/output4363B and admission concurrency4 remain bounded.
+- OS quotas are not a general OS sandbox. Protected trusted HRBs remain required.
+ Memory arithmetic across all4 workers can reach1GiB plus the daemon/host.
+ CSPRNG and clock reads necessarily use OS entropy/time facilities.
+
+Local proof: SHA empty/abc, HMAC RFC4231 case1, raw/hex lengths, RNG bounds;
+MD5 abc; Blowfish zero-key zero-block ECB, padded roundtrip, CFB64 with an
+independent OpenSSL vector (8-byte key01234567, IV0001020304050607).
+Huge string/array, spin, runtime error each refused auth; same Linux daemon
+answered Hello immediately, then accepted a good session after normal rate limit.
+Windows Job object code needs native Windows build/runtime proof before release.
+
+Client-only metadata fix: after successful CompleteAuth, best-effort existing
+Hello/HelloAck fills the version cache. Adds one application RTT (2 becomes3),
+not a server update; no change to server-name behavior. Low-level API remains.

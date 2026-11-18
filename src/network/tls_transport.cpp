@@ -11,10 +11,24 @@
 #include <mbedtls/pk.h>
 #include <mbedtls/ssl.h>
 #include <mbedtls/x509_crt.h>
+#include <mbedtls/x509.h>
+#include <mbedtls/bignum.h>
+#include <mbedtls/hkdf.h>
+#include <mbedtls/md.h>
+#include <mbedtls/platform_util.h>
 
 #include <cstring>
 #include <algorithm>
 #include <utility>
+#include <vector>
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#endif
 
 namespace openads::network {
 
@@ -49,10 +63,10 @@ public:
         }
         // One wire frame can exceed a TLS record. Let the caller's send loop
         // advance through bounded records instead of rejecting large replies.
-        const auto capacity = mbedtls_ssl_get_max_out_record_payload(&ssl_);
+        const auto capacity = server_ ? mbedtls_ssl_get_max_out_record_payload(&ssl_) : 0;
         if (capacity < 0) return tls_error(capacity);
         int rc = mbedtls_ssl_write(&ssl_, buf,
-            std::min(n, static_cast<std::size_t>(capacity)));
+            server_ ? std::min(n, static_cast<std::size_t>(capacity)) : n);
         if (server_ && retry(rc)) return blocked(rc);
         if (rc < 0) {
             return util::Error{openads::AE_REMOTE_ERROR, rc,
@@ -109,12 +123,38 @@ public:
         if (rc != 0) return util::Error{openads::AE_REMOTE_ERROR, rc,
             "net_connect: " + mbed_msg(rc), host + ":" + portstr};
 
+        // Same small-frame latency policy as connect_tcp. mbedTLS creates
+        // this socket directly, bypassing our ordinary socket setup.
+        int no_delay = 1;
+#ifdef _WIN32
+        int socket_rc = setsockopt(net_.fd, IPPROTO_TCP, TCP_NODELAY,
+            reinterpret_cast<const char*>(&no_delay), sizeof(no_delay));
+#else
+        int socket_rc = setsockopt(net_.fd, IPPROTO_TCP, TCP_NODELAY,
+            &no_delay, sizeof(no_delay));
+#endif
+        if (socket_rc != 0)
+            return util::Error{openads::AE_REMOTE_ERROR, 0,
+                "TLS client TCP_NODELAY setup failed", ""};
+
+        if(cfg.auth_tls13_only) {
+#ifdef _WIN32
+            DWORD timeout=30000;
+            setsockopt(net_.fd,SOL_SOCKET,SO_RCVTIMEO,reinterpret_cast<const char*>(&timeout),sizeof(timeout));
+            setsockopt(net_.fd,SOL_SOCKET,SO_SNDTIMEO,reinterpret_cast<const char*>(&timeout),sizeof(timeout));
+#else
+            timeval timeout{30,0};
+            setsockopt(net_.fd,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout));
+            setsockopt(net_.fd,SOL_SOCKET,SO_SNDTIMEO,&timeout,sizeof(timeout));
+#endif
+        }
         rc = mbedtls_ssl_config_defaults(&conf_, MBEDTLS_SSL_IS_CLIENT,
                                           MBEDTLS_SSL_TRANSPORT_STREAM,
                                           MBEDTLS_SSL_PRESET_DEFAULT);
         if (rc != 0) return util::Error{openads::AE_REMOTE_ERROR, rc,
             "ssl_config_defaults: " + mbed_msg(rc), ""};
 
+        if (cfg.auth_tls13_only) configure_auth_tls();
         if (cfg.insecure_skip_verify) {
             mbedtls_ssl_conf_authmode(&conf_, MBEDTLS_SSL_VERIFY_NONE);
         } else if (cfg.ca_pem.empty()) {
@@ -150,8 +190,13 @@ public:
                     "ssl_handshake (client): " + mbed_msg(rc), host};
             }
         }
+        handshake_done_ = true;
         return {};
     }
+
+    bool encrypted_ready() const noexcept override { return handshake_done_ && !closed_; }
+    // RFC8446 section7.5 exporter, pinned mbedTLS3.6.2 session layout.
+    // Never export master/traffic secrets. Caller gets only domain-specific32B.
 
     bool wants_write() const noexcept override { return want_write_; }
     bool buffered_read() const noexcept override {
@@ -168,6 +213,7 @@ public:
         rc = mbedtls_ssl_config_defaults(&conf_, MBEDTLS_SSL_IS_SERVER,
             MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT);
         if (rc != 0) return tls_error(rc);
+        if (cfg.auth_tls13_only) configure_auth_tls();
         rc = mbedtls_x509_crt_parse(&srv_cert_,
             reinterpret_cast<const unsigned char*>(cfg.cert_pem.c_str()), cfg.cert_pem.size() + 1);
         if (rc != 0) return tls_error(rc);
@@ -192,6 +238,17 @@ public:
         return {};
     }
 private:
+    void configure_auth_tls() {
+        mbedtls_ssl_conf_min_tls_version(&conf_, MBEDTLS_SSL_VERSION_TLS1_3);
+        mbedtls_ssl_conf_max_tls_version(&conf_, MBEDTLS_SSL_VERSION_TLS1_3);
+        mbedtls_ssl_conf_tls13_key_exchange_modes(&conf_, MBEDTLS_SSL_TLS1_3_KEY_EXCHANGE_MODE_EPHEMERAL);
+#if defined(MBEDTLS_SSL_SESSION_TICKETS)
+        mbedtls_ssl_conf_session_tickets(&conf_, MBEDTLS_SSL_SESSION_TICKETS_DISABLED);
+#endif
+#if defined(MBEDTLS_SSL_SRV_C) && defined(MBEDTLS_SSL_PROTO_TLS1_3)
+        mbedtls_ssl_conf_new_session_tickets(&conf_, 0);
+#endif
+    }
     static util::Error tls_error(int rc) {
         return {openads::AE_REMOTE_ERROR, rc, "TLS server: " + mbed_msg(rc), ""};
     }
@@ -260,6 +317,43 @@ util::Result<std::unique_ptr<ITransport>> accept_tls(Socket socket, const TlsCon
 util::Result<void> validate_tls_server_config(const TlsConfig& cfg) {
     MbedTlsTransport transport;
     return transport.server_setup(Socket{}, cfg);
+}
+
+// Fresh ephemeral identity at startup. Authentication is deliberately absent.
+bool auth_random_bytes(std::uint8_t* out, std::size_t n) {
+    mbedtls_entropy_context e; mbedtls_ctr_drbg_context d;
+    mbedtls_entropy_init(&e);mbedtls_ctr_drbg_init(&d);
+    int rc=mbedtls_ctr_drbg_seed(&d,mbedtls_entropy_func,&e,nullptr,0);
+    if(rc==0)rc=mbedtls_ctr_drbg_random(&d,out,n);
+    mbedtls_ctr_drbg_free(&d);mbedtls_entropy_free(&e);return rc==0;
+}
+util::Result<TlsConfig> make_auth_tls_config() {
+    mbedtls_entropy_context e;mbedtls_ctr_drbg_context d;mbedtls_pk_context k;
+    mbedtls_x509write_cert c;mbedtls_mpi serial;
+    mbedtls_entropy_init(&e);mbedtls_ctr_drbg_init(&d);mbedtls_pk_init(&k);
+    mbedtls_x509write_crt_init(&c);mbedtls_mpi_init(&serial);
+    TlsConfig cfg;cfg.auth_tls13_only=true;
+    int rc=mbedtls_ctr_drbg_seed(&d,mbedtls_entropy_func,&e,nullptr,0);
+    if(rc==0)rc=mbedtls_pk_setup(&k,mbedtls_pk_info_from_type(MBEDTLS_PK_ECKEY));
+    if(rc==0)rc=mbedtls_ecp_gen_key(MBEDTLS_ECP_DP_SECP256R1,mbedtls_pk_ec(k),mbedtls_ctr_drbg_random,&d);
+    if(rc==0)rc=mbedtls_mpi_fill_random(&serial,16,mbedtls_ctr_drbg_random,&d);
+    if(rc==0)rc=mbedtls_x509write_crt_set_serial(&c,&serial);
+    mbedtls_x509write_crt_set_version(&c,MBEDTLS_X509_CRT_VERSION_3);
+    mbedtls_x509write_crt_set_md_alg(&c,MBEDTLS_MD_SHA256);
+    mbedtls_x509write_crt_set_subject_key(&c,&k);mbedtls_x509write_crt_set_issuer_key(&c,&k);
+    if(rc==0)rc=mbedtls_x509write_crt_set_subject_name(&c,"CN=OpenADS unverified auth spike");
+    if(rc==0)rc=mbedtls_x509write_crt_set_issuer_name(&c,"CN=OpenADS unverified auth spike");
+    if(rc==0)rc=mbedtls_x509write_crt_set_validity(&c,"20200101000000","20991231235959");
+    unsigned char pem[8192]{};
+    if(rc==0)rc=mbedtls_x509write_crt_pem(&c,pem,sizeof(pem),mbedtls_ctr_drbg_random,&d);
+    if(rc==0)cfg.cert_pem=reinterpret_cast<char*>(pem);
+    if(rc==0)rc=mbedtls_pk_write_key_pem(&k,pem,sizeof(pem));
+    if(rc==0)cfg.key_pem=reinterpret_cast<char*>(pem);
+    volatile unsigned char* w=pem;for(std::size_t i=0;i<sizeof(pem);++i)w[i]=0;
+    mbedtls_x509write_crt_free(&c);mbedtls_mpi_free(&serial);mbedtls_pk_free(&k);
+    mbedtls_ctr_drbg_free(&d);mbedtls_entropy_free(&e);
+    if(rc!=0)return util::Error{openads::AE_REMOTE_ERROR,rc,"auth TLS identity generation failed",""};
+    return cfg;
 }
 
 } // namespace openads::network

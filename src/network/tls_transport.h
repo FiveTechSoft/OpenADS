@@ -32,6 +32,8 @@ struct TlsConfig {
     std::string sni_hostname;
     // Skip peer verification (insecure — dev/test only).
     bool insecure_skip_verify = false;
+    // Explicit auth-spike transport only, no plaintext or TLS1.2 fallback.
+    bool auth_tls13_only = false;
 };
 
 // Connect a TLS client to host:port, returning a transport ready
@@ -45,6 +47,8 @@ util::Result<std::unique_ptr<ITransport>>
 util::Result<std::unique_ptr<ITransport>>
     accept_tls(Socket socket, const TlsConfig& cfg);
 util::Result<void> validate_tls_server_config(const TlsConfig& cfg);
+util::Result<TlsConfig> make_auth_tls_config();
+bool auth_random_bytes(std::uint8_t* out, std::size_t n);
 
 } // namespace openads::network
 
