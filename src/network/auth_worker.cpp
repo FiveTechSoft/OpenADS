@@ -31,13 +31,21 @@ AuthWorker::AuthWorker(std::string executable,std::string module,unsigned concur
     if(concurrency==0 || concurrency>kMaxConcurrency)
         throw std::invalid_argument("auth_worker_concurrency must be 1..256");
 }
-bool AuthWorker::probe(){std::string out;return run("P",out)&&out=="READY";}
+bool AuthWorker::probe(){std::string out;if(!run("P",out))return false;mutual_required_=out=="READY2";return mutual_required_||out=="READY";}
 bool AuthWorker::authenticate(const AuthAttempt::Challenge& c,const std::string& blob,const std::string& ctx,AuthResult& result,bool* capacity_busy){
     result.clear();
     if(capacity_busy)*capacity_busy=false;
     std::string in="A",out;Wipe wi{in},wo{out};
     in.append(reinterpret_cast<const char*>(c.data()),c.size());put(in,blob);put(in,ctx);
     return run(in,out,capacity_busy)&&parse_auth_result(out,result);
+}
+bool AuthWorker::issue_mutual(const AuthAttempt::Challenge& c,const std::string& transcript,const std::string& context,std::string& proof,bool* busy){
+ std::string in="B";Wipe wi{in};in.append(reinterpret_cast<const char*>(c.data()),32);put(in,transcript);put(in,context);
+ return run(in,proof,busy)&&!proof.empty()&&proof.size()<=4096;
+}
+bool AuthWorker::verify_mutual(const AuthAttempt::Challenge& c,const std::string& transcript,const std::string& proof,AuthResult& result,bool* busy){
+ result.clear();std::string in="M",out;Wipe wi{in},wo{out};in.append(reinterpret_cast<const char*>(c.data()),32);put(in,transcript);put(in,proof);
+ return run(in,out,busy)&&parse_auth_result(out,result);
 }
 bool AuthWorker::run(const std::string& in,std::string& out,bool* capacity_busy){
     if(capacity_busy)*capacity_busy=false;

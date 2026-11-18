@@ -1,4 +1,5 @@
 #include "network/client.h"
+#include "network/mutual_auth.h"
 
 #include "abi/lock_retry_policy.h"
 #include "engine/table.h"
@@ -523,6 +524,15 @@ util::Result<std::vector<std::uint8_t>> RemoteConnection::begin_auth(std::unique
         transport_->close();return util::Error{5000,0,"BeginAuth reply invalid",""};
     }
     auth_pending_=true;return rep.value().payload;
+}
+util::Result<std::string> RemoteConnection::begin_mutual(std::unique_ptr<ITransport> t,const std::string& dir,const std::string& selector,std::array<std::uint8_t,32>& challenge,std::array<std::uint8_t,32>& binding){
+ if(transport_||!t||!t->channel_binding(binding)||dir.size()>4096||selector.empty()||selector.size()>256||dir.find('\0')!=std::string::npos)return util::Error{5000,0,"Mutual arguments/binding invalid",""};
+ transport_=std::move(t);auth_dir_=dir;
+ auto begin=mutual_begin(selector,dir);Frame f;f.opcode=Opcode::BeginAuth;f.payload.assign(begin.begin(),begin.end());auto rep=request(f);
+ if(!rep)return rep.error();
+ if(rep.value().opcode!=Opcode::BeginAuthAck||rep.value().payload.size()<33||rep.value().payload.size()>4128){transport_->close();return util::Error{5000,0,"Mutual proof missing",""};}
+ std::copy_n(rep.value().payload.begin(),32,challenge.begin());auth_pending_=true;
+ return std::string(rep.value().payload.begin()+32,rep.value().payload.end());
 }
 util::Result<void> RemoteConnection::complete_auth(const std::string& blob) {
     if(!auth_pending_)return util::Error{5000,0,"No pending auth",""};

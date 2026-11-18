@@ -7289,6 +7289,28 @@ UNSIGNED32 ENTRYPOINT OAdsBeginAuth(const char* url,ADSHANDLE* pending,UNSIGNED8
     return fail(openads::AE_FUNCTION_NOT_AVAILABLE,"Auth requires TLS build");
 #endif
 }
+UNSIGNED32 ENTRYPOINT OAdsBeginMutualAuth(const char* url,const char* selector,ADSHANDLE* pending,UNSIGNED8* challenge32,UNSIGNED8* binding32,UNSIGNED8* proof,UNSIGNED32* proofBytes) {
+ if(pending)*pending=0;
+ if(!url||!selector||!pending||!challenge32||!binding32||!proof||!proofBytes||*proofBytes<4096)return fail(openads::AE_LOGIN_FAILED,"Mutual arguments invalid");
+ *proofBytes=0;std::fill(challenge32,challenge32+32,0);std::fill(binding32,binding32+32,0);
+#if defined(OPENADS_WITH_TLS)
+ std::string path(url),host,dir;std::uint16_t port=0;
+ if(path.rfind("auth://",0)!=0)return fail(openads::AE_LOGIN_FAILED,"auth:// URL required");
+ path.replace(0,7,"tls://");
+ if(!openads::network::parse_tls_uri(path,host,port,dir))return fail(openads::AE_LOGIN_FAILED,"Auth URL invalid");
+ auto& s=state();std::lock_guard<std::recursive_mutex> lk(s.mu);expire_auth_pending();
+ if(auth_pending_connections.size()>=64)return fail(openads::AE_LOGIN_FAILED,"Pending auth limit");
+ openads::network::TlsConfig cfg;cfg.insecure_skip_verify=true;cfg.auth_tls13_only=true;cfg.sni_hostname=host;
+ auto t=openads::network::connect_tls(host,port,cfg);if(!t)return fail(t.error());
+ auto conn=std::make_unique<openads::network::RemoteConnection>();std::array<std::uint8_t,32> c{},b{};
+ auto result=conn->begin_mutual(std::move(t).value(),dir,selector,c,b);if(!result)return fail(result.error());
+ auto h=s.registry.register_object(HandleKind::PendingAuth,conn.get());
+ auth_pending_connections.emplace(h,PendingAuthConnection{std::move(conn),std::chrono::steady_clock::now()+std::chrono::seconds(30)});
+ std::copy(c.begin(),c.end(),challenge32);std::copy(b.begin(),b.end(),binding32);std::copy(result.value().begin(),result.value().end(),proof);*proofBytes=static_cast<UNSIGNED32>(result.value().size());*pending=to_ads_handle(h);return ok();
+#else
+ return fail(openads::AE_FUNCTION_NOT_AVAILABLE,"Auth requires TLS build");
+#endif
+}
 UNSIGNED32 ENTRYPOINT OAdsCompleteAuth(ADSHANDLE pending,const UNSIGNED8* blob,UNSIGNED32 bytes,ADSHANDLE* connection) {
     if(connection)*connection=0;
     auto& s=state();std::lock_guard<std::recursive_mutex> lk(s.mu);expire_auth_pending();

@@ -29,6 +29,7 @@ public:
     virtual void close() noexcept            = 0;
     virtual bool valid() const noexcept      = 0;
     virtual bool encrypted_ready() const noexcept { return false; }
+    virtual bool channel_binding(std::array<std::uint8_t,32>& out) const { out.fill(0); return false; }
     virtual bool wants_write() const noexcept { return false; }
     virtual bool buffered_read() const noexcept { return false; }
 };

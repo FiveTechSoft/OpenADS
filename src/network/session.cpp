@@ -1,4 +1,5 @@
 #include "network/session.h"
+#include "network/mutual_auth.h"
 #include "network/auth_result.h"
 #include "engine/pbkdf2.h"
 #include "engine/data_dict.h"
@@ -1838,9 +1839,18 @@ DispatchResult Session::dispatch(const Frame& f) {
 #endif
             if(!auth_attempt_.begin(challenge,true,srv_->session_now(),std::chrono::seconds(30)))
                 return {err("Auth denied",openads::AE_LOGIN_FAILED),true};
-            std::string begin(f.payload.begin(),f.payload.end());
-            if(begin.size()>4096||begin.find('\0')!=std::string::npos)return {err("Auth denied",openads::AE_LOGIN_FAILED),true};
-            auth_dir_=begin;
+            std::string begin(f.payload.begin(),f.payload.end()),selector,requested;
+            mutual_auth_=begin.size()>=4&&begin.compare(0,4,std::string("\0OM2",4))==0;
+            if(!mutual_auth_ && srv_->auth_worker_->mutual_required())return {err("Mutual auth required",openads::AE_LOGIN_FAILED),true};
+            if(mutual_auth_){
+                std::size_t p=4;
+                if(!mutual_read(begin,p,selector,256)||selector.empty()||!mutual_read(begin,p,requested,4096)||p!=begin.size()||requested.find('\0')!=std::string::npos)
+                    return {err("Mutual request denied",openads::AE_LOGIN_FAILED),true};
+                std::array<std::uint8_t,32> binding{};
+                if(!tls_transport_->channel_binding(binding))return {err("Mutual binding unavailable",openads::AE_LOGIN_FAILED),true};
+                mutual_transcript_=mutual_transcript(challenge,binding,selector,requested);
+                auth_dir_=requested;
+            }else {if(begin.size()>4096||begin.find('\0')!=std::string::npos)return {err("Auth denied",openads::AE_LOGIN_FAILED),true};auth_dir_=begin;}
             // Resolve before invoking application auth. Pass normalized root.
             const auto& effective=default_data_dir_.empty()?srv_->data_dir_:default_data_dir_;
             if(!effective.empty()) {
@@ -1851,6 +1861,13 @@ DispatchResult Session::dispatch(const Frame& f) {
             }
             reply.opcode=Opcode::BeginAuthAck;
             reply.payload.assign(challenge.begin(),challenge.end());
+            if(!mutual_auth_ && srv_->auth_worker_->mutual_required())return {err("Mutual auth required",openads::AE_LOGIN_FAILED),true};
+            if(mutual_auth_){
+                std::string proof;bool busy=false;
+                if(!srv_->auth_worker_->issue_mutual(challenge,mutual_transcript_,auth_dir_,proof,&busy))
+                    return {err(busy?"Auth busy":"Mutual proof denied",openads::AE_LOGIN_FAILED),true};
+                reply.payload.insert(reply.payload.end(),proof.begin(),proof.end());
+            }
             break;
         }
         case Opcode::CompleteAuth:
@@ -1867,7 +1884,7 @@ DispatchResult Session::dispatch(const Frame& f) {
                 std::string context="v1;session="+std::to_string(sid_)+";tls=1.3;requested_path="+auth_dir_;
                 std::string blob(f.payload.begin(),f.payload.end());
                 bool capacity_busy=false;
-                bool accepted=srv_->auth_worker_->authenticate(challenge,blob,context,hrb_result,&capacity_busy);
+                bool accepted=mutual_auth_ ? srv_->auth_worker_->verify_mutual(challenge,mutual_transcript_,blob,hrb_result,&capacity_busy) : srv_->auth_worker_->authenticate(challenge,blob,context,hrb_result,&capacity_busy);
                 volatile char* bp=blob.empty()?nullptr:&blob[0];
                 for(std::size_t i=0;i<blob.size();++i)bp[i]=0;
                 if(capacity_busy)

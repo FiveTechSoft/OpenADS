@@ -1,0 +1,62 @@
+MTFIX48 WINDOWS HRB PROBE CHECK
+
+Open PowerShell in the extracted mtfix48 bin folder, using the SAME Windows
+account that starts the test server. Stop the test server first.
+
+1. Use the new kit's openads_serverd.exe and openads_auth_worker.exe
+from the same bin folder. Compare their hashes against SHA256.txt in this
+kit, not a previous release. Use this kit's public mutual-test-only.hrb.
+
+2. Run the worker directly so its actual diagnostic is visible.
+Do not use echo P: that adds a newline and is not a valid probe input.
+
+$psi = New-Object System.Diagnostics.ProcessStartInfo
+$psi.FileName = (Resolve-Path .\openads_auth_worker.exe).Path
+$psi.Arguments = '"' + (Resolve-Path .\mutual-test-only.hrb).Path + '"'
+$psi.UseShellExecute = $false
+$psi.RedirectStandardInput = $true
+$psi.RedirectStandardOutput = $true
+$psi.RedirectStandardError = $true
+$p = New-Object System.Diagnostics.Process
+$p.StartInfo = $psi
+[void]$p.Start()
+$p.StandardInput.Write('P')
+$p.StandardInput.Close()
+$out = $p.StandardOutput.ReadToEnd()
+$err = $p.StandardError.ReadToEnd()
+$p.WaitForExit()
+"exit=$($p.ExitCode) stdout=[$out] stderr=[$err]"
+
+Correct result: exit=0 stdout=[READY2] stderr=[]
+
+If it says "Auth module ACL has an unapproved principal" or
+"Auth module protected ACL/read validation failed", the ZIP extraction
+inherited file permissions that the protected HRB loader intentionally rejects.
+The original build removed inheritance before testing; ZIP extraction does
+not carry that Windows ACL. The original setup notes omitted this step.
+
+3. For that ACL rejection only, set a clean ACL on the PUBLIC MOCK HRB.
+This grants read access ONLY to the current account, SYSTEM and Administrators.
+It changes this one test file, not the folder or your real vouch_auth.hrb.
+
+$path = (Resolve-Path .\mutual-test-only.hrb).Path
+$acl = New-Object System.Security.AccessControl.FileSecurity
+$acl.SetAccessRuleProtection($true, $false)
+$me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+foreach ($sid in @($me.Value, 'S-1-5-18', 'S-1-5-32-544')) {
+    $id = New-Object System.Security.Principal.SecurityIdentifier($sid)
+    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($id, 'Read', 'Allow')
+    $acl.AddAccessRule($rule)
+}
+Set-Acl -LiteralPath $path -AclObject $acl
+
+Repeat step2. Expect READY2. Then start the test server with the mock HRB.
+If it still fails, send the exact exit/stdout/stderr line from step2.
+A mismatched file hash means use the matching extracted kit file first.
+
+The old ace32.dll is a separate stale file. Do not rename/copy it over the
+new openace32.dll. The daemon launches openads_auth_worker.exe from its own
+folder; the client DLL does not determine the HRB probe result.
+
+This remains a test-only mock with a PUBLIC fixture key, not real licensing.
+Do not deploy it to Lightsail or use it as production auth.
