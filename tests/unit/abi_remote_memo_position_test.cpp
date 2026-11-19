@@ -53,7 +53,7 @@ TEST_CASE("remote memo length follows logical forward and reverse read-ahead pos
     i++){
         ck(AdsAppendRecord(t),"append");
         std::string p(sz(i),char('A'+i%26));
-        ck(AdsSetString(t,b(fld),b(p),p.size()),"set memo");
+        ck(AdsSetString(t,b(fld),b(p),static_cast<UNSIGNED32>(p.size())),"set memo");
         ck(AdsWriteRecord(t),"write");
     }
     ck(AdsCloseTable(t),"close");
@@ -73,7 +73,7 @@ TEST_CASE("remote memo length follows logical forward and reverse read-ahead pos
         ck(AdsGetMemoLength(t,b(fld),&n),"memo length");
         auto lenframes=stats.packets_in.load()-before;
         std::vector<UNSIGNED8> out(n+2);
-        UNSIGNED32 cap=out.size();
+        UNSIGNED32 cap=static_cast<UNSIGNED32>(out.size());
         before=stats.packets_in.load();
         ck(AdsGetString(t,b(fld),out.data(),&cap,0),"memo contents");
         auto strframes=stats.packets_in.load()-before;
