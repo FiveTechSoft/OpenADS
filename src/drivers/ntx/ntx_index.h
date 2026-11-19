@@ -5,6 +5,7 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -113,7 +114,14 @@ public:
     // (NTX already walks the full tree into a flat vector).
     const std::vector<std::uint32_t>& ordered_recnos_cached();
     std::uint32_t pos_of_recno_cached(std::uint32_t recno);
+    // Bumped in invalidate_pos_cache(): every own mutation and every
+    // peer change detected by the header reload funnels through it.
+    std::optional<std::uint64_t> content_revision() const override {
+        return content_revision_;
+    }
+
     void invalidate_pos_cache() {
+        ++content_revision_;
         pos_cache_valid_ = false;
         pos_recnos_.clear();
         pos_map_.clear();
@@ -237,6 +245,8 @@ private:
     std::vector<std::uint32_t>                       pos_recnos_;
     std::unordered_map<std::uint32_t, std::uint32_t> pos_map_;
     bool                                             pos_cache_valid_ = false;
+    // See content_revision(): bumped by invalidate_pos_cache().
+    std::uint64_t content_revision_ = 0;
 };
 
 } // namespace openads::drivers::ntx

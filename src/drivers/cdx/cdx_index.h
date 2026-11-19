@@ -6,6 +6,7 @@
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -115,6 +116,13 @@ public:
     // (sub-tag counter / root_page changed). See IIndex::refresh_from_disk.
     void refresh_from_disk() override;
 
+    // Bumped in invalidate_pos_cache(): every own mutation (insert /
+    // erase / build_bulk / clear_data) and every peer rewrite detected
+    // by reload_header_if_changed_ funnels through that one helper.
+    std::optional<std::uint64_t> content_revision() const override {
+        return content_revision_;
+    }
+
     // No root page == no on-disk keys (never built, or cleared). See
     // IIndex::empty. Refreshes the cached sub-tag header first so a peer's
     // rebuild in this same process is seen.
@@ -202,6 +210,7 @@ public:
         pos_cache_valid_ = false;
         pos_walk_.clear();
         pos_map_.clear();
+        ++content_revision_;
     }
 
     // Build a fresh compound CDX on disk with a single sub-tag.
@@ -381,6 +390,8 @@ private:
     std::vector<std::uint32_t>                       pos_walk_;
     std::unordered_map<std::uint32_t, std::uint32_t> pos_map_;
     bool                                             pos_cache_valid_ = false;
+    // See content_revision(): bumped by invalidate_pos_cache().
+    std::uint64_t                                    content_revision_ = 0;
 
     // Cursor: a single (leaf_page, key_index_in_leaf) plus the cached
     // decoded keys for that leaf.

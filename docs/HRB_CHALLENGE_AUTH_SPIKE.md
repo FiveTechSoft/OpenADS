@@ -67,6 +67,12 @@ explicit certificate configuration for this spike. Existing TLS/Connect mode
 is unchanged without --auth_module. Worker executable is installed beside
 serverd. No RDDADS-core edit, no compiler/Qt upgrade.
 
+Platform limit (POSIX): the auth worker spawn closes inherited file
+descriptors with the glibc extension posix_spawn_file_actions_addclosefrom_np.
+Builds against any other libc (macOS included) take a fail-closed branch at
+the preprocessor guard instead: the worker never starts, so --auth_module is
+unavailable on those platforms. Windows is unaffected.
+
 Pending maximum64 per client process; timeout30s; blob max4096 bytes; server
 pre-login frame maximum64KiB. Fresh worker per call; maximum4 globally; worker
 load/auth/unload deadline2s; no queued attempts on saturation. Normal daemon

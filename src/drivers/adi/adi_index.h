@@ -5,6 +5,7 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -132,7 +133,14 @@ public:
     // Invalidated on insert / erase / clear_data / build_bulk.
     const std::vector<std::uint32_t>& ordered_recnos_cached();
     std::uint32_t pos_of_recno_cached(std::uint32_t recno);
+    // Bumped in invalidate_pos_cache(): every own mutation and every
+    // peer change detected by the header reload funnels through it.
+    std::optional<std::uint64_t> content_revision() const override {
+        return content_revision_;
+    }
+
     void invalidate_pos_cache() {
+        ++content_revision_;
         pos_cache_valid_ = false;
         ordered_recnos_.clear();
         pos_of_recno_.clear();
@@ -344,6 +352,8 @@ private:
     std::vector<std::uint32_t>                          ordered_recnos_;
     std::unordered_map<std::uint32_t, std::uint32_t>    pos_of_recno_;
     bool                                                pos_cache_valid_ = false;
+    // See content_revision(): bumped by invalidate_pos_cache().
+    std::uint64_t content_revision_ = 0;
 
     // v2 front-coded dense leaf decoded into (recno, full key) pairs in key
     // order — the in-memory image of the current leaf. Populated by
