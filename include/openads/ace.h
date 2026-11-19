@@ -103,6 +103,40 @@ UNSIGNED32 ENTRYPOINT AdsCheckExistence(ADSHANDLE  hConnect, UNSIGNED8* pucName,
 UNSIGNED32 ENTRYPOINT AdsDeleteFile    (ADSHANDLE  hConnect, UNSIGNED8* pucName);
 UNSIGNED32 ENTRYPOINT AdsRenameFile    (ADSHANDLE  hConnect, UNSIGNED8* pucOld,
                               UNSIGNED8* pucNew);
+UNSIGNED32 ENTRYPOINT AdsCopyFile      (ADSHANDLE  hConnect, UNSIGNED8* pucSrc,
+                              UNSIGNED8* pucDst);
+// Whole-file load (hb_vfLoad). *pulBufLen carries the buffer capacity in
+// and the file size out; AE_INSUFFICIENT_BUFFER when capacity is short.
+UNSIGNED32 ENTRYPOINT AdsLoadFile      (ADSHANDLE  hConnect, UNSIGNED8* pucName,
+                              void* pBuf, UNSIGNED32* pulBufLen);
+// Whole-file save (hb_vfSave): creates or truncates.
+UNSIGNED32 ENTRYPOINT AdsSaveFile      (ADSHANDLE  hConnect, UNSIGNED8* pucName,
+                              const void* pBuf, UNSIGNED32 ulLen);
+UNSIGNED32 ENTRYPOINT AdsFReadAt       (ADSHANDLE  hFile, UNSIGNED64 ullOffset,
+                              void* pBuf, UNSIGNED32 ulLen,
+                              UNSIGNED32* pulRead);
+UNSIGNED32 ENTRYPOINT AdsFWriteAt      (ADSHANDLE  hFile, UNSIGNED64 ullOffset,
+                              const void* pBuf, UNSIGNED32 ulLen,
+                              UNSIGNED32* pulWritten);
+UNSIGNED32 ENTRYPOINT AdsFFlush        (ADSHANDLE  hFile);
+UNSIGNED32 ENTRYPOINT AdsFEof          (ADSHANDLE  hFile, UNSIGNED16* pbEof);
+// hb_vf group 3 - metadata batch.
+UNSIGNED32 ENTRYPOINT AdsSetFileAttr   (ADSHANDLE  hConnect, UNSIGNED8* pucName,
+                              UNSIGNED32 ulAttr);
+UNSIGNED32 ENTRYPOINT AdsSetFileTime   (ADSHANDLE  hConnect, UNSIGNED8* pucName,
+                              UNSIGNED16 usYear, UNSIGNED8 ucMon,
+                              UNSIGNED8 ucDay, UNSIGNED8 ucHour,
+                              UNSIGNED8 ucMin, UNSIGNED8 ucSec);
+UNSIGNED32 ENTRYPOINT AdsFTrunc        (ADSHANDLE  hFile,
+                              UNSIGNED64 ullSize);
+// Creates an empty uniquely named file under pucDir; the name lands in
+// pucName (capacity *pusNameLen in, length out, not NUL-padded).
+UNSIGNED32 ENTRYPOINT AdsTempFile      (ADSHANDLE  hConnect, UNSIGNED8* pucDir,
+                              UNSIGNED8* pucPrefix, UNSIGNED8* pucName,
+                              UNSIGNED16* pusNameLen);
+// ucType: 0 = free available, 1 = total capacity, 2 = free.
+UNSIGNED32 ENTRYPOINT AdsDirSpace      (ADSHANDLE  hConnect, UNSIGNED8* pucDir,
+                              UNSIGNED8 ucType, UNSIGNED64* pullBytes);
 UNSIGNED32 ENTRYPOINT AdsGetFileSize   (ADSHANDLE  hConnect, UNSIGNED8* pucName,
                               UNSIGNED32* pulSize);
 UNSIGNED32 ENTRYPOINT AdsGetFileTime   (ADSHANDLE  hConnect, UNSIGNED8* pucName,
@@ -183,6 +217,33 @@ UNSIGNED32 OADSAPI oads_CheckExistence (ADSHANDLE  hConnect, UNSIGNED8* pucName,
 UNSIGNED32 OADSAPI oads_DeleteFile     (ADSHANDLE  hConnect, UNSIGNED8* pucName);
 UNSIGNED32 OADSAPI oads_RenameFile     (ADSHANDLE  hConnect, UNSIGNED8* pucOld,
                                 UNSIGNED8* pucNew);
+UNSIGNED32 OADSAPI oads_CopyFile       (ADSHANDLE  hConnect, UNSIGNED8* pucSrc,
+                                UNSIGNED8* pucDst);
+UNSIGNED32 OADSAPI oads_LoadFile       (ADSHANDLE  hConnect, UNSIGNED8* pucName,
+                                void* pBuf, UNSIGNED32* pulBufLen);
+UNSIGNED32 OADSAPI oads_SaveFile       (ADSHANDLE  hConnect, UNSIGNED8* pucName,
+                                const void* pBuf, UNSIGNED32 ulLen);
+UNSIGNED32 OADSAPI oads_FReadAt        (ADSHANDLE  hFile, UNSIGNED64 ullOffset,
+                                void* pBuf, UNSIGNED32 ulLen,
+                                UNSIGNED32* pulRead);
+UNSIGNED32 OADSAPI oads_FWriteAt       (ADSHANDLE  hFile, UNSIGNED64 ullOffset,
+                                const void* pBuf, UNSIGNED32 ulLen,
+                                UNSIGNED32* pulWritten);
+UNSIGNED32 OADSAPI oads_FFlush         (ADSHANDLE  hFile);
+UNSIGNED32 OADSAPI oads_FEof           (ADSHANDLE  hFile, UNSIGNED16* pbEof);
+UNSIGNED32 OADSAPI oads_SetFileAttr    (ADSHANDLE  hConnect, UNSIGNED8* pucName,
+                                UNSIGNED32 ulAttr);
+UNSIGNED32 OADSAPI oads_SetFileTime    (ADSHANDLE  hConnect, UNSIGNED8* pucName,
+                                UNSIGNED16 usYear, UNSIGNED8 ucMon,
+                                UNSIGNED8 ucDay, UNSIGNED8 ucHour,
+                                UNSIGNED8 ucMin, UNSIGNED8 ucSec);
+UNSIGNED32 OADSAPI oads_FTrunc         (ADSHANDLE  hFile,
+                                UNSIGNED64 ullSize);
+UNSIGNED32 OADSAPI oads_TempFile       (ADSHANDLE  hConnect, UNSIGNED8* pucDir,
+                                UNSIGNED8* pucPrefix, UNSIGNED8* pucName,
+                                UNSIGNED16* pusNameLen);
+UNSIGNED32 OADSAPI oads_DirSpace       (ADSHANDLE  hConnect, UNSIGNED8* pucDir,
+                                UNSIGNED8 ucType, UNSIGNED64* pullBytes);
 UNSIGNED32 OADSAPI oads_GetFileSize    (ADSHANDLE  hConnect, UNSIGNED8* pucName,
                                 UNSIGNED32* pulSize);
 UNSIGNED32 OADSAPI oads_GetFileTime    (ADSHANDLE  hConnect, UNSIGNED8* pucName,

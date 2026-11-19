@@ -27,6 +27,11 @@ enum class Opcode : std::uint8_t {
     Connect            = 0x10,
     ConnectAck         = 0x11,
     Disconnect         = 0x12,
+    // FileEof: [u32 file_id] -> [u8 eof]. The 0xE0+ server-filesystem
+    // family and the 0x20s block around FileCopy are full; 0x1D/0x1E are
+    // the last free pair below 0x20.
+    FileEof            = 0x1D,
+    FileEofAck         = 0x1E,
     BeginAuth          = 0x3D,
     BeginAuthAck       = 0x3E,
     CompleteAuth       = 0x3F,
@@ -34,6 +39,49 @@ enum class Opcode : std::uint8_t {
     OpenTableAck       = 0x21,
     CloseTable         = 0x22,
     CloseTableAck      = 0x23,
+    // FileCopy: [u16 srcLen][src][u16 dstLen][dst] → empty ack
+    // Server-filesystem family (0xE0+) is full, so copy lives here.
+    FileCopy           = 0x24,
+    FileCopyAck        = 0x25,
+    // hb_vf group 2 - wire-efficiency batch.
+    // FileLoad:    [u16 nameLen][name] -> [u32 size][bytes]
+    //              (whole file; server caps at kMaxFsWholeFile)
+    FileLoad           = 0x26,
+    FileLoadAck        = 0x27,
+    // FileSave:    [u16 nameLen][name][u32 size][bytes] -> empty ack
+    //              (creates or truncates, like hb_vfSave)
+    FileSave           = 0x28,
+    FileSaveAck        = 0x29,
+    // FileReadAt:  [u32 file_id][u64 offset][u32 nbytes] -> [u32 nread][bytes]
+    FileReadAt         = 0x2A,
+    FileReadAtAck      = 0x2B,
+    // FileWriteAt: [u32 file_id][u64 offset][u32 nbytes][bytes]
+    //              -> [u32 nwritten]
+    FileWriteAt        = 0x2C,
+    FileWriteAtAck     = 0x2D,
+    // FileFlush:   [u32 file_id] -> empty ack (flush server buffers)
+    FileFlush          = 0x2E,
+    FileFlushAck       = 0x2F,
+    // hb_vf group 3 - metadata batch.
+    // FileSetAttr: [u16 nameLen][name][u32 attr] -> empty ack
+    //              (bit 0x01 readonly honored; other bits ignored)
+    FileSetAttr        = 0x34,
+    FileSetAttrAck     = 0x35,
+    // FileSetTime: [u16 nameLen][name][u16 year][u8 mon][u8 day]
+    //              [u8 hh][u8 mm][u8 ss] -> empty ack (local time)
+    FileSetTime        = 0x36,
+    FileSetTimeAck     = 0x37,
+    // FileTrunc:   [u32 file_id][u64 size] -> empty ack
+    FileTrunc          = 0x38,
+    FileTruncAck       = 0x39,
+    // FileTemp:    [u16 dirLen][dir][u16 prefixLen][prefix]
+    //              -> [u16 nameLen][name] (created empty, name relative)
+    FileTemp           = 0x3A,
+    FileTempAck        = 0x3B,
+    // DirSpace:    [u16 dirLen][dir][u8 type] -> [u64 bytes]
+    //              type 0 = free available, 1 = total capacity, 2 = free
+    DirSpace           = 0x3C,
+    DirSpaceAck        = 0x1F,  // 0x3D+ is taken; last free slot below 0x20
     ExecuteSQL         = 0x30,
     ExecuteSQLAck      = 0x31,
     Fetch              = 0x32,

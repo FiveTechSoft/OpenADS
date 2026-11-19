@@ -210,6 +210,30 @@ bool valid_opcode(std::uint8_t opcode) noexcept {
         case static_cast<std::uint8_t>(Opcode::FileEraseAck):
         case static_cast<std::uint8_t>(Opcode::FileRename):
         case static_cast<std::uint8_t>(Opcode::FileRenameAck):
+        case static_cast<std::uint8_t>(Opcode::FileCopy):
+        case static_cast<std::uint8_t>(Opcode::FileCopyAck):
+        case static_cast<std::uint8_t>(Opcode::FileEof):
+        case static_cast<std::uint8_t>(Opcode::FileEofAck):
+        case static_cast<std::uint8_t>(Opcode::FileLoad):
+        case static_cast<std::uint8_t>(Opcode::FileLoadAck):
+        case static_cast<std::uint8_t>(Opcode::FileSave):
+        case static_cast<std::uint8_t>(Opcode::FileSaveAck):
+        case static_cast<std::uint8_t>(Opcode::FileReadAt):
+        case static_cast<std::uint8_t>(Opcode::FileReadAtAck):
+        case static_cast<std::uint8_t>(Opcode::FileWriteAt):
+        case static_cast<std::uint8_t>(Opcode::FileWriteAtAck):
+        case static_cast<std::uint8_t>(Opcode::FileFlush):
+        case static_cast<std::uint8_t>(Opcode::FileFlushAck):
+        case static_cast<std::uint8_t>(Opcode::FileSetAttr):
+        case static_cast<std::uint8_t>(Opcode::FileSetAttrAck):
+        case static_cast<std::uint8_t>(Opcode::FileSetTime):
+        case static_cast<std::uint8_t>(Opcode::FileSetTimeAck):
+        case static_cast<std::uint8_t>(Opcode::FileTrunc):
+        case static_cast<std::uint8_t>(Opcode::FileTruncAck):
+        case static_cast<std::uint8_t>(Opcode::FileTemp):
+        case static_cast<std::uint8_t>(Opcode::FileTempAck):
+        case static_cast<std::uint8_t>(Opcode::DirSpace):
+        case static_cast<std::uint8_t>(Opcode::DirSpaceAck):
         case static_cast<std::uint8_t>(Opcode::FileSize):
         case static_cast<std::uint8_t>(Opcode::FileSizeAck):
         case static_cast<std::uint8_t>(Opcode::FileMTime):

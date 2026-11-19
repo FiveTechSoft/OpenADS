@@ -47,6 +47,7 @@
 #include "hbvm.h"
 #include "ace.h"
 #include <string.h>
+#include <stdio.h>
 
 /* The no-handle OAds_* overloads belong to this Harbour glue, not to
  * rddads. ACE's default is thread-local; the app can set it on its login
@@ -438,6 +439,349 @@ HB_FUNC( OADS_RENAMEFILE )
         ulRc = oads_RenameFile( hConn, ( UNSIGNED8 * ) szOld,
                                        ( UNSIGNED8 * ) szNew );
     hb_retl( ulRc == 0 );
+}
+
+/* ------------------------------------------------------------------ */
+/*  OADS_CopyFile( hConn, cSrcFile, cTgtFile ) -> lOk                 */
+/*  OADS_CopyFile( cSrcFile, cTgtFile )        -> lOk (default conn)  */
+/*  Server-side copy; overwrites the target if it exists.            */
+/* ------------------------------------------------------------------ */
+HB_FUNC( OADS_COPYFILE )
+{
+    ADSHANDLE  hConn;
+    const char *szSrc;
+    const char *szDst;
+    UNSIGNED32 ulRc   = 1;
+
+    if( hb_pcount() >= 3 )
+    {
+        hConn = ( ADSHANDLE ) hb_parnint( 1 );
+        szSrc = hb_parc( 2 );
+        szDst = hb_parc( 3 );
+    }
+    else
+    {
+        hConn = oads_default_connection();
+        szSrc = hb_parc( 1 );
+        szDst = hb_parc( 2 );
+    }
+
+    if( szSrc && szDst )
+        ulRc = oads_CopyFile( hConn, ( UNSIGNED8 * ) szSrc,
+                                     ( UNSIGNED8 * ) szDst );
+    hb_retl( ulRc == 0 );
+}
+
+/* ------------------------------------------------------------------ */
+/*  OADS_FLoad( hConn, cName ) -> cData | NIL                         */
+/*  OADS_FLoad( cName )          -> cData | NIL (default conn)        */
+/*  Whole file in one call (hb_vfLoad). NIL on error.                */
+/* ------------------------------------------------------------------ */
+HB_FUNC( OADS_FLOAD )
+{
+    ADSHANDLE  hConn;
+    const char *szName;
+
+    if( hb_pcount() >= 2 )
+    {
+        hConn  = ( ADSHANDLE ) hb_parnint( 1 );
+        szName = hb_parc( 2 );
+    }
+    else
+    {
+        hConn  = oads_default_connection();
+        szName = hb_parc( 1 );
+    }
+
+    if( szName )
+    {
+        UNSIGNED32 ulSize = 0;
+        if( oads_GetFileSize( hConn, ( UNSIGNED8 * ) szName,
+                              &ulSize ) == 0 )
+        {
+            char *pBuf = ( char * ) hb_xgrab( ( HB_SIZE ) ulSize + 1 );
+            UNSIGNED32 ulLen = ulSize;
+            if( oads_LoadFile( hConn, ( UNSIGNED8 * ) szName,
+                               pBuf, &ulLen ) == 0 )
+            {
+                memset( pBuf + ulLen, 0, 1 );
+                hb_retclen( pBuf, ( HB_SIZE ) ulLen );
+                hb_xfree( pBuf );
+                return;
+            }
+            hb_xfree( pBuf );
+        }
+    }
+    hb_ret();
+}
+
+/* ------------------------------------------------------------------ */
+/*  OADS_FSave( hConn, cName, cData ) -> lOk                          */
+/*  OADS_FSave( cName, cData )          -> lOk (default conn)         */
+/*  Whole file in one call (hb_vfSave); creates or truncates.        */
+/* ------------------------------------------------------------------ */
+HB_FUNC( OADS_FSAVE )
+{
+    ADSHANDLE  hConn;
+    const char *szName;
+    const char *szData;
+    UNSIGNED32 ulLen;
+    UNSIGNED32 ulRc = 1;
+
+    if( hb_pcount() >= 3 )
+    {
+        hConn  = ( ADSHANDLE ) hb_parnint( 1 );
+        szName = hb_parc( 2 );
+        szData = hb_parc( 3 );
+        ulLen  = ( UNSIGNED32 ) hb_parclen( 3 );
+    }
+    else
+    {
+        hConn  = oads_default_connection();
+        szName = hb_parc( 1 );
+        szData = hb_parc( 2 );
+        ulLen  = ( UNSIGNED32 ) hb_parclen( 2 );
+    }
+
+    if( szName && ( szData || ulLen == 0 ) )
+        ulRc = oads_SaveFile( hConn, ( UNSIGNED8 * ) szName,
+                              szData, ulLen );
+    hb_retl( ulRc == 0 );
+}
+
+/* ------------------------------------------------------------------ */
+/*  OADS_FReadAt( hFile, nOffset, nLen ) -> cData | NIL               */
+/*  Positional read in one call; NIL on error.                       */
+/* ------------------------------------------------------------------ */
+HB_FUNC( OADS_FREADAT )
+{
+    ADSHANDLE  hFile   = ( ADSHANDLE ) hb_parnint( 1 );
+    UNSIGNED64 ullOff  = ( UNSIGNED64 ) hb_parnint( 2 );
+    UNSIGNED32 ulLen   = ( UNSIGNED32 ) hb_parnl( 3 );
+    UNSIGNED32 ulRead  = 0;
+    char       *pBuf;
+
+    if( !hFile || hb_pcount() < 3 )
+    {
+        hb_ret();
+        return;
+    }
+    pBuf = ( char * ) hb_xgrab( ( HB_SIZE ) ulLen + 1 );
+    if( oads_FReadAt( hFile, ullOff, pBuf, ulLen, &ulRead ) == 0 )
+    {
+        memset( pBuf + ulRead, 0, 1 );
+        hb_retclen( pBuf, ( HB_SIZE ) ulRead );
+    }
+    else
+    {
+        hb_ret();
+    }
+    hb_xfree( pBuf );
+}
+
+/* ------------------------------------------------------------------ */
+/*  OADS_FWriteAt( hFile, nOffset, cData ) -> nWritten (-1 on error)  */
+/* ------------------------------------------------------------------ */
+HB_FUNC( OADS_FWRITEAT )
+{
+    ADSHANDLE  hFile     = ( ADSHANDLE ) hb_parnint( 1 );
+    UNSIGNED64 ullOff    = ( UNSIGNED64 ) hb_parnint( 2 );
+    const char *szData   = hb_parc( 3 );
+    UNSIGNED32 ulLen     = ( UNSIGNED32 ) hb_parclen( 3 );
+    UNSIGNED32 ulWritten = 0;
+
+    if( !hFile || !szData )
+    {
+        hb_retni( -1 );
+        return;
+    }
+    if( oads_FWriteAt( hFile, ullOff, szData, ulLen, &ulWritten ) == 0 )
+        hb_retnl( ( long ) ulWritten );
+    else
+        hb_retni( -1 );
+}
+
+/* ------------------------------------------------------------------ */
+/*  OADS_FFlush( hFile ) -> lOk                                       */
+/* ------------------------------------------------------------------ */
+HB_FUNC( OADS_FFLUSH )
+{
+    ADSHANDLE hFile = ( ADSHANDLE ) hb_parnint( 1 );
+
+    hb_retl( hFile && oads_FFlush( hFile ) == 0 );
+}
+
+/* ------------------------------------------------------------------ */
+/*  OADS_FEof( hFile ) -> lEof | NIL                                  */
+/* ------------------------------------------------------------------ */
+HB_FUNC( OADS_FEOF )
+{
+    ADSHANDLE  hFile = ( ADSHANDLE ) hb_parnint( 1 );
+    UNSIGNED16 bEof  = 0;
+
+    if( hFile && oads_FEof( hFile, &bEof ) == 0 )
+        hb_retl( bEof != 0 );
+    else
+        hb_ret();
+}
+
+/* ------------------------------------------------------------------ */
+/*  OADS_SetFileAttr( hConn, cName, nAttr ) -> lOk                    */
+/*  OADS_SetFileAttr( cName, nAttr )        -> lOk (default conn)     */
+/*  nAttr is a platform bitset (read-only = 1).                       */
+/* ------------------------------------------------------------------ */
+HB_FUNC( OADS_SETFILEATTR )
+{
+    ADSHANDLE  hConn;
+    const char *szName;
+    UNSIGNED32 ulAttr;
+
+    if( hb_pcount() >= 3 )
+    {
+        hConn  = ( ADSHANDLE ) hb_parnint( 1 );
+        szName = hb_parc( 2 );
+        ulAttr = ( UNSIGNED32 ) hb_parnint( 3 );
+    }
+    else
+    {
+        hConn  = oads_default_connection();
+        szName = hb_parc( 1 );
+        ulAttr = ( UNSIGNED32 ) hb_parnint( 2 );
+    }
+
+    hb_retl( szName != NULL &&
+             oads_SetFileAttr( hConn, ( UNSIGNED8 * ) szName,
+                               ulAttr ) == 0 );
+}
+
+/* ------------------------------------------------------------------ */
+/*  OADS_SetFileTime( hConn, cName, dDate, cTime ) -> lOk             */
+/*  OADS_SetFileTime( cName, dDate, cTime )        -> lOk (def conn)  */
+/*  cTime is "hh:mm:ss" (24-hour).                                    */
+/* ------------------------------------------------------------------ */
+HB_FUNC( OADS_SETFILETIME )
+{
+    ADSHANDLE  hConn;
+    const char *szName;
+    const char *szTime;
+    HB_LONG    lDate;
+    int        iYear = 0, iMonth = 0, iDay = 0;
+    int        iHour = 0, iMin = 0, iSec = 0;
+
+    if( hb_pcount() >= 4 )
+    {
+        hConn  = ( ADSHANDLE ) hb_parnint( 1 );
+        szName = hb_parc( 2 );
+        lDate  = hb_pardl( 3 );
+        szTime = hb_parc( 4 );
+    }
+    else
+    {
+        hConn  = oads_default_connection();
+        szName = hb_parc( 1 );
+        lDate  = hb_pardl( 2 );
+        szTime = hb_parc( 3 );
+    }
+
+    if( szName && lDate > 0 )
+    {
+        hb_dateDecode( lDate, &iYear, &iMonth, &iDay );
+        if( szTime && ( sscanf( szTime, "%d:%d:%d", &iHour, &iMin, &iSec ) != 3 ||
+                       iHour < 0 || iHour > 23 || iMin < 0 || iMin > 59 ||
+                       iSec < 0 || iSec > 59 ) )
+        {
+            hb_retl( HB_FALSE );
+            return;
+        }
+        hb_retl( oads_SetFileTime( hConn, ( UNSIGNED8 * ) szName,
+                                   ( UNSIGNED16 ) iYear,
+                                   ( UNSIGNED8 ) iMonth,
+                                   ( UNSIGNED8 ) iDay,
+                                   ( UNSIGNED8 ) iHour,
+                                   ( UNSIGNED8 ) iMin,
+                                   ( UNSIGNED8 ) iSec ) == 0 );
+    }
+    else
+        hb_retl( HB_FALSE );
+}
+
+/* ------------------------------------------------------------------ */
+/*  OADS_FTrunc( hFile, nSize ) -> lOk                                */
+/* ------------------------------------------------------------------ */
+HB_FUNC( OADS_FTRUNC )
+{
+    ADSHANDLE hFile = ( ADSHANDLE ) hb_parnint( 1 );
+    UNSIGNED64 ullSize = ( UNSIGNED64 ) hb_parnint( 2 );
+
+    hb_retl( hFile && hb_parnint( 2 ) >= 0 &&
+             oads_FTrunc( hFile, ullSize ) == 0 );
+}
+
+/* ------------------------------------------------------------------ */
+/*  OADS_TempFile( hConn, cDir, cPrefix ) -> cName                    */
+/*  OADS_TempFile( cDir, cPrefix )        -> cName (default conn)     */
+/*  Creates an empty file with a unique name under cDir and returns   */
+/*  its jail-relative path, or "" on failure.                                  */
+/* ------------------------------------------------------------------ */
+HB_FUNC( OADS_TEMPFILE )
+{
+    ADSHANDLE  hConn;
+    const char *szDir;
+    const char *szPrefix;
+    char       szName[ 4096 ];
+    UNSIGNED16 usLen = sizeof( szName );
+
+    if( hb_pcount() >= 3 )
+    {
+        hConn    = ( ADSHANDLE ) hb_parnint( 1 );
+        szDir    = hb_parc( 2 );
+        szPrefix = hb_parc( 3 );
+    }
+    else
+    {
+        hConn    = oads_default_connection();
+        szDir    = hb_parc( 1 );
+        szPrefix = hb_parc( 2 );
+    }
+
+    szName[ 0 ] = '\0';
+    if( szDir &&
+        oads_TempFile( hConn, ( UNSIGNED8 * ) szDir,
+                       ( UNSIGNED8 * ) szPrefix,
+                       ( UNSIGNED8 * ) szName, &usLen ) == 0 )
+        hb_retclen( szName, usLen );
+    else
+        hb_retc( "" );
+}
+
+/* ------------------------------------------------------------------ */
+/*  OADS_DirSpace( hConn, cDir, nType ) -> nBytes                     */
+/*  OADS_DirSpace( cDir, nType )        -> nBytes (default conn)      */
+/*  nType: 0 = free available, 1 = total capacity, 2 = free.          */
+/* ------------------------------------------------------------------ */
+HB_FUNC( OADS_DIRSPACE )
+{
+    ADSHANDLE  hConn;
+    const char *szDir;
+    UNSIGNED8  ucType;
+    UNSIGNED64 ullBytes = 0;
+
+    if( hb_pcount() >= 3 )
+    {
+        hConn  = ( ADSHANDLE ) hb_parnint( 1 );
+        szDir  = hb_parc( 2 );
+        ucType = ( UNSIGNED8 ) hb_parnint( 3 );
+    }
+    else
+    {
+        hConn  = oads_default_connection();
+        szDir  = hb_parc( 1 );
+        ucType = ( UNSIGNED8 ) hb_parnint( 2 );
+    }
+
+    if( szDir )
+        oads_DirSpace( hConn, ( UNSIGNED8 * ) szDir, ucType, &ullBytes );
+    hb_retnint( ( HB_MAXINT ) ullBytes );
 }
 
 /* ------------------------------------------------------------------ */

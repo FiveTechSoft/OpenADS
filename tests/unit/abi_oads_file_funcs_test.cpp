@@ -2,7 +2,7 @@
 //
 // Exercises ALL 16 oads_*() C functions (the legacy filesystem aliases):
 //   oads_FOpen, oads_FCreate, oads_FClose, oads_FRead, oads_FWrite, oads_FSeek,
-//   oads_CheckExistence, oads_DeleteFile, oads_RenameFile,
+//   oads_CheckExistence, oads_DeleteFile, oads_RenameFile, oads_CopyFile,
 //   oads_GetFileSize, oads_GetFileDate, oads_GetFileTime,
 //   oads_DirMake, oads_DirRemove, oads_DirExist, oads_Directory
 //
@@ -491,6 +491,250 @@ TEST_CASE( "oads_* local: RenameFile renames a file" )
     fs::remove_all( dir, ec );
 }
 
+TEST_CASE( "oads_* local: CopyFile copies a file" )
+{
+    auto dir = fs::temp_directory_path() / "oads_file_copy";
+    std::error_code ec;
+    fs::remove_all( dir, ec );
+    fs::create_directories( dir );
+
+    ADSHANDLE h = local_connect( dir );
+    ADSHANDLE hf = 0;
+
+    // create source
+    REQUIRE( oads_FCreate( h, (UNSIGNED8*)"src.txt", 0, &hf ) == 0 );
+    UNSIGNED32 nw = 0;
+    oads_FWrite( hf, "data", 4, &nw );
+    oads_FClose( hf );
+
+    // copy
+    REQUIRE( oads_CopyFile( h, (UNSIGNED8*)"src.txt",
+                                  (UNSIGNED8*)"dst.txt" ) == 0 );
+
+    // source still exists
+    UNSIGNED16 usExists = 0;
+    REQUIRE( oads_CheckExistence( h, (UNSIGNED8*)"src.txt", &usExists ) == 0 );
+    CHECK( usExists == 1 );
+
+    // target exists with same content
+    usExists = 0;
+    REQUIRE( oads_CheckExistence( h, (UNSIGNED8*)"dst.txt", &usExists ) == 0 );
+    CHECK( usExists == 1 );
+    ADSHANDLE hf2 = 0;
+    REQUIRE( oads_FOpen( h, (UNSIGNED8*)"dst.txt", ADS_READONLY, &hf2 ) == 0 );
+    char buf[16] = {};
+    UNSIGNED32 nr = 0;
+    oads_FRead( hf2, buf, sizeof( buf ), &nr );
+    CHECK( nr == 4 );
+    CHECK( std::string( buf, nr ) == "data" );
+    oads_FClose( hf2 );
+
+    // overwrite: shorter content replaces, not appends
+    REQUIRE( oads_FCreate( h, (UNSIGNED8*)"src2.txt", 0, &hf ) == 0 );
+    oads_FWrite( hf, "xy", 2, &nw );
+    oads_FClose( hf );
+    REQUIRE( oads_CopyFile( h, (UNSIGNED8*)"src2.txt",
+                                  (UNSIGNED8*)"dst.txt" ) == 0 );
+    UNSIGNED32 ulSize = 0;
+    REQUIRE( oads_GetFileSize( h, (UNSIGNED8*)"dst.txt", &ulSize ) == 0 );
+    CHECK( ulSize == 2 );
+
+    // missing source fails
+    CHECK( oads_CopyFile( h, (UNSIGNED8*)"gone.txt",
+                                (UNSIGNED8*)"dst2.txt" ) != 0 );
+
+    REQUIRE( AdsDisconnect( h ) == 0 );
+    fs::remove_all( dir, ec );
+}
+
+TEST_CASE( "oads_* local: Load Save ReadAt WriteAt Flush Eof" )
+{
+    auto dir = fs::temp_directory_path() / "oads_file_g2";
+    std::error_code ec;
+    fs::remove_all( dir, ec );
+    fs::create_directories( dir );
+
+    ADSHANDLE h = local_connect( dir );
+
+    // FSave creates a whole file in one call
+    REQUIRE( oads_SaveFile( h, (UNSIGNED8*)"w.txt", "hello", 5 ) == 0 );
+    UNSIGNED32 ulSize = 0;
+    REQUIRE( oads_GetFileSize( h, (UNSIGNED8*)"w.txt", &ulSize ) == 0 );
+    CHECK( ulSize == 5 );
+
+    // FSave truncates an existing file
+    REQUIRE( oads_SaveFile( h, (UNSIGNED8*)"w.txt", "ab", 2 ) == 0 );
+    ulSize = 0;
+    REQUIRE( oads_GetFileSize( h, (UNSIGNED8*)"w.txt", &ulSize ) == 0 );
+    CHECK( ulSize == 2 );
+
+    // FLoad returns the whole content
+    char lbuf[64] = {};
+    UNSIGNED32 ulCap = sizeof( lbuf );
+    REQUIRE( oads_LoadFile( h, (UNSIGNED8*)"w.txt", lbuf, &ulCap ) == 0 );
+    CHECK( ulCap == 2 );
+    CHECK( std::string( lbuf, ulCap ) == "ab" );
+
+    // FLoad with a short buffer reports the needed size
+    char tiny[1] = {};
+    UNSIGNED32 ulNeed = sizeof( tiny );
+    CHECK( oads_LoadFile( h, (UNSIGNED8*)"w.txt", tiny, &ulNeed ) ==
+           (UNSIGNED32) openads::AE_INSUFFICIENT_BUFFER );
+    CHECK( ulNeed == 2 );
+
+    // FLoad of a missing file fails
+    UNSIGNED32 ulX = sizeof( lbuf );
+    CHECK( oads_LoadFile( h, (UNSIGNED8*)"gone.txt", lbuf, &ulX ) != 0 );
+
+    // Positional I/O on a handle
+    ADSHANDLE hf = 0;
+    REQUIRE( oads_FCreate( h, (UNSIGNED8*)"p.txt", 0, &hf ) == 0 );
+    UNSIGNED32 nw = 0;
+    REQUIRE( oads_FWrite( hf, "0123456789", 10, &nw ) == 0 );
+
+    char rbuf[8] = {};
+    UNSIGNED32 nr = 0;
+    REQUIRE( oads_FReadAt( hf, 4, rbuf, 3, &nr ) == 0 );
+    CHECK( nr == 3 );
+    CHECK( std::string( rbuf, nr ) == "456" );
+
+    // ReadAt past the end reads nothing
+    nr = 99;
+    REQUIRE( oads_FReadAt( hf, 50, rbuf, 3, &nr ) == 0 );
+    CHECK( nr == 0 );
+
+    // WriteAt overwrites in place; verify through the same handle
+    // (a second reader can lag uncommitted CRT writes on Windows).
+    REQUIRE( oads_FWriteAt( hf, 2, "XY", 2, &nw ) == 0 );
+    CHECK( nw == 2 );
+    REQUIRE( oads_FFlush( hf ) == 0 );
+    char all[16] = {};
+    UNSIGNED32 ulAll = 0;
+    REQUIRE( oads_FReadAt( hf, 0, all, 10, &ulAll ) == 0 );
+    CHECK( ulAll == 10 );
+    CHECK( std::string( all, ulAll ) == "01XY456789" );
+
+    // Eof: not at end, then seek to end and it flips
+    UNSIGNED16 bEof = 1;
+    REQUIRE( oads_FSeek( hf, 0, 0, &nw ) == 0 );
+    REQUIRE( oads_FEof( hf, &bEof ) == 0 );
+    CHECK( bEof == 0 );
+    REQUIRE( oads_FSeek( hf, 0, 2, &nw ) == 0 );
+    bEof = 0;
+    REQUIRE( oads_FEof( hf, &bEof ) == 0 );
+    CHECK( bEof == 1 );
+
+    oads_FClose( hf );
+    CHECK( oads_FEof( hf, &bEof ) != 0 );  // closed handle fails
+
+    // After the close every byte is on disk for a fresh reader too.
+    char disk[16] = {};
+    UNSIGNED32 ulDisk = sizeof( disk );
+    REQUIRE( oads_LoadFile( h, (UNSIGNED8*)"p.txt", disk, &ulDisk ) == 0 );
+    CHECK( std::string( disk, ulDisk ) == "01XY456789" );
+
+    REQUIRE( AdsDisconnect( h ) == 0 );
+    fs::remove_all( dir, ec );
+}
+
+static void metadata_round_trip( ADSHANDLE h, const fs::path& dir )
+{
+    REQUIRE( oads_SaveFile( h, (UNSIGNED8*)"m.txt", "0123456789", 10 ) == 0 );
+
+    // SetFileAttr: read-only clears write bits, clearing restores them
+    auto p = dir / "m.txt";
+    REQUIRE( oads_SetFileAttr( h, (UNSIGNED8*)"m.txt", 1 ) == 0 );
+    CHECK( ( fs::status( p ).permissions() & fs::perms::owner_write ) ==
+           fs::perms::none );
+    REQUIRE( oads_SetFileAttr( h, (UNSIGNED8*)"m.txt", 0 ) == 0 );
+    CHECK( ( fs::status( p ).permissions() & fs::perms::owner_write ) !=
+           fs::perms::none );
+    CHECK( oads_SetFileAttr( h, (UNSIGNED8*)"gone.txt", 1 ) != 0 );
+
+    // SetFileTime: round-trip via GetFileDate/GetFileTime
+    REQUIRE( oads_SetFileTime( h, (UNSIGNED8*)"m.txt",
+                               2021, 3, 4, 5, 6, 7 ) == 0 );
+    UNSIGNED8 aucDate[32] = {};
+    UNSIGNED16 usLen = sizeof( aucDate );
+    REQUIRE( oads_GetFileDate( h, (UNSIGNED8*)"m.txt", aucDate, &usLen ) == 0 );
+    REQUIRE( usLen == 9 ); // existing getter includes the terminating NUL
+    CHECK( aucDate[8] == 0 );
+    CHECK( std::string( (char*) aucDate, 8 ) == "20210304" );
+    UNSIGNED8 aucTime[32] = {};
+    usLen = sizeof( aucTime );
+    REQUIRE( oads_GetFileTime( h, (UNSIGNED8*)"m.txt", aucTime, &usLen ) == 0 );
+    CHECK( std::string( (char*) aucTime, usLen ).substr( 0, 5 ) == "05:06" );
+
+    // FTrunc shrinks, then grows while preserving the prefix.
+    ADSHANDLE hf = 0;
+    REQUIRE( oads_FCreate( h, (UNSIGNED8*)"t.txt", 0, &hf ) == 0 );
+    UNSIGNED32 nw = 0;
+    REQUIRE( oads_FWrite( hf, "0123456789", 10, &nw ) == 0 );
+    REQUIRE( oads_FTrunc( hf, 4 ) == 0 );
+    UNSIGNED32 ulSize = 0;
+    REQUIRE( oads_GetFileSize( h, (UNSIGNED8*)"t.txt", &ulSize ) == 0 );
+    CHECK( ulSize == 4 );
+    char buf[16] = {};
+    UNSIGNED32 nr = 0;
+    REQUIRE( oads_FReadAt( hf, 0, buf, 4, &nr ) == 0 );
+    CHECK( nr == 4 );
+    CHECK( std::string( buf, nr ) == "0123" );
+    REQUIRE( oads_FTrunc( hf, 6 ) == 0 );
+    ulSize = 0;
+    REQUIRE( oads_GetFileSize( h, (UNSIGNED8*)"t.txt", &ulSize ) == 0 );
+    CHECK( ulSize == 6 );
+    oads_FClose( hf );
+    CHECK( oads_FTrunc( hf, 4 ) != 0 );  // closed handle fails
+
+    // TempFile: unique names that exist, under the jail root
+    char t1[4096] = {};
+    UNSIGNED16 t1len = sizeof( t1 );
+    REQUIRE( oads_TempFile( h, (UNSIGNED8*)"", (UNSIGNED8*)"tmp",
+                            (UNSIGNED8*)t1, &t1len ) == 0 );
+    CHECK( t1len > 0 );
+    ADSHANDLE ht = 0;
+    REQUIRE( oads_FOpen( h, (UNSIGNED8*)t1, ADS_READONLY, &ht ) == 0 );
+    CHECK( oads_FTrunc( ht, 10 ) != 0 );
+    REQUIRE( oads_FClose( ht ) == 0 );
+    CHECK( fs::exists( dir / std::string( t1, t1len ) ) );
+    CHECK( std::string( t1, t1len ).find( "tmp" ) != std::string::npos );
+    char t2[4096] = {};
+    UNSIGNED16 t2len = sizeof( t2 );
+    REQUIRE( oads_TempFile( h, (UNSIGNED8*)"", (UNSIGNED8*)"tmp",
+                            (UNSIGNED8*)t2, &t2len ) == 0 );
+    CHECK( std::string( t2, t2len ) != std::string( t1, t1len ) );
+
+    // DirSpace: capacity positive, available/free no more than capacity
+    UNSIGNED64 ullCap = 0, ullAvail = 0, ullFree = 0;
+    REQUIRE( oads_DirSpace( h, (UNSIGNED8*)"", 1, &ullCap ) == 0 );
+    REQUIRE( oads_DirSpace( h, (UNSIGNED8*)"", 0, &ullAvail ) == 0 );
+    REQUIRE( oads_DirSpace( h, (UNSIGNED8*)"", 2, &ullFree ) == 0 );
+    CHECK( ullCap > 0 );
+    CHECK( ullAvail <= ullCap );
+    CHECK( ullFree <= ullCap );
+
+    CHECK( oads_SetFileAttr( h, (UNSIGNED8*)"../outside.txt", 1 ) != 0 );
+    CHECK( oads_SetFileTime( h, (UNSIGNED8*)"../outside.txt", 2021, 3, 4, 5, 6, 7 ) != 0 );
+    UNSIGNED16 deniedLen = sizeof( t1 );
+    CHECK( oads_TempFile( h, (UNSIGNED8*)"..", (UNSIGNED8*)"deny", (UNSIGNED8*)t1, &deniedLen ) != 0 );
+    CHECK( oads_DirSpace( h, (UNSIGNED8*)"..", 0, &ullAvail ) != 0 );
+}
+
+TEST_CASE( "oads_* local: SetAttr SetTime FTrunc TempFile DirSpace" )
+{
+    auto dir = fs::temp_directory_path() / "oads_file_g3";
+    std::error_code ec;
+    fs::remove_all( dir, ec );
+    fs::create_directories( dir );
+
+    ADSHANDLE h = local_connect( dir );
+
+    metadata_round_trip( h, dir );
+
+    REQUIRE( AdsDisconnect( h ) == 0 );
+    fs::remove_all( dir, ec );
+}
+
 TEST_CASE( "oads_* local: GetFileSize returns correct size" )
 {
     auto dir = fs::temp_directory_path() / "oads_file_size";
@@ -640,6 +884,7 @@ TEST_CASE( "oads_* remote embedded: full round-trip" )
 
     ADSHANDLE h = remote_connect_embedded( data, srv.port() );
     oads_round_trip( h, "remote-embedded" );
+    metadata_round_trip( h, data );
 
     // verify file lands in server data dir, not client cwd
     CHECK_FALSE( fs::exists( app / "oads_test.txt" ) );
@@ -674,6 +919,13 @@ TEST_CASE( "oads_* remote embedded: EnableFileFunc off denies" )
     INFO( "FOpen with file func disabled rc=", rc );
     CHECK( rc != 0 );
 
+    CHECK( oads_SetFileAttr( h, (UNSIGNED8*)"nope.txt", 0 ) != 0 );
+    CHECK( oads_SetFileTime( h, (UNSIGNED8*)"nope.txt", 2021, 3, 4, 5, 6, 7 ) != 0 );
+    char name[4096] = {};
+    UNSIGNED16 nameLen = sizeof( name );
+    CHECK( oads_TempFile( h, (UNSIGNED8*)"", (UNSIGNED8*)"no", (UNSIGNED8*)name, &nameLen ) != 0 );
+    UNSIGNED64 bytes = 0;
+    CHECK( oads_DirSpace( h, (UNSIGNED8*)"", 0, &bytes ) != 0 );
     REQUIRE( AdsDisconnect( h ) == 0 );
     fs::remove_all( data );
 }
