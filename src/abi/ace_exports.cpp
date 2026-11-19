@@ -1804,7 +1804,7 @@ void remote_ensure_rec_count(openads::network::RemoteTable* rt) {
 // machinery (GoBottom, KeyGoto, RelKeyPos, skip clamp) must use THIS,
 // not cached_rec_count: with a scope of 1 live row in a 36-row table,
 // clamping to 36 made GoBottom report KeyNo=36 and sent KeyGoto/rel-pos
-// walks 35 rows past the scope end -- the phantom/duplicate rows in Tim
+// walks 35 rows past the scope end -- the phantom/duplicate rows in the reported
 // Stone's scoped remote xBrowse (31/07/2026).
 std::uint32_t remote_ensure_key_count(openads::network::RemoteTable* rt) {
     if (rt == nullptr) return 0;
@@ -6017,6 +6017,15 @@ void set_connection_remote_server(ADSHANDLE hConnect, bool on) {
 // starving the peer op that would release the record (client threads on
 // a shared connection; Pritpal Bedi: "dbUnlock() in threads fail
 // somehow"). The client retries instead, one wire request per attempt.
+// Wire-mirror FLock for the server's parallel ABI twin (session.cpp
+// LockTable / ensure_abi_handle): the wire LockTable locks the session's
+// engine Table; the twin must see the same whole-file coverage for its
+// 5035 write guard and its append auto-lock decision, but must not take a
+// second OS lock on the same byte from another handle.
+void adopt_virtual_table_lock(ADSHANDLE hTable) {
+    if (Table* t = get_table(hTable)) t->adopt_virtual_table_lock();
+}
+
 UNSIGNED32 try_lock_record_once(ADSHANDLE hTable, UNSIGNED32 ulRecord) {
     Table* t = get_table(hTable);
     if (!t) return openads::AE_INTERNAL_ERROR;
@@ -13144,7 +13153,7 @@ UNSIGNED32 ENTRYPOINT AdsGetRecordCount(ADSHANDLE hTable, UNSIGNED16 bFilterOpti
     // RemoteIndex handle. Must return the *index* key count (scope +
     // SET DELETED aware on the server), NOT the parent table's physical
     // record count. Routing to the table made remote xBrowse allocate
-    // ghost rows when deleted keys sat inside the scope (Tim's report).
+    // ghost rows when deleted keys sat inside the scope (the user's report).
     if (auto* ri = get_remote_index(hTable)) {
         if (pulRecordCount == nullptr) {
             return fail(openads::AE_INTERNAL_ERROR, "remote index");
@@ -14704,6 +14713,13 @@ UNSIGNED32 ENTRYPOINT AdsGetMemoLength(ADSHANDLE hTable, UNSIGNED8* pucField,
         auto i = remote_field_index(rt, pucField);
         if (i == std::numeric_limits<std::size_t>::max() || i >= rt->fields.size()) {
             return fail(openads::AE_COLUMN_NOT_FOUND, "");
+        }
+        // A local lookahead step changes the logical row without moving the
+        // server. Memo length must describe that logical row. Do not read a
+        // different server row when settling fails.
+        if (rt->cursor_lag != 0) {
+            auto settled = rt->conn->skip(rt, 0);
+            if (!settled) return fail(settled.error());
         }
         auto v = rt->conn->get_field(rt->id, rt->fields[i].name);
         if (!v) return fail(v.error());
@@ -16874,6 +16890,14 @@ UNSIGNED32 ENTRYPOINT AdsCreateIndex61(ADSHANDLE   hTable,
     }
 #endif
     if (auto* rt = get_remote_table(hTable)) {
+        // RDD OrderCreate clears the old orders before creating a tag.
+        // Settle that teardown before the new server bindings exist, or
+        // the final GoTop can flush the old CloseAll against the new bag.
+        // A parked snapshot cannot be reused across a mutating create.
+        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
+        if (rt->indexes_parked) {
+            if (UNSIGNED32 frc = remote_emit_close_all(rt); frc != 0) return frc;
+        }
         create_index_diag("61 ROUTE remote h=%llu table_id=%u", static_cast<unsigned long long>(hTable), static_cast<unsigned>(rt->id));
         std::string path = openads::abi::to_internal(pucFileName, 0);
         path = normalize_index_path(std::move(path));
@@ -21018,7 +21042,13 @@ UNSIGNED32 ENTRYPOINT AdsGetIndexHandleByOrder(ADSHANDLE hTable, UNSIGNED16 usOr
         if (handles.empty()) {
             return fail(openads::AE_INTERNAL_ERROR, "no remote index");
         }
-        std::size_t idx = (usOrder == 0 || usOrder > handles.size())
+        // An ordinal past the last tag is an error, not tag 1: rddads
+        // answers IndexKey(n)/OrdName(n) with "" only when this call fails,
+        // and while !Empty(IndexKey(j)) loops rely on that to stop.
+        if (usOrder > handles.size()) {
+            return fail(openads::AE_INTERNAL_ERROR, "index order out of range");
+        }
+        std::size_t idx = (usOrder == 0)
                               ? 0 : static_cast<std::size_t>(usOrder - 1);
         *phIndex = static_cast<ADSHANDLE>(handles[idx]);
         return ok();
@@ -21031,9 +21061,12 @@ UNSIGNED32 ENTRYPOINT AdsGetIndexHandleByOrder(ADSHANDLE hTable, UNSIGNED16 usOr
     if (ordered.empty()) {
         return fail(openads::AE_INTERNAL_ERROR, "no active index");
     }
-    if (usOrder == 0 || usOrder > ordered.size()) {
-        // Fall back to first entry on out-of-range ordinal so legacy
-        // callers that pass 0 or 1 still resolve to *some* index.
+    if (usOrder > ordered.size()) {
+        // Past the last tag: fail, so IndexKey(n)/OrdName(n) loops end.
+        return fail(openads::AE_INTERNAL_ERROR, "index order out of range");
+    }
+    if (usOrder == 0) {
+        // Order 0 keeps resolving to the first entry for legacy callers.
         *phIndex = ordered.front();
     } else {
         *phIndex = ordered[usOrder - 1];
@@ -21709,11 +21742,11 @@ UNSIGNED32 ENTRYPOINT AdsSeekLast(ADSHANDLE hIndex,
 // usLen       : explicit scope-key length. Required because typed
 //               keys (ADS_DOUBLEKEY, ADS_RAWKEY) legally contain
 //               embedded NULs that strlen() would truncate.
-// usDataType  : ADS_STRINGKEY / ADS_RAWKEY / ADS_DOUBLEKEY / ... --
-//               matches AdsSeek's u16KeyType. We mirror AdsSeek's
-//               ADS_DOUBLEKEY -> ASCII-padded conversion so a scope
-//               set with a double compares apples-to-apples against
-//               the index's stored key bytes.
+// usDataType  : caller-declared key encoding. Ignored: the SDK
+//               numbering (ADS_STRINGKEY=2 / ADS_DOUBLEKEY=4) differs
+//               from this header's, so the active index's real key
+//               type plus usLen decides any double conversion -- the
+//               same detection AdsSeek uses.
 // A scope bound longer than the index key is meaningless -- trim it. Bounds
 // SHORTER than the key are NOT padded: they bound by prefix, and the engine
 // compares only the bytes the caller supplied (Table::key_in_*_scope_).
@@ -21764,16 +21797,60 @@ UNSIGNED32 ENTRYPOINT AdsSetScope(ADSHANDLE hIndex, UNSIGNED16 usScope,
     Table* t = table_for_index(hIndex);
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown index");
     std::string key;
-    if (usDataType == ADS_DOUBLEKEY && usLen == sizeof(double) &&
-        pucScope != nullptr &&
-        t->order() != nullptr && t->order()->index() != nullptr) {
+    // Scope keys are detected from the ACTIVE INDEX's real key type plus
+    // the buffer length, not from usDataType -- mirrors ads_seek_local.
+    // The ADS SDK numbers the buffer types ADS_RAWKEY=1 / ADS_STRINGKEY=2 /
+    // ADS_DOUBLEKEY=4 while this header numbers them 0/1/2, so a caller
+    // compiled against the SDK numbering sends 2 for a character scope and
+    // 4 for a numeric one. Trusting the constant misread 8 ASCII scope
+    // bytes as an IEEE-754 double (a character scope then matched
+    // nothing) and dropped real numeric scopes onto the raw-string path.
+    (void)usDataType;
+    auto* sc_idx = (t->order() != nullptr) ? t->order()->index() : nullptr;
+    // Strip the `ALIAS->` qualifier the way the write side does
+    // (evaluate_index_expr -> strip_alias_qualifiers); otherwise a
+    // tag built from `FIELD->ID` never resolves the field.
+    std::int32_t sc_fidx = (sc_idx != nullptr)
+        ? t->field_index(
+              openads::engine::strip_alias_qualifiers(sc_idx->expression()))
+        : -1;
+    bool sc_numeric = false;
+    bool sc_date    = false;
+    if (sc_fidx >= 0) {
+        auto sct = t->field_descriptor(
+            static_cast<std::uint16_t>(sc_fidx)).type;
+        sc_numeric = (sct == openads::drivers::DbfFieldType::Numeric ||
+                      sct == openads::drivers::DbfFieldType::Float);
+        // DBF Date only: CDX/NTX date keys are raw YYYYMMDD text. ADT
+        // AdtDate keys are ADI packed binary and stay on the string path.
+        sc_date    = (sct == openads::drivers::DbfFieldType::Date);
+    }
+    // An 8-byte buffer is ambiguous: a binary double (SAP ADS_DOUBLEKEY,
+    // or a julian day number from rddads OrdScope on a date tag) or an
+    // 8-character ASCII key ("20250620" on a date tag, right-aligned
+    // numeric text). Binary doubles essentially always carry a
+    // non-printable byte, so an all-printable buffer takes the string
+    // path; converting it would turn an ASCII scope key into a garbage
+    // double that matches nothing.
+    bool sc_ascii8 = (pucScope != nullptr && usLen == sizeof(double));
+    if (sc_ascii8) {
+        for (int bi = 0; bi < 8; ++bi) {
+            if (pucScope[bi] < 0x20 || pucScope[bi] > 0x7E) {
+                sc_ascii8 = false;
+                break;
+            }
+        }
+    }
+    if (pucScope != nullptr && usLen == sizeof(double) &&
+        !sc_ascii8 &&
+        sc_idx != nullptr &&
+        (sc_idx->key_encoding() == openads::drivers::KeyEncoding::FoxNumeric ||
+         sc_idx->key_encoding() == openads::drivers::KeyEncoding::NtxNumeric ||
+         sc_numeric || sc_date)) {
         double dv = 0;
         std::memcpy(&dv, pucScope, sizeof(double));
-        auto* idx = t->order()->index();
-        std::uint16_t klen = idx->key_length();
-        std::uint16_t fmt_w = klen;
-        std::uint16_t dec = 0;
-        if (idx->key_encoding() ==
+        std::uint16_t klen = sc_idx->key_length();
+        if (sc_idx->key_encoding() ==
             openads::drivers::KeyEncoding::FoxNumeric) {
             // Numeric CDX scope key: same 8-byte order-preserving encoding
             // as the stored keys, not ASCII.
@@ -21782,34 +21859,37 @@ UNSIGNED32 ENTRYPOINT AdsSetScope(ADSHANDLE hIndex, UNSIGNED16 usScope,
             if (!rsc) return fail(rsc.error());
             return ok();
         }
-        // Strip the `ALIAS->` qualifier the way the write side does
-        // (evaluate_index_expr -> strip_alias_qualifiers); otherwise a
-        // tag built from `FIELD->ID` never resolves the field, fmt_w
-        // stays at the stale key_length, and the numeric seek key is
-        // padded to a different width than the stored key.
-        std::int32_t fidx = t->field_index(
-            openads::engine::strip_alias_qualifiers(idx->expression()));
-        if (fidx >= 0) {
+        if (sc_idx->key_encoding() ==
+            openads::drivers::KeyEncoding::NtxNumeric) {
+            // Numeric NTX scope key: same native zero-padded encoding as
+            // the stored keys (mirrors the AdsSeek path).
+            key = openads::engine::ntx_numeric_key(dv, klen,
+                                                   sc_idx->key_decimals());
+            auto rsc = t->set_scope(usScope == ADS_TOP, key);
+            if (!rsc) return fail(rsc.error());
+            return ok();
+        }
+        if (sc_date) {
+            // DBF Date scope key: julian day number double -> raw YYYYMMDD
+            // text (mirrors the AdsSeek date path).
+            int y = 0, mo = 0, dy = 0;
+            julian_to_ymd(static_cast<SIGNED32>(dv), y, mo, dy);
+            char dbuf[16];
+            std::snprintf(dbuf, sizeof(dbuf), "%04d%02d%02d",
+                          y, mo, dy);
+            key.assign(dbuf, 8);
+            if (key.size() < klen) key.append(klen - key.size(), ' ');
+            auto rsc = t->set_scope(usScope == ADS_TOP, key);
+            if (!rsc) return fail(rsc.error());
+            return ok();
+        }
+        // Numeric ASCII-stored key: right-aligned ASCII in the field's
+        // declared width and decimals, matching the stored key bytes.
+        std::uint16_t fmt_w = klen;
+        std::uint16_t dec = 0;
+        if (sc_fidx >= 0) {
             const auto& fd = t->field_descriptor(
-                static_cast<std::uint16_t>(fidx));
-            // DBF Date key: rddads sends OrdScope() date values as a
-            // julian day number double (hb_itemGetDL) once AdsGetKeyType
-            // reports ADS_DATE. CDX/NTX date keys are raw YYYYMMDD text,
-            // so convert the julian day to that key form instead of
-            // ASCII-formatting the raw number. (ADT AdtDate keys are ADI
-            // packed binary and stay on the generic path.)
-            if (fd.type == openads::drivers::DbfFieldType::Date) {
-                int y = 0, mo = 0, dy = 0;
-                julian_to_ymd(static_cast<SIGNED32>(dv), y, mo, dy);
-                char dbuf[16];
-                std::snprintf(dbuf, sizeof(dbuf), "%04d%02d%02d",
-                              y, mo, dy);
-                key.assign(dbuf, 8);
-                if (key.size() < klen) key.append(klen - key.size(), ' ');
-                auto rsc = t->set_scope(usScope == ADS_TOP, key);
-                if (!rsc) return fail(rsc.error());
-                return ok();
-            }
+                static_cast<std::uint16_t>(sc_fidx));
             dec = static_cast<std::uint16_t>(fd.decimals);
             if (fd.length > 0)
                 fmt_w = static_cast<std::uint16_t>(fd.length);
@@ -22061,7 +22141,7 @@ UNSIGNED32 ENTRYPOINT AdsCopyTable(ADSHANDLE   hHandle,
 // SAP / rddads signature: 3 args.
 //   AdsCopyTableContents(hSrc, hDst, usFilterOption)
 //
-// usFilterOption : ADS_IGNOREFILTERS (0) / ADS_RESPECTFILTERS (1).
+// usFilterOption : ADS_RESPECTFILTERS (1) / ADS_IGNOREFILTERS (2) (SAP numbering).
 // We iterate raw records and skip the DBF tombstone byte -- that
 // matches IGNOREFILTERS (the default Harbour passes). RESPECT
 // will land alongside AOF-aware copy in a follow-up; until then
@@ -22388,8 +22468,7 @@ UNSIGNED32 ENTRYPOINT AdsClearFilter(ADSHANDLE hTable) {
     }
     Table* t = get_table(hTable);
     if (t == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
-    t->set_filter(nullptr);
-    t->set_filter_expr("");
+    t->clear_filter();   // also drops a filter-built bitmap / recno sequence
     return ok();
 }
 
@@ -38755,7 +38834,7 @@ UNSIGNED32 ENTRYPOINT AdsGetKeyLength(ADSHANDLE hIndex, UNSIGNED16* p) {
 // sequence (== the record number when no order is active). FWH's
 // xBrowse uses this (via Harbour rddads' AdsKeyNo()) as its scrollbar
 // position; a stubbed 0 left the browse unable to paint any row.
-UNSIGNED32 ENTRYPOINT AdsGetKeyNum(ADSHANDLE hObj, UNSIGNED16 /*usFilterOption*/,
+UNSIGNED32 ENTRYPOINT AdsGetKeyNum(ADSHANDLE hObj, UNSIGNED16 usFilterOption,
                         UNSIGNED32* pulKeyNum) {
     arc2_trace("AdsGetKeyNum");
     if (pulKeyNum == nullptr) return fail(openads::AE_INTERNAL_ERROR, "");
@@ -38782,6 +38861,32 @@ UNSIGNED32 ENTRYPOINT AdsGetKeyNum(ADSHANDLE hObj, UNSIGNED16 /*usFilterOption*/
     auto*         idx = ord->index();
     // CDX: O(1) via the cached ordered-recno walk.
     if (auto* cdx = dynamic_cast<openads::drivers::cdx::CdxIndex*>(idx)) {
+        // Under a scope the key number is the position INSIDE the scope
+        // (1..OrdKeyCount), as SAP ADS and DBFCDX report it. The absolute
+        // index position (e.g. 99365 for row 5 of a 9-row scope) made
+        // TXBrowse:CalcRowSelPos compute nLen - KeyNo < 0 and throw the
+        // highlight off after every mouse click. Counted like
+        // AdsGetKeyCount (SET DELETED aware) so the two always agree.
+        // Also covers the server's GetKeyNum handler, which calls this
+        // with filter option 0. ADT is included when its .adi bag runs
+        // through this CDX engine (adt_cdx_index).
+        auto& sc = ord->scope();
+        if (usFilterOption != ADS_IGNOREFILTERS &&
+            (sc.top.has_value() || sc.bottom.has_value())) {
+            std::function<bool(std::uint32_t)> live;
+            const std::function<bool(std::uint32_t)>* live_p = nullptr;
+            if (!t->show_deleted_records()) {
+                live = [t](std::uint32_t r) {
+                    auto del = t->deleted_at(r);
+                    return del && !del.value();
+                };
+                live_p = &live;
+            }
+            *pulKeyNum = cdx->scoped_key_number(sc.top.value_or(""),
+                                                sc.bottom.value_or(""),
+                                                rn, live_p);
+            return ok();
+        }
         std::uint32_t pos = cdx->pos_of_recno_cached(rn);
         *pulKeyNum = (pos == 0xFFFFFFFFu) ? 0u : (pos + 1u);
         return ok();
@@ -39761,7 +39866,30 @@ UNSIGNED32 ENTRYPOINT AdsSetFilter(ADSHANDLE hTable, UNSIGNED8* pucFilter) {
     }
     Table* t = get_table(hTable);
     if (t == nullptr) return fail(openads::AE_INTERNAL_ERROR, "no table");
-    t->set_filter_expr(openads::abi::to_internal(pucFilter, 0));
+    const std::string fexpr = openads::abi::to_internal(pucFilter, 0);
+    t->set_filter_expr(fexpr);
+    // A non-empty filter must hide the rows it rejects (SET OPTIMIZE OFF
+    // path in rddads goes through here). Evaluate it once per record into a
+    // bitmap and install it like an AOF result, so goto_top / goto_bottom /
+    // skip honour it in natural and index order alike. Single filter slot:
+    // like AdsSetAOF, this replaces any filter already set on the table.
+    bool blank = true;
+    for (char ch : fexpr) if (ch != ' ' && ch != '\t') { blank = false; break; }
+    if (!blank) {
+        const std::uint32_t n = t->record_count();
+        const bool saved_pos = !t->bof() && !t->eof();
+        const std::uint32_t saved_recno = t->recno();
+        t->set_filter(nullptr);
+        t->clear_recno_sequence();
+        std::vector<bool> bm(n, false);
+        for (std::uint32_t r = 1; r <= n; ++r) {
+            if (!t->goto_record(r)) continue;
+            bm[r - 1] = openads::engine::evaluate_index_expr_truthy(*t, fexpr);
+        }
+        t->install_aof_bitmap(std::move(bm));
+        if (saved_pos && saved_recno != 0)
+            (void)t->goto_record(saved_recno);
+    }
     return ok();
 }
 UNSIGNED32 ENTRYPOINT AdsSetFilter100(ADSHANDLE hTable, void* pvFilter,
@@ -39810,30 +39938,38 @@ UNSIGNED32 ENTRYPOINT AdsSetRelKeyPos(ADSHANDLE h, double pos) {
         openads::network::RemoteTable* rt = ri->parent;
         auto act = openads::network::remote_activate_index(ri);
         if (!act) return fail(act.error());
-        remote_ensure_rec_count(rt);
-        const std::uint32_t rc =
-            rt->rec_count_cached ? rt->cached_rec_count : 0u;
-        if (rc <= 1u) return ok();
+        // The target is a position in the active order's key walk, so
+        // scale by the scoped key count -- the same denominator
+        // remote_query_rel_key_pos uses. Scaling by the physical record
+        // count sent every position past the first to the last scoped key
+        // (TXBrowse mouse click on a scoped browse jumped to the last row).
+        const std::uint32_t kc = remote_ensure_key_count(rt);
+        if (kc == 0u) return ok();
         if (pos < 0.0) pos = 0.0;
         if (pos > 1.0) pos = 1.0;
         std::uint32_t target = static_cast<std::uint32_t>(
-            pos * static_cast<double>(rc - 1u) + 0.5) + 1u;
-        if (target > rc) target = rc;
-        return remote_goto_key_num(rt, ri, target, &rc);
+            pos * static_cast<double>(kc - 1u) + 0.5) + 1u;
+        if (target > kc) target = kc;
+        return remote_goto_key_num(rt, ri, target);
     }
     if (auto* rt = get_remote_table(h)) {
+        if (remote_table_has_index(rt)) {
+            // Scoped key count, as in the index-handle branch above.
+            const std::uint32_t kc = remote_ensure_key_count(rt);
+            if (kc == 0u) return ok();
+            if (pos < 0.0) pos = 0.0;
+            if (pos > 1.0) pos = 1.0;
+            std::uint32_t target = static_cast<std::uint32_t>(
+                pos * static_cast<double>(kc - 1u) + 0.5) + 1u;
+            if (target > kc) target = kc;
+            return remote_goto_key_num(rt, nullptr, target);
+        }
         remote_ensure_rec_count(rt);
         const std::uint32_t rc =
             rt->rec_count_cached ? rt->cached_rec_count : 0u;
         if (rc <= 1u) return ok();
         if (pos < 0.0) pos = 0.0;
         if (pos > 1.0) pos = 1.0;
-        if (remote_table_has_index(rt)) {
-            std::uint32_t target = static_cast<std::uint32_t>(
-                pos * static_cast<double>(rc - 1u) + 0.5) + 1u;
-            if (target > rc) target = rc;
-            return remote_goto_key_num(rt, nullptr, target, &rc);
-        }
         std::uint32_t rn = static_cast<std::uint32_t>(
             pos * static_cast<double>(rc - 1u) + 0.5) + 1u;
         if (rn < 1u) rn = 1u;

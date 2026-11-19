@@ -2070,6 +2070,51 @@ std::uint32_t CdxIndex::count_scoped_keys(
     return count;
 }
 
+std::uint32_t CdxIndex::scoped_key_number(
+    const std::string& top,
+    const std::string& bottom,
+    std::uint32_t recno,
+    const std::function<bool(std::uint32_t recno)>* include_recno) {
+    (void)reload_header_if_changed_();
+    std::uint32_t  s_leaf    = cur_leaf_;
+    std::int32_t   s_index   = cur_index_;
+    CurState       s_state   = cur_state_;
+    auto           s_decoded = cur_decoded_;
+    std::string    s_key     = current_key_;
+
+    std::uint32_t count = 0, found = 0;
+    auto r = top.empty() ? seek_first() : seek_key(top, /*soft=*/true);
+    if (r && r.value().positioned) {
+        auto cur = r.value();
+        while (cur.positioned) {
+            std::string key = current_key();
+            if (!bottom.empty()) {
+                const std::size_t bn =
+                    std::min<std::size_t>(bottom.size(), key_size_);
+                if (compare_keys_(key.data(), bottom.data(), bn) > 0) break;
+            }
+            const bool inc =
+                include_recno == nullptr || (*include_recno)(cur.recno);
+            if (inc) ++count;
+            if (cur.recno == recno) {
+                if (inc) found = count;
+                break;
+            }
+            auto nx = next();
+            if (!nx) break;
+            cur = nx.value();
+        }
+    }
+
+    cur_leaf_    = s_leaf;
+    cur_index_   = s_index;
+    cur_state_   = s_state;
+    cur_decoded_ = std::move(s_decoded);
+    current_key_ = std::move(s_key);
+
+    return found;
+}
+
 std::uint32_t CdxIndex::pos_of_recno_cached(std::uint32_t recno) {
     ordered_recnos_cached();
     auto it = pos_map_.find(recno);

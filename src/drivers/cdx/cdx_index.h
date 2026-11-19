@@ -186,6 +186,16 @@ public:
         const std::string& bottom,
         const std::function<bool(std::uint32_t recno)>* include_recno =
             nullptr);
+    // 1-based position of `recno` within the scope range, counted exactly
+    // like count_scoped_keys (same walk, same include_recno filter), so
+    // OrdKeyNo agrees with OrdKeyCount under a scope. 0 when recno is
+    // outside the range. Saves/restores cursor state.
+    std::uint32_t scoped_key_number(
+        const std::string& top,
+        const std::string& bottom,
+        std::uint32_t recno,
+        const std::function<bool(std::uint32_t recno)>* include_recno =
+            nullptr);
     // 0-based position of recno in key order, or 0xFFFFFFFF if absent.
     std::uint32_t pos_of_recno_cached(std::uint32_t recno);
     void invalidate_pos_cache() {

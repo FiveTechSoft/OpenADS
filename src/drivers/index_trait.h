@@ -32,8 +32,17 @@ struct SeekOutcome {
 };
 
 class IIndex {
+    bool record_reanchor_pending_ = false;
 public:
     virtual ~IIndex() = default;
+
+    // GoCold key maintenance can invalidate this view's cursor. Keep the
+    // obligation with the view (including parked tags), not the table's
+    // current order. A replacement index starts with no inherited state.
+    bool record_reanchor_pending() const noexcept { return record_reanchor_pending_; }
+    void require_record_reanchor(bool pending = true) noexcept {
+        record_reanchor_pending_ = pending;
+    }
 
     virtual util::Result<void>
         open(const std::string& path, IndexOpenMode mode) = 0;

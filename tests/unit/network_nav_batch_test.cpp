@@ -22,6 +22,7 @@
 #include "openads/ace.h"
 
 #include <cstring>
+#include <cstdlib>
 #include <filesystem>
 #include <string>
 
@@ -750,13 +751,34 @@ TEST_CASE("Reposition truth: Seek miss certifies EOF locally") {
     s.stop();
 }
 
+struct NbCountPolicy {
+    std::string previous;
+    bool existed;
+    explicit NbCountPolicy(const char* value) {
+        const char* p = std::getenv("OPENADS_FRESH_COUNTS");
+        existed = p != nullptr;
+        if (p) previous = p;
+        set(value);
+    }
+    static void set(const char* value) {
+#ifdef _WIN32
+        _putenv_s("OPENADS_FRESH_COUNTS", value ? value : "");
+#else
+        if (value) setenv("OPENADS_FRESH_COUNTS", value, 1);
+        else unsetenv("OPENADS_FRESH_COUNTS");
+#endif
+    }
+    ~NbCountPolicy() { set(existed ? previous.c_str() : nullptr); }
+};
+
 UNSIGNED32 nb_reccount(ADSHANDLE hTable) {
     UNSIGNED32 v = 0;
     REQUIRE(AdsGetRecordCount(hTable, 0, &v) == AE_SUCCESS);
     return v;
 }
 
-TEST_CASE("Count truth: nav ack certifies the record count") {
+TEST_CASE("Count truth: shared calls refresh instead of trusting nav snapshots") {
+    NbCountPolicy policy("1");
     nb_wipe();
     auto dir = nb_tmp_dir();
     nb_seed(dir, "cnt.dbf", 3);
@@ -766,14 +788,13 @@ TEST_CASE("Count truth: nav ack certifies the record count") {
     ADSHANDLE hConn = nb_connect_remote(dir, s.port());
     ADSHANDLE hTable = nb_open(hConn, "cnt.dbf");
 
-    // The USE flow (open, position, count) pays no count frame: the
-    // nav ack certified it. (Bottom, not top: the open's implicit
-    // GoTop dedupes a repeat top with no ack and no tail.)
+    // A nav count is a cursor snapshot, not a cross-session freshness
+    // certificate. Shared physical counts must refresh on each call.
     const std::uint64_t rc0 = nb_op(kOpGetRecordCount);
     REQUIRE(AdsGotoBottom(hTable) == AE_SUCCESS);
     CHECK(nb_reccount(hTable) == 3u);
     CHECK(nb_reccount(hTable) == 3u);
-    CHECK(nb_op(kOpGetRecordCount) == rc0);
+    CHECK(nb_op(kOpGetRecordCount) == rc0 + 2);
 
     REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
     REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
@@ -808,6 +829,199 @@ TEST_CASE("Phantom RecNo derives from flags plus cached count") {
     REQUIRE(AdsCloseTable(hB) == AE_SUCCESS);
     REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
     s.stop();
+}
+
+TEST_CASE("mtfix33 shared physical count sees another session append without navigation") {
+    NbCountPolicy policy("1");
+    nb_wipe();
+    auto dir = nb_tmp_dir();
+    nb_seed(dir, "fresh.dbf", 3);
+    openads::network::Server s;
+    REQUIRE(s.start("127.0.0.1", 0).has_value());
+    ADSHANDLE ca = nb_connect_remote(dir, s.port());
+    ADSHANDLE cb = nb_connect_remote(dir, s.port());
+    ADSHANDLE a = nb_open(ca, "fresh.dbf");
+    ADSHANDLE b = nb_open(cb, "fresh.dbf");
+    REQUIRE(AdsGotoBottom(a) == AE_SUCCESS);
+    CHECK(nb_reccount(a) == 3u);
+    REQUIRE(AdsAppendRecord(b) == AE_SUCCESS);
+    REQUIRE(AdsWriteRecord(b) == AE_SUCCESS);
+    CHECK(nb_reccount(a) == 4u);
+    CHECK(nb_reccount(a) == 4u);
+    // A's independent cursor did not move when B appended.
+    CHECK(nb_recno(a) == 3u);
+    REQUIRE(AdsCloseTable(b) == AE_SUCCESS);
+    REQUIRE(AdsDisconnect(cb) == AE_SUCCESS);
+    REQUIRE(AdsCloseTable(a) == AE_SUCCESS);
+    REQUIRE(AdsDisconnect(ca) == AE_SUCCESS);
+    s.stop();
+}
+
+TEST_CASE("mtfix33 count refreshes across sibling workareas even under exclusive open") {
+    NbCountPolicy policy("1");
+    nb_wipe();
+    auto dir = nb_tmp_dir();
+    nb_seed(dir, "sibling.dbf", 3);
+    openads::network::Server s;
+    REQUIRE(s.start("127.0.0.1", 0).has_value());
+    ADSHANDLE c = nb_connect_remote(dir, s.port());
+    ADSHANDLE a = 0;
+    UNSIGNED8 name[] = "sibling.dbf";
+    REQUIRE(AdsOpenTable(c, name, nullptr, ADS_CDX, ADS_ANSI,
+                         ADS_COMPATIBLE_LOCKING, ADS_IGNORERIGHTS,
+                         ADS_EXCLUSIVE, &a) == AE_SUCCESS);
+    ADSHANDLE b = nb_open(c, "sibling.dbf");
+    CHECK(nb_reccount(a) == 3u);
+    REQUIRE(AdsAppendRecord(b) == AE_SUCCESS);
+    REQUIRE(AdsWriteRecord(b) == AE_SUCCESS);
+    CHECK(nb_reccount(a) == 4u);
+    REQUIRE(AdsCloseTable(b) == AE_SUCCESS);
+    REQUIRE(AdsCloseTable(a) == AE_SUCCESS);
+    REQUIRE(AdsDisconnect(c) == AE_SUCCESS);
+    s.stop();
+}
+
+TEST_CASE("mtfix33 shared count observes local DBFCDX append and peer zap") {
+    NbCountPolicy policy("1");
+    nb_wipe();
+    auto dir = nb_tmp_dir();
+    nb_seed(dir, "local.dbf", 3);
+    openads::network::Server s;
+    REQUIRE(s.start("127.0.0.1", 0).has_value());
+    ADSHANDLE c = nb_connect_remote(dir, s.port());
+    ADSHANDLE a = nb_open(c, "local.dbf");
+    CHECK(nb_reccount(a) == 3u);
+    UNSIGNED8 path[512]{};
+    std::memcpy(path, dir.string().c_str(), dir.string().size());
+    ADSHANDLE local = 0, b = 0;
+    REQUIRE(AdsConnect60(path, ADS_LOCAL_SERVER, nullptr, nullptr, 0, &local) == AE_SUCCESS);
+    b = nb_open(local, "local.dbf");
+    REQUIRE(AdsAppendRecord(b) == AE_SUCCESS);
+    REQUIRE(AdsWriteRecord(b) == AE_SUCCESS);
+    CHECK(nb_reccount(a) == 4u);
+    REQUIRE(AdsZapTable(b) == AE_SUCCESS);
+    CHECK(nb_reccount(a) == 0u);
+    REQUIRE(AdsCloseTable(b) == AE_SUCCESS);
+    REQUIRE(AdsDisconnect(local) == AE_SUCCESS);
+    REQUIRE(AdsCloseTable(a) == AE_SUCCESS);
+    REQUIRE(AdsDisconnect(c) == AE_SUCCESS);
+    s.stop();
+}
+
+TEST_CASE("mtfix34 ordered relative-position reads do not fetch unused physical counts") {
+    NbCountPolicy policy("1");
+    nb_wipe();
+    auto dir = nb_tmp_dir();
+    nb_seed_ord(dir);
+    openads::network::Server s;
+    REQUIRE(s.start("127.0.0.1", 0).has_value());
+    ADSHANDLE c = nb_connect_remote(dir, s.port());
+    ADSHANDLE t = nb_open(c, "ord.dbf");
+    UNSIGNED8 tag[] = "BYID";
+    ADSHANDLE i = 0;
+    REQUIRE(AdsGetIndexHandle(t, tag, &i) == AE_SUCCESS);
+    REQUIRE(AdsSetIndexOrderByHandle(t, i) == AE_SUCCESS);
+    REQUIRE(AdsGotoBottom(i) == AE_SUCCESS);
+    const auto before = nb_op(kOpGetRecordCount);
+    double pos = 0;
+    for (int n = 0; n < 10; ++n) {
+        REQUIRE(AdsGetRelKeyPos(t, &pos) == AE_SUCCESS);
+        CHECK(pos == doctest::Approx(1.0));
+    }
+    CHECK(nb_op(kOpGetRecordCount) == before);
+    REQUIRE(AdsSetRelKeyPos(t, 0.5) == AE_SUCCESS);
+    // Target math scales by the scoped key count (mtfix34 principle:
+    // ordered position uses the key count, not the physical count), so
+    // no physical record count is fetched at all here.
+    CHECK(nb_op(kOpGetRecordCount) == before);
+    CHECK(nb_recno(t) == 3u);
+    CHECK(nb_reccount(t) == 3u);
+    CHECK(nb_op(kOpGetRecordCount) == before + 1);
+    REQUIRE(AdsCloseTable(t) == AE_SUCCESS);
+    REQUIRE(AdsDisconnect(c) == AE_SUCCESS);
+    s.stop();
+}
+
+TEST_CASE("mtfix34 natural relative-position uses one fresh count per operation") {
+    NbCountPolicy policy("1");
+    nb_wipe();
+    auto dir = nb_tmp_dir();
+    nb_seed(dir, "rel.dbf", 3);
+    openads::network::Server s;
+    REQUIRE(s.start("127.0.0.1", 0).has_value());
+    ADSHANDLE c = nb_connect_remote(dir, s.port());
+    ADSHANDLE t = nb_open(c, "rel.dbf");
+    REQUIRE(AdsGotoBottom(t) == AE_SUCCESS);
+    auto before = nb_op(kOpGetRecordCount);
+    double pos = 0;
+    REQUIRE(AdsGetRelKeyPos(t, &pos) == AE_SUCCESS);
+    CHECK(pos == doctest::Approx(1.0));
+    CHECK(nb_op(kOpGetRecordCount) == before + 1);
+    before = nb_op(kOpGetRecordCount);
+    REQUIRE(AdsSetRelKeyPos(t, 0.5) == AE_SUCCESS);
+    CHECK(nb_op(kOpGetRecordCount) == before + 1);
+    CHECK(nb_recno(t) == 2u);
+    ADSHANDLE peer = nb_connect_remote(dir, s.port());
+    ADSHANDLE b = nb_open(peer, "rel.dbf");
+    REQUIRE(AdsAppendRecord(b) == AE_SUCCESS);
+    REQUIRE(AdsWriteRecord(b) == AE_SUCCESS);
+    REQUIRE(AdsGetRelKeyPos(t, &pos) == AE_SUCCESS);
+    CHECK(pos == doctest::Approx(1.0 / 3.0));
+    CHECK(nb_reccount(t) == 4u);
+    REQUIRE(AdsCloseTable(b) == AE_SUCCESS);
+    REQUIRE(AdsDisconnect(peer) == AE_SUCCESS);
+    REQUIRE(AdsCloseTable(t) == AE_SUCCESS);
+    REQUIRE(AdsDisconnect(c) == AE_SUCCESS);
+    s.stop();
+}
+
+TEST_CASE("mtfix35 remote physical count forwards disk refresh errors without stale output") {
+    NbCountPolicy policy("1");
+    nb_wipe();
+    const auto dir = nb_tmp_dir();
+    nb_seed(dir, "error.dbf", 3);
+    openads::network::Server s;
+    REQUIRE(s.start("127.0.0.1", 0).has_value());
+    const auto c = nb_connect_remote(dir, s.port());
+    const auto a = nb_open(c, "error.dbf");
+    CHECK(nb_reccount(a) == 3u);
+    fs::resize_file(dir / "error.dbf", 4);
+    UNSIGNED32 count = 0xDEADBEEFu;
+    CHECK(AdsGetRecordCount(a, ADS_IGNOREFILTERS, &count) == 5103);
+    CHECK(count == 0xDEADBEEFu);
+    CHECK(AdsCloseTable(a) == AE_SUCCESS);
+    CHECK(AdsDisconnect(c) == AE_SUCCESS);
+    s.stop();
+}
+
+TEST_CASE("mtfix37 default compatibility reuses count and fresh opt-in sees peer append") {
+    NbCountPolicy policy(nullptr);
+    nb_wipe();
+    const auto dir = nb_tmp_dir();
+    nb_seed(dir, "compat.dbf", 3);
+    openads::network::Server server;
+    REQUIRE(server.start("127.0.0.1", 0).has_value());
+    const auto connection = nb_connect_remote(dir, server.port());
+    const auto table = nb_open(connection, "compat.dbf");
+    CHECK(nb_reccount(table) == 3);
+    const auto before = nb_op(kOpGetRecordCount);
+    CHECK(nb_reccount(table) == 3);
+    CHECK(nb_op(kOpGetRecordCount) == before);
+    const auto peer = nb_connect_remote(dir, server.port());
+    const auto writer = nb_open(peer, "compat.dbf");
+    REQUIRE(AdsAppendRecord(writer) == AE_SUCCESS);
+    REQUIRE(AdsWriteRecord(writer) == AE_SUCCESS);
+    CHECK(nb_reccount(table) == 3); // documented compatibility risk
+    CHECK(nb_op(kOpGetRecordCount) == before);
+    NbCountPolicy::set("1");
+    CHECK(nb_reccount(table) == 4);
+    CHECK(nb_reccount(table) == 4);
+    CHECK(nb_op(kOpGetRecordCount) == before + 2);
+    REQUIRE(AdsCloseTable(writer) == AE_SUCCESS);
+    REQUIRE(AdsDisconnect(peer) == AE_SUCCESS);
+    REQUIRE(AdsCloseTable(table) == AE_SUCCESS);
+    REQUIRE(AdsDisconnect(connection) == AE_SUCCESS);
+    server.stop();
 }
 
 namespace {
@@ -846,17 +1060,18 @@ TEST_CASE("Position count: ordered reads skip unused physical count") {
     REQUIRE(AdsGetRelKeyPos(index, &position) == AE_SUCCESS);
     CHECK(position == doctest::Approx(1.0));
     CHECK(nb_op(kOpGetRecordCount) == before);
-    // Preserve existing setter math: one physical snapshot supplies the
-    // target, while nested ordered navigation uses its scoped key count.
+    // The scoped setter uses the key count, not a physical snapshot.
+    // Preserve the parent's forced-cache-invalidation coverage while
+    // retaining that newer fork behavior.
     before = nb_op(kOpGetRecordCount);
     nb_uncache_physical(table);
     REQUIRE(AdsSetRelKeyPos(table, 0.5) == AE_SUCCESS);
     CHECK(nb_recno(table) == 3);
-    CHECK(nb_op(kOpGetRecordCount) == before + 1);
+    CHECK(nb_op(kOpGetRecordCount) == before);
     nb_uncache_physical(table);
     REQUIRE(AdsSetRelKeyPos(index, 0.5) == AE_SUCCESS);
     CHECK(nb_recno(table) == 3);
-    CHECK(nb_op(kOpGetRecordCount) == before + 2);
+    CHECK(nb_op(kOpGetRecordCount) == before);
     // A scoped order has fewer keys than physical records. The getter must
     // use the scoped denominator; setter targets must still clamp to it.
     double low = 10.0, high = 20.0;
@@ -875,7 +1090,7 @@ TEST_CASE("Position count: ordered reads skip unused physical count") {
     nb_uncache_physical(table);
     REQUIRE(AdsSetRelKeyPos(index, 1.0) == AE_SUCCESS);
     CHECK(nb_recno(table) == 3);
-    CHECK(nb_op(kOpGetRecordCount) == before + 1);
+    CHECK(nb_op(kOpGetRecordCount) == before);
     REQUIRE(AdsClearScope(index, ADS_TOP) == AE_SUCCESS);
     REQUIRE(AdsClearScope(index, ADS_BOTTOM) == AE_SUCCESS);
     REQUIRE(AdsCloseTable(table) == AE_SUCCESS);

@@ -87,6 +87,17 @@ public:
     bool is_table_locked() const noexcept {
         return table_lock_.has_value();
     }
+    // Wire-mirror FLock for the server's parallel ABI twin (see
+    // Session::LockTable/ensure_abi_handle): the session's engine Table
+    // already holds the real OS FLock byte on this file in this process,
+    // so the twin marks the same whole-file coverage WITHOUT a second OS
+    // lock (Windows rejects a same-byte overlap from another handle).
+    // A default LockHandle has offset 0 - the same virtual marker the
+    // FLock-suspended record locks use; unlock_table resets it without an
+    // OS unlock.
+    void adopt_virtual_table_lock() noexcept {
+        if (!table_lock_) table_lock_ = LockHandle{};
+    }
     std::uint16_t lock_count() const noexcept {
         return static_cast<std::uint16_t>(recno_locks_.size());
     }
@@ -359,6 +370,7 @@ public:
     void clear_recno_sequence() noexcept {
         recno_sequence_.clear(); sequence_idx_ = -1;
         recno_sequence_active_ = false;
+        aof_seq_order_built_ = false;
     }
     bool has_recno_sequence() const noexcept {
         return !recno_sequence_.empty();
@@ -415,6 +427,7 @@ public:
         // The bitmap moves into the closure; navigation state
         // owns it from this point on.
         aof_active_ = true;
+        aof_seq_order_built_ = false;   // re-sort to the active order lazily
         auto p = std::make_shared<std::vector<bool>>(std::move(bm));
         // Keep a retained copy so AdsCustomizeAOF can flip individual
         // record bits and reinstall without re-evaluating the filter.
@@ -721,6 +734,13 @@ private:
     std::uint64_t                                 live_gen_       = 0;
     bool                                          last_seek_found_ = false;
     bool                                          aof_active_      = false;
+    // The AOF recno sequence is built in record order. When an index order
+    // is active it is re-sorted into that order lazily (sync_aof_sequence_order_),
+    // keyed by the controlling index and traverse direction it was built for.
+    bool                                          aof_seq_order_built_ = false;
+    const void*                                   aof_seq_order_key_   = nullptr;
+    bool                                          aof_seq_order_desc_  = false;
+    void sync_aof_sequence_order_();
     bool                                          transaction_free_ = false;
     int                                           aof_opt_level_   = 0;
     std::string                                   filter_expr_;    // source filter expression string

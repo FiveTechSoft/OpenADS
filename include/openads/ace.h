@@ -863,9 +863,17 @@ UNSIGNED32 ENTRYPOINT AdsExecuteSQLDirectW  (ADSHANDLE hStatement, UNSIGNED16* p
 #define ADS_OEM            2
 
 // Filter / scope flags.
-#define ADS_RESPECTSCOPES   1
-#define ADS_RESPECTFILTERS  2
-#define ADS_IGNOREFILTERS   3
+// SAP ACE / Harbour ads.ch numbering. An earlier OpenADS header numbered
+// these 1/2/3 in a different order, so a client compiled against the SAP
+// values (rddads) was read with the wrong meaning (its RESPECTSCOPES 3
+// arrived as our "ignore filters"). The value never crosses the wire, so
+// this only aligns the in-process meaning between the app and the DLL.
+// Supported behavior: the SAP values are the contract. A caller compiled
+// against the old OpenADS numbering for these three options must rebuild;
+// nothing else in the exported ABI changes.
+#define ADS_RESPECTFILTERS  1
+#define ADS_IGNOREFILTERS   2
+#define ADS_RESPECTSCOPES   3
 #define ADS_IGNORERIGHTS    4
 // ADS_HARDSEEK is the OPPOSITE of ADS_SOFTSEEK (defined at line 320 as 1).
 // rddads passes one or the other to AdsSeek* etc. as a single bit-flag.
