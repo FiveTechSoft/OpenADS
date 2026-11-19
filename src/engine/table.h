@@ -740,6 +740,9 @@ private:
     bool                                          aof_seq_order_built_ = false;
     const void*                                   aof_seq_order_key_   = nullptr;
     bool                                          aof_seq_order_desc_  = false;
+    // Index content revision the cached sequence was built against;
+    // nullopt forces a rebuild (driver cannot report one).
+    std::optional<std::uint64_t>                  aof_seq_order_rev_;
     void sync_aof_sequence_order_();
     bool                                          transaction_free_ = false;
     int                                           aof_opt_level_   = 0;

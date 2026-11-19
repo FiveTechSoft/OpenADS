@@ -548,8 +548,17 @@ void Table::sync_aof_sequence_order_() {
     const void* key = (order_ && order_->index())
         ? static_cast<const void*>(order_->index()) : nullptr;
     const bool desc = key != nullptr && order_->descending_traverse();
+    // Index-content revision: a key edit (this handle's commit, or a peer
+    // observed through refresh_from_disk) changes the order the sequence
+    // was sorted by, so the cached sequence must be rebuilt. A driver
+    // that cannot report a revision (nullopt) always rebuilds; with no
+    // index order there is nothing to re-sort against.
+    const std::optional<std::uint64_t> rev =
+        key != nullptr ? order_->index()->content_revision()
+                       : std::optional<std::uint64_t>{0};
     if (aof_seq_order_built_ && key == aof_seq_order_key_ &&
-        desc == aof_seq_order_desc_) return;
+        desc == aof_seq_order_desc_ && rev.has_value() &&
+        rev == aof_seq_order_rev_) return;
     std::vector<std::uint32_t> seq;
     if (key == nullptr) {
         for (std::size_t i = 0; i < aof_bitmap_.size(); ++i)
@@ -580,6 +589,7 @@ void Table::sync_aof_sequence_order_() {
     aof_seq_order_built_ = true;
     aof_seq_order_key_   = key;
     aof_seq_order_desc_  = desc;
+    aof_seq_order_rev_   = rev;
     sequence_idx_ = -1;
     if (state_ == State::Positioned && recno_ != 0) {
         auto it = std::find(recno_sequence_.begin(), recno_sequence_.end(), recno_);

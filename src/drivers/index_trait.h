@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -96,6 +97,15 @@ public:
     // become visible. Default no-op; CdxIndex drops clean page-cache pages
     // when the sub-tag counter / root changes. Call before navigation.
     virtual void refresh_from_disk() {}
+
+    // Content revision for caches keyed on index order (the AOF sequence
+    // cache). The driver bumps it on every content mutation it performs or
+    // detects: own writes, and peer rewrites seen via refresh_from_disk.
+    // std::nullopt = the driver cannot report one; callers must treat that
+    // as "always changed" and rebuild rather than risk a stale view.
+    virtual std::optional<std::uint64_t> content_revision() const {
+        return std::nullopt;
+    }
 
     virtual std::string current_key() const = 0;
 
