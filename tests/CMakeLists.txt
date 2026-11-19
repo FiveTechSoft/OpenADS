@@ -115,6 +115,7 @@ add_executable(openads_unit_tests
     unit/abi_index_create_settle_test.cpp
     unit/abi_deleted_scope_test.cpp
     unit/abi_scope_keynum_test.cpp
+    unit/abi_scope_keytype_test.cpp
     unit/abi_remote_logical_write_test.cpp
     unit/abi_create_concurrent_test.cpp
     unit/abi_remote_create_stress_test.cpp

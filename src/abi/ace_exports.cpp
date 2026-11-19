@@ -21797,16 +21797,60 @@ UNSIGNED32 ENTRYPOINT AdsSetScope(ADSHANDLE hIndex, UNSIGNED16 usScope,
     Table* t = table_for_index(hIndex);
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown index");
     std::string key;
-    if (usDataType == ADS_DOUBLEKEY && usLen == sizeof(double) &&
-        pucScope != nullptr &&
-        t->order() != nullptr && t->order()->index() != nullptr) {
+    // Scope keys are detected from the ACTIVE INDEX's real key type plus
+    // the buffer length, not from usDataType -- mirrors ads_seek_local.
+    // The ADS SDK numbers the buffer types ADS_RAWKEY=1 / ADS_STRINGKEY=2 /
+    // ADS_DOUBLEKEY=4 while this header numbers them 0/1/2, so a caller
+    // compiled against the SDK numbering sends 2 for a character scope and
+    // 4 for a numeric one. Trusting the constant misread 8 ASCII scope
+    // bytes as an IEEE-754 double (a character scope then matched
+    // nothing) and dropped real numeric scopes onto the raw-string path.
+    (void)usDataType;
+    auto* sc_idx = (t->order() != nullptr) ? t->order()->index() : nullptr;
+    // Strip the `ALIAS->` qualifier the way the write side does
+    // (evaluate_index_expr -> strip_alias_qualifiers); otherwise a
+    // tag built from `FIELD->ID` never resolves the field.
+    std::int32_t sc_fidx = (sc_idx != nullptr)
+        ? t->field_index(
+              openads::engine::strip_alias_qualifiers(sc_idx->expression()))
+        : -1;
+    bool sc_numeric = false;
+    bool sc_date    = false;
+    if (sc_fidx >= 0) {
+        auto sct = t->field_descriptor(
+            static_cast<std::uint16_t>(sc_fidx)).type;
+        sc_numeric = (sct == openads::drivers::DbfFieldType::Numeric ||
+                      sct == openads::drivers::DbfFieldType::Float);
+        // DBF Date only: CDX/NTX date keys are raw YYYYMMDD text. ADT
+        // AdtDate keys are ADI packed binary and stay on the string path.
+        sc_date    = (sct == openads::drivers::DbfFieldType::Date);
+    }
+    // An 8-byte buffer is ambiguous: a binary double (SAP ADS_DOUBLEKEY,
+    // or a julian day number from rddads OrdScope on a date tag) or an
+    // 8-character ASCII key ("20250620" on a date tag, right-aligned
+    // numeric text). Binary doubles essentially always carry a
+    // non-printable byte, so an all-printable buffer takes the string
+    // path; converting it would turn an ASCII scope key into a garbage
+    // double that matches nothing.
+    bool sc_ascii8 = (pucScope != nullptr && usLen == sizeof(double));
+    if (sc_ascii8) {
+        for (int bi = 0; bi < 8; ++bi) {
+            if (pucScope[bi] < 0x20 || pucScope[bi] > 0x7E) {
+                sc_ascii8 = false;
+                break;
+            }
+        }
+    }
+    if (pucScope != nullptr && usLen == sizeof(double) &&
+        !sc_ascii8 &&
+        sc_idx != nullptr &&
+        (sc_idx->key_encoding() == openads::drivers::KeyEncoding::FoxNumeric ||
+         sc_idx->key_encoding() == openads::drivers::KeyEncoding::NtxNumeric ||
+         sc_numeric || sc_date)) {
         double dv = 0;
         std::memcpy(&dv, pucScope, sizeof(double));
-        auto* idx = t->order()->index();
-        std::uint16_t klen = idx->key_length();
-        std::uint16_t fmt_w = klen;
-        std::uint16_t dec = 0;
-        if (idx->key_encoding() ==
+        std::uint16_t klen = sc_idx->key_length();
+        if (sc_idx->key_encoding() ==
             openads::drivers::KeyEncoding::FoxNumeric) {
             // Numeric CDX scope key: same 8-byte order-preserving encoding
             // as the stored keys, not ASCII.
@@ -21815,34 +21859,37 @@ UNSIGNED32 ENTRYPOINT AdsSetScope(ADSHANDLE hIndex, UNSIGNED16 usScope,
             if (!rsc) return fail(rsc.error());
             return ok();
         }
-        // Strip the `ALIAS->` qualifier the way the write side does
-        // (evaluate_index_expr -> strip_alias_qualifiers); otherwise a
-        // tag built from `FIELD->ID` never resolves the field, fmt_w
-        // stays at the stale key_length, and the numeric seek key is
-        // padded to a different width than the stored key.
-        std::int32_t fidx = t->field_index(
-            openads::engine::strip_alias_qualifiers(idx->expression()));
-        if (fidx >= 0) {
+        if (sc_idx->key_encoding() ==
+            openads::drivers::KeyEncoding::NtxNumeric) {
+            // Numeric NTX scope key: same native zero-padded encoding as
+            // the stored keys (mirrors the AdsSeek path).
+            key = openads::engine::ntx_numeric_key(dv, klen,
+                                                   sc_idx->key_decimals());
+            auto rsc = t->set_scope(usScope == ADS_TOP, key);
+            if (!rsc) return fail(rsc.error());
+            return ok();
+        }
+        if (sc_date) {
+            // DBF Date scope key: julian day number double -> raw YYYYMMDD
+            // text (mirrors the AdsSeek date path).
+            int y = 0, mo = 0, dy = 0;
+            julian_to_ymd(static_cast<SIGNED32>(dv), y, mo, dy);
+            char dbuf[16];
+            std::snprintf(dbuf, sizeof(dbuf), "%04d%02d%02d",
+                          y, mo, dy);
+            key.assign(dbuf, 8);
+            if (key.size() < klen) key.append(klen - key.size(), ' ');
+            auto rsc = t->set_scope(usScope == ADS_TOP, key);
+            if (!rsc) return fail(rsc.error());
+            return ok();
+        }
+        // Numeric ASCII-stored key: right-aligned ASCII in the field's
+        // declared width and decimals, matching the stored key bytes.
+        std::uint16_t fmt_w = klen;
+        std::uint16_t dec = 0;
+        if (sc_fidx >= 0) {
             const auto& fd = t->field_descriptor(
-                static_cast<std::uint16_t>(fidx));
-            // DBF Date key: rddads sends OrdScope() date values as a
-            // julian day number double (hb_itemGetDL) once AdsGetKeyType
-            // reports ADS_DATE. CDX/NTX date keys are raw YYYYMMDD text,
-            // so convert the julian day to that key form instead of
-            // ASCII-formatting the raw number. (ADT AdtDate keys are ADI
-            // packed binary and stay on the generic path.)
-            if (fd.type == openads::drivers::DbfFieldType::Date) {
-                int y = 0, mo = 0, dy = 0;
-                julian_to_ymd(static_cast<SIGNED32>(dv), y, mo, dy);
-                char dbuf[16];
-                std::snprintf(dbuf, sizeof(dbuf), "%04d%02d%02d",
-                              y, mo, dy);
-                key.assign(dbuf, 8);
-                if (key.size() < klen) key.append(klen - key.size(), ' ');
-                auto rsc = t->set_scope(usScope == ADS_TOP, key);
-                if (!rsc) return fail(rsc.error());
-                return ok();
-            }
+                static_cast<std::uint16_t>(sc_fidx));
             dec = static_cast<std::uint16_t>(fd.decimals);
             if (fd.length > 0)
                 fmt_w = static_cast<std::uint16_t>(fd.length);
