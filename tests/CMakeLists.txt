@@ -112,6 +112,9 @@ add_executable(openads_unit_tests
     unit/abi_remote_create_table_test.cpp
     unit/tim_items_test.cpp
     unit/dbf_numeric_text_write_test.cpp
+    unit/abi_index_create_settle_test.cpp
+    unit/abi_deleted_scope_test.cpp
+    unit/abi_scope_keynum_test.cpp
     unit/abi_remote_logical_write_test.cpp
     unit/abi_create_concurrent_test.cpp
     unit/abi_remote_create_stress_test.cpp
@@ -146,6 +149,7 @@ add_executable(openads_unit_tests
     unit/abi_scope_partial_key_test.cpp
     unit/abi_seek_last_partial_test.cpp
     unit/abi_aof_index_agreement_test.cpp
+    unit/abi_aof_index_order_test.cpp
     unit/abi_aof_empty_result_test.cpp
     unit/abi_adi_prefix_seek_multilevel_test.cpp
     unit/abi_prefix_seek_deleted_test.cpp
@@ -153,6 +157,7 @@ add_executable(openads_unit_tests
     unit/cdx_prev_empty_leaf_test.cpp
     unit/cdx_empty_tree_test.cpp
     unit/abi_ntx_numeric_edge_test.cpp
+    unit/abi_remote_memo_position_test.cpp
     unit/abi_memo_large_test.cpp
     unit/abi_ordsetfocus_test.cpp
     unit/abi_seek_empty_test.cpp
@@ -187,6 +192,7 @@ add_executable(openads_unit_tests
     unit/abi_cdx_str_val_compound_test.cpp
     unit/abi_cdx_issue131_test.cpp
     unit/abi_ordnumber_test.cpp
+    unit/abi_index_handle_out_of_range_test.cpp
     unit/abi_server_info_test.cpp
     unit/abi_unicode_test.cpp
     unit/abi_lock_retry_test.cpp
@@ -339,6 +345,7 @@ add_executable(openads_unit_tests
     unit/network_client_test.cpp
     unit/abi_dd_invoicing_test.cpp
     unit/abi_fetch_where_test.cpp
+    unit/abi_dirty_key_skip_test.cpp
     unit/network_setfields_test.cpp
     unit/network_open_warm_test.cpp
     unit/network_version_test.cpp
@@ -358,6 +365,7 @@ add_executable(openads_unit_tests
     unit/abi_remote_locked_row_test.cpp
     unit/abi_remote_lock_introspection_test.cpp
     unit/network_exclusive_open_test.cpp
+    unit/network_append_lock_ledger_test.cpp
     unit/backend_tier1_test.cpp
     unit/abi_oads_file_funcs_test.cpp
     unit/abi_create_index_path_test.cpp

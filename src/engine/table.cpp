@@ -306,6 +306,13 @@ util::Result<void> Table::sync_all_indexes_(
         const std::string& cond = idx->condition();
         const bool include =
             cond.empty() || evaluate_index_expr_truthy(*this, cond);
+        // A key replacement invalidates the B-tree cursor. Refresh the
+        // physical row's NEW key after all index maintenance, as Harbour
+        // hb_cdxCurKeyRefresh does before Skip. Also covers explicit
+        // WriteRecord followed by Skip: the edit need not still be hot.
+        if (!include) idx->require_record_reanchor(false);
+        else if (!s.prev_included || prev_key != new_key)
+            idx->require_record_reanchor();
         // Erase prior (recno, prev_key).
         //
         // On a genuine UPDATE of an indexed record the old entry MUST
@@ -532,7 +539,57 @@ bool Table::key_in_bottom_scope_(const std::string& key) const {
     return key <= bottom;
 }
 
+// An AOF walks recno_sequence_, which install_aof_bitmap() builds in record
+// order. With an index order active the visible rows must come back in INDEX
+// order (SAP ADS behaviour). Re-sort the sequence on first navigation after
+// the AOF or the order changed, keeping the cursor on the current record.
+void Table::sync_aof_sequence_order_() {
+    if (!aof_active_ || !recno_sequence_active_) return;
+    const void* key = (order_ && order_->index())
+        ? static_cast<const void*>(order_->index()) : nullptr;
+    const bool desc = key != nullptr && order_->descending_traverse();
+    if (aof_seq_order_built_ && key == aof_seq_order_key_ &&
+        desc == aof_seq_order_desc_) return;
+    std::vector<std::uint32_t> seq;
+    if (key == nullptr) {
+        for (std::size_t i = 0; i < aof_bitmap_.size(); ++i)
+            if (aof_bitmap_[i]) seq.push_back(static_cast<std::uint32_t>(i + 1));
+    } else {
+        auto* idx = order_->index();
+        seq.reserve(recno_sequence_.size());
+        auto r = idx->seek_first();
+        while (r && r.value().positioned) {
+            const std::uint32_t rn = r.value().recno;
+            if (rn >= 1 && rn <= aof_bitmap_.size() && aof_bitmap_[rn - 1])
+                seq.push_back(rn);
+            r = idx->next();
+        }
+        if (!r) return;   // index unreadable: keep the record-order sequence
+        idx->invalidate_cursor();
+        if (desc) std::reverse(seq.begin(), seq.end());
+        // A conditional (FOR) or partial tag does not hold every row. The
+        // AOF set must not shrink because of the order: rows the index lacks
+        // follow the indexed ones, in record order.
+        std::vector<bool> seen(aof_bitmap_.size(), false);
+        for (auto rn : seq) seen[rn - 1] = true;
+        for (std::size_t i = 0; i < aof_bitmap_.size(); ++i)
+            if (aof_bitmap_[i] && !seen[i])
+                seq.push_back(static_cast<std::uint32_t>(i + 1));
+    }
+    recno_sequence_ = std::move(seq);
+    aof_seq_order_built_ = true;
+    aof_seq_order_key_   = key;
+    aof_seq_order_desc_  = desc;
+    sequence_idx_ = -1;
+    if (state_ == State::Positioned && recno_ != 0) {
+        auto it = std::find(recno_sequence_.begin(), recno_sequence_.end(), recno_);
+        if (it != recno_sequence_.end())
+            sequence_idx_ = static_cast<std::int64_t>(it - recno_sequence_.begin());
+    }
+}
+
 void Table::set_recno_sequence(std::vector<std::uint32_t> seq) {
+    aof_seq_order_built_ = false;
     recno_sequence_ = std::move(seq);
     sequence_idx_   = -1;
     // Installed, even when empty: an empty visible set means "no rows",
@@ -560,6 +617,7 @@ util::Result<void> Table::goto_top() {
     if (driver_->record_count() == 0) {
         state_ = State::Limbo; recno_ = 0; return {};
     }
+    sync_aof_sequence_order_();
     if (recno_sequence_active_) {
         if (recno_sequence_.empty()) {
             state_ = State::Limbo; recno_ = 0; return {};
@@ -679,6 +737,7 @@ util::Result<void> Table::goto_bottom() {
     if (driver_->record_count() == 0) {
         state_ = State::Limbo; recno_ = 0; return {};
     }
+    sync_aof_sequence_order_();
     if (recno_sequence_active_) {
         if (recno_sequence_.empty()) {
             state_ = State::Limbo; recno_ = 0; return {};
@@ -713,6 +772,10 @@ util::Result<void> Table::goto_bottom() {
                 }
                 r = idx->prev();
                 if (!r) return r.error();
+                if (r.value().positioned &&
+                    !key_in_top_scope_(idx->current_key())) {
+                    state_ = State::Limbo; recno_ = 0; return {};
+                }
             }
             state_ = State::Limbo; recno_ = 0; return {};
         }
@@ -724,6 +787,10 @@ util::Result<void> Table::goto_bottom() {
             if (ld) return {};
             r = idx->prev();
             if (!r) return r.error();
+            if (r.value().positioned &&
+                !key_in_top_scope_(idx->current_key())) {
+                state_ = State::Limbo; recno_ = 0; return {};
+            }
         }
         state_ = State::Limbo; recno_ = 0; return {};
     }
@@ -790,6 +857,7 @@ util::Result<void> Table::goto_record(std::uint32_t recno) {
     // from wherever the last GoTop/GoBottom/Skip left it (GoTo(n) then
     // Skip(-1) fell off the front to BOF). AOF sequences are ascending,
     // so binary-search first; fall back to a linear find for SQL ones.
+    sync_aof_sequence_order_();
     if (recno_sequence_active_ && !recno_sequence_.empty()) {
         auto it = std::lower_bound(recno_sequence_.begin(),
                                    recno_sequence_.end(), recno);
@@ -829,6 +897,14 @@ util::Result<void> Table::goto_record(std::uint32_t recno) {
             if (sk.value().recno != recno) {
                 idx->invalidate_cursor();
             }
+        }
+        // An absolute landing owns this view's cursor now. A physical
+        // Goto to a row outside a FOR tag is a legitimate missing key;
+        // leave its insertion-point semantics to the existing Skip path.
+        if (sk && ((sk.value().positioned && sk.value().recno == recno) ||
+            (!idx->condition().empty() &&
+             !evaluate_index_expr_truthy(*this, idx->condition())))) {
+            idx->require_record_reanchor(false);
         }
     }
     return {};
@@ -893,6 +969,26 @@ util::Result<void> Table::skip(std::int32_t delta) {
     // Settle dirty buffer before cursor motion (GoCold). load_record_
     // also commits, but EOF/BOF exits never load.
     if (auto r = commit_dirty_record(); !r) return r.error();
+    if (order_ && order_->index() &&
+        order_->index()->record_reanchor_pending() && state_ == State::Positioned) {
+        auto* idx = order_->index();
+        const auto key = compute_index_key_(idx);
+        auto at = idx->seek_key(key, false);
+        if (!at) { idx->invalidate_cursor(); return at.error(); }
+        // Equal keys can belong to many physical rows. Do not anchor on
+        // the first duplicate or impose an arbitrary duplicate limit.
+        while (at.value().positioned && at.value().recno != recno_ &&
+               idx->current_key() == key) {
+            at = idx->next();
+            if (!at) { idx->invalidate_cursor(); return at.error(); }
+        }
+        if (!at.value().positioned || at.value().recno != recno_) {
+            idx->invalidate_cursor();
+            return util::Error{5044, 0,
+                "updated record not found in active index", path_};
+        }
+        idx->require_record_reanchor(false);
+    }
     // Leaving the record ends the append key-sync window (see
     // append_pending_recno_ in table.h).
     append_pending_recno_ = 0;
@@ -904,6 +1000,7 @@ util::Result<void> Table::skip(std::int32_t delta) {
     //     cached EOF fence is about to fire (natural order) or when the
     //     index walk runs off the end (peer may have grown the bag).
     // SQL materialised sequences stay a frozen snapshot.
+    sync_aof_sequence_order_();
     if (recno_sequence_active_) {
         if (delta == 0) {
             if (state_ == State::Bof) sequence_idx_ = -1;
@@ -1263,15 +1360,19 @@ util::Result<void> Table::append_record() {
     // erase until that commit lands (see append_pending_recno_ in table.h).
     append_pending_recno_ = recno_;
     append_keys_done_.clear();
-    // Exclusive ADT opens permit writes without a record lock. Avoid
-    // accumulating an unused append auto-lock on each new row, including
-    // when this engine Table is used by the server. Shared ADT and other
-    // table types retain their existing auto-lock behavior.
+    // Exclusive opens and FLocked tables permit writes without a record
+    // lock (the 5035 write guard bypasses both; SAP ADS takes no record
+    // locks there, matching Harbour dbfRawLock where REC_LOCK is a no-op
+    // success when exclusive or FLocked). Taking the auto-lock there only
+    // accumulates registrations that exclusive/FLock apps never release
+    // (rddads adsRawLock/adsAppend skip the unlock in those modes) until
+    // the 4096 walls stop the 4097th append (the reporting user 2a, 2026-10-25).
+    // Shared, non-FLocked tables retain the auto-lock unchanged.
     // Do NOT use the blocking kernel acquire: a peer FLock/Browse covers the VFP rec-lock
     // range and LockFileEx waits forever (B_BIG N=700 convoy). Retry with
     // the ACE lock budget, then roll the blank row back so a timeout
     // cannot leave a durable empty record.
-    if (mode_ != OpenMode::Exclusive || type_ != TableType::Adt) {
+    if (mode_ != OpenMode::Exclusive && !table_lock_) {
         // Engine-internal budget, decoupled from the client-facing ACE lock
         // policy (single-attempt by default): the app cannot retry this
         // internal auto-lock itself, so it keeps its own short wait.
@@ -2068,7 +2169,11 @@ util::Result<void> Table::unlock_table() {
         if (auto r = commit_dirty_record(); !r) return r.error();
     }
     if (table_lock_) {
-        if (locks_.unlock_table(driver_->file(), to_lock_type_(), locking_)) {
+        if (table_lock_->offset() == 0) {
+            // Virtual wire-mirror FLock (adopt_virtual_table_lock): no OS
+            // byte was taken on this handle; drop the registration only.
+            table_lock_.reset();
+        } else if (locks_.unlock_table(driver_->file(), to_lock_type_(), locking_)) {
             table_lock_->release();
             table_lock_.reset();
         }

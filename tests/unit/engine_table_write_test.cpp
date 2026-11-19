@@ -325,21 +325,29 @@ TEST_CASE("Remote-owned engine table caps virtual and append locks before mutati
         REQUIRE(opened);
         auto table = std::move(opened).value();
         table.set_owner(&connection);
+        // Under a held table lock appends take no auto-lock (SAP parity,
+        // the reporting user 2a, 2026-10-25): nothing accumulates, so the cap is
+        // never hit. 4,200 appends sail past the old 4,096 wall.
         REQUIRE(table.try_lock_table_excl());
+        for (std::uint32_t i = 0; i < 4200; ++i) REQUIRE(table.append_record());
+        CHECK(table.lock_count() == 0);
+        CHECK(table.record_count() == 4200);
+        REQUIRE(table.unlock_table());
+        // Shared and not table-locked: the cap still guards the pile.
         for (std::uint32_t i = 0; i < 4096; ++i) REQUIRE(table.append_record());
         CHECK(table.lock_count() == 4096);
-        CHECK(table.record_count() == 4096);
+        CHECK(table.record_count() == 4200 + 4096);
         auto denied = table.append_record();
         REQUIRE_FALSE(denied);
         CHECK(denied.error().code == openads::AE_ACCESS_DENIED);
-        CHECK(table.record_count() == 4096);
+        CHECK(table.record_count() == 4200 + 4096);
         CHECK(table.lock_count() == 4096);
-        REQUIRE(table.try_lock_record_excl(1)); // existing lock stays idempotent
-        REQUIRE_FALSE(table.try_lock_record_excl(4097));
-        REQUIRE_FALSE(table.lock_record_excl(4097));
-        REQUIRE(table.unlock_record(1));
+        REQUIRE(table.try_lock_record_excl(4201)); // existing lock stays idempotent
+        REQUIRE_FALSE(table.try_lock_record_excl(1)); // cap full: new lock denied
+        REQUIRE_FALSE(table.lock_record_excl(1));
+        REQUIRE(table.unlock_record(4201));
         REQUIRE(table.append_record());
-        CHECK(table.record_count() == 4097);
+        CHECK(table.record_count() == 4200 + 4097);
         CHECK(table.lock_count() == 4096);
     }
     fs::remove(path);

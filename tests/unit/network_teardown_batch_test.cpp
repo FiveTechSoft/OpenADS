@@ -198,7 +198,7 @@ TEST_CASE("Teardown batching: dirty flush travels alone under a park [flaky]") {
     srv.stop();
 }
 
-TEST_CASE("Teardown batching: merged flush survives for unparked closes") {
+TEST_CASE("Teardown batching: create settles flush and close before new bindings") {
     tb_wipe();
     auto dir = tb_tmp_dir();
     tb_seed(dir);
@@ -208,9 +208,8 @@ TEST_CASE("Teardown batching: merged flush survives for unparked closes") {
     ADSHANDLE hConn = tb_connect_remote(dir, srv.port());
     ADSHANDLE hTable = tb_open(hConn);
 
-    // Dirty table, CloseAll parked, then a structural change drops
-    // the park with the flags still owed: the next op merges
-    // flush-into-close (one CloseAll frame, zero flush frames).
+    // Dirty table and parked CloseAll must settle before the structural
+    // create. A close after create would destroy the new tag bindings.
     UNSIGNED8 fld[] = "ID";
     REQUIRE(AdsAppendRecord(hTable) == AE_SUCCESS);
     REQUIRE(AdsSetDouble(hTable, fld, 60.0) == AE_SUCCESS);
@@ -221,13 +220,21 @@ TEST_CASE("Teardown batching: merged flush survives for unparked closes") {
     UNSIGNED8 bag[] = "TB.CDX";
     UNSIGNED8 tag[] = "BYID9";
     UNSIGNED8 exp[] = "ID";
+    const std::uint64_t fl_before_create = tb_op(kOpFlushFile);
+    const std::uint64_t ca_before_create = tb_op(kOpCloseAllIdx);
     REQUIRE(AdsCreateIndex61(hTable, bag, tag, exp, nullptr, nullptr,
                              ADS_COMPOUND, 512, &hI) == AE_SUCCESS);
+    // With no live park, CloseAll absorbs the owed flush on capable peers.
+    CHECK(tb_op(kOpFlushFile) == fl_before_create);
+    CHECK(tb_op(kOpCloseAllIdx) == ca_before_create + 1);
     const std::uint64_t fl0 = tb_op(kOpFlushFile);
     const std::uint64_t ca0 = tb_op(kOpCloseAllIdx);
     REQUIRE(AdsGotoTop(hTable) == AE_SUCCESS);
     CHECK(tb_op(kOpFlushFile) == fl0);
-    CHECK(tb_op(kOpCloseAllIdx) == ca0 + 1);
+    CHECK(tb_op(kOpCloseAllIdx) == ca0);
+    UNSIGNED16 attached_count = 0;
+    REQUIRE(AdsGetNumIndexes(hTable, &attached_count) == AE_SUCCESS);
+    CHECK(attached_count == 2u);
 
     REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);
     REQUIRE(AdsDisconnect(hConn) == AE_SUCCESS);
@@ -565,21 +572,23 @@ TEST_CASE("Index park: CreateIndex invalidates the snapshot") {
     ADSHANDLE hConn = tb_connect_remote(dir, srv.port());
     ADSHANDLE hTable = tb_open(hConn);
 
-    // Park, then structurally change the bag: the snapshot predates
-    // the new tag, so the next rotation reopens for real (frames
-    // flow) and the new tag is visible immediately after.
+    // Create must settle the old park first, then rebuild current bag
+    // metadata. A same-bag reopen reuses that fresh metadata without
+    // sending a late CloseAll against the newly created tag.
     REQUIRE(AdsCloseAllIndexes(hTable) == AE_SUCCESS);
     ADSHANDLE hI = 0;
     UNSIGNED8 bag[] = "TB.CDX";
     UNSIGNED8 tag[] = "BYID2";
     UNSIGNED8 exp[] = "ID";
+    const std::uint64_t ca_before_create = tb_op(kOpCloseAllIdx);
     REQUIRE(AdsCreateIndex61(hTable, bag, tag, exp, nullptr, nullptr,
                              ADS_COMPOUND, 512, &hI) == AE_SUCCESS);
+    CHECK(tb_op(kOpCloseAllIdx) == ca_before_create + 1);
     const std::uint64_t ca0 = tb_op(kOpCloseAllIdx);
     const std::uint64_t oi0 = tb_op(kOpOpenIndex);
     tb_open_bag(hTable, "TB.CDX");
-    CHECK(tb_op(kOpCloseAllIdx) == ca0 + 1);
-    CHECK(tb_op(kOpOpenIndex) == oi0 + 1);
+    CHECK(tb_op(kOpCloseAllIdx) == ca0);
+    CHECK(tb_op(kOpOpenIndex) == oi0);
     CHECK(tb_numidx(hTable) == 2u);
 
     REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);

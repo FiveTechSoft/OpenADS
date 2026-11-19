@@ -55,6 +55,8 @@ void share_connection_resolve_log(ADSHANDLE                  hConnect,
 // fail a contended lock FAST — AdsLockRecord's retry loop would block the
 // session thread ~1s, starving the peer op that releases the lock.
 UNSIGNED32 try_lock_record_once(ADSHANDLE hTable, UNSIGNED32 ulRecord);
+// Virtual FLock mirror for the parallel ABI twin (ace_exports.cpp).
+void adopt_virtual_table_lock(ADSHANDLE hTable);
 // Raw (unformatted) date/timestamp field reads for the wire: the server
 // packs "YYYYMMDD"/"YYYYMMDDhhmmss" into row payloads regardless of the
 // process-wide date format; clients format for display themselves.
@@ -876,6 +878,9 @@ ADSHANDLE Session::ensure_abi_handle(std::uint32_t id) {
         std::memcpy(ab.data(), aof.data(), aof.size());
         (void)AdsSetAOF(h, ab.data(), 0);
     }
+    // A FLock taken before the twin existed must cover the twin too
+    // (same virtual mirror as the LockTable handler).
+    if (tbl->is_table_locked()) openads::abi::adopt_virtual_table_lock(h);
     tbls_h_[id] = h;
     return h;
 }
@@ -1036,9 +1041,8 @@ void Session::pack_row_trailer(Frame& reply, std::uint32_t id,
         h_abi = cit->second;
     } else if (ordered_tables_.count(id) != 0) {
         h_abi = ensure_abi_handle(id);
-        // Also resolve the engine table — we need it for fallback reads
-        // when the ABI twin is in Limbo (ACE's CDX may disagree with the
-        // engine's CDX on index state, leaving the twin at bof=eof=1).
+        // Also resolve the engine table for natural-path bookkeeping.
+        // Ordered packing below never substitutes its cursor for the ABI twin.
         if (auto eit = tbls_.find(id); eit != tbls_.end() && sess_conn_) {
             eng_tbl = sess_conn_->lookup_table(eit->second);
         }
@@ -1051,54 +1055,12 @@ void Session::pack_row_trailer(Frame& reply, std::uint32_t id,
         reply.payload.push_back(0);
         return;
     }
-    if (h_abi != 0) {
-        UNSIGNED16 _b = 9, _e = 9; AdsAtBOF(h_abi, &_b); AdsAtEOF(h_abi, &_e);
-        // Rescue: if the twin landed in Limbo (bof=1 eof=1) — e.g. from a
-        // cached handle opened when the table was empty — reposition it now.
-        if (_b && _e) {
-            AdsGotoTop(h_abi);
-            AdsAtBOF(h_abi, &_b); AdsAtEOF(h_abi, &_e);
-            if (_b && _e) AdsGotoBottom(h_abi);
-            AdsAtBOF(h_abi, &_b); AdsAtEOF(h_abi, &_e);
-            WTRACE("[wire] pack enter id=%u Limbo rescue bof=%u eof=%u\n",
-                   id, (unsigned)_b, (unsigned)_e);
-        }
-        WTRACE("[wire] pack enter id=%u twin bof=%u eof=%u\n", id, (unsigned)_b, (unsigned)_e);
-    }
-    // f2436d8 regression: for ORDERED tables it made this pack read from the
-    // engine mirror. That mirror lags the twin one op (handlers sync AFTER
-    // packing) and its lookahead walks NATURAL order, so every ordered op
-    // shipped the previous position's row and ordered read-ahead walked
-    // recno order instead of the index. The twin is the authority for an
-    // ordered table: pack from it. The engine stays the source for
-    // natural-order tables and the fallback when the twin is genuinely in
-    // Limbo (empty order/table) — the case f2436d8 meant to cover.
-    bool twin_limbo = false;
-    if (h_abi != 0) {
-        UNSIGNED16 lb = 9, le = 9;
-        AdsAtBOF(h_abi, &lb); AdsAtEOF(h_abi, &le);
-        twin_limbo = (lb != 0 && le != 0);
-    }
-    const bool use_engine = (eng_tbl != nullptr) && (h_abi == 0 || twin_limbo);
+    // An ordered ABI cursor is authoritative even when no visible key
+    // exists. Packing must never navigate it or substitute an unscoped row.
+    const bool use_engine = (eng_tbl != nullptr) && (h_abi == 0);
     // Pack the current row.
     bool current_packed = false;
     if (use_engine) {
-        // If the ABI twin is in Limbo (bof=eof=1) but we have the engine
-        // table, sync the engine to the ABI twin's recno and read from engine.
-        // ACE's CDX may disagree with the engine's CDX on index state.
-        if (h_abi != 0) {
-            UNSIGNED32 rn = 0;
-            AdsGetRecordNum(h_abi, 0, &rn);
-            if (rn > 0 && eng_tbl->record_count() >= rn) {
-                eng_tbl->goto_record(rn);
-                WTRACE("[wire] pack enter id=%u Limbo fallback engine recno=%u\n",
-                       id, (unsigned)rn);
-            } else {
-                // Twin recno unavailable (Limbo); use engine's current pos.
-                WTRACE("[wire] pack enter id=%u Limbo, engine recno=%u\n",
-                       id, (unsigned)eng_tbl->recno());
-            }
-        }
         if (eng_tbl->eof() || eng_tbl->bof() || eng_tbl->recno() == 0) {
             reply.payload.push_back(0);
         } else {
@@ -1116,7 +1078,7 @@ void Session::pack_row_trailer(Frame& reply, std::uint32_t id,
         // and its boundary detection (which relies on a pristine
         // row_valid_before) then reports Bof()=.F. on the first backward
         // skip at the top — xBrowse counts one extra row above and paints
-        // a phantom duplicate (Tim Stone, 1-record scope). It also lets
+        // a phantom duplicate (the reporting user, 1-record scope). It also lets
         // the lookahead walk run at BOF, whose restore step clears the
         // twin's BOF flag. Field reads at BOF still work: they miss the
         // cache and cost one round trip, exactly like EOF.
@@ -1616,7 +1578,7 @@ Session::FieldWriteResult Session::write_fields(std::uint32_t id,
                 r = tbl->set_field(fi_u, val);
                 break;
         }
-        if (!r) { out.code = 5035; return out; }
+        if (!r) { out.code = r.error().code != 0 ? static_cast<decltype(out.code)>(r.error().code) : 5035; return out; }
     }
     return out;
 }
@@ -2674,7 +2636,8 @@ DispatchResult Session::dispatch(const Frame& f) {
             const std::uint16_t lookahead =
                 want_lookahead ? next_lookahead(id, depth_hint, dir) : 0;
             if (auto cit = cursor_tbls_.find(id); cit != cursor_tbls_.end()) {
-                (void)AdsSkip(cit->second, step);
+                const auto rc = AdsSkip(cit->second, step);
+                if (rc != 0) { reply = err("Skip: cursor failed", rc); break; }
                 reply.opcode = Opcode::SkipAck;
                 pack_row_trailer(reply, id, lookahead, dir);
                 break;
@@ -2695,7 +2658,8 @@ DispatchResult Session::dispatch(const Frame& f) {
             ADSHANDLE hord =
                 ordered_tables_.count(id) ? ensure_abi_handle(id) : 0;
             if (hord != 0) {
-                (void)AdsSkip(hord, step);
+                const auto rc = AdsSkip(hord, step);
+                if (rc != 0) { reply = err("Skip: ordered failed", rc); break; }
                 { UNSIGNED16 _b = 9, _e = 9; AdsAtBOF(hord, &_b); AdsAtEOF(hord, &_e);
                   WTRACE("[wire] Skip twin hord bof=%u eof=%u\n", (unsigned)_b, (unsigned)_e); }
                 reply.opcode = Opcode::SkipAck;
@@ -2712,7 +2676,11 @@ DispatchResult Session::dispatch(const Frame& f) {
                   WTRACE("[wire] Skip end id=%u twin bof=%u eof=%u\n", id, (unsigned)_b, (unsigned)_e); }
                 break;
             }
-            (void)tbl->skip(step);
+            auto skipped = tbl->skip(step);
+            if (!skipped) {
+                reply = err("Skip: failed", static_cast<UNSIGNED32>(skipped.error().code));
+                break;
+            }
             reply.opcode = Opcode::SkipAck;
             pack_row_trailer(reply, id, lookahead, dir);
             pack_bound_trailer(reply, id);
@@ -3014,7 +2982,7 @@ DispatchResult Session::dispatch(const Frame& f) {
             // from the twin, like the GotoTop/Skip handlers do. Fixes the
             // BOF+EOF-both-true answer that made rddads' DBOI_POSITION
             // (OrdKeyGoto past the scoped key count) report Bof()=.T. and
-            // xBrowse paint a phantom duplicate row (Tim Stone, 1-record
+            // xBrowse paint a phantom duplicate row (the reporting user, 1-record
             // scope).
             ADSHANDLE hord_bof =
                 ordered_tables_.count(id) ? ensure_abi_handle(id) : 0;
@@ -3212,6 +3180,18 @@ DispatchResult Session::dispatch(const Frame& f) {
             // current recno.
             auto rb = tbl->goto_record(tbl->recno());
             if (!rb) { reply = err("RefreshRecord: " + rb.error().message); break; }
+            // Ordered refresh acknowledgements are packed from the ABI
+            // twin for ordered tables, but the re-read above only touched
+            // the session engine table - the twin's private read-ahead
+            // block stayed stale. Refresh the twin as well: its local
+            // AdsRefreshRecord invalidates its driver read-ahead and
+            // re-reads and re-seats the current record in its active order.
+            if (ordered_tables_.count(id) != 0) {
+                if (ADSHANDLE h = ensure_abi_handle(id); h != 0) {
+                    const auto rc = AdsRefreshRecord(h);
+                    if (rc != 0) { reply = err("RefreshRecord: twin refresh failed rc=" + std::to_string(rc)); break; }
+                } else { reply = err("RefreshRecord: no twin handle"); break; }
+            }
             reply.opcode = Opcode::RefreshRecordAck;
             // The re-read row rides back with the ack (row trailer),
             // plus position truth (bound tail), so the caller's
@@ -3554,6 +3534,11 @@ DispatchResult Session::dispatch(const Frame& f) {
                         openads::AE_LOCKED);
                     break;
                 }
+                // M12.16 twin: mirror the FLock so the twin's write guard
+                // and append auto-lock see the whole-file cover. Virtual
+                // only - the engine Table above owns the real OS byte.
+                if (auto hit = tbls_h_.find(id); hit != tbls_h_.end())
+                    openads::abi::adopt_virtual_table_lock(hit->second);
             } else {
                 // M12.16 dual-handle: route through the ABI shadow handle
                 // when it exists (same as LockRecord/UnlockRecord) so the
@@ -4833,7 +4818,14 @@ DispatchResult Session::dispatch(const Frame& f) {
             }
             auto* tbl = sess_conn_->lookup_table(it->second);
             if (!tbl) { reply = err("AppendBlank: lookup failed"); break; }
-            if (explicit_record_locks_.size() >= 4096) {
+            // Exclusive open or a held FLock gives whole-file cover: no
+            // append auto-lock is taken in those modes (Table::append_blank
+            // skips it), so the ledger must neither count nor cap them
+            // (SAP-parity fix: bulk APPEND FROM over REMOTE died at 4,096).
+            const bool whole_file_cover =
+                tbl->open_mode() == openads::engine::OpenMode::Exclusive ||
+                tbl->is_table_locked();
+            if (!whole_file_cover && explicit_record_locks_.size() >= 4096) {
                 reply = err("Session record-lock limit", openads::AE_ACCESS_DENIED); break;
             }
             auto diag_name = tbl_open_paths_.find(id);
@@ -4875,7 +4867,7 @@ DispatchResult Session::dispatch(const Frame& f) {
                 diag_first_append_.insert(id).second)
                 openads::abi::create_diag::log("server-first-append-ok");
             // Include automatic append locks in the session ledger, not only explicit LockRecord.
-            explicit_record_locks_.insert((static_cast<std::uint64_t>(id) << 32) | tbl->recno());
+            if (!whole_file_cover) explicit_record_locks_.insert((static_cast<std::uint64_t>(id) << 32) | tbl->recno());
             reply.opcode = Opcode::AppendBlankAck;
             break;
         }
