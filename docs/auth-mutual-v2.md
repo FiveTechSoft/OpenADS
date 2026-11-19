@@ -45,3 +45,7 @@ a live TLS-terminating relay, malformed framing, and deterministic expiry.
 The caller must still implement and test its own proof algorithm and trusted
 key material. These mock tests do not certify a proprietary HRB, protect keys
 from endpoint compromise, or replace Windows/macOS and real-client acceptance.
+
+Platform limit: the worker spawn path shares the V1 spike's POSIX restriction
+(glibc-only close-from). Builds against other libcs, macOS included, fail
+closed and cannot start the auth worker, so V2 is unavailable there.
