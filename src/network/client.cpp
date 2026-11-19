@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include "network/client.h"
 #include "network/mutual_auth.h"
 
@@ -279,7 +280,7 @@ void RemoteConnection::note_all_tables_nav() {
     for (auto& [id, v] : tbl_nav_seqs_) ++v;
 }
 
-util::Result<Frame> RemoteConnection::request(const Frame& f) {
+util::Result<Frame> RemoteConnection::request(const Frame& f, bool require_commit_ack) {
     std::lock_guard<std::mutex> lk(mu_);
     frame_seq_.fetch_add(1, std::memory_order_relaxed);
     switch (f.opcode) {
@@ -391,6 +392,15 @@ util::Result<Frame> RemoteConnection::request(const Frame& f) {
         return util::Error{static_cast<std::int32_t>(code), 0,
                            std::move(msg), ""};
     }
+    if (require_commit_ack &&
+        (rep.value().opcode != Opcode::SetFieldsAck ||
+         rep.value().payload != std::vector<std::uint8_t>{1})) {
+        // Poison while mu_ still excludes every other shared-connection
+        // caller. Nobody can send a later request after ambiguous commit
+        // success but before the connection is marked unusable.
+        transport_->close();
+        return util::Error{5000, 0, "SetFields: commit acknowledgement invalid", ""};
+    }
     return rep;
 }
 
@@ -421,7 +431,12 @@ void connect_pack_payload(std::vector<std::uint8_t>& payload,
     std::uint32_t caps = kCapPrefetchConsume | kCapPrefetchBackward
                        | kCapOpenTableMode | kCapSetFieldsBatch
                        | kCapFlushInCloseAll | kCapNavOrderFuse
-                       | kCapNavBoundaryPair | kCapOpenSetupMetadata | kCapLockedRow;
+                       | kCapNavBoundaryPair | kCapOpenSetupMetadata | kCapLockedRow | kCapAppendMetadata;
+    // Test kill-switch: pretend to be a pre-mtfix68 client (the server
+    // then sends the empty ack; the legacy path runs). Same env name as
+    // the server-side gate in session.cpp.
+    if (std::getenv("OPENADS_NO_APPEND_META_CAP") != nullptr)
+        caps &= ~kCapAppendMetadata;
     for (int i = 0; i < 4; ++i)
         payload.push_back(static_cast<std::uint8_t>((caps >> (8 * i)) & 0xFFu));
 }
@@ -807,6 +822,10 @@ static void apply_bound_trailer(RemoteTable* rt, bool bof, bool eof,
     rt->recno_bound     = recno;
     rt->recno_bound_ok  = true;
     rt->recno_bound_seq = seq;
+    // mtfix67 -- certify the per-table twin from the same nav answer;
+    // the frame that delivered it already bumped tbl_nav_seqs_[id]
+    // inside request(), so the snapshot matches.
+    rt->recno_bound_tbl_seq = rt->conn->tbl_nav_seq(rt->id);
     rt->bound_at         = std::chrono::steady_clock::now();
     rt->bound_data_epoch = rt->conn->data_epoch();
     if (has_count) {
@@ -1169,6 +1188,34 @@ util::Result<void> RemoteConnection::append_blank(std::uint32_t id) {
     return {};
 }
 
+util::Result<RemoteConnection::AppendMeta>
+RemoteConnection::append_blank_meta(RemoteTable* rt) {
+    note_nav_frame();
+    Frame req;
+    req.opcode = Opcode::AppendBlank;
+    write_u32_le(rt->id, req.payload);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::AppendBlankAck) {
+        return util::Error{5000, 0, "AppendBlank: server error", ""};
+    }
+    AppendMeta m;
+    // mtfix68 - length-gated trailer [u32 recno][u8 lock_held][u8 bof]
+    // [u8 eof], kCapAppendMetadata servers only. The append frame already
+    // bumped tbl_nav_seqs_[rt->id] inside request(), so this certification
+    // snapshots the post-append generation exactly like a nav-ack one.
+    if (rep.value().payload.size() >= 7) {
+        const auto& pl = rep.value().payload;
+        m.present   = true;
+        m.recno     = read_u32_le(pl.data());
+        m.lock_held = pl[4] != 0;
+        m.bof       = pl[5] != 0;
+        m.eof       = pl[6] != 0;
+        apply_bound_trailer(rt, m.bof, m.eof, m.recno, 0, false);
+    }
+    return m;
+}
+
 util::Result<std::vector<std::uint8_t>>
 RemoteConnection::get_record(std::uint32_t id) {
     Frame req;
@@ -1259,9 +1306,13 @@ util::Result<void> RemoteConnection::set_field(std::uint32_t id,
 
 util::Result<void> RemoteConnection::set_fields_batch(
         std::uint32_t id,
-        const std::vector<std::pair<std::string, std::string>>& fields) {
+        const std::vector<std::pair<std::string, std::string>>& fields,
+        bool commit) {
+    if (commit && !server_setfields_commit()) {
+        return util::Error{5000, 0, "SetFields: commit not supported", ""};
+    }
     note_nav_frame();
-    if (fields.empty()) return {};
+    if (fields.empty() && !commit) return {};
     if (fields.size() > kMaxWireFields) {
         return util::Error{5000, 0,
             "SetFields: too many fields", ""};
@@ -1284,7 +1335,8 @@ util::Result<void> RemoteConnection::set_fields_batch(
         req.payload.push_back(static_cast<std::uint8_t>((vlen >> 24) & 0xFFu));
         req.payload.insert(req.payload.end(), value.begin(), value.end());
     }
-    auto rep = request(req);
+    if (commit) req.payload.push_back(1);
+    auto rep = request(req, commit);
     if (!rep) return rep.error();
     if (rep.value().opcode != Opcode::SetFieldsAck) {
         return util::Error{5000, 0, "SetFields: server error", ""};
@@ -1355,18 +1407,44 @@ util::Result<void> RemoteConnection::goto_record(RemoteTable* rt,
 }
 
 util::Result<void> RemoteConnection::goto_bottom(RemoteTable* rt) {
+    rt->bottom_count_valid = false;
     note_nav_frame();
     Frame req;
     req.opcode = Opcode::GotoBottom;
     write_u32_le(rt->id, req.payload);
     // mtfix12 R1: opposite-boundary certification (see goto_top).
     const bool want_pair = server_nav_boundary_pair();
-    if (want_pair) req.payload.push_back(0x02);
+    // Request only for the exact internal cold ordered-count dependency.
+    // Existing warm-count and natural-order behavior is untouched.
+    const bool want_count = server_bottom_key_count() &&
+        rt->active_index_id != 0 && !rt->key_count_cached &&
+        rt->key_counts.find(rt->active_index_id) == rt->key_counts.end();
+    if (want_pair || want_count)
+        req.payload.push_back(static_cast<std::uint8_t>(
+            (want_pair ? 0x02 : 0) | (want_count ? 0x04 : 0)));
     rt->pair_valid = false;
     auto rep = request(req);
     if (!rep) return rep.error();
     if (rep.value().opcode != Opcode::GotoBottomAck) {
         return util::Error{5000, 0, "GotoBottom: server error", ""};
+    }
+    bool certified_count = false;
+    std::uint32_t count = 0;
+    if (want_count) {
+        auto& pl = rep.value().payload;
+        if (pl.size() < 16 || read_u32_le(pl.data()) != kBottomKeyCountMagic ||
+            read_u32_le(pl.data() + 12) != rt->id) {
+            rt->row_valid = false;
+            rt->keyno_valid = false;
+            rt->bound_bof_ok = rt->bound_eof_ok = false;
+            rt->recno_bound_ok = rt->count_bound_ok = false;
+            rt->last_nav = 0;
+            rt->invalidate_prefetch();
+            return util::Error{5000, 0, "GotoBottom: invalid count metadata", ""};
+        }
+        certified_count = read_u32_le(pl.data() + 4) == 0;
+        count = read_u32_le(pl.data() + 8);
+        pl.erase(pl.begin(), pl.begin() + 16);
     }
     const std::size_t tend =
         parse_row_trailer_into(rt, rep.value().payload, 0);
@@ -1379,6 +1457,12 @@ util::Result<void> RemoteConnection::goto_bottom(RemoteTable* rt) {
                         rep.value().payload, off);
     } else {
         apply_bound_tail(rt, rep.value().payload, tend);
+    }
+    if (certified_count) {
+        // Consume only in this landing's key-position synchronization.
+        // Do not seed the older persistent explicit-count caches.
+        rt->bottom_count = count;
+        rt->bottom_count_valid = true;
     }
     return {};
 }

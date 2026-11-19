@@ -34,6 +34,7 @@ EXPORTS
     AdsGetVersion
     AdsAppendRecord
     AdsWriteRecord
+    AdsFlushPendingFields
     AdsDeleteRecord
     AdsRecallRecord
     AdsIsRecordDeleted

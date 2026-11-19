@@ -1800,6 +1800,18 @@ __declspec(dllexport) UNSIGNED32 __stdcall AdsFindNextTable(ADSHANDLE a0, ADSHAN
     return rc;
 }
 
+/* ---- AdsFlushPendingFields ---- */
+#define AdsFlushPendingFields oadsimpl_AdsFlushPendingFields
+extern UNSIGNED32 ENTRYPOINT AdsFlushPendingFields(ADSHANDLE hTable);
+#undef AdsFlushPendingFields
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsFlushPendingFields=_AdsFlushPendingFields")
+#pragma comment(linker, "/export:AdsFlushPendingFields=_AdsFlushPendingFields")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsFlushPendingFields(ADSHANDLE a0) {
+    UNSIGNED32 rc = oadsimpl_AdsFlushPendingFields(a0);
+    arc_log_rc("AdsFlushPendingFields", rc, 1, (uintptr_t)a0);
+    return rc;
+}
+
 /* ---- AdsFlushFileBuffers ---- */
 #define AdsFlushFileBuffers oadsimpl_AdsFlushFileBuffers
 extern UNSIGNED32 ENTRYPOINT AdsFlushFileBuffers(ADSHANDLE hTable);

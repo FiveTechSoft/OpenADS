@@ -147,18 +147,20 @@ TEST_CASE("Commit slimming: blind UnlockTable and GetAllLocks stay local") {
     CHECK(saw1);
     CHECK(saw3);
 
-    // An append auto-locks server-side with no recno in the ack: the
-    // ledger goes uncertain, GetAllLocks returns to the wire, and the
-    // following UnlockTable really goes out (and releases it).
+    // mtfix68: a kCapAppendMetadata ack NAMES the auto-locked blank, so
+    // the ledger books it exactly (held_recs) and GetAllLocks/GetNumLocks
+    // stay LOCAL. Pre-mtfix68 the empty ack forced the ledger uncertain
+    // and both calls went back to the wire. The following UnlockTable
+    // still really goes out (and releases everything).
     REQUIRE(AdsAppendRecord(hTable) == AE_SUCCESS);
     n = 8;
     REQUIRE(AdsGetAllLocks(hTable, recs, &n) == AE_SUCCESS);
-    CHECK(cs_op(kOpGetAllLocks) == gal0 + 1);
-    CHECK(n >= 3u);   // 1, 3 and the auto-locked blank
+    CHECK(cs_op(kOpGetAllLocks) == gal0);       // ledger certain: local
+    CHECK(n == 3u);   // 1, 3 and the booked blank
     nl = 0;
     REQUIRE(AdsGetNumLocks(hTable, &nl) == AE_SUCCESS);
-    CHECK(cs_op(kOpGetAllLocks) == gal0 + 2);   // uncertain: back to wire
-    CHECK(nl >= 3u);
+    CHECK(cs_op(kOpGetAllLocks) == gal0);       // still local
+    CHECK(nl == 3u);
     un0 = cs_op(kOpUnlockTable);
     REQUIRE(AdsUnlockTable(hTable) == AE_SUCCESS);
     CHECK(cs_op(kOpUnlockTable) == un0 + 1);
@@ -166,11 +168,11 @@ TEST_CASE("Commit slimming: blind UnlockTable and GetAllLocks stay local") {
     // Ledger provably empty again: local answer, zero locks.
     n = 8;
     REQUIRE(AdsGetAllLocks(hTable, recs, &n) == AE_SUCCESS);
-    CHECK(cs_op(kOpGetAllLocks) == gal0 + 2);
+    CHECK(cs_op(kOpGetAllLocks) == gal0);
     CHECK(n == 0u);
     nl = 99;
     REQUIRE(AdsGetNumLocks(hTable, &nl) == AE_SUCCESS);
-    CHECK(cs_op(kOpGetAllLocks) == gal0 + 2);
+    CHECK(cs_op(kOpGetAllLocks) == gal0);
     CHECK(nl == 0u);
 
     REQUIRE(AdsCloseTable(hTable) == AE_SUCCESS);

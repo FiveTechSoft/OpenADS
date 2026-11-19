@@ -1,3 +1,4 @@
+#include "network/checked_record_flush.h"
 #include "network/session.h"
 #include "network/mutual_auth.h"
 #include "network/auth_result.h"
@@ -1509,6 +1510,18 @@ UNSIGNED32 Session::install_table_order(std::uint32_t tid,
     return openads::AE_SUCCESS;
 }
 
+util::Result<void> Session::flush_table_record(std::uint32_t id,
+        openads::engine::Table* tbl) {
+    return checked_record_flush([&]() -> UNSIGNED32 {
+        if (auto hit = tbls_h_.find(id); hit != tbls_h_.end())
+            return AdsFlushFileBuffers(hit->second);
+        return 0;
+    }, [&]() -> util::Result<void> {
+        tbl->set_pending_append(false);
+        return tbl->flush();
+    });
+}
+
 Session::FieldWriteResult Session::write_fields(std::uint32_t id,
         openads::engine::Table* tbl,
         const std::vector<std::pair<std::string, std::string>>& pairs) {
@@ -1863,7 +1876,7 @@ DispatchResult Session::dispatch(const Frame& f) {
                 };
                 pack(auth_dir_);pack(hrb_result.user);pack(hrb_result.password);
                 const std::uint32_t caps=kCapPrefetchConsume|kCapPrefetchBackward|kCapOpenTableMode|
-                    kCapSetFieldsBatch|kCapFlushInCloseAll|kCapNavOrderFuse|kCapNavBoundaryPair|kCapOpenSetupMetadata|kCapLockedRow;
+                    kCapSetFieldsBatch|kCapFlushInCloseAll|kCapNavOrderFuse|kCapNavBoundaryPair|kCapOpenSetupMetadata|kCapLockedRow|kCapAppendMetadata;
                 for(unsigned i=0;i<4;++i)auth_connect.payload.push_back(static_cast<std::uint8_t>(caps>>(8*i)));
             }
             // M12.9 — Connect payload format:
@@ -1916,6 +1929,9 @@ DispatchResult Session::dispatch(const Frame& f) {
                 client_open_setup_metadata_ok_ = (caps & kCapOpenSetupMetadata) != 0;
                 client_locked_row_ok_ = (caps & kCapLockedRow) != 0 &&
                     std::getenv("OPENADS_NO_LOCKED_ROW_CAP") == nullptr;
+                // mtfix68 - AppendBlankAck trailer (kCapAppendMetadata).
+                client_append_meta_ok_ = (caps & kCapAppendMetadata) != 0 &&
+                    std::getenv("OPENADS_NO_APPEND_META_CAP") == nullptr;
                 client_open_table_mode_ok_ =
                     (caps & openads::network::kCapOpenTableMode) != 0;
             }
@@ -2086,6 +2102,8 @@ DispatchResult Session::dispatch(const Frame& f) {
             {
                 std::uint32_t scaps =
                     openads::network::kCapSetFieldsBatch |
+                    openads::network::kCapSetFieldsCommit |
+                    openads::network::kCapBottomKeyCount |
                     openads::network::kCapFlushInCloseAll |
                     openads::network::kCapNavOrderFuse |
                     openads::network::kCapFlushTableDurable |
@@ -2095,6 +2113,12 @@ DispatchResult Session::dispatch(const Frame& f) {
                 // that neither echoes kCapLockedRow nor answers the
                 // current-record flag with a row trailer, so the client
                 // negotiates down to the refresh-after-lock fallback.
+                // Compatibility test: emulate a server predating this
+                // commit extension without changing ordinary SetFields.
+                if (std::getenv("OPENADS_NO_BOTTOM_KEYCOUNT_CAP") != nullptr)
+                    scaps &= ~openads::network::kCapBottomKeyCount;
+                if (std::getenv("OPENADS_NO_SETFIELDS_COMMIT_CAP") != nullptr)
+                    scaps &= ~openads::network::kCapSetFieldsCommit;
                 if (std::getenv("OPENADS_NO_LOCKED_ROW_CAP") != nullptr)
                     scaps &= ~openads::network::kCapLockedRow;
                 reply.payload.push_back(
@@ -3071,9 +3095,12 @@ DispatchResult Session::dispatch(const Frame& f) {
             // boundary-pair request.
             bool fused_order = false;
             bool want_pair = false;
+            bool want_count = false;
             if (f.payload.size() >= 5) {
                 const std::uint8_t fl = f.payload[4];
                 want_pair = (fl & 0x02) != 0;
+                want_count = (fl & 0x04) != 0 &&
+                    std::getenv("OPENADS_NO_BOTTOM_KEYCOUNT_CAP") == nullptr;
                 if ((fl & 0x01) != 0 && f.payload.size() >= 9) {
                     std::uint32_t oiid = read_u32_le(f.payload.data() + 5);
                     UNSIGNED32 oorc = install_table_order(id, oiid);
@@ -3089,8 +3116,9 @@ DispatchResult Session::dispatch(const Frame& f) {
             if (!tbl) { reply = err("GotoBottom: lookup failed"); break; }
             ADSHANDLE hord =
                 ordered_tables_.count(id) ? ensure_abi_handle(id) : 0;
+            UNSIGNED32 bottom_rc = 0;
             if (hord != 0) {
-                (void)AdsGotoBottom(hord);
+                bottom_rc = AdsGotoBottom(hord);
                 sync_engine_cursor(id);
             } else {
                 auto rb = tbl->goto_bottom();
@@ -3129,6 +3157,26 @@ DispatchResult Session::dispatch(const Frame& f) {
             }
             if (want_pair) {
                 pack_boundary_pair(reply, id, 2, hord, tbl);
+            }
+            if (want_count) {
+                // Same ordered ABI count as the legacy B0 dependency. Never
+                // certify physical count after a failed ordered count. Preserve
+                // legacy nav/error disposition: a failed optional certification
+                // sends status only and the client retains its ordinary B0 path.
+                UNSIGNED32 kc = 0;
+                UNSIGNED32 krc = bottom_rc;
+                if (krc == 0) {
+                    krc = hord != 0 ? AdsGetKeyCount(hord, 0, &kc)
+                                    : openads::AE_INTERNAL_ERROR;
+                }
+                Frame wrapped;
+                write_u32_le(kBottomKeyCountMagic, wrapped.payload);
+                write_u32_le(krc, wrapped.payload);
+                write_u32_le(kc, wrapped.payload);
+                write_u32_le(id, wrapped.payload);
+                wrapped.payload.insert(wrapped.payload.end(), reply.payload.begin(),
+                                       reply.payload.end());
+                reply.payload.swap(wrapped.payload);
             }
             break;
         }
@@ -4868,6 +4916,19 @@ DispatchResult Session::dispatch(const Frame& f) {
                 openads::abi::create_diag::log("server-first-append-ok");
             // Include automatic append locks in the session ledger, not only explicit LockRecord.
             if (!whole_file_cover) explicit_record_locks_.insert((static_cast<std::uint64_t>(id) << 32) | tbl->recno());
+            // mtfix68 - the append already happened and the auto-lock is
+            // already held; report the facts so a kCapAppendMetadata client
+            // books position + lock without GetRecordNum/LockRecord trips.
+            // Old clients get the empty ack exactly as before. Position after
+            // a successful append is the new record: bof=0, eof=0 (xBase
+            // APPEND BLANK lands on the row, never at a boundary).
+            if (client_append_meta_ok_) {
+                write_u32_le(tbl->recno(), reply.payload);
+                reply.payload.push_back(whole_file_cover
+                    ? std::uint8_t{0} : std::uint8_t{1});
+                reply.payload.push_back(std::uint8_t{0});
+                reply.payload.push_back(std::uint8_t{0});
+            }
             reply.opcode = Opcode::AppendBlankAck;
             break;
         }
@@ -4959,12 +5020,23 @@ DispatchResult Session::dispatch(const Frame& f) {
             auto* tbl = sess_conn_->lookup_table(it->second);
             if (!tbl) { reply = err("SetFields: lookup failed"); break; }
 
+            const bool commit = f.payload.size() == pos + 1 &&
+                f.payload[pos] == 1;
             auto wr = write_fields(id, tbl, pairs);
-            if (wr.code != 0) {
+            if (wr.code != 0 || wr.column_missing) {
                 reply = wr.column_missing
-                    ? err("SetFields: column not found")
+                    ? err("SetFields: column not found", openads::AE_COLUMN_NOT_FOUND)
                     : err("SetFields: write failed", wr.code);
                 break;
+            }
+            if (commit) {
+                // No flush after any failed field. This is not a transaction:
+                // the applied prefix/error behavior remains ordered writes.
+                auto flushed = flush_table_record(id, tbl);
+                if (!flushed) {
+                    reply = err("FlushTable: flush failed", static_cast<UNSIGNED32>(flushed.error().code)); break;
+                }
+                reply.payload.push_back(1);
             }
             reply.opcode = Opcode::SetFieldsAck;
             break;
@@ -5070,17 +5142,8 @@ DispatchResult Session::dispatch(const Frame& f) {
             }
             auto* tbl = sess_conn_->lookup_table(it->second);
             if (!tbl) { reply = err("FlushTable: lookup failed"); break; }
-            // Flush the ABI twin first (holds open index bags), then engine.
-            if (auto hit = tbls_h_.find(id); hit != tbls_h_.end()) {
-                (void)AdsFlushFileBuffers(hit->second);
-            }
-            // Remote AdsWriteRecord lands here: the append is now committed,
-            // so drop the pending-append marker (mirrors the local
-            // AdsWriteRecord which clears it). Without this the flag stayed
-            // set for the life of the server-side table.
-            tbl->set_pending_append(false);
-            auto r = tbl->flush();
-            if (!r) { reply = err("FlushTable: flush failed"); break; }
+            auto r = flush_table_record(id, tbl);
+            if (!r) { reply = err("FlushTable: flush failed", static_cast<UNSIGNED32>(r.error().code)); break; }
             reply.opcode = Opcode::FlushTableAck;
             break;
         }

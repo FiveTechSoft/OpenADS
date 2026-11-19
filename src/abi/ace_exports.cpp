@@ -694,6 +694,16 @@ UNSIGNED32 remote_buffered_set(openads::network::RemoteTable* rt,
     remote_settle_cursor(rt);
     rt->row_valid = false;                      // M12.17 cache invalidation
     if (rt->pending_sets.empty()) {
+        const bool acknowledged_append = rt->append_batch_recno != 0 &&
+            rt->append_batch_nav_seq == rt->conn->tbl_nav_seq(rt->id) &&
+            rt->recno_bound_ok && rt->recno_bound == rt->append_batch_recno &&
+            (rt->open_exclusive || rt->table_lock_held ||
+             rt->held_recs.count(rt->append_batch_recno) != 0);
+        rt->pending_first_applied = !acknowledged_append;
+        if (acknowledged_append) {
+            rt->pending_sets.emplace_back(fname, val);
+            return ok();
+        }
         // Probe: the first set of a run goes out immediately so
         // write-guard errors surface on the writing call itself (see
         // above). The value is ALSO buffered: after a twin-path append
@@ -828,17 +838,17 @@ UNSIGNED32 remote_flush_sets(openads::network::RemoteTable* rt) {
     // locally the server cursor lags behind, and the batch must apply to
     // the row the buffered sets targeted — not where the server sits.
     remote_settle_cursor(rt);
-    // pending[0] is always the probe (already applied server-side at
-    // buffer time), so the flush covers pending[1:]. A lone probe needs
-    // no frame at all — single-field edits cost exactly what they did
-    // before coalescing existed.
-    if (rt->pending_sets.size() == 1) {
+    // Existing-row runs have an already-applied first probe. Acknowledged
+    // append runs contain only unapplied values, so include their first
+    // value even for a one-field batch. Never silently drop that value.
+    if (rt->pending_first_applied && rt->pending_sets.size() == 1) {
         rt->pending_sets.clear();
         rt->row_valid = false;
         return ok();
     }
     const std::vector<std::pair<std::string, std::string>> rest(
-        rt->pending_sets.begin() + 1, rt->pending_sets.end());
+        rt->pending_sets.begin() + (rt->pending_first_applied ? 1 : 0),
+        rt->pending_sets.end());
     if (rt->conn->server_setfields_batch()) {
         if (auto r = rt->conn->set_fields_batch(rt->id, rest);
             !r) {
@@ -1978,6 +1988,7 @@ void remote_empty_restamp(openads::network::RemoteTable* rt) {
     rt->nav_not_eof = false;
     rt->bound_seq = seq;
     rt->recno_bound_seq = seq;
+    rt->recno_bound_tbl_seq = rt->conn->tbl_nav_seq(rt->id);
     rt->count_bound_seq = seq;
     rt->last_nav = 0;
     // The serve lands on no row: no anchor, and any certified pair
@@ -2008,6 +2019,9 @@ std::string remote_record_length_key(const openads::network::RemoteTable* rt) {
 
 void remote_sync_keyno_gotobottom(openads::network::RemoteTable* rt) {
     if (rt == nullptr) return;
+    const bool same_landing_count = rt->bottom_count_valid;
+    const std::uint32_t landing_count = rt->bottom_count;
+    rt->bottom_count_valid = false;
     remote_clear_nav_boundaries(rt);
     if (remote_table_has_index(rt)) {
         // An ordered GotoBottom that the server certified empty (no row,
@@ -2023,7 +2037,8 @@ void remote_sync_keyno_gotobottom(openads::network::RemoteTable* rt) {
         }
         // Bottom of the ORDER, not of the file: with a scope active the
         // last key is key #scoped_key_count, not #physical_rec_count.
-        const std::uint32_t kc = remote_ensure_key_count(rt);
+        const std::uint32_t kc = same_landing_count
+            ? landing_count : remote_ensure_key_count(rt);
         rt->current_keyno = kc > 0 ? kc : 1u;
         rt->keyno_valid   = true;
     } else if (rt->row_valid) {
@@ -12819,11 +12834,11 @@ UNSIGNED32 ENTRYPOINT AdsGetLong(ADSHANDLE hTable, UNSIGNED8* pucField, SIGNED32
         if (i == std::numeric_limits<std::size_t>::max()) {
             return fail(openads::AE_COLUMN_NOT_FOUND, "");
         }
-        if (!rt->row_valid) {
-            (void)rt->conn->fetch_current_row(rt);
-        }
         std::string vstr;
         const bool overlaid = remote_pending_overlay(rt, i, vstr);
+        if (!overlaid && !rt->row_valid) {
+            (void)rt->conn->fetch_current_row(rt);
+        }
         if (!overlaid && rt->row_valid && i < rt->current_row.size()) {
             vstr = rt->current_row[i];
         } else if (!overlaid && i < rt->fields.size()) {
@@ -12872,11 +12887,11 @@ UNSIGNED32 ENTRYPOINT AdsGetDouble(ADSHANDLE hTable, UNSIGNED8* pucField, double
         if (i == std::numeric_limits<std::size_t>::max()) {
             return fail(openads::AE_COLUMN_NOT_FOUND, "");
         }
-        if (!rt->row_valid) {
-            (void)rt->conn->fetch_current_row(rt);
-        }
         std::string vstr;
         const bool overlaid = remote_pending_overlay(rt, i, vstr);
+        if (!overlaid && !rt->row_valid) {
+            (void)rt->conn->fetch_current_row(rt);
+        }
         if (!overlaid && rt->row_valid && i < rt->current_row.size()) {
             vstr = rt->current_row[i];
         } else if (!overlaid && i < rt->fields.size()) {
@@ -13025,11 +13040,11 @@ UNSIGNED32 ENTRYPOINT AdsGetJulian(ADSHANDLE hTable, UNSIGNED8* pucField, SIGNED
         if (i == std::numeric_limits<std::size_t>::max()) {
             return fail(openads::AE_COLUMN_NOT_FOUND, "");
         }
-        if (!rt->row_valid) {
-            (void)rt->conn->fetch_current_row(rt);
-        }
         std::string vstr;
         const bool overlaid = remote_pending_overlay(rt, i, vstr);
+        if (!overlaid && !rt->row_valid) {
+            (void)rt->conn->fetch_current_row(rt);
+        }
         if (!overlaid && rt->row_valid && i < rt->current_row.size()) {
             vstr = rt->current_row[i];
         } else if (!overlaid && i < rt->fields.size()) {
@@ -13080,8 +13095,20 @@ UNSIGNED32 ENTRYPOINT AdsGetRecordNum(ADSHANDLE hTable, UNSIGNED16 /*bFilterOpti
         // did). Serves xBrowse's per-row RecNo() while no
         // cursor-affecting frame lands — same currency as the bound
         // cache, cleared with it.
+        // mtfix67 -- validity keyed on the PER-TABLE nav generation:
+        // only this handle's cursor-moving frames (classified in
+        // request(), plus Seek's resolved-binding bump and the
+        // all-tables bumps for index-keyed/visibility ops) can move its
+        // server cursor, so other-table navs and this table's own
+        // writes (SetField/SetFields/FlushTable bump the conn-wide
+        // nav_seq but move no cursor) no longer evict the bound recno.
+        // Same-table invalidation is unchanged: any cursor op on this
+        // table bumps tbl_nav_seq(id) and the check misses exactly as
+        // before. Unconditional: the env-gated anchor envelope and this
+        // one share the same per-table correctness invariant, and the
+        // rebind below certifies both seqs from one wire answer.
         if (rt->recno_bound_ok &&
-            rt->recno_bound_seq == rt->conn->nav_seq()) {
+            rt->recno_bound_tbl_seq == rt->conn->tbl_nav_seq(rt->id)) {
             *pulRecordNum = rt->recno_bound;
             return ok();
         }
@@ -13115,9 +13142,10 @@ UNSIGNED32 ENTRYPOINT AdsGetRecordNum(ADSHANDLE hTable, UNSIGNED16 /*bFilterOpti
         auto r = rt->conn->get_record_num(rt->id);
         if (!r) return fail(r.error());
         *pulRecordNum = r.value();
-        rt->recno_bound     = r.value();
-        rt->recno_bound_ok  = true;
-        rt->recno_bound_seq = rt->conn->nav_seq();
+        rt->recno_bound         = r.value();
+        rt->recno_bound_ok      = true;
+        rt->recno_bound_seq     = rt->conn->nav_seq();
+        rt->recno_bound_tbl_seq = rt->conn->tbl_nav_seq(rt->id);
         return ok();
     }
     if (auto* ops = openads::abi::backend_table_ops_for(hTable))
@@ -13315,9 +13343,6 @@ UNSIGNED32 ENTRYPOINT AdsGetField(ADSHANDLE hTable, UNSIGNED8* pucField,
         // standalone FetchCurrentRow call here on first access.
         // xbrowse-style W cols Ãƒâ€” H rows repaint: 1 RTT per row,
         // zero RTT per cell.
-        if (!rt->row_valid) {
-            (void)rt->conn->fetch_current_row(rt);
-        }
         auto fi = remote_field_index(rt, pucField);
         if (fi == std::numeric_limits<std::size_t>::max()) {
             return fail(openads::AE_COLUMN_NOT_FOUND, "");
@@ -13328,6 +13353,9 @@ UNSIGNED32 ENTRYPOINT AdsGetField(ADSHANDLE hTable, UNSIGNED8* pucField,
         {
             std::string val;
             const bool overlaid = remote_pending_overlay(rt, fi, val);
+            if (!overlaid && !rt->row_valid) {
+                (void)rt->conn->fetch_current_row(rt);
+            }
             if (!overlaid && rt->row_valid && fi < rt->current_row.size()) {
                 val = rt->current_row[fi];
             }
@@ -13820,18 +13848,33 @@ UNSIGNED32 ENTRYPOINT AdsAppendRecord(ADSHANDLE hTable) {
         rt->keyno_valid      = false;
         remote_clear_nav_boundaries(rt);
         rt->invalidate_prefetch();
-        auto r = rt->conn->append_blank(rt->id);
-        if (!r) {
-            openads::abi::create_diag::log("client-append-fail", r.error().code,
-                "wire-append", r.error().sub_code);
-            return fail(r.error());
+        auto amr = rt->conn->append_blank_meta(rt);
+        if (!amr) {
+            openads::abi::create_diag::log("client-append-fail", amr.error().code,
+                "wire-append", amr.error().sub_code);
+            return fail(amr.error());
         }
         // Fresh appends auto-lock (non-exclusive tables): pooled reuse
-        // must not resurrect a locked handle. The ack carries no
-        // recno, so the ledger cannot name the auto-lock -- mark the
-        // lock state uncertain until a full UnlockTable proves clear.
+        // must not resurrect a locked handle.
+        // mtfix68 - a kCapAppendMetadata ack NAMES the auto-locked record,
+        // so the ledger books it exactly (held_recs) and the following
+        // RecNo/RLOCK are served locally; UnlockRecord/UnlockTable/close
+        // clear it through the existing paths. Old-server acks carry
+        // nothing: keep marking the lock state uncertain until a full
+        // UnlockTable proves clear. whole_file_cover (exclusive/FLock)
+        // takes no auto-lock: trailer says lock_held=0, ledger stays exact.
         rt->ever_locked = true;
-        rt->locks_uncertain = true;
+        if (!amr.value().present) {
+            rt->locks_uncertain = true;
+        } else if (amr.value().lock_held) {
+            // The ack names exactly ONE lock: the appended record's.
+            // Book it, but never clear a pre-existing locks_uncertain --
+            // earlier locks this ledger cannot name stay uncertain until
+            // a full UnlockTable/close proves them gone.
+            rt->held_recs.insert(amr.value().recno);
+        }
+        rt->append_batch_recno = amr.value().present ? amr.value().recno : 0;
+        rt->append_batch_nav_seq = rt->conn->tbl_nav_seq(rt->id);
         rt->write_dirty = true;
         openads::abi::create_diag::log("client-append-ok");
         return ok();
@@ -13952,6 +13995,12 @@ UNSIGNED32 ENTRYPOINT AdsAppendRecord(ADSHANDLE hTable) {
     return ok();
 }
 
+UNSIGNED32 ENTRYPOINT AdsFlushPendingFields(ADSHANDLE hTable) {
+    if (auto* rt = get_remote_table(hTable)) return remote_flush_sets(rt);
+    if (get_table(hTable) != nullptr) return ok();
+    return fail(openads::AE_INTERNAL_ERROR, "AdsFlushPendingFields: invalid table handle");
+}
+
 UNSIGNED32 ENTRYPOINT AdsWriteRecord(ADSHANDLE hTable) {
     arc2_trace("AdsWriteRecord");
     if (auto* rt = get_remote_table(hTable)) {
@@ -13962,7 +14011,34 @@ UNSIGNED32 ENTRYPOINT AdsWriteRecord(ADSHANDLE hTable) {
         // pages, 1 RTT each, 16 of them after a Vouch voucher save.
         const bool had_writes =
             !rt->pending_sets.empty() || rt->write_dirty;
-        if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
+        bool committed_batch = false;
+        if (rt->pending_sets.size() > (rt->pending_first_applied ? 1u : 0u) &&
+            rt->cursor_lag == 0 &&
+            !rt->pending_order && !rt->flush_file_pending &&
+            !rt->close_all_indexes_pending &&
+            rt->conn->server_setfields_commit()) {
+            const std::vector<std::pair<std::string, std::string>> rest(
+                rt->pending_sets.begin() + (rt->pending_first_applied ? 1 : 0),
+                rt->pending_sets.end());
+            auto applied = rt->conn->set_fields_batch(rt->id, rest, true);
+            // Same disposition as the old SetFields stage on error,
+            // including transport ambiguity: never retry a partial apply.
+            rt->pending_sets.clear();
+            rt->row_valid = false;
+            if (!applied) {
+                // The apply may have succeeded before a flush failure or
+                // lost acknowledgement. Do not leave pre-write order/row
+                // certifications alive on that ambiguous failure path.
+                rt->key_count_cached = false;
+                rt->key_counts.clear();
+                rt->keyno_valid = false;
+                rt->invalidate_prefetch();
+                return fail(applied.error());
+            }
+            committed_batch = true;
+        } else {
+            if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
+        }
         rt->row_valid = false;                      // M12.17 cache invalidation
         // A write can move the row in/out of a conditional order or
         // scope: the cached key count may have changed with it.
@@ -13979,8 +14055,10 @@ UNSIGNED32 ENTRYPOINT AdsWriteRecord(ADSHANDLE hTable) {
             cli_trace_tbl(rt, "AdsWriteRecord", "clean: flush skipped");
             return ok();
         }
-        auto r = rt->conn->flush_table(rt->id);
-        if (!r) return fail(r.error());
+        if (!committed_batch) {
+            auto r = rt->conn->flush_table(rt->id);
+            if (!r) return fail(r.error());
+        }
         // kCapFlushTableDurable servers run the full file-buffers
         // flush inside the FlushTable handler, so the commit is
         // durable right here and a trailing AdsFlushFileBuffers owes
@@ -15161,6 +15239,17 @@ UNSIGNED32 ENTRYPOINT AdsLockRecord(ADSHANDLE hTable, UNSIGNED32 ulRecord) {
     if (auto* rt = get_remote_table(hTable)) {
         if (UNSIGNED32 frc = remote_flush_pending(rt); frc != 0) return frc;
         remote_settle_cursor(rt);
+        // mtfix68 - a record this connection already holds (booked from
+        // the append ack trailer, or a prior lock) needs no re-lock trip:
+        // the server's try_lock_record_excl answers a repeated same-handle
+        // lock with success by design (engine/table.cpp:2004, refcount-
+        // free binary lock), so the local answer is identical. Explicit
+        // recno only: ulRecord==0 keeps the wire path, which resolves the
+        // current record server-side.
+        if (ulRecord != 0 && rt->held_recs.count(ulRecord) != 0) {
+            cli_trace_tbl(rt, "AdsLockRecord", "already held rec=%u", ulRecord);
+            return ok();
+        }
         auto r = rt->conn->lock_record(rt, ulRecord);
         if (!r) return fail(r.error());
         rt->ever_locked = true;

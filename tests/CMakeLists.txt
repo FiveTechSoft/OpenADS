@@ -347,6 +347,8 @@ add_executable(openads_unit_tests
     unit/abi_dd_invoicing_test.cpp
     unit/abi_fetch_where_test.cpp
     unit/abi_dirty_key_skip_test.cpp
+    unit/abi_remote_bottom_keycount_test.cpp
+    unit/abi_remote_setfields_commit_test.cpp
     unit/network_setfields_test.cpp
     unit/network_open_warm_test.cpp
     unit/network_version_test.cpp
@@ -356,6 +358,8 @@ add_executable(openads_unit_tests
     unit/network_empty_window_test.cpp
     unit/network_remote_reindex_test.cpp
     unit/network_frame_trace_test.cpp
+    unit/abi_remote_recno_bound_test.cpp
+    unit/abi_remote_append_meta_test.cpp
     unit/network_boundary_pair_test.cpp
     unit/network_commit_slimming_test.cpp
     unit/network_teardown_batch_test.cpp

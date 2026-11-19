@@ -110,6 +110,10 @@ public:
         return (server_caps_ & kCapSetFieldsBatch) != 0;
     }
 
+    bool server_setfields_commit() const noexcept {
+        return (server_caps_ & kCapSetFieldsCommit) != 0;
+    }
+
     // Server flushes inside CloseAllIndexes (see kCapFlushInCloseAll):
     // a deferred FlushFileBuffers merges into that single frame.
     bool server_flush_in_closeall() const noexcept {
@@ -134,6 +138,10 @@ public:
     // back-to-back dbGoTop(); dbGoBottom() ritual costs one RTT.
     bool server_nav_boundary_pair() const noexcept {
         return (server_caps_ & kCapNavBoundaryPair) != 0;
+    }
+
+    bool server_bottom_key_count() const noexcept {
+        return (server_caps_ & kCapBottomKeyCount) != 0;
     }
 
     // Current cursor-generation sequence (see nav_seq_). Relaxed load
@@ -508,6 +516,18 @@ public:
     util::Result<void>          apply_pair_blob(RemoteTable* rt);
     // M12.6 — remote write surface.
     util::Result<void>          append_blank(std::uint32_t id);
+    // mtfix68 - append with the metadata trailer (kCapAppendMetadata).
+    // present=false means an old server sent the empty ack: the caller
+    // keeps the legacy follow-up trips. On present=true the new recno is
+    // certified through apply_bound_trailer inside the call.
+    struct AppendMeta {
+        bool          present   = false;
+        std::uint32_t recno     = 0;
+        bool          lock_held = false;
+        bool          bof       = false;
+        bool          eof       = false;
+    };
+    util::Result<AppendMeta>    append_blank_meta(RemoteTable* rt);
     util::Result<void>          set_field(std::uint32_t id,
                                           const std::string& field_name,
                                           const std::string& value);
@@ -516,7 +536,8 @@ public:
     // Empty input is a no-op success (no frame sent).
     util::Result<void>          set_fields_batch(
         std::uint32_t id,
-        const std::vector<std::pair<std::string, std::string>>& fields);
+        const std::vector<std::pair<std::string, std::string>>& fields,
+        bool commit = false);
     // M12.25 — raw DBF record image at the current cursor position.
     util::Result<std::vector<std::uint8_t>> get_record(std::uint32_t id);
     util::Result<std::uint32_t> get_record_crc(std::uint32_t id);
@@ -623,7 +644,7 @@ public:
 private:
     std::string auth_dir_;
     bool auth_pending_ = false;
-    util::Result<Frame> request(const Frame& f);
+    util::Result<Frame> request(const Frame& f, bool require_commit_ack = false);
 
     // Record a cursor/visibility-affecting frame. Called at the top of
     // every method that can move the server cursor or change what it
@@ -743,6 +764,14 @@ struct RemoteTable {
     // ace_exports.cpp). Empty = clean. Reads overlay these values onto
     // current_row so same-handle read-after-write stays exact.
     std::vector<std::pair<std::string, std::string>> pending_sets;
+    // Acknowledged append context only. Commit ends a batch, not this
+    // current-record context. Any later cursor-generation change expires it.
+    std::uint32_t append_batch_recno = 0;
+    std::uint64_t append_batch_nav_seq = 0;
+    // Existing-row runs still probe their first value immediately.
+    // Append-context runs send ALL values, including the first, at a boundary.
+    bool pending_first_applied = true;
+
     // Lazy-close pooling (USE latency): eligibility observed over the
     // handle lifetime. Parked only when every line below still reads
     // fresh-open equivalent at close time.
@@ -815,6 +844,13 @@ struct RemoteTable {
     std::uint32_t            recno_bound    = 0;
     bool                     recno_bound_ok = false;
     std::uint64_t            recno_bound_seq = 0;
+    // mtfix67 -- per-table twin of recno_bound_seq: snapshots
+    // RemoteConnection::tbl_nav_seq(id). A frame on another table cannot
+    // move this table's server cursor, and writes do not move it either
+    // (they bump tbl_write_gens, not tbl_nav_seqs), so this seq stays
+    // valid across other-table navs and same-table writes where the
+    // conn-wide seq is conservatively dropped.
+    std::uint64_t            recno_bound_tbl_seq = 0;
     // Certified record count from the last nav ack tail (optional
     // [u32 reccount] after the bound bytes), with the seq at answer
     // time. Same trust as rec_count_cached (in-memory server count,
@@ -910,6 +946,9 @@ struct RemoteTable {
     // and every write that invalidates rec_count_cached.
     std::uint32_t            cached_key_count   = 0;
     bool                     key_count_cached   = false;
+    // One landing only: never a persistent explicit-count certification.
+    bool                     bottom_count_valid = false;
+    std::uint32_t            bottom_count = 0;
     // Per-order key counts: an order switch does not change any
     // order's count, so rotation revisits serve from here while the
     // single slot above still bounces per switch. Second-chance

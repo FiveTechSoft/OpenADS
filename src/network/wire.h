@@ -705,6 +705,32 @@ inline constexpr std::uint32_t kCapLockedRow = 0x00000400u;
 
 inline constexpr std::uint32_t kCapOpenSetupMetadata = 0x00000200u;
 
+// mtfix68 - AppendBlankAck metadata trailer: when the client advertises
+// this bit, the server appends [u32 recno][u8 lock_held][u8 bof][u8 eof]
+// to the (previously empty) AppendBlankAck, so the client books the new
+// record's position and the already-taken append auto-lock without the
+// two follow-up round trips (GetRecordNum + LockRecord). Old servers send
+// the empty ack; the client length-gates and keeps the legacy path.
+// Server behavior is otherwise unchanged: the auto-lock already exists.
+inline constexpr std::uint32_t kCapAppendMetadata = 0x00000800u;
+
+// Commit-boundary SetFields extension. With this capability only, a client
+// may append one byte (1) after the ordinary SetFields body. The server
+// applies the ordered fields, stops on error, then runs the SAME FlushTable
+// work. Success is SetFieldsAck payload {1}; an empty legacy ack is NOT
+// proof of commit and must never trigger a replay. Ordinary SetFields and
+// every older peer keep their existing packet/commit sequence.
+inline constexpr std::uint32_t kCapSetFieldsCommit = 0x00001000u;
+
+// Ordinary ordered GoBottom may request same-landing key-count metadata.
+// Request flag 0x04 is sent only after this server capability is advertised.
+// Requested ACK wraps the unchanged old body with a 16-byte prefix:
+// [u32 magic BKC1][u32 count-status][u32 count][u32 table-id].
+// Nonzero count-status is not a certification: retain the legacy B0 path.
+// Explicit later count APIs remain live requests.
+inline constexpr std::uint32_t kCapBottomKeyCount = 0x00002000u;
+inline constexpr std::uint32_t kBottomKeyCountMagic = 0x31434b42u;
+
 namespace OpenTableAckSections {
     constexpr std::uint8_t kRecordLength = 3;
     constexpr std::uint8_t kProductionIndex = 4;
