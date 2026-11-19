@@ -320,6 +320,9 @@ UNSIGNED32 ENTRYPOINT AdsGetServerVersion (ADSHANDLE   hConnect,
 
 UNSIGNED32 ENTRYPOINT AdsAppendRecord  (ADSHANDLE hTable);
 UNSIGNED32 ENTRYPOINT AdsWriteRecord   (ADSHANDLE hTable);
+/* OpenADS extension: drain pending field assignments only. No commit,
+ * navigation or unlock. New RDD users require the matching OpenADS DLL. */
+UNSIGNED32 ENTRYPOINT AdsFlushPendingFields(ADSHANDLE hTable);
 UNSIGNED32 ENTRYPOINT AdsDeleteRecord  (ADSHANDLE hTable);
 UNSIGNED32 ENTRYPOINT AdsRecallRecord  (ADSHANDLE hTable);
 UNSIGNED32 ENTRYPOINT AdsIsRecordDeleted(ADSHANDLE hTable, UNSIGNED16* pbDeleted);

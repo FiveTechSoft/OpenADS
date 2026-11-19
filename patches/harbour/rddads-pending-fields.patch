@@ -1,0 +1,304 @@
+--- a/contrib/rddads/ads1.c
++++ b/contrib/rddads/ads1.c
+@@ -198,6 +198,36 @@
+    return errCode;
+ }
+ 
++/* Report known write failures without automatic replay/default. Unknown
++ * navigation/append errors retain their original compatibility flags. */
++static HB_ERRCODE adsCheckedWriteResult( ADSAREAP pArea, UNSIGNED32 code,
++                                        HB_ERRCODE fallback )
++{
++   HB_ERRCODE gen = fallback;
++   HB_USHORT flags = fallback == EG_CORRUPTION ? EF_CANDEFAULT : 0;
++   HB_BOOL knownWrite = HB_TRUE;
++   if( code == AE_SUCCESS )
++      return HB_SUCCESS;
++   if( code == AE_LOCK_FAILED || code == AE_RECORD_NOT_LOCKED )
++      gen = EG_UNLOCKED;
++   else if( code == AE_TABLE_READONLY )
++      gen = EG_READONLY;
++   else if( code == 5063 /* OpenADS AE_COLUMN_NOT_FOUND */ )
++      gen = EG_WRITE;
++   else if( code == AE_DATA_TOO_LONG
++#ifdef AE_VALUE_OVERFLOW
++            || code == AE_VALUE_OVERFLOW
++#endif
++          )
++      gen = EG_DATAWIDTH;
++   else
++      knownWrite = HB_FALSE;
++   if( knownWrite )
++      flags = 0;
++   commonError( pArea, gen, ( HB_ERRCODE ) code, 0, NULL, flags, NULL );
++   return HB_FAILURE;
++}
++
+ /*
+  * it's not used - temporary disabled to avoid warnings,
+  * enable it if necessary
+@@ -768,16 +798,15 @@
+ 
+    HB_TRACE( HB_TR_DEBUG, ( "hb_adsCloseCursor(%p)", ( void * ) pArea ) );
+ 
+-   pArea->hOrdCurrent = 0;
+    if( pArea->hTable )
+    {
+       UNSIGNED32 u32RetVal = AdsCloseTable( pArea->hTable );
+ 
+-      if( u32RetVal != AE_SUCCESS )
+-         HB_TRACE( HB_TR_DEBUG, ( "adsCloseTable(%lu, %s) failed", ( HB_ULONG ) u32RetVal, pArea->szDataFileName ) );
+-
++      if( adsCheckedWriteResult( pArea, u32RetVal, EG_WRITE ) != HB_SUCCESS )
++         return HB_FAILURE;
+       pArea->hTable = 0;
+    }
++   pArea->hOrdCurrent = 0;
+    if( pArea->hStatement )
+    {
+       AdsCloseSQLStatement( pArea->hStatement );
+@@ -863,7 +892,7 @@
+    u32RetVal = AdsGotoBottom( ( pArea->hOrdCurrent ) ? pArea->hOrdCurrent : pArea->hTable );
+    if( u32RetVal != AE_SUCCESS )
+    {
+-      commonError( pArea, EG_CORRUPTION, ( HB_ERRCODE ) u32RetVal, 0, NULL, EF_CANDEFAULT, NULL );
++      adsCheckedWriteResult( pArea, u32RetVal, EG_CORRUPTION );
+       return HB_FAILURE;
+    }
+ 
+@@ -892,6 +921,12 @@
+ 
+    HB_TRACE( HB_TR_DEBUG, ( "adsGoTo(%p, %lu)", ( void * ) pArea, ulRecNo ) );
+ 
++   /* Drain separately so a write's invalid-record code cannot enter the
++      historical ADT GOTO-to-phantom compatibility branch below. */
++   u32RetVal = AdsFlushPendingFields( pArea->hTable );
++   if( adsCheckedWriteResult( pArea, u32RetVal, EG_WRITE ) != HB_SUCCESS )
++      return HB_FAILURE;
++
+    /* 2001-07-19 15:04, BH
+       The following call is a necessary workaround for ace32.dll
+       prior to 6.1.  There were bugs where
+@@ -937,7 +972,7 @@
+     */
+    if( u32RetVal != AE_SUCCESS && u32RetVal != AE_INVALID_RECORD_NUMBER )
+    {
+-      commonError( pArea, EG_CORRUPTION, ( HB_ERRCODE ) u32RetVal, 0, NULL, EF_CANDEFAULT, NULL );
++      adsCheckedWriteResult( pArea, u32RetVal, EG_CORRUPTION );
+       return HB_FAILURE;
+    }
+ 
+@@ -958,7 +993,9 @@
+    else if( ulRecNo == u32RecNo )
+    {
+       /* is it really necessary? doesn't AdsGotoRecord() refresh buffers? */
+-      AdsRefreshRecord( pArea->hTable );
++      u32RetVal = AdsRefreshRecord( pArea->hTable );
++      if( adsCheckedWriteResult( pArea, u32RetVal, EG_CORRUPTION ) != HB_SUCCESS )
++         return HB_FAILURE;
+    }
+ 
+    /* Force relational movement in child WorkAreas */
+@@ -998,7 +1035,7 @@
+    u32RetVal = AdsGotoTop( ( pArea->hOrdCurrent ) ? pArea->hOrdCurrent : pArea->hTable );
+    if( u32RetVal != AE_SUCCESS )
+    {
+-      commonError( pArea, EG_CORRUPTION, ( HB_ERRCODE ) u32RetVal, 0, NULL, EF_CANDEFAULT, NULL );
++      adsCheckedWriteResult( pArea, u32RetVal, EG_CORRUPTION );
+       return HB_FAILURE;
+    }
+ 
+@@ -1128,7 +1165,7 @@
+ 
+    if( u32RetVal != AE_SUCCESS )
+    {
+-      commonError( pArea, EG_CORRUPTION, ( HB_ERRCODE ) u32RetVal, 0, NULL, EF_CANDEFAULT, NULL );
++      adsCheckedWriteResult( pArea, u32RetVal, EG_CORRUPTION );
+       return HB_FAILURE;
+    }
+ 
+@@ -1302,11 +1339,13 @@
+          u32RetVal = AdsSkip( ( pArea->hOrdCurrent ) ? pArea->hOrdCurrent : pArea->hTable, 0 );
+          if( u32RetVal != AE_SUCCESS )
+          {
+-            commonError( pArea, EG_CORRUPTION, ( HB_ERRCODE ) u32RetVal, 0, NULL, EF_CANDEFAULT, NULL );
++            adsCheckedWriteResult( pArea, u32RetVal, EG_CORRUPTION );
+             return HB_FAILURE;
+          }
+          /* TODO: is this really necessary, doesn't AdsSkip(0) do that? */
+-         AdsRefreshRecord( pArea->hTable );
++         u32RetVal = AdsRefreshRecord( pArea->hTable );
++         if( adsCheckedWriteResult( pArea, u32RetVal, EG_CORRUPTION ) != HB_SUCCESS )
++            return HB_FAILURE;
+          hb_adsUpdateAreaFlags( pArea );
+ 
+          /* Restore flags */
+@@ -1359,7 +1398,7 @@
+                u32RetVal = AdsSkip( ( pArea->hOrdCurrent ) ? pArea->hOrdCurrent : pArea->hTable, lSkipper );
+                if( u32RetVal != AE_SUCCESS )
+                {
+-                  commonError( pArea, EG_CORRUPTION, ( HB_ERRCODE ) u32RetVal, 0, NULL, EF_CANDEFAULT, NULL );
++                  adsCheckedWriteResult( pArea, u32RetVal, EG_CORRUPTION );
+                   return HB_FAILURE;
+                }
+                hb_adsUpdateAreaFlags( pArea );
+@@ -1378,7 +1417,7 @@
+                u32RetVal = AdsSkip( ( pArea->hOrdCurrent ) ? pArea->hOrdCurrent : pArea->hTable, lSkipper );
+                if( u32RetVal != AE_SUCCESS )
+                {
+-                  commonError( pArea, EG_CORRUPTION, ( HB_ERRCODE ) u32RetVal, 0, NULL, EF_CANDEFAULT, NULL );
++                  adsCheckedWriteResult( pArea, u32RetVal, EG_CORRUPTION );
+                   return HB_FAILURE;
+                }
+                hb_adsUpdateAreaFlags( pArea );
+@@ -1425,7 +1464,7 @@
+          u32RetVal = AdsSkip( ( pArea->hOrdCurrent ) ? pArea->hOrdCurrent : pArea->hTable, lUpDown );
+          if( u32RetVal != AE_SUCCESS )
+          {
+-            commonError( pArea, EG_CORRUPTION, ( HB_ERRCODE ) u32RetVal, 0, NULL, EF_CANDEFAULT, NULL );
++            adsCheckedWriteResult( pArea, u32RetVal, EG_CORRUPTION );
+             return HB_FAILURE;
+          }
+          hb_adsUpdateAreaFlags( pArea );
+@@ -1478,6 +1517,12 @@
+ 
+    HB_TRACE( HB_TR_DEBUG, ( "adsAppend(%p, %d)", ( void * ) pArea, ( int ) fUnLockAll ) );
+ 
++   /* Report deferred prior replacements separately. Genuine append errors
++      below retain the stock Harbour categories and handler flags. */
++   u32RetVal = AdsFlushPendingFields( pArea->hTable );
++   if( adsCheckedWriteResult( pArea, u32RetVal, EG_WRITE ) != HB_SUCCESS )
++      return HB_FAILURE;
++
+    /* reset any pending relations */
+    SELF_RESETREL( pArea );
+ 
+@@ -1488,8 +1533,9 @@
+       AdsAtEOF( pArea->hTable, &u16Eof );
+    }
+ 
+-   if( fUnLockAll && pArea->fShared && ! pArea->fFLocked )
+-      SELF_RAWLOCK( &pArea->area, FILE_UNLOCK, 0 );
++   if( fUnLockAll && pArea->fShared && ! pArea->fFLocked &&
++       SELF_RAWLOCK( &pArea->area, FILE_UNLOCK, 0 ) != HB_SUCCESS )
++      return HB_FAILURE;
+ 
+    u32RetVal = AdsAppendRecord( pArea->hTable );
+    if( u32RetVal == AE_SUCCESS )
+@@ -2139,10 +2185,12 @@
+ 
+    if( ! pArea->fReadonly )
+    {
+-      AdsWriteRecord( pArea->hTable );
++      if( adsCheckedWriteResult( pArea, AdsWriteRecord( pArea->hTable ), EG_WRITE ) != HB_SUCCESS )
++         return HB_FAILURE;
+ #if ADS_LIB_VERSION >= 610
+-      if( hb_setGetL( HB_SET_HARDCOMMIT ) )
+-         AdsFlushFileBuffers( pArea->hTable );
++      if( hb_setGetL( HB_SET_HARDCOMMIT ) &&
++          adsCheckedWriteResult( pArea, AdsFlushFileBuffers( pArea->hTable ), EG_WRITE ) != HB_SUCCESS )
++         return HB_FAILURE;
+ #endif
+    }
+ 
+@@ -2598,8 +2646,7 @@
+    HB_TRACE( HB_TR_DEBUG, ( "adsGoCold(%p)", ( void * ) pArea ) );
+ 
+    if( ! pArea->fReadonly )
+-      AdsWriteRecord( pArea->hTable );
+-
++      return adsCheckedWriteResult( pArea, AdsWriteRecord( pArea->hTable ), EG_WRITE );
+    return HB_SUCCESS;
+ }
+ 
+@@ -3022,14 +3069,16 @@
+ 
+ static HB_ERRCODE adsClose( ADSAREAP pArea )
+ {
++   HB_ERRCODE result;
+    HB_TRACE( HB_TR_DEBUG, ( "adsClose(%p)", ( void * ) pArea ) );
+ 
+-   if( pArea->szQuery )
++   result = hb_adsCloseCursor( pArea );
++   if( result == HB_SUCCESS && pArea->szQuery )
+    {
+       hb_xfree( pArea->szQuery );
+       pArea->szQuery = NULL;
+    }
+-   return hb_adsCloseCursor( pArea );
++   return result;
+ }
+ 
+ static HB_ERRCODE adsCreate( ADSAREAP pArea, LPDBOPENINFO pCreateInfo )
+@@ -4522,7 +4571,7 @@
+             }
+             if( u32RetVal != AE_SUCCESS )
+             {
+-               commonError( pArea, EG_CORRUPTION, ( HB_ERRCODE ) u32RetVal, 0, NULL, EF_CANDEFAULT, NULL );
++               adsCheckedWriteResult( pArea, u32RetVal, EG_CORRUPTION );
+                return HB_FAILURE;
+             }
+             hb_adsUpdateAreaFlags( pArea );
+@@ -4977,7 +5026,7 @@
+             return HB_SUCCESS;
+ 
+          u32RetVal = AdsUnlockRecord( pArea->hTable, ulRecNo );
+-         if( u32RetVal != AE_SUCCESS )
++         if( adsCheckedWriteResult( pArea, u32RetVal, EG_WRITE ) != HB_SUCCESS )
+             return HB_FAILURE;
+          break;
+ 
+@@ -5008,7 +5057,7 @@
+              u32RetVal == AE_TABLE_NOT_SHARED )
+             pArea->fFLocked = HB_FALSE;
+          else
+-            return HB_FAILURE;
++            return adsCheckedWriteResult( pArea, u32RetVal, EG_WRITE );
+          break;
+    }
+    return HB_SUCCESS;
+@@ -5026,8 +5075,12 @@
+    switch( pLockInfo->uiMethod )
+    {
+       case DBLM_EXCLUSIVE:
+-         if( pArea->fShared && ! pArea->fFLocked )
+-            AdsUnlockTable( pArea->hTable );
++         if( pArea->fShared && ! pArea->fFLocked &&
++             adsCheckedWriteResult( pArea, AdsUnlockTable( pArea->hTable ), EG_WRITE ) != HB_SUCCESS )
++         {
++            pLockInfo->fResult = HB_FALSE;
++            return HB_FAILURE;
++         }
+ 
+          if( ! ulRecNo )
+             SELF_RECNO( &pArea->area, &ulRecNo );
+--- a/contrib/rddads/adsfunc.c
++++ b/contrib/rddads/adsfunc.c
+@@ -1348,8 +1348,11 @@
+             pArea->hTable = hCursor;
+             SELF_OPEN( &pArea->area, &pInfo );
+          }
+-         else
+-            hb_adsCloseCursor( pArea );
++         else if( hb_adsCloseCursor( pArea ) != HB_SUCCESS )
++         {
++            hb_retl( HB_FALSE );
++            return;
++         }
+ 
+          hb_retl( HB_TRUE );
+       }
+@@ -1402,8 +1405,11 @@
+             pArea->hTable = hCursor;
+             SELF_OPEN( &pArea->area, &pInfo );
+          }
+-         else
+-            hb_adsCloseCursor( pArea );
++         else if( hb_adsCloseCursor( pArea ) != HB_SUCCESS )
++         {
++            hb_retl( HB_FALSE );
++            return;
++         }
+ 
+          hb_retl( HB_TRUE );
+       }

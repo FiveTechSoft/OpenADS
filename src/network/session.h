@@ -160,6 +160,7 @@ private:
     bool          client_open_table_mode_ok_ = false;
     bool          client_open_setup_metadata_ok_ = false;
     bool          client_locked_row_ok_ = false;
+    bool          client_append_meta_ok_ = false;
     // M12.32 — last ShowDeleted state received; abi_conn_ is created
     // lazily, so ensure_abi_conn must re-apply it or the ABI connection
     // starts with the default (show) and ordered walks leak deleted rows.
@@ -301,6 +302,8 @@ private:
         UNSIGNED32 code = 0;
         bool       column_missing = false;
     };
+    util::Result<void> flush_table_record(std::uint32_t id,
+        openads::engine::Table* tbl);
     FieldWriteResult write_fields(std::uint32_t id,
         openads::engine::Table* tbl,
         const std::vector<std::pair<std::string, std::string>>& pairs);
