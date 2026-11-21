@@ -640,7 +640,21 @@ TEST_CASE( "oads_* local: Load Save ReadAt WriteAt Flush Eof" )
     fs::remove_all( dir, ec );
 }
 
-static void lock_round_trip( ADSHANDLE h, const fs::path& dir )
+static fs::path lock85_probe_path()
+{
+    // Resolve before any case changes the working directory: dladdr can
+    // return a relative loader path when the test binary is invoked by a
+    // relative path, and absolute() would then anchor at the wrong cwd.
+    auto module = openads::platform::module_directory();
+    REQUIRE( module.has_value() );
+    fs::path probe = fs::absolute( fs::path( *module ) ) / "openads_fs_lock85_probe";
+#if defined(_WIN32)
+    probe += ".exe";
+#endif
+    return probe;
+}
+
+static void lock_round_trip( ADSHANDLE h, const fs::path& dir, const fs::path& probe )
 {
     ADSHANDLE a = 0, b = 0, c = 0;
     REQUIRE( oads_FCreate( h, (UNSIGNED8*)"locks.bin", 0, &a ) == 0 );
@@ -690,12 +704,6 @@ static void lock_round_trip( ADSHANDLE h, const fs::path& dir )
 #endif
     // A real other process holds byte 128 until it exits. WAIT must
     // complete after that release, without blocking the server thread.
-    auto module = openads::platform::module_directory();
-    REQUIRE( module.has_value() );
-    fs::path probe = fs::path(*module) / "openads_fs_lock85_probe";
-#if defined(_WIN32)
-    probe += ".exe";
-#endif
     REQUIRE( fs::exists(probe) );
     auto marker = dir / "holder-ready";
     fs::remove(marker);
@@ -741,7 +749,7 @@ TEST_CASE( "oads_* local: FS byte locks shared exclusive wait and owner IO" )
     fs::remove_all(dir);
     fs::create_directories(dir);
     auto h = local_connect(dir);
-    lock_round_trip(h, dir);
+    lock_round_trip(h, dir, lock85_probe_path());
     REQUIRE( AdsDisconnect(h) == 0 );
     fs::remove_all(dir);
 }
@@ -995,12 +1003,13 @@ TEST_CASE( "oads_* remote embedded: full round-trip" )
     REQUIRE( srv.start( "127.0.0.1", 0 ).has_value() );
 
     auto prev = fs::current_path();
+    const fs::path probe85 = lock85_probe_path();
     fs::current_path( app );
 
     ADSHANDLE h = remote_connect_embedded( data, srv.port() );
     oads_round_trip( h, "remote-embedded" );
     metadata_round_trip( h, data );
-    lock_round_trip( h, data );
+    lock_round_trip( h, data, probe85 );
 
     // Different client connections are separate lock owners, like two
     // Harbour processes. Same-client opens still share merged ranges.
