@@ -1,5 +1,6 @@
 #include "mgmt/error_log.h"
 #include "mgmt/mg_stats.h"
+#include "util/log.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -181,7 +182,7 @@ namespace {
 // conventional "Op: rest" detail shape the server uses
 // (e.g. "OpenIndex: foo.cdx"). Only splits when the head looks like a
 // bare opcode/identifier so free-text messages with colons are untouched.
-void derive_op_table(const std::string& detail, const std::string& op_in,
+[[maybe_unused]] void derive_op_table(const std::string& detail, const std::string& op_in,
                      const std::string& table_in, std::string& op_out,
                      std::string& table_out) {
     op_out = op_in;
@@ -431,7 +432,8 @@ void ErrorLog::log_ex(std::int32_t code, const std::string& source,
                       std::int32_t src_line, const std::string& detail,
                       std::uint64_t session, const std::string& client,
                       const std::string& op, const std::string& table) {
-    if (g_in_log) return;
+    (void)detail; // Error returns retain full text; diagnostic storage does not.
+    if (!openads::util::logging_enabled() || g_in_log) return;
     g_in_log = true;
     if (code != 0) {
         process_mg_stats().logged_errors.fetch_add(
@@ -470,11 +472,11 @@ void ErrorLog::log_ex(std::int32_t code, const std::string& source,
         std::string eff_session_client = client.empty() ? g_ctx.client : client;
         std::uint64_t eff_session = session != 0 ? session : g_ctx.session;
         std::string drv_op, drv_table;
-        derive_op_table(detail, eff_op, eff_table, drv_op, drv_table);
+        drv_op = "[hidden]"; drv_table = "[hidden]";
         append_text_locked(fs::path(d),
             text_line(dt, code, source, src_line, current_pid(),
-                      current_tid8(), eff_session, eff_session_client,
-                      drv_op, drv_table, detail),
+                      current_tid8(), eff_session, "[hidden]",
+                      drv_op, drv_table, "[detail hidden]"),
             max_kb_);
     }
 
@@ -484,7 +486,7 @@ void ErrorLog::log_ex(std::int32_t code, const std::string& source,
     fill_field(rec.data(), 2, std::to_string(code));
     fill_field(rec.data(), 3, source);
     fill_field(rec.data(), 4, std::to_string(src_line));
-    fill_field(rec.data(), 5, detail);
+    fill_field(rec.data(), 5, "[detail hidden]");
 
     // Read just the header to learn the current record count. The common
     // case appends in place; a full read + rewrite happens only when the

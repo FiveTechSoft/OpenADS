@@ -349,6 +349,7 @@ add_executable(openads_unit_tests
     unit/network_client_test.cpp
     unit/abi_dd_invoicing_test.cpp
     unit/abi_fetch_where_test.cpp
+    unit/abi_wire_caller_test.cpp
     unit/abi_dirty_key_skip_test.cpp
     unit/abi_remote_bottom_keycount_test.cpp
     unit/abi_remote_setfields_commit_test.cpp
@@ -612,6 +613,40 @@ target_link_libraries(oads_imac_test PRIVATE openads_ace)
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
     add_test(NAME mingw_import_parser COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/mingw_import_parser_test.py)
+endif()
+
+# The security default must be tested in new processes, not after a unit test
+# has already called the app's opt-in API.
+add_executable(openads_trace_gate_probe trace_gate_probe.cpp)
+target_link_libraries(openads_trace_gate_probe PRIVATE openads_core)
+target_include_directories(openads_trace_gate_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
+if(OPENADS_WITH_SQLITE)
+    target_link_libraries(openads_trace_gate_probe PRIVATE openads_sqlite3)
+endif()
+if(OPENADS_WITH_HARBOUR_UDF)
+    target_link_libraries(openads_trace_gate_probe PRIVATE ${HARBOUR_LINK_LIBRARIES})
+endif()
+add_dependencies(openads_unit_tests openads_trace_gate_probe)
+if(Python3_Interpreter_FOUND AND TARGET openads_serverd)
+    add_test(NAME diagnostics_gate_contract COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/trace_gate_contract.py $<TARGET_FILE:openads_trace_gate_probe>
+        $<TARGET_FILE:openads_serverd>)
+endif()
+
+# Pure-local marker gates plus the existing remote sequence with markers inserted.
+add_executable(openads_trace_marker_probe trace_marker_probe.cpp)
+target_link_libraries(openads_trace_marker_probe PRIVATE openads_core)
+if(OPENADS_WITH_SQLITE)
+    target_link_libraries(openads_trace_marker_probe PRIVATE openads_sqlite3)
+endif()
+if(OPENADS_WITH_HARBOUR_UDF)
+    target_link_libraries(openads_trace_marker_probe PRIVATE ${HARBOUR_LINK_LIBRARIES})
+endif()
+add_dependencies(openads_unit_tests openads_trace_marker_probe)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME trace_marker_contract COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/trace_marker_contract.py
+        $<TARGET_FILE:openads_trace_marker_probe> $<TARGET_FILE:openads_trace_gate_probe>)
 endif()
 
 # Native mutual-auth proof uses a public mock HRB, not production material.

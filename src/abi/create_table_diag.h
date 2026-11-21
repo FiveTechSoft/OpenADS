@@ -2,6 +2,7 @@
 
 // Opt-in CreateTable stages, shared by the client ABI and server ABI twin.
 // Never log schema, row values, usernames, or raw paths.
+#include "util/log.h"
 #include <chrono>
 #include <cctype>
 #include <cstdint>
@@ -29,6 +30,7 @@ inline std::string leaf(std::string_view path) {
     return out;
 }
 inline bool enabled(std::string_view path) {
+    if (!openads::util::logging_enabled()) return false;
     const char* dest = std::getenv("OPENADS_CREATE_TABLE_DIAG_FILE");
     if (!dest || !*dest) return false;
     const char* filter = std::getenv("OPENADS_CREATE_TABLE_DIAG_FILTER");
@@ -66,7 +68,7 @@ struct Scope {
 };
 inline void log(std::string_view stage, std::int64_t code = 0,
                 std::string_view detail = {}, int os_error = 0) {
-    if (target.empty()) return;
+    if (!openads::util::logging_enabled() || target.empty()) return;
     const char* dest = std::getenv("OPENADS_CREATE_TABLE_DIAG_FILE");
     if (!dest || !*dest) return;
     static std::mutex mu;
@@ -84,7 +86,7 @@ inline void log(std::string_view stage, std::int64_t code = 0,
         std::chrono::system_clock::now().time_since_epoch()).count();
     std::fprintf(fp, "create-table epoch_ms=%lld id=%s table=%s stage=%.*s code=%lld os_code=%d detail=%.*s\n",
                  static_cast<long long>(epoch_ms),
-                 correlation.c_str(), target.c_str(), static_cast<int>(stage.size()), stage.data(),
+                 correlation.c_str(), "[table hidden]", static_cast<int>(stage.size()), stage.data(),
                  static_cast<long long>(code), os_error,
                  static_cast<int>(detail.size()), detail.data());
     std::fclose(fp);

@@ -277,8 +277,46 @@ HB_FUNC( OADS_GETCONNECTION )
 /*  OADS_SETLOGGING( lOn ) -> lOk                                      */
 /*  Master switch for every log the ace DLL can emit (audit channel +  */
 /*  ace_calls.log traces). Call OAds_SetLogging( .F. ) once at startup */
-/*  in production so no paths/aliases reach end-user machines.         */
+/*  Default OFF. .T. permits env/ini diagnostics; .F. stops them.       */
 /* ------------------------------------------------------------------ */
+/* IDs are labels, not connection/thread operations. Never coerce invalid types.
+   Omission means no argument; an explicit NIL remains invalid. */
+extern UNSIGNED32 ENTRYPOINT OAdsTraceMark(const UNSIGNED8*, UNSIGNED32);
+extern UNSIGNED32 ENTRYPOINT OAdsTraceMarkEx(const UNSIGNED8*, UNSIGNED32, UNSIGNED64, UNSIGNED64);
+static HB_BOOL oads_marker_id(int param, UNSIGNED64* out)
+{
+    PHB_ITEM item;
+    *out = 0;
+    if (hb_pcount() < param) return HB_TRUE;
+    item = hb_param(param, HB_IT_NUMERIC);
+    if (!item) return HB_FALSE;
+    if (HB_IS_INTEGER(item) || HB_IS_LONG(item)) {
+        HB_MAXINT value = hb_itemGetNInt(item);
+        if (value < 0 || (UNSIGNED64) value > 9999999999999999ULL) return HB_FALSE;
+        *out = (UNSIGNED64) value;
+        return HB_TRUE;
+    } else {
+        double value = hb_itemGetND(item);
+        /* Both comparisons reject NaN/infinity before any integer conversion.
+           Large floats may already be rounded, so reject above2^53-1. */
+        if (!(value >= 0.0 && value <= 9007199254740991.0)) return HB_FALSE;
+        *out = (UNSIGNED64) value;
+        return (double) *out == value;
+    }
+}
+
+/* OAds_TraceMark(cMark [,nInstId [,nThreadId]]) -> lWritten.
+   Wrapper remains in kit librddads.a. No default-connection lookup/RDD call. */
+HB_FUNC( OADS_TRACEMARK )
+{
+    HB_SIZE len = hb_parclen(1);
+    UNSIGNED64 instance, app_thread;
+    hb_retl( HB_ISCHAR(1) && len > 0 && len <= 120 &&
+             oads_marker_id(2, &instance) && oads_marker_id(3, &app_thread) &&
+             OAdsTraceMarkEx((const UNSIGNED8*) hb_parc(1), (UNSIGNED32) len,
+                             instance, app_thread) == 0 );
+}
+
 HB_FUNC( OADS_SETLOGGING )
 {
     hb_retl( OAdsSetLogging( ( UNSIGNED16 ) hb_parl( 1 ) ) == 0 );
@@ -1719,3 +1757,7 @@ HB_FUNC( OADS_COMPLETEAUTH ) {
 HB_FUNC( OADS_CANCELAUTH ) {
     hb_retl(OAdsCancelAuth((ADSHANDLE)hb_parnint(1))==0);
 }
+
+/* Compatibility spelling used by Vouch's current copy call. Same tested
+ * connection overloads and logical result as OADS_COPYFILE; no new behavior. */
+HB_FUNC_TRANSLATE( OADS_FCOPYFILE, OADS_COPYFILE )

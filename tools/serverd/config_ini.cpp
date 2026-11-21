@@ -129,6 +129,11 @@ bool parse_ini(const std::string& text, IniConfig& out, std::string& error) {
         if (key == "host") {
             out.host = val;
             out.has_host = true;
+        } else if (key == "diagnostics") {
+            std::string v = to_lower(val);
+            if (v != "0" && v != "1" && v != "false" && v != "true" && v != "no" && v != "yes" && v != "off" && v != "on") { error = "diagnostics must be boolean"; return false; }
+            out.has_diagnostics = true;
+            out.diagnostics = v == "1" || v == "true" || v == "yes" || v == "on";
         } else if (key == "allow_anonymous") {
             std::string v = val;
             for (char& c : v) {
