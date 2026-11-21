@@ -26,7 +26,7 @@ int main(int argc, char** argv) {
         auto r = fs_lock_step(*f.value(), 0, 16, static_cast<std::uint16_t>(type), 0);
         if (!r) return 11;
         const bool want = std::string(argv[4]) == "free";
-        return r.value() == want ? 0 : 12;
+        return ( r.value() != 0 ) == want ? 0 : 12;
     }
     auto dir = fs::temp_directory_path() / ("openads-lock85-" + std::to_string(
         std::chrono::steady_clock::now().time_since_epoch().count()));
