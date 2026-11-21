@@ -2920,6 +2920,11 @@ std::uint64_t read_u64_le(const std::uint8_t* p) {
     return v;
 }
 
+void write_u64_le(std::uint64_t v, std::vector<std::uint8_t>& out) {
+    for (int i = 0; i < 8; ++i)
+        out.push_back(static_cast<std::uint8_t>((v >> (8 * i)) & 0xFF));
+}
+
 } // namespace
 
 // File state can change on another connection or directly on the host.
@@ -2961,6 +2966,200 @@ RemoteConnection::file_rename(const std::string& old_p,
     if (rep.value().opcode != Opcode::FileRenameAck)
         return fs_wire_err(rep.value(), "FileRename");
     return {};
+}
+
+util::Result<void>
+RemoteConnection::file_copy(const std::string& src_p,
+                            const std::string& dst_p) {
+    Frame req;
+    req.opcode = Opcode::FileCopy;
+    push_lp_str(req.payload, src_p);
+    push_lp_str(req.payload, dst_p);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::FileCopyAck)
+        return fs_wire_err(rep.value(), "FileCopy");
+    return {};
+}
+
+util::Result<std::vector<std::uint8_t>>
+RemoteConnection::file_load(const std::string& path) {
+    Frame req;
+    req.opcode = Opcode::FileLoad;
+    push_lp_str(req.payload, path);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::FileLoadAck ||
+        rep.value().payload.size() < 4)
+        return fs_wire_err(rep.value(), "FileLoad");
+    std::uint32_t n = read_u32_le(rep.value().payload.data());
+    if (4ull + n > rep.value().payload.size())
+        return util::Error{5000, 0, "FileLoad: short data", ""};
+    return std::vector<std::uint8_t>(
+        rep.value().payload.begin() + 4,
+        rep.value().payload.begin() + 4 + static_cast<std::ptrdiff_t>(n));
+}
+
+util::Result<void>
+RemoteConnection::file_save(const std::string& path,
+                            const std::uint8_t* data, std::uint64_t size) {
+    Frame req;
+    req.opcode = Opcode::FileSave;
+    push_lp_str(req.payload, path);
+    write_u32_le(static_cast<std::uint32_t>(size), req.payload);
+    if (data && size)
+        req.payload.insert(req.payload.end(), data,
+                           data + static_cast<std::ptrdiff_t>(size));
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::FileSaveAck)
+        return fs_wire_err(rep.value(), "FileSave");
+    return {};
+}
+
+util::Result<std::vector<std::uint8_t>>
+RemoteConnection::fread_at(std::uint32_t file_id, std::uint64_t offset,
+                           std::uint32_t nbytes) {
+    Frame req;
+    req.opcode = Opcode::FileReadAt;
+    write_u32_le(file_id, req.payload);
+    write_u64_le(offset, req.payload);
+    write_u32_le(nbytes, req.payload);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::FileReadAtAck ||
+        rep.value().payload.size() < 4)
+        return fs_wire_err(rep.value(), "FileReadAt");
+    std::uint32_t n = read_u32_le(rep.value().payload.data());
+    if (4u + n > rep.value().payload.size())
+        return util::Error{5000, 0, "FileReadAt: short data", ""};
+    return std::vector<std::uint8_t>(
+        rep.value().payload.begin() + 4,
+        rep.value().payload.begin() + 4 + static_cast<std::ptrdiff_t>(n));
+}
+
+util::Result<std::uint32_t>
+RemoteConnection::fwrite_at(std::uint32_t file_id, std::uint64_t offset,
+                            const std::uint8_t* data, std::uint32_t n) {
+    Frame req;
+    req.opcode = Opcode::FileWriteAt;
+    write_u32_le(file_id, req.payload);
+    write_u64_le(offset, req.payload);
+    write_u32_le(n, req.payload);
+    if (data && n)
+        req.payload.insert(req.payload.end(), data, data + n);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::FileWriteAtAck ||
+        rep.value().payload.size() < 4)
+        return fs_wire_err(rep.value(), "FileWriteAt");
+    return read_u32_le(rep.value().payload.data());
+}
+
+util::Result<void>
+RemoteConnection::fflush(std::uint32_t file_id) {
+    Frame req;
+    req.opcode = Opcode::FileFlush;
+    write_u32_le(file_id, req.payload);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::FileFlushAck)
+        return fs_wire_err(rep.value(), "FileFlush");
+    return {};
+}
+
+util::Result<bool>
+RemoteConnection::feof(std::uint32_t file_id) {
+    Frame req;
+    req.opcode = Opcode::FileEof;
+    write_u32_le(file_id, req.payload);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::FileEofAck ||
+        rep.value().payload.empty())
+        return fs_wire_err(rep.value(), "FileEof");
+    return rep.value().payload[0] != 0;
+}
+
+util::Result<void>
+RemoteConnection::file_set_attr(const std::string& path,
+                                std::uint32_t attr) {
+    Frame req;
+    req.opcode = Opcode::FileSetAttr;
+    push_lp_str(req.payload, path);
+    write_u32_le(attr, req.payload);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::FileSetAttrAck)
+        return fs_wire_err(rep.value(), "FileSetAttr");
+    return {};
+}
+
+util::Result<void>
+RemoteConnection::file_set_time(const std::string& path, std::uint16_t year,
+                                std::uint8_t mon, std::uint8_t day,
+                                std::uint8_t hh, std::uint8_t mm,
+                                std::uint8_t ss) {
+    Frame req;
+    req.opcode = Opcode::FileSetTime;
+    push_lp_str(req.payload, path);
+    req.payload.push_back(static_cast<std::uint8_t>(year & 0xFF));
+    req.payload.push_back(static_cast<std::uint8_t>((year >> 8) & 0xFF));
+    req.payload.push_back(mon);
+    req.payload.push_back(day);
+    req.payload.push_back(hh);
+    req.payload.push_back(mm);
+    req.payload.push_back(ss);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::FileSetTimeAck)
+        return fs_wire_err(rep.value(), "FileSetTime");
+    return {};
+}
+
+util::Result<void>
+RemoteConnection::ftruncate(std::uint32_t file_id, std::uint64_t size) {
+    Frame req;
+    req.opcode = Opcode::FileTrunc;
+    write_u32_le(file_id, req.payload);
+    write_u64_le(size, req.payload);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::FileTruncAck)
+        return fs_wire_err(rep.value(), "FileTrunc");
+    return {};
+}
+
+util::Result<std::string>
+RemoteConnection::file_temp(const std::string& dir,
+                            const std::string& prefix) {
+    Frame req;
+    req.opcode = Opcode::FileTemp;
+    push_lp_str(req.payload, dir);
+    push_lp_str(req.payload, prefix);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::FileTempAck)
+        return fs_wire_err(rep.value(), "FileTemp");
+    std::size_t pos = 0;
+    std::string name;
+    if (!read_lstr16(rep.value().payload, pos, name))
+        return util::Error{5000, 0, "FileTemp: short ack", ""};
+    return name;
+}
+
+util::Result<std::uint64_t>
+RemoteConnection::dir_space(const std::string& dir, std::uint8_t type) {
+    Frame req;
+    req.opcode = Opcode::DirSpace;
+    push_lp_str(req.payload, dir);
+    req.payload.push_back(type);
+    auto rep = request(req);
+    if (!rep) return rep.error();
+    if (rep.value().opcode != Opcode::DirSpaceAck ||
+        rep.value().payload.size() < 8)
+        return fs_wire_err(rep.value(), "DirSpace");
+    return read_u64_le(rep.value().payload.data());
 }
 
 util::Result<std::uint64_t>

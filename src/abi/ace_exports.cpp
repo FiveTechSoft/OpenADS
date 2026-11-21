@@ -11305,6 +11305,345 @@ UNSIGNED32 ENTRYPOINT AdsRenameFile(ADSHANDLE hConn, UNSIGNED8* pucOld,
     return ok();
 }
 
+UNSIGNED32 ENTRYPOINT AdsCopyFile(ADSHANDLE hConn, UNSIGNED8* pucSrc,
+                                  UNSIGNED8* pucDst) {
+    arc2_trace("AdsCopyFile");
+    if (!pucSrc || !pucDst)
+        return fail(openads::AE_INTERNAL_ERROR, "null name");
+    auto s = openads::abi::to_internal(pucSrc, 0);
+    auto d = openads::abi::to_internal(pucDst, 0);
+    auto ctx = resolve_fs_conn(hConn);
+    if (ctx.remote) {
+        remote_flush_pools(ctx.remote);
+        remote_invalidate_index_parks(ctx.remote);
+        auto r = ctx.remote->file_copy(s, d);
+        if (!r) return fail(r.error());
+        return ok();
+    }
+    if (!ctx.local) return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
+    auto a = jail_local(ctx, s);
+    auto b = jail_local(ctx, d);
+    if (!a || !b) return fail(openads::AE_ACCESS_DENIED, "path");
+    auto r = openads::engine::fs_copy(*a, *b);
+    if (!r) return fail(r.error());
+    return ok();
+}
+
+UNSIGNED32 ENTRYPOINT AdsLoadFile(ADSHANDLE hConn, UNSIGNED8* pucName,
+                                  void* pBuf, UNSIGNED32* pulBufLen) {
+    arc2_trace("AdsLoadFile");
+    if (!pucName || !pulBufLen)
+        return fail(openads::AE_INTERNAL_ERROR, "null arg");
+    auto name = openads::abi::to_internal(pucName, 0);
+    auto ctx = resolve_fs_conn(hConn);
+    std::vector<std::uint8_t> bytes;
+    if (ctx.remote) {
+        auto r = ctx.remote->file_load(name);
+        if (!r) return fail(r.error());
+        bytes = std::move(r.value());
+    } else {
+        if (!ctx.local) return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
+        auto abs = jail_local(ctx, name);
+        if (!abs) return fail(openads::AE_ACCESS_DENIED, "path");
+        auto r = openads::engine::fs_load(*abs);
+        if (!r) return fail(r.error());
+        bytes = std::move(r.value());
+    }
+    if (bytes.size() > *pulBufLen) {
+        *pulBufLen = static_cast<UNSIGNED32>(bytes.size());
+        return fail(openads::AE_INSUFFICIENT_BUFFER, "buffer too small");
+    }
+    if (pBuf && !bytes.empty())
+        std::memcpy(pBuf, bytes.data(), bytes.size());
+    *pulBufLen = static_cast<UNSIGNED32>(bytes.size());
+    return ok();
+}
+
+UNSIGNED32 ENTRYPOINT AdsSaveFile(ADSHANDLE hConn, UNSIGNED8* pucName,
+                                  const void* pBuf, UNSIGNED32 ulLen) {
+    arc2_trace("AdsSaveFile");
+    if (!pucName || (!pBuf && ulLen))
+        return fail(openads::AE_INTERNAL_ERROR, "null arg");
+    auto name = openads::abi::to_internal(pucName, 0);
+    auto ctx = resolve_fs_conn(hConn);
+    if (ctx.remote) {
+        remote_flush_pools(ctx.remote);
+        remote_invalidate_index_parks(ctx.remote);
+        auto r = ctx.remote->file_save(
+            name, static_cast<const std::uint8_t*>(pBuf), ulLen);
+        if (!r) return fail(r.error());
+        return ok();
+    }
+    if (!ctx.local) return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
+    auto abs = jail_local(ctx, name);
+    if (!abs) return fail(openads::AE_ACCESS_DENIED, "path");
+    auto r = openads::engine::fs_save(
+        *abs, static_cast<const std::uint8_t*>(pBuf), ulLen);
+    if (!r) return fail(r.error());
+    return ok();
+}
+
+UNSIGNED32 ENTRYPOINT AdsFReadAt(ADSHANDLE hFile, UNSIGNED64 ullOffset,
+                                 void* pBuf, UNSIGNED32 ulLen,
+                                 UNSIGNED32* pulRead) {
+    arc2_trace("AdsFReadAt");
+    if (!pulRead) return fail(openads::AE_INTERNAL_ERROR, "null out");
+    *pulRead = 0;
+    auto& s = state();
+    std::unique_lock<std::recursive_mutex> lk(s.mu);
+    if (auto it = remote_files_map().find(hFile); it != remote_files_map().end()) {
+        // Retain lifetime under the registry lock, then release it BEFORE
+        // waiting on this file or its connection. Never invert that order.
+        auto rf = it->second;
+        lk.unlock();
+        std::lock_guard<std::mutex> file_lk(rf->mu);
+        if (rf->closed) return fail(openads::AE_INTERNAL_ERROR, "bad file handle");
+        auto r = rf->conn->fread_at(rf->file_id, ullOffset, ulLen);
+        if (!r) return fail(r.error());
+        const auto& bytes = r.value();
+        if (pBuf && !bytes.empty())
+            std::memcpy(pBuf, bytes.data(), bytes.size());
+        *pulRead = static_cast<UNSIGNED32>(bytes.size());
+        return ok();
+    }
+    if (auto* lf = s.registry.lookup<openads::engine::FsFile>(
+            hFile, openads::session::HandleKind::LocalFile)) {
+        if (!pBuf && ulLen) return fail(openads::AE_INTERNAL_ERROR, "null buf");
+        lf->stream.clear();
+        lf->stream.seekg(static_cast<std::streamoff>(ullOffset), std::ios::beg);
+        lf->stream.read(static_cast<char*>(pBuf),
+                        static_cast<std::streamsize>(ulLen));
+        *pulRead = static_cast<UNSIGNED32>(lf->stream.gcount());
+        return ok();
+    }
+    return fail(openads::AE_INTERNAL_ERROR, "bad file handle");
+}
+
+UNSIGNED32 ENTRYPOINT AdsFWriteAt(ADSHANDLE hFile, UNSIGNED64 ullOffset,
+                                  const void* pBuf, UNSIGNED32 ulLen,
+                                  UNSIGNED32* pulWritten) {
+    arc2_trace("AdsFWriteAt");
+    if (!pulWritten) return fail(openads::AE_INTERNAL_ERROR, "null out");
+    *pulWritten = 0;
+    auto& s = state();
+    std::unique_lock<std::recursive_mutex> lk(s.mu);
+    if (auto it = remote_files_map().find(hFile); it != remote_files_map().end()) {
+        // Retain lifetime under the registry lock, then release it BEFORE
+        // waiting on this file or its connection. Never invert that order.
+        auto rf = it->second;
+        lk.unlock();
+        std::lock_guard<std::mutex> file_lk(rf->mu);
+        if (rf->closed) return fail(openads::AE_INTERNAL_ERROR, "bad file handle");
+        auto r = rf->conn->fwrite_at(
+            rf->file_id, ullOffset,
+            static_cast<const std::uint8_t*>(pBuf), ulLen);
+        if (!r) return fail(r.error());
+        *pulWritten = r.value();
+        return ok();
+    }
+    if (auto* lf = s.registry.lookup<openads::engine::FsFile>(
+            hFile, openads::session::HandleKind::LocalFile)) {
+        if (!pBuf && ulLen) return fail(openads::AE_INTERNAL_ERROR, "null buf");
+        lf->stream.clear();
+        lf->stream.seekg(static_cast<std::streamoff>(ullOffset), std::ios::beg);
+        lf->stream.write(static_cast<const char*>(pBuf),
+                         static_cast<std::streamsize>(ulLen));
+        lf->stream.flush();
+        if (!lf->stream)
+            return fail(openads::AE_INTERNAL_ERROR, "write failed");
+        *pulWritten = ulLen;
+        return ok();
+    }
+    return fail(openads::AE_INTERNAL_ERROR, "bad file handle");
+}
+
+UNSIGNED32 ENTRYPOINT AdsFFlush(ADSHANDLE hFile) {
+    arc2_trace("AdsFFlush");
+    auto& s = state();
+    std::unique_lock<std::recursive_mutex> lk(s.mu);
+    if (auto it = remote_files_map().find(hFile); it != remote_files_map().end()) {
+        // Retain lifetime under the registry lock, then release it BEFORE
+        // waiting on this file or its connection. Never invert that order.
+        auto rf = it->second;
+        lk.unlock();
+        std::lock_guard<std::mutex> file_lk(rf->mu);
+        if (rf->closed) return fail(openads::AE_INTERNAL_ERROR, "bad file handle");
+        auto r = rf->conn->fflush(rf->file_id);
+        if (!r) return fail(r.error());
+        return ok();
+    }
+    if (auto* lf = s.registry.lookup<openads::engine::FsFile>(
+            hFile, openads::session::HandleKind::LocalFile)) {
+        lf->stream.flush();
+        if (!lf->stream)
+            return fail(openads::AE_INTERNAL_ERROR, "flush failed");
+        return ok();
+    }
+    return fail(openads::AE_INTERNAL_ERROR, "bad file handle");
+}
+
+UNSIGNED32 ENTRYPOINT AdsFEof(ADSHANDLE hFile, UNSIGNED16* pbEof) {
+    arc2_trace("AdsFEof");
+    if (!pbEof) return fail(openads::AE_INTERNAL_ERROR, "null out");
+    *pbEof = 0;
+    auto& s = state();
+    std::unique_lock<std::recursive_mutex> lk(s.mu);
+    if (auto it = remote_files_map().find(hFile); it != remote_files_map().end()) {
+        // Retain lifetime under the registry lock, then release it BEFORE
+        // waiting on this file or its connection. Never invert that order.
+        auto rf = it->second;
+        lk.unlock();
+        std::lock_guard<std::mutex> file_lk(rf->mu);
+        if (rf->closed) return fail(openads::AE_INTERNAL_ERROR, "bad file handle");
+        auto r = rf->conn->feof(rf->file_id);
+        if (!r) return fail(r.error());
+        *pbEof = r.value() ? 1 : 0;
+        return ok();
+    }
+    if (auto* lf = s.registry.lookup<openads::engine::FsFile>(
+            hFile, openads::session::HandleKind::LocalFile)) {
+        lf->stream.clear();
+        auto cur = lf->stream.tellg();
+        lf->stream.seekg(0, std::ios::end);
+        auto end = lf->stream.tellg();
+        lf->stream.clear();
+        if (cur >= 0) lf->stream.seekg(cur);
+        *pbEof = (cur < 0 || (end >= 0 && cur >= end)) ? 1 : 0;
+        return ok();
+    }
+    return fail(openads::AE_INTERNAL_ERROR, "bad file handle");
+}
+
+UNSIGNED32 ENTRYPOINT AdsSetFileAttr(ADSHANDLE hConn, UNSIGNED8* pucName,
+                                     UNSIGNED32 ulAttr) {
+    arc2_trace("AdsSetFileAttr");
+    if (!pucName) return fail(openads::AE_INTERNAL_ERROR, "null name");
+    auto name = openads::abi::to_internal(pucName, 0);
+    auto ctx = resolve_fs_conn(hConn);
+    if (ctx.remote) {
+        remote_flush_pools(ctx.remote);
+        remote_invalidate_index_parks(ctx.remote);
+        auto r = ctx.remote->file_set_attr(name, ulAttr);
+        if (!r) return fail(r.error());
+        return ok();
+    }
+    if (!ctx.local) return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
+    auto abs = jail_local(ctx, name);
+    if (!abs) return fail(openads::AE_ACCESS_DENIED, "path");
+    auto r = openads::engine::fs_set_attr(*abs, ulAttr);
+    if (!r) return fail(r.error());
+    return ok();
+}
+
+UNSIGNED32 ENTRYPOINT AdsSetFileTime(ADSHANDLE hConn, UNSIGNED8* pucName,
+                                     UNSIGNED16 usYear, UNSIGNED8 ucMon,
+                                     UNSIGNED8 ucDay, UNSIGNED8 ucHour,
+                                     UNSIGNED8 ucMin, UNSIGNED8 ucSec) {
+    arc2_trace("AdsSetFileTime");
+    if (!pucName) return fail(openads::AE_INTERNAL_ERROR, "null name");
+    auto name = openads::abi::to_internal(pucName, 0);
+    auto ctx = resolve_fs_conn(hConn);
+    if (ctx.remote) {
+        remote_flush_pools(ctx.remote);
+        remote_invalidate_index_parks(ctx.remote);
+        auto r = ctx.remote->file_set_time(name, usYear, ucMon, ucDay,
+                                           ucHour, ucMin, ucSec);
+        if (!r) return fail(r.error());
+        return ok();
+    }
+    if (!ctx.local) return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
+    auto abs = jail_local(ctx, name);
+    if (!abs) return fail(openads::AE_ACCESS_DENIED, "path");
+    auto r = openads::engine::fs_set_time(*abs, usYear, ucMon, ucDay,
+                                          ucHour, ucMin, ucSec);
+    if (!r) return fail(r.error());
+    return ok();
+}
+
+UNSIGNED32 ENTRYPOINT AdsFTrunc(ADSHANDLE hFile, UNSIGNED64 ullSize) {
+    arc2_trace("AdsFTrunc");
+    auto& s = state();
+    std::unique_lock<std::recursive_mutex> lk(s.mu);
+    if (auto it = remote_files_map().find(hFile); it != remote_files_map().end()) {
+        // Retain lifetime under the registry lock, then release it BEFORE
+        // waiting on this file or its connection. Never invert that order.
+        auto rf = it->second;
+        lk.unlock();
+        std::lock_guard<std::mutex> file_lk(rf->mu);
+        if (rf->closed) return fail(openads::AE_INTERNAL_ERROR, "bad file handle");
+        auto r = rf->conn->ftruncate(rf->file_id, ullSize);
+        if (!r) return fail(r.error());
+        return ok();
+    }
+    if (auto* lf = s.registry.lookup<openads::engine::FsFile>(
+            hFile, openads::session::HandleKind::LocalFile)) {
+        auto r = openads::engine::fs_truncate(*lf, ullSize);
+        if (!r) return fail(r.error());
+        lf->stream.clear();
+        return ok();
+    }
+    return fail(openads::AE_INTERNAL_ERROR, "bad file handle");
+}
+
+UNSIGNED32 ENTRYPOINT AdsTempFile(ADSHANDLE hConn, UNSIGNED8* pucDir,
+                                  UNSIGNED8* pucPrefix, UNSIGNED8* pucName,
+                                  UNSIGNED16* pusNameLen) {
+    arc2_trace("AdsTempFile");
+    if (!pucDir || !pucName || !pusNameLen)
+        return fail(openads::AE_INTERNAL_ERROR, "null arg");
+    auto dir = openads::abi::to_internal(pucDir, 0);
+    if (dir.empty()) dir = ".";
+    std::string prefix;
+    if (pucPrefix) prefix = openads::abi::to_internal(pucPrefix, 0);
+    auto ctx = resolve_fs_conn(hConn);
+    std::string name;
+    if (ctx.remote) {
+        auto r = ctx.remote->file_temp(dir, prefix);
+        if (!r) return fail(r.error());
+        name = std::move(r.value());
+    } else {
+        if (!ctx.local) return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
+        auto abs = jail_local(ctx, dir);
+        if (!abs) return fail(openads::AE_ACCESS_DENIED, "path");
+        auto r = openads::engine::fs_tempfile(*abs, prefix);
+        if (!r) return fail(r.error());
+        name = (std::filesystem::path(
+                    openads::platform::fold_absolute_to_relative(dir)) /
+                std::filesystem::path(r.value()).filename()).generic_string();
+    }
+    if (name.size() > *pusNameLen) {
+        *pusNameLen = static_cast<UNSIGNED16>(name.size());
+        return fail(openads::AE_INSUFFICIENT_BUFFER, "buffer too small");
+    }
+    std::memcpy(pucName, name.data(), name.size());
+    *pusNameLen = static_cast<UNSIGNED16>(name.size());
+    return ok();
+}
+
+UNSIGNED32 ENTRYPOINT AdsDirSpace(ADSHANDLE hConn, UNSIGNED8* pucDir,
+                                  UNSIGNED8 ucType, UNSIGNED64* pullBytes) {
+    arc2_trace("AdsDirSpace");
+    if (!pucDir || !pullBytes)
+        return fail(openads::AE_INTERNAL_ERROR, "null arg");
+    *pullBytes = 0;
+    auto dir = openads::abi::to_internal(pucDir, 0);
+    if (dir.empty()) dir = ".";
+    auto ctx = resolve_fs_conn(hConn);
+    if (ctx.remote) {
+        auto r = ctx.remote->dir_space(dir, ucType);
+        if (!r) return fail(r.error());
+        *pullBytes = r.value();
+        return ok();
+    }
+    if (!ctx.local) return fail(openads::AE_INVALID_CONNECTION_HANDLE, "");
+    auto abs = jail_local(ctx, dir);
+    if (!abs) return fail(openads::AE_ACCESS_DENIED, "path");
+    auto r = openads::engine::fs_dir_space(*abs, ucType);
+    if (!r) return fail(r.error());
+    *pullBytes = r.value();
+    return ok();
+}
+
 UNSIGNED32 ENTRYPOINT AdsGetFileSize(ADSHANDLE hConn, UNSIGNED8* pucName,
                                      UNSIGNED32* pulSize) {
     arc2_trace("AdsGetFileSize");

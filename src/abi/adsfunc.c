@@ -77,6 +77,101 @@ UNSIGNED32 OADSAPI oads_RenameFile( ADSHANDLE hConnect,
     return AdsRenameFile( hConnect, pucOld, pucNew );
 }
 
+UNSIGNED32 OADSAPI oads_CopyFile( ADSHANDLE hConnect,
+                                     UNSIGNED8 *pucSrc,
+                                     UNSIGNED8 *pucDst )
+{
+    return AdsCopyFile( hConnect, pucSrc, pucDst );
+}
+
+UNSIGNED32 OADSAPI oads_LoadFile( ADSHANDLE hConnect,
+                                     UNSIGNED8 *pucName,
+                                     void *pBuf,
+                                     UNSIGNED32 *pulBufLen )
+{
+    return AdsLoadFile( hConnect, pucName, pBuf, pulBufLen );
+}
+
+UNSIGNED32 OADSAPI oads_SaveFile( ADSHANDLE hConnect,
+                                     UNSIGNED8 *pucName,
+                                     const void *pBuf,
+                                     UNSIGNED32 ulLen )
+{
+    return AdsSaveFile( hConnect, pucName, pBuf, ulLen );
+}
+
+UNSIGNED32 OADSAPI oads_FReadAt( ADSHANDLE hFile,
+                                     UNSIGNED64 ullOffset,
+                                     void *pBuf,
+                                     UNSIGNED32 ulLen,
+                                     UNSIGNED32 *pulRead )
+{
+    return AdsFReadAt( hFile, ullOffset, pBuf, ulLen, pulRead );
+}
+
+UNSIGNED32 OADSAPI oads_FWriteAt( ADSHANDLE hFile,
+                                     UNSIGNED64 ullOffset,
+                                     const void *pBuf,
+                                     UNSIGNED32 ulLen,
+                                     UNSIGNED32 *pulWritten )
+{
+    return AdsFWriteAt( hFile, ullOffset, pBuf, ulLen, pulWritten );
+}
+
+UNSIGNED32 OADSAPI oads_FFlush( ADSHANDLE hFile )
+{
+    return AdsFFlush( hFile );
+}
+
+UNSIGNED32 OADSAPI oads_FEof( ADSHANDLE hFile,
+                                     UNSIGNED16 *pbEof )
+{
+    return AdsFEof( hFile, pbEof );
+}
+
+UNSIGNED32 OADSAPI oads_SetFileAttr( ADSHANDLE hConnect,
+                                     UNSIGNED8 *pucName,
+                                     UNSIGNED32 ulAttr )
+{
+    return AdsSetFileAttr( hConnect, pucName, ulAttr );
+}
+
+UNSIGNED32 OADSAPI oads_SetFileTime( ADSHANDLE hConnect,
+                                     UNSIGNED8 *pucName,
+                                     UNSIGNED16 usYear,
+                                     UNSIGNED8 ucMon,
+                                     UNSIGNED8 ucDay,
+                                     UNSIGNED8 ucHour,
+                                     UNSIGNED8 ucMin,
+                                     UNSIGNED8 ucSec )
+{
+    return AdsSetFileTime( hConnect, pucName, usYear, ucMon, ucDay,
+                           ucHour, ucMin, ucSec );
+}
+
+UNSIGNED32 OADSAPI oads_FTrunc( ADSHANDLE hFile,
+                                     UNSIGNED64 ullSize )
+{
+    return AdsFTrunc( hFile, ullSize );
+}
+
+UNSIGNED32 OADSAPI oads_TempFile( ADSHANDLE hConnect,
+                                     UNSIGNED8 *pucDir,
+                                     UNSIGNED8 *pucPrefix,
+                                     UNSIGNED8 *pucName,
+                                     UNSIGNED16 *pusNameLen )
+{
+    return AdsTempFile( hConnect, pucDir, pucPrefix, pucName, pusNameLen );
+}
+
+UNSIGNED32 OADSAPI oads_DirSpace( ADSHANDLE hConnect,
+                                     UNSIGNED8 *pucDir,
+                                     UNSIGNED8 ucType,
+                                     UNSIGNED64 *pullBytes )
+{
+    return AdsDirSpace( hConnect, pucDir, ucType, pullBytes );
+}
+
 UNSIGNED32 OADSAPI oads_GetFileSize( ADSHANDLE hConnect,
                                         UNSIGNED8 *pucName,
                                         UNSIGNED32 *pulSize )
