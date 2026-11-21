@@ -2,6 +2,7 @@
 
 #include "engine/oem_collation.h"
 #include "platform/lock.h"
+#include "util/log.h"
 
 #ifndef _WIN32
 #include <fcntl.h>
@@ -43,6 +44,7 @@ bool want_fsync_() {
 // Opt-in lock diagnostics only. Set OPENADS_LOCK_DIAG to a writable file
 // path before starting the process; unset/empty means no diagnostic file.
 std::FILE* open_lock_diag_() {
+    if (!openads::util::logging_enabled()) return nullptr;
     const char* path = std::getenv("OPENADS_LOCK_DIAG");
     return path && path[0] != '\0' ? std::fopen(path, "a") : nullptr;
 }
@@ -747,7 +749,7 @@ util::Result<void> CdxIndex::ensure_write_lock_() {
         if (!slot) slot = std::make_shared<CdxWriteLockEntry>();
         e = slot;
         if (auto* f = open_lock_diag_()) {
-            std::fprintf(f, "ensure_write_lock ENTER path=%s users=%zu has_os=%d fd=%p\n", path_.c_str(), e->users, (int)(bool)e->os_lock, file_.native_handle());
+            std::fprintf(f, "ensure_write_lock ENTER path=%s users=%zu has_os=%d fd=%p\n", "[hidden]", e->users, (int)(bool)e->os_lock, file_.native_handle());
             std::fclose(f);
         }
     }
@@ -775,7 +777,7 @@ util::Result<void> CdxIndex::ensure_write_lock_() {
                 if (!l) {
                     if (auto* f = open_lock_diag_()) {
                         std::fprintf(f, "acquire_cdx_os_lock FAIL path=%s fd=%p code=%d sub=%d msg=%s\n",
-                            path_.c_str(), file_.native_handle(), l.error().code, l.error().sub_code, l.error().message.c_str());
+                            "[hidden]", file_.native_handle(), l.error().code, l.error().sub_code, "[error text hidden]");
                         std::fclose(f);
                     }
                     return l.error();
@@ -850,7 +852,7 @@ CdxIndex::open_named(const std::string& path,
     mode_  = mode;
     path_  = canonicalize_path(path);
     if (auto* f = open_lock_diag_()) {
-        std::fprintf(f, "open_named orig=%s canon=%s fd_will_open\n", path.c_str(), path_.c_str());
+        std::fprintf(f, "open_named orig=%s canon=%s fd_will_open\n", "[hidden]", "[hidden]");
         std::fclose(f);
     }
     auto fres = platform::File::open(path, map_mode(mode));
