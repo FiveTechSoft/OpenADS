@@ -214,3 +214,21 @@ TEST_CASE("mtfix41 established idle setting strict parse and default never") {
         CHECK_FALSE(openads::serverd::parse_ini(std::string("established_session_idle_seconds = ")+value+"\n",bad,error));
     }
 }
+
+TEST_CASE("diagnostics master is absent OFF and accepts explicit admin config only") {
+    auto absent = parse_ok("port=6262\n");
+    CHECK_FALSE(absent.has_diagnostics);
+    CHECK_FALSE(absent.diagnostics);
+    for (auto value : {"1", "true", "yes", "on"}) {
+        auto cfg = parse_ok(std::string("diagnostics=") + value + "\n");
+        CHECK(cfg.has_diagnostics);
+        CHECK(cfg.diagnostics);
+    }
+    for (auto value : {"0", "false", "no", "off"}) {
+        auto cfg = parse_ok(std::string("diagnostics=") + value + "\n");
+        CHECK(cfg.has_diagnostics);
+        CHECK_FALSE(cfg.diagnostics);
+    }
+    IniConfig cfg; std::string error;
+    CHECK_FALSE(parse_ini("diagnostics=environment\n", cfg, error));
+}

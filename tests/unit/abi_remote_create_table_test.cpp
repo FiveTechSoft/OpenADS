@@ -1,3 +1,4 @@
+#include "util/log.h"
 // Remote AdsCreateTable must land the free table under the server data
 // directory (not next to the client app) and leave the open handle usable.
 // Regression for Pritpal Bedi: v1.8.15 fixed local absolute-path create,
@@ -140,6 +141,9 @@ TEST_CASE("remote AdsCreateTable with drive-rooted name still under data dir") {
 }
 
 TEST_CASE("CreateTable diagnostic isolates post-write reopen failure") {
+    const bool old_logging = openads::util::logging_enabled();
+    struct Restore { bool old; ~Restore() { openads::util::set_logging_enabled(old); } } restore{old_logging};
+    openads::util::set_logging_enabled(true);
     using openads::network::Server;
     auto data = fs::temp_directory_path() / "openads_create_diag_post_open";
     auto diag = data / "create-diag.log";
@@ -205,6 +209,7 @@ TEST_CASE("CreateTable diagnostic isolates post-write reopen failure") {
     CHECK(content.find("stage=client-wire-fail code=" +
                        std::to_string(reported)) != std::string::npos);
     CHECK(content.find("NOTE") == std::string::npos);
+    CHECK(content.find(rel) == std::string::npos);
     (void)AdsDisconnect(conn);
 #if defined(_WIN32)
     _putenv_s("OPENADS_CREATE_TABLE_DIAG_FILE", "");
@@ -217,6 +222,9 @@ TEST_CASE("CreateTable diagnostic isolates post-write reopen failure") {
 }
 
 TEST_CASE("CreateTable broad diagnostic records first-user open and append") {
+    const bool old_logging = openads::util::logging_enabled();
+    struct Restore { bool old; ~Restore() { openads::util::set_logging_enabled(old); } } restore{old_logging};
+    openads::util::set_logging_enabled(true);
     using openads::network::Server;
     auto data = fs::temp_directory_path() / "openads_create_diag_first_user";
     auto diag = data / "create-diag.log";
@@ -244,11 +252,12 @@ TEST_CASE("CreateTable broad diagnostic records first-user open and append") {
     std::ifstream log(diag);
     std::string content((std::istreambuf_iterator<char>(log)),
                         std::istreambuf_iterator<char>());
-    CHECK(content.find("table=USERCFG.dbf stage=dbf-write-ok") != std::string::npos);
-    CHECK(content.find("table=USERCFG.dbf stage=server-open-ok") != std::string::npos);
-    CHECK(content.find("table=USERCFG.dbf stage=client-append-enter") != std::string::npos);
-    CHECK(content.find("table=USERCFG.dbf stage=client-append-ok") != std::string::npos);
-    CHECK(content.find("table=USERCFG.dbf stage=server-first-append-ok") != std::string::npos);
+    CHECK(content.find("table=[table hidden] stage=dbf-write-ok") != std::string::npos);
+    CHECK(content.find("table=[table hidden] stage=server-open-ok") != std::string::npos);
+    CHECK(content.find("table=[table hidden] stage=client-append-enter") != std::string::npos);
+    CHECK(content.find("table=[table hidden] stage=client-append-ok") != std::string::npos);
+    CHECK(content.find("table=[table hidden] stage=server-first-append-ok") != std::string::npos);
+    CHECK(content.find("USERCFG.dbf") == std::string::npos);
 #if defined(_WIN32)
     _putenv_s("OPENADS_CREATE_TABLE_DIAG_FILE", "");
 #else

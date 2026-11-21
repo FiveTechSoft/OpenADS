@@ -90,8 +90,8 @@ Vouch source, commit, lock, navigation or count policy changes.
 full and compact modes. It requires wire_trace and the master gate; it never
 enables them. No connection or RDD action occurs. The label is 1..120 bytes with
 no C0/DEL/C1 control bytes. Use ASCII developer labels, never private data.
-The result is diagnostic only, not application-save status. The full contract and
-measured-time limits are recorded in the release notes.
+The result is diagnostic only, not application-save status. The executable contracts are in tests/trace_marker_contract.py and
+tests/trace_marker_harbour.py.
 Count only W rows as wire frames. M rows have no wire duration and advance the
 previous-row gap column. Thread IDs and steady tick_us pair application scopes;
 local file writes have overhead and markers are not cross-thread wire barriers.
@@ -99,8 +99,8 @@ local file writes have overhead and markers are not cross-thread wire barriers.
 ## Optional instance/thread IDs (mtfix77)
 
 The SAME Harbour function accepts `OAds_TraceMark(cMark [,nInstId [,nThreadId]])`.
-Omitted IDs are0; explicit NIL/type/range errors return .F. Exact integers accept
+Omitted IDs are 0; explicit NIL/type/range errors return .F. Exact integers accept
 0..9999999999999999; floats must be finite/integral and <=9007199254740991.
 Both flavors have right-aligned instance/thread fields, then marker, with
 separate auto_thread and tick_us. The old C ABI remains; an additive Ex bridge
-carries IDs. The full contract is recorded in the release notes.
+carries IDs. The numeric acceptance cases are in tests/trace_marker_numeric_test.c.

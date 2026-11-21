@@ -5,10 +5,17 @@
 #include <string>
 #include <string_view>
 
+struct LoggingGuard {
+    bool old = openads::util::logging_enabled();
+    LoggingGuard() { openads::util::set_logging_enabled(true); }
+    ~LoggingGuard() { openads::util::set_logging_enabled(old); }
+};
+
 using openads::util::Log;
 using openads::util::LogLevel;
 
 TEST_CASE("Log respects the configured level threshold") {
+    LoggingGuard enabled;
     std::ostringstream out;
     Log log{LogLevel::Info, &out};
 
@@ -23,6 +30,7 @@ TEST_CASE("Log respects the configured level threshold") {
 }
 
 TEST_CASE("Log emits the level prefix") {
+    LoggingGuard enabled;
     std::ostringstream out;
     Log log{LogLevel::Trace, &out};
     log.write(LogLevel::Trace, "tag");
@@ -56,6 +64,7 @@ using openads::util::AuditKind;
 namespace {
 
 struct AuditGuard {
+    LoggingGuard enabled;
     std::ostringstream console;
     std::ostringstream file;
     AuditGuard() {
@@ -133,7 +142,7 @@ TEST_CASE("write_audit RESOLVED goes to console and file") {
 
     const std::string want =
         "HYT673 00000001 00000014 2026-08-16 22:12:13.826 "
-        "RESOLVED=\"C:/temp/t.dbf\" JAILED\n";
+        "RESOLVED=\"[context hidden]\"\n";
     CHECK(g.console.str() == want);
     CHECK(g.file.str() == want);
 }
@@ -172,10 +181,9 @@ TEST_CASE("write_remote_open_audit logs each asked name only once") {
 TEST_CASE("write_remote_open_audit is a RESOLVED line in the file") {
     AuditGuard g;
     openads::util::write_remote_open_audit("C:/Creative.RAM/USERS.dbf");
-    CHECK(g.console.str().find("RESOLVED=\"(remote)\"") != std::string::npos);
-    CHECK(g.console.str().find("ASKED=\"C:/Creative.RAM/USERS.dbf\"") !=
-          std::string::npos);
-    CHECK(g.console.str().find("VIA=REMOTE") != std::string::npos);
+    CHECK(g.console.str().find("RESOLVED=") != std::string::npos);
+    CHECK(g.console.str().find("C:/Creative.RAM/USERS.dbf") == std::string::npos);
+    CHECK(g.console.str().find("context hidden") != std::string::npos);
     CHECK(g.file.str() == g.console.str());
 }
 
@@ -192,17 +200,17 @@ TEST_CASE("write_audit Detail appears on console when enabled, never in file") {
         "2026-08-16 22:12:13.826");
     openads::util::write_audit(
         AuditKind::Resolved, "HYT673", 1, 1,
-        "RESOLVED=\"b\" JAILED",
+        "RESOLVED=\"[context hidden]\"",
         "2026-08-16 22:12:13.826");
 
-    CHECK(g.console.str().find("input=") != std::string::npos);
-    CHECK(g.console.str().find("LEGACY remap") != std::string::npos);
+    CHECK(g.console.str().find("input=") == std::string::npos);
+    CHECK(g.console.str().find("LEGACY remap") == std::string::npos);
     CHECK(g.console.str().find("RESOLVED=") != std::string::npos);
     CHECK(g.file.str().find("input=") == std::string::npos);
     CHECK(g.file.str().find("LEGACY remap") == std::string::npos);
     CHECK(g.file.str() ==
           "HYT673 00000001 00000001 2026-08-16 22:12:13.826 "
-          "RESOLVED=\"b\" JAILED\n");
+          "RESOLVED=\"[context hidden]\"\n");
 }
 
 TEST_CASE("format_alias_field right-pads to 10 chars, truncates from the right") {
@@ -216,7 +224,7 @@ TEST_CASE("set_logging_enabled(false) silences every audit line") {
     openads::util::set_logging_enabled(false);
 
     openads::util::write_audit(
-        AuditKind::Resolved, "HYT673", 1, 1, "RESOLVED=\"b\" JAILED",
+        AuditKind::Resolved, "HYT673", 1, 1, "RESOLVED=\"[context hidden]\"",
         "2026-08-16 22:12:13.826");
     openads::util::write_audit(
         AuditKind::Connected, "HYT673", 1, 2, "CONNECTED=\"/data\"",
@@ -232,7 +240,7 @@ TEST_CASE("set_logging_enabled(false) silences every audit line") {
     // Re-enabling restores output.
     openads::util::set_logging_enabled(true);
     openads::util::write_audit(
-        AuditKind::Resolved, "HYT673", 1, 4, "RESOLVED=\"b\" JAILED",
+        AuditKind::Resolved, "HYT673", 1, 4, "RESOLVED=\"[context hidden]\"",
         "2026-08-16 22:12:13.826");
     CHECK(g.console.str().find("RESOLVED=") != std::string::npos);
     CHECK(g.file.str().find("RESOLVED=") != std::string::npos);

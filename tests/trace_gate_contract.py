@@ -105,32 +105,54 @@ for value in ('0', 'false', 'off', 'no'):
   assert '[wire]' not in p.stderr,value
   print('env_false_overrides_ini',value,'PASS')
 
-# Standalone daemon keeps necessary operational replies, not diagnostics.
+# Separate daemon process: admin config alone authorizes server diagnostics.
 if len(sys.argv)>2:
- import time
- with tempfile.TemporaryDirectory(prefix='PRIVATE_SERVER_CANARY_') as base:
-  # The daemon's existing data jail rejects symlink path components.
-  # macOS tempfile roots may be under /var -> /private/var. Give it the
-  # physical root; do not weaken the jail to accommodate a test fixture.
-  root=pathlib.Path(base).resolve();cfg=root/'server.ini'
-  cfg.write_text('host=127.0.0.1\nport=0\ndata='+str(root)+'\ndiagnostics=false\n')
-  env=os.environ.copy();env['OPENADS_WIRE_TRACE']='1';env['OPENADS_OPDUMP']='1'
-  env['OPENADS_ERROR_LOG_PATH']=str(root/'errors')
-  env['OPENADS_LOG_FILE']=str(root/'audit.log')
-  server=subprocess.Popen([sys.argv[2],'--config',str(cfg)],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
-  try:
-   time.sleep(1)
-   if server.poll() is not None:
-    out,err=server.communicate(timeout=10)
-    raise AssertionError(('server failed startup',server.returncode,out,err))
-   server.terminate();out,err=server.communicate(timeout=10)
-  finally:
-   if server.poll() is None:server.kill();server.communicate()
-  assert 'PRIVATE_SERVER_CANARY' not in out+err
-  assert '[wire]' not in err
-  assert not list((root/'errors').glob('*'))
-  assert not (root/'audit.log').exists()
-  print('standalone_server_OFF_env_OPDUMP_and_wire PASS')
+ import time, socket
+ for mode in ('default','off','on'):
+  with tempfile.TemporaryDirectory(prefix='PRIVATE_SERVER_CANARY_') as base:
+   root=pathlib.Path(base).resolve();cfg=root/'server.ini'
+   with socket.socket() as sock:
+    sock.bind(('127.0.0.1',0));port=sock.getsockname()[1]
+   text='host=127.0.0.1\nport='+str(port)+'\ndata='+str(root)+'\n'
+   if mode!='default':text+='diagnostics='+('true' if mode=='on' else 'false')+'\n'
+   cfg.write_text(text)
+   env=os.environ.copy()
+   for key in list(env):
+    if key.startswith('OPENADS_'):env.pop(key)
+   env.update(OPENADS_WIRE_TRACE='1',OPENADS_OPDUMP='1',OPENADS_DIAGNOSTICS='1',OPENADS_LOGGING='1',
+              OPENADS_ERROR_LOG_PATH=str(root/'errors'),OPENADS_LOG_FILE=str(root/'audit.log'),
+              OPENADS_INI=str(root/'client.ini'))
+   (root/'client.ini').write_text('diagnostics=true\nlog=debug\nwire_trace=1\n')
+   server=subprocess.Popen([sys.argv[2],'--config',str(cfg)],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+   try:
+    deadline=time.monotonic()+10
+    while True:
+     if server.poll() is not None:raise AssertionError(('server startup',mode,server.communicate()))
+     try:
+      with socket.create_connection(('127.0.0.1',port),timeout=.2):break
+     except OSError:
+      if time.monotonic()>deadline:raise
+      time.sleep(.05)
+    client=subprocess.run([exe,'server-client',str(port),str(root)],env=env,capture_output=True,text=True,timeout=10)
+    assert client.returncode==0,(mode,client.returncode,client.stderr)
+    # Let the selected sampler's first 10-second interval elapse when ON.
+    if mode=='on':time.sleep(10.2)
+    server.terminate();out,err=server.communicate(timeout=12)
+   finally:
+    if server.poll() is None:server.kill();server.communicate()
+   logs='\n'.join(f.read_bytes().decode('latin1') for f in root.rglob('*') if f.is_file() and f.name not in ('server.ini','client.ini'))
+   for canary in ('PRIVATE_SERVER_CANARY','PRIVATE_MISSING_TABLE_CANARY'):
+    assert canary not in out+err+logs,(mode,canary)
+   if mode=='on':
+    assert '[wire]' in err,(mode,'admin enable not exercised',err)
+    assert list((root/'errors').glob('*')),(mode,'OPDUMP output absent')
+    # ErrorLog masks raw details, retaining a safe source token.
+    assert 'OPDUMP' in logs,(mode,'sampler source not exercised',logs)
+   else:
+    assert '[wire]' not in err,(mode,err)
+    assert not list((root/'errors').glob('*')),(mode,logs)
+    assert not (root/'audit.log').exists(),mode
+   print('standalone_server',mode,'admin_boundary_mask_env_and_client_ini PASS')
 
 # Provenance describes the synchronous ACE trigger, not PRG/RDD source lines.
 with tempfile.TemporaryDirectory(prefix='openads_caller_contract_') as base:

@@ -15,6 +15,14 @@ void checked(UNSIGNED32 rc,int line){if(rc)throw std::runtime_error("ACE failure
 #define ok(x) checked((x),__LINE__)
 int main(int argc,char**argv){
  std::string mode=argc>1?argv[1]:"default";
+ if (mode == "server-client") {
+  if (argc != 4) return 20;
+  openads::network::RemoteConnection remote;
+  if (!remote.connect("127.0.0.1", static_cast<std::uint16_t>(std::stoi(argv[2])), argv[3])) return 21;
+  if (remote.open_table("PRIVATE_MISSING_TABLE_CANARY.DBF")) return 22;
+  remote.disconnect();
+  return 0;
+ }
  const bool marks = mode == "markers";
  if (marks) mode = "caller";
  auto mark = [&](const char* label) {
