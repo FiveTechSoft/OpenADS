@@ -31,8 +31,11 @@
 #include "openads/ace.h"
 #include "openads/error.h"
 #include "network/server.h"
+#include "platform/path.h"
 
 #include <chrono>
+#include <atomic>
+#include <thread>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -637,6 +640,120 @@ TEST_CASE( "oads_* local: Load Save ReadAt WriteAt Flush Eof" )
     fs::remove_all( dir, ec );
 }
 
+static fs::path lock85_probe_path()
+{
+    // Resolve before any case changes the working directory: dladdr can
+    // return a relative loader path when the test binary is invoked by a
+    // relative path, and absolute() would then anchor at the wrong cwd.
+    auto module = openads::platform::module_directory();
+    REQUIRE( module.has_value() );
+    fs::path probe = fs::absolute( fs::path( *module ) ) / "openads_fs_lock85_probe";
+#if defined(_WIN32)
+    probe += ".exe";
+#endif
+    return probe;
+}
+
+static void lock_round_trip( ADSHANDLE h, const fs::path& dir, const fs::path& probe )
+{
+    ADSHANDLE a = 0, b = 0, c = 0;
+    REQUIRE( oads_FCreate( h, (UNSIGNED8*)"locks.bin", 0, &a ) == 0 );
+    REQUIRE( oads_FOpen( h, (UNSIGNED8*)"locks.bin", 2, &b ) == 0 );
+    REQUIRE( oads_FOpen( h, (UNSIGNED8*)"locks.bin", 2, &c ) == 0 );
+    REQUIRE( oads_FLock( a, 0, 16, 0 ) == 0 );
+    CHECK( oads_FLock( b, 0, 16, 0 ) == 5012 );
+    CHECK( oads_FLock( b, 0, 16, 0x100 ) == 5012 );
+    SIGNED32 result = -1;
+    REQUIRE( oads_FLockTest( b, 0, 16, 0, &result ) == 0 );
+    CHECK( result > 0 );
+    // Locking must not block I/O through the owning native handle.
+    UNSIGNED32 wrote = 0, got = 0;
+    REQUIRE( oads_FWriteAt( a, 0, "owned", 5, &wrote ) == 0 );
+    CHECK( wrote == 5 );
+    char buf[8] = {};
+    REQUIRE( oads_FReadAt( a, 0, buf, 5, &got ) == 0 );
+    CHECK( std::string( buf, got ) == "owned" );
+    // A disjoint range can be held concurrently.
+    REQUIRE( oads_FLock( b, 64, 16, 0 ) == 0 );
+    REQUIRE( oads_FUnlock( b, 64, 16 ) == 0 );
+
+    CHECK( oads_FLock( b, 0, 16, 1 ) != 0 );
+    CHECK( oads_FLock( b, 0x7FFFFFFFFFFFFFFFULL, 1, 0 ) != 0 );
+    // Harbour refuses own/process-local overlapping relocks, even WAIT.
+    CHECK( oads_FLock( b, 0, 16, 0x200 ) == 5012 );
+    REQUIRE( oads_FUnlock( a, 0, 16 ) == 0 );
+    REQUIRE( oads_FLock( a, 0, 16, 0x100 ) == 0 );
+    CHECK( oads_FLock( b, 0, 16, 0x100 ) == 5012 );
+    REQUIRE( oads_FUnlock( a, 0, 16 ) == 0 );
+    // Adjacent locks merge in the registry. Unix can split that merged
+    // range with partial unlock; Windows preserves native exact unlock.
+    REQUIRE( oads_FLock( a, 0, 8, 0 ) == 0 );
+    REQUIRE( oads_FLock( a, 8, 8, 0 ) == 0 );
+#if defined(_WIN32)
+    CHECK( oads_FUnlock( a, 4, 4 ) != 0 );
+    REQUIRE( oads_FUnlock( a, 0, 8 ) == 0 );
+    REQUIRE( oads_FUnlock( a, 8, 8 ) == 0 );
+#else
+    REQUIRE( oads_FUnlock( a, 4, 4 ) == 0 );
+    REQUIRE( oads_FLockTest( b, 4, 4, 0, &result ) == 0 );
+    CHECK( result == 0 );
+    REQUIRE( oads_FUnlock( a, 0, 4 ) == 0 );
+    REQUIRE( oads_FUnlock( a, 8, 8 ) == 0 );
+    REQUIRE( oads_FLock( a, 64, 0, 0 ) == 0 ); // to EOF on Unix
+    REQUIRE( oads_FUnlock( a, 64, 0 ) == 0 );
+#endif
+    // A real other process holds byte 128 until it exits. WAIT must
+    // complete after that release, without blocking the server thread.
+    REQUIRE( fs::exists(probe) );
+    auto marker = dir / "holder-ready";
+    fs::remove(marker);
+    std::string command = "\"" + probe.string() + "\" hold \"" +
+                           (dir / "locks.bin").string() + "\" \"" + marker.string() + "\"";
+#if defined(_WIN32)
+    command = "\"" + command + "\"";
+#endif
+    std::atomic<int> child_rc{-1};
+    std::thread holder([&] { child_rc.store(std::system(command.c_str())); });
+    bool ready = false;
+    for (int i = 0; i < 300; ++i) {
+        if (fs::exists(marker)) { ready = true; break; }
+        if (child_rc.load() != -1) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    UNSIGNED32 wait_rc = 999;
+    if (ready) {
+        CHECK( oads_FLock( a, 128, 16, 0 ) == 5012 );
+        CHECK( oads_FLockTest( a, 128, 16, 0, &result ) == 0 );
+        CHECK( result > 0 ); // POSIX PID, Windows 1
+        wait_rc = oads_FLock( a, 128, 16, 0x200 );
+        if (wait_rc == 0) oads_FUnlock( a, 128, 16 );
+    }
+    holder.join();
+    CHECK( ready );
+    CHECK( child_rc.load() == 0 );
+    CHECK( wait_rc == 0 );
+    REQUIRE( oads_FLock( a, 32, 16, 0 ) == 0 );
+    REQUIRE( oads_FClose(a) == 0 ); // other references retain merged locks
+    CHECK( oads_FLock( b, 32, 16, 0 ) == 5012 );
+    REQUIRE( oads_FUnlock( b, 32, 16 ) == 0 );
+    REQUIRE( oads_FLockTest( c, 0, 16, 0, &result ) == 0 );
+    CHECK( result == 0 );
+    REQUIRE( oads_FClose(b) == 0 );
+    REQUIRE( oads_FClose(c) == 0 );
+    CHECK( oads_FLock( b, 0, 16, 0 ) != 0 );
+}
+
+TEST_CASE( "oads_* local: FS byte locks shared exclusive wait and owner IO" )
+{
+    auto dir = fs::temp_directory_path() / "oads_file_g4";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    auto h = local_connect(dir);
+    lock_round_trip(h, dir, lock85_probe_path());
+    REQUIRE( AdsDisconnect(h) == 0 );
+    fs::remove_all(dir);
+}
+
 static void metadata_round_trip( ADSHANDLE h, const fs::path& dir )
 {
     REQUIRE( oads_SaveFile( h, (UNSIGNED8*)"m.txt", "0123456789", 10 ) == 0 );
@@ -706,12 +823,18 @@ static void metadata_round_trip( ADSHANDLE h, const fs::path& dir )
 
     // DirSpace: capacity positive, available/free no more than capacity
     UNSIGNED64 ullCap = 0, ullAvail = 0, ullFree = 0;
-    REQUIRE( oads_DirSpace( h, (UNSIGNED8*)"", 1, &ullCap ) == 0 );
+    REQUIRE( oads_DirSpace( h, (UNSIGNED8*)"", 3, &ullCap ) == 0 );
     REQUIRE( oads_DirSpace( h, (UNSIGNED8*)"", 0, &ullAvail ) == 0 );
-    REQUIRE( oads_DirSpace( h, (UNSIGNED8*)"", 2, &ullFree ) == 0 );
+    REQUIRE( oads_DirSpace( h, (UNSIGNED8*)"", 1, &ullFree ) == 0 );
     CHECK( ullCap > 0 );
     CHECK( ullAvail <= ullCap );
     CHECK( ullFree <= ullCap );
+    UNSIGNED64 ullUsed = 0;
+    REQUIRE( oads_DirSpace( h, (UNSIGNED8*)"", 2, &ullUsed ) == 0 );
+    CHECK( ullUsed <= ullCap );
+    // Disk use can move between requests; allow 64 MiB of runner activity.
+    auto sum = ullUsed + ullFree;
+    CHECK( (sum > ullCap ? sum - ullCap : ullCap - sum) < 64ull*1024ull*1024ull );
 
     CHECK( oads_SetFileAttr( h, (UNSIGNED8*)"../outside.txt", 1 ) != 0 );
     CHECK( oads_SetFileTime( h, (UNSIGNED8*)"../outside.txt", 2021, 3, 4, 5, 6, 7 ) != 0 );
@@ -880,11 +1003,46 @@ TEST_CASE( "oads_* remote embedded: full round-trip" )
     REQUIRE( srv.start( "127.0.0.1", 0 ).has_value() );
 
     auto prev = fs::current_path();
+    const fs::path probe85 = lock85_probe_path();
     fs::current_path( app );
 
     ADSHANDLE h = remote_connect_embedded( data, srv.port() );
     oads_round_trip( h, "remote-embedded" );
     metadata_round_trip( h, data );
+    lock_round_trip( h, data, probe85 );
+
+    // Different client connections are separate lock owners, like two
+    // Harbour processes. Same-client opens still share merged ranges.
+    auto peer = remote_connect_embedded(data, srv.port());
+    ADSHANDLE left = 0, right = 0;
+    REQUIRE( oads_FOpen(h, (UNSIGNED8*)"locks.bin", 2, &left) == 0 );
+    REQUIRE( oads_FOpen(peer, (UNSIGNED8*)"locks.bin", 2, &right) == 0 );
+    REQUIRE( oads_FLock(left, 0, 16, 0x100) == 0 );
+    REQUIRE( oads_FLock(right, 0, 16, 0x100) == 0 );
+    REQUIRE( oads_FUnlock(left, 0, 16) == 0 );
+    REQUIRE( oads_FUnlock(right, 0, 16) == 0 );
+    REQUIRE( oads_FLock(left, 0, 16, 0) == 0 );
+    CHECK( oads_FLock(right, 0, 16, 0) == 5012 );
+    std::atomic<bool> done{false};
+    std::atomic<UNSIGNED32> wait_rc{999};
+    std::thread waiter([&] { wait_rc.store(oads_FLock(right,0,16,0x200)); done.store(true); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    CHECK_FALSE(done.load());
+    CHECK( oads_FUnlock(left,0,16) == 0 );
+    for (int i=0; i<300 && !done.load(); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    if (!done.load()) oads_FClose(right);
+    waiter.join();
+    CHECK(wait_rc.load() == 0);
+    CHECK(oads_FUnlock(right,0,16) == 0);
+    CHECK(oads_FLock(left,32,16,0) == 0);
+    CHECK(oads_FClose(left) == 0);
+    REQUIRE(AdsDisconnect(h) == 0);
+    CHECK(oads_FLock(right,32,16,0) == 0);
+    CHECK(oads_FUnlock(right,32,16) == 0);
+    CHECK(oads_FClose(right) == 0);
+    REQUIRE(AdsDisconnect(peer) == 0);
+    h = remote_connect_embedded(data,srv.port());
 
     // verify file lands in server data dir, not client cwd
     CHECK_FALSE( fs::exists( app / "oads_test.txt" ) );

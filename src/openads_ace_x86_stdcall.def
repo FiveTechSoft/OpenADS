@@ -37,6 +37,9 @@ EXPORTS
     oads_SetFileAttr
     oads_SetFileTime
     oads_FTrunc
+    oads_FLockTest
+    oads_FUnlock
+    oads_FLock
     oads_TempFile
     oads_DirSpace
     oads_GetFileSize

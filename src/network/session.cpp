@@ -1658,6 +1658,8 @@ void Session::append_open_warm_sections(std::vector<std::uint8_t>& out,
 }
 
 DispatchResult Session::dispatch(const Frame& f) {
+    // Distinct remote connections behave as distinct Harbour processes.
+    openads::engine::FsOwnerScope fs_owner(reinterpret_cast<std::uintptr_t>(this));
     Frame reply;
     if (srv_->auth_required() && (f.opcode == Opcode::Connect || f.opcode == Opcode::MgConnect))
         return {err("Challenge authentication required", openads::AE_LOGIN_FAILED), true};
@@ -1712,6 +1714,7 @@ DispatchResult Session::dispatch(const Frame& f) {
             case Opcode::FRead: case Opcode::FWrite: case Opcode::FSeek:
             case Opcode::FileReadAt: case Opcode::FileWriteAt:
             case Opcode::FileFlush: case Opcode::FileEof:
+            case Opcode::FileLockOp:
             case Opcode::FileTrunc:
             case Opcode::ZipArchive: case Opcode::UnzipArchive: case Opcode::ZipList:
                 if (!admin) return denied();
@@ -4259,6 +4262,7 @@ DispatchResult Session::dispatch(const Frame& f) {
         case Opcode::FileWriteAt:
         case Opcode::FileFlush:
         case Opcode::FileEof:
+        case Opcode::FileLockOp:
         case Opcode::FileTrunc: {
             if (!srv_->enable_file_func()) {
                 reply = err("file functions disabled",
@@ -4789,6 +4793,22 @@ DispatchResult Session::dispatch(const Frame& f) {
                 reply.opcode = Opcode::FileEofAck;
                 reply.payload.push_back(
                     (cur < 0 || (end >= 0 && cur >= end)) ? 1 : 0);
+            } else if (f.opcode == Opcode::FileLockOp) {
+                if (f.payload.size() != 23) { reply = err("FileLockOp: bad payload"); break; }
+                auto id = read_u32_le(f.payload.data());
+                auto it = files_.find(id);
+                if (it == files_.end()) { reply = err("FileLockOp: bad handle"); break; }
+                std::uint64_t start = 0, len = 0;
+                for (std::size_t i = 0; i < 8; ++i) {
+                    start |= static_cast<std::uint64_t>(f.payload[4+i]) << (8*i);
+                    len |= static_cast<std::uint64_t>(f.payload[12+i]) << (8*i);
+                }
+                auto type = static_cast<std::uint16_t>(f.payload[20] |
+                             (static_cast<std::uint16_t>(f.payload[21]) << 8));
+                auto v = openads::engine::fs_lock_step(*it->second, start, len, type, f.payload[22]);
+                if (!v) { reply = err("FileLockOp", static_cast<UNSIGNED32>(v.error().code)); break; }
+                reply.opcode = Opcode::FileLockOp;
+                write_u32_le(static_cast<std::uint32_t>(v.value()), reply.payload);
             } else if (f.opcode == Opcode::FileTrunc) {
                 if (f.payload.size() < 12) {
                     reply = err("FileTrunc: short payload"); break;
