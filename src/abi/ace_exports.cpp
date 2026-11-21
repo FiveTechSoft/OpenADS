@@ -11387,6 +11387,7 @@ UNSIGNED32 ENTRYPOINT AdsSaveFile(ADSHANDLE hConn, UNSIGNED8* pucName,
 UNSIGNED32 ENTRYPOINT AdsVfRequest(ADSHANDLE hConn, const void* request,
                                     UNSIGNED32 length, void** reply,
                                     UNSIGNED32* reply_length) {
+    arc2_trace("AdsVfRequest");
     if(!reply || !reply_length || !request)return fail(openads::AE_INTERNAL_ERROR,"null vf arg");
     *reply=nullptr;*reply_length=0;
     if(length<OADS_VF_REQUEST_SIZE || length>OADS_VF_REQUEST_SIZE+2u*OADS_VF_PATH_MAX+OADS_VF_CHUNK_MAX)
@@ -11407,6 +11408,7 @@ UNSIGNED32 ENTRYPOINT AdsVfRequest(ADSHANDLE hConn, const void* request,
     *reply=out;*reply_length=static_cast<UNSIGNED32>(r.value().size());return ok();
 }
 void ENTRYPOINT AdsVfFree(void* reply) {
+    arc2_trace("AdsVfFree");
     std::free(reply);
 }
 
@@ -39923,6 +39925,7 @@ UNSIGNED32 ENTRYPOINT AdsIsConnectionAlive(ADSHANDLE hConnect, UNSIGNED16* p) {
 // registered local connection. Registry-only: no wire traffic, no
 // blocking, safe to call on every OAds_* invocation.
 UNSIGNED32 ENTRYPOINT OAdsIsLiveConnection(ADSHANDLE hConnect, UNSIGNED16* pbLive) {
+    arc2_trace("OAdsIsLiveConnection");
     if (pbLive == nullptr) return fail(openads::AE_INTERNAL_ERROR, "null out");
     *pbLive = 0;
     if (hConnect == 0) return ok();
