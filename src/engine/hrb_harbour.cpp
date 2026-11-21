@@ -303,6 +303,13 @@ bool protected_call(const char* name, const Scalar* args,
 
 }  // namespace
 
+bool vf_vm_enter() {
+    ensure_vm_started();
+    if (hb_stackId() == nullptr) ensure_thread_attached();
+    return hb_vmRequestReenterExt() != HB_FALSE;
+}
+void vf_vm_leave() { hb_vmRequestRestore(); }
+
 HarbourBackend::~HarbourBackend() {
     if (module_ != nullptr) {
         // Best-effort UDF_Exit; the process is going away anyway.

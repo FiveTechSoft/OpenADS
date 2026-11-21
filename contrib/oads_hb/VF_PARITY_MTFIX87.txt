@@ -1,0 +1,87 @@
+Exact Harbour vf family - mtfix87 cumulative test kit
+Pritpal Bedi
+2026-11-15 19:11
+
+Compatibility and use
+- Existing OAds_F functions, numeric handles and signatures stay unchanged.
+  The new OAds_vf functions call Harbour's real vf front end. Argument checks,
+  GC pointer handles, by-reference outputs, return types and FError follow
+  the Harbour runtime linked by the application. Do not mix the two kinds
+  of file handles. Relink with the kit's lib/librddads.a.
+- All 44 Harbour vf entry points are exposed with the OAds_vf prefix,
+  including the higher-level NameExists, DirBuild and DirUnbuild functions
+  and the optional FromSocket member. The separate driver object is loaded
+  when the new family is first used. Old callers gain no socket dependency.
+- Plain paths stay client-local. OAds_vfPath(hConn,cRelativeName) creates an
+  explicit remote name for an existing remote connection. It does not
+  connect or change the default connection. The current spelling is
+  oads<connection>:<relative-path>; use the helper rather than constructing
+  it. Malformed, zero and overflowing connection prefixes cannot fall back
+  to a local write. The same remote names work with hb_vf once this driver
+  has been loaded.
+
+Documented choices
+1. Remote calls require EnableFileFunc and the existing server data jail.
+   Normal destructive operations inside it retain Harbour behavior. Erase,
+   overwrite and truncate are not disabled. DirUnbuild removes empty folders
+   upward but cannot remove the root or any parent.
+2. Links cannot target outside the root. Listings omit outside-target links;
+   followed metadata comes from a separately pinned target inside the root.
+   Metadata pins hold the validated parent or leaf for the whole operation.
+   macOS uses descriptor-relative parent operations and directory reads;
+   its /dev/fd entries cannot be used to traverse child names.
+   LinkRead never returns an absolute server-native path. Absolute in-root
+   targets are returned relative to the jail; relative targets stay relative.
+3. Remote data handles are regular disk files. Named pipes, devices and
+   sockets are refused rather than blocking a server request indefinitely.
+   Client-local calls and FromSocket keep Harbour's behavior unchanged.
+4. OAds_vfTempFile is Harbour's client-local function, with the same arguments
+   and native GC pointer result. OAds_vfTempFileServer(@cName,cRemoteDir,
+   cPrefix,cExt,nAttr) is separate. Build cRemoteDir with OAds_vfPath. The
+   explicit folder avoids accidentally choosing a server. Its result is an
+   open remote GC pointer; the returned name works with OAds_vfErase.
+5. Remote Handle returns FS_ERROR (-1), never a server OS handle or socket.
+   Client-local Handle is unchanged. FromSocket is in a separate archive
+   member and needs Harbour's hbtcpio library when it is actually used.
+6. Config's driver name is OADS: for remote files, FILE: for native files.
+   Unsupported native-disk config values stay unchanged, like Harbour.
+7. CopyFileEx uses Harbour's copy loop and callback on the client. Either
+   endpoint may be local or explicitly remote. No callback goes to the
+   server. Load/Save and I/O use chunks. This family does not impose the old
+   64 MiB whole-file cap. Large Directory results are also chunked.
+8. Each remote client connection is a separate byte-lock owner, as accepted
+   for mtfix85. The new family preserves Harbour's server-platform behavior:
+   Unix merges opens/ranges until last close; Windows uses separate native
+   handles, so closing one releases that handle's locks. Existing OAds_F
+   behavior stays unchanged. WAIT retries on the client. A server byte-lock
+   request never waits. These are file locks, not RDD/CDX locks.
+9. Transport failures remain distinct from Harbour filesystem errors. Each
+   mutation runs once; response-size discovery never repeats an open, write,
+   rename or delete. Replies are allocated once and released by the caller.
+10. The server vf metadata provider uses the pinned Harbour runtime already
+    used by the kit. A source build without Harbour cannot provide this
+    remote family and returns unsupported. All delivered server variants
+    are built with that provider. This does not change the RDD implementation.
+
+Validation scope
+- Native-vs-OAds client-local read-only and mutation comparisons.
+- Real TCP native-vs-remote file operations, open flags and paired opens.
+- Two-client byte locks, WAIT, close behavior, SET PATH and by-reference Open.
+- Binary Load/Save, local/remote CopyFileEx in both directions and callbacks.
+- Large Directory results, in-root links, outside links, FIFO refusal,
+  root/parent rejection and invalid remote prefixes.
+- Separate FromSocket archive-member linking and native invalid-argument checks.
+- The cumulative platform suites and an x86-client/x64-server assembly check.
+
+Platform proof and package hashes accompany the build. These tests do not
+replace Vouch's own application test or authorize a production deployment.
+Existing INI, auth files, data and rollback files must be kept unchanged.
+No automatic deployment, service restart or upstream merge is performed.
+
+Windows LinkRead resource correction
+- The linked Harbour Windows lookup helper does not close its temporary
+  native handle. The remote provider closes its own private lookup handle
+  after getting the same target name. Otherwise a long-running server would
+  leak handles and prevent later erase/rename. Client-local Harbour and the
+  old OAds_F family stay unchanged. Native comparison probes run this call
+  in a short-lived child so Harbour's lookup leak cannot spoil cleanup.

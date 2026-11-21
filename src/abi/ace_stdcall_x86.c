@@ -6082,3 +6082,19 @@ extern UNSIGNED32 ENTRYPOINT OAdsGetServerStats(ADSHANDLE, UNSIGNED8*, UNSIGNED3
 __declspec(dllexport) UNSIGNED32 __stdcall OAdsGetServerStats(ADSHANDLE a0, UNSIGNED8* a1, UNSIGNED32* a2) {
     return oadsimpl_OAdsGetServerStats(a0, a1, a2);
 }
+
+/* Exact-vf additive transport ABI. */
+#define AdsVfRequest oadsimpl_AdsVfRequest
+extern UNSIGNED32 ENTRYPOINT AdsVfRequest(ADSHANDLE,const void*,UNSIGNED32,void**,UNSIGNED32*);
+#undef AdsVfRequest
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsVfRequest=_AdsVfRequest")
+#pragma comment(linker, "/export:AdsVfRequest=_AdsVfRequest")
+__declspec(dllexport) UNSIGNED32 __stdcall AdsVfRequest(ADSHANDLE a,const void* b,UNSIGNED32 c,void** d,UNSIGNED32* e) {
+    return oadsimpl_AdsVfRequest(a,b,c,d,e);
+}
+#define AdsVfFree oadsimpl_AdsVfFree
+extern void ENTRYPOINT AdsVfFree(void*);
+#undef AdsVfFree
+#pragma comment(linker, "/alternatename:_oadsimpl_AdsVfFree=_AdsVfFree")
+#pragma comment(linker, "/export:AdsVfFree=_AdsVfFree")
+__declspec(dllexport) void __stdcall AdsVfFree(void* p) { oadsimpl_AdsVfFree(p); }

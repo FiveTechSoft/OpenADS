@@ -35,6 +35,8 @@ add_executable(openads_unit_tests
     unit/platform_path_test.cpp
     unit/fs_sandbox_test.cpp
     unit/server_fs_test.cpp
+    unit/vf_codec_test.cpp
+    unit/vf_guard_test.cpp
     unit/abi_server_fs_test.cpp
     unit/abi_remote_file_wait_test.cpp
     unit/platform_time_test.cpp

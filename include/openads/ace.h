@@ -112,6 +112,12 @@ UNSIGNED32 ENTRYPOINT AdsLoadFile      (ADSHANDLE  hConnect, UNSIGNED8* pucName,
 // Whole-file save (hb_vfSave): creates or truncates.
 UNSIGNED32 ENTRYPOINT AdsSaveFile      (ADSHANDLE  hConnect, UNSIGNED8* pucName,
                               const void* pBuf, UNSIGNED32 ulLen);
+// Allocated exact-vf transport reply. Exactly one request is executed; there
+// is no size-query/replay contract for operations that create or change files.
+UNSIGNED32 ENTRYPOINT AdsVfRequest(ADSHANDLE hConnect, const void* pRequest,
+                                  UNSIGNED32 ulRequestLen, void** ppReply,
+                                  UNSIGNED32* pulReplyLen);
+void ENTRYPOINT AdsVfFree(void* pReply);
 UNSIGNED32 ENTRYPOINT AdsFReadAt       (ADSHANDLE  hFile, UNSIGNED64 ullOffset,
                               void* pBuf, UNSIGNED32 ulLen,
                               UNSIGNED32* pulRead);
@@ -217,6 +223,8 @@ UNSIGNED32 OADSAPI oads_FSeek       (ADSHANDLE hFile, SIGNED32 lOffset,
                                UNSIGNED16 usOrigin, UNSIGNED32* pulPos);
 UNSIGNED32 OADSAPI oads_CheckExistence (ADSHANDLE  hConnect, UNSIGNED8* pucName,
                                 UNSIGNED16* pbExists);
+UNSIGNED32 OADSAPI oads_IsLiveConnection (ADSHANDLE  hConnect,
+                                UNSIGNED16* pbLive);
 UNSIGNED32 OADSAPI oads_DeleteFile     (ADSHANDLE  hConnect, UNSIGNED8* pucName);
 UNSIGNED32 OADSAPI oads_RenameFile     (ADSHANDLE  hConnect, UNSIGNED8* pucOld,
                                 UNSIGNED8* pucNew);
@@ -1574,6 +1582,8 @@ UNSIGNED32 ENTRYPOINT AdsGetTableConnection(ADSHANDLE hTable,
                                              ADSHANDLE* phConnect);
 UNSIGNED32 ENTRYPOINT AdsIsConnectionAlive (ADSHANDLE hConnect,
                                              UNSIGNED16* pbAlive);
+UNSIGNED32 ENTRYPOINT OAdsIsLiveConnection (ADSHANDLE hConnect,
+                                            UNSIGNED16* pbLive);
 UNSIGNED32 ENTRYPOINT AdsIsEmpty           (ADSHANDLE hTable,
                                              UNSIGNED8* pucField,
                                              UNSIGNED16* pbEmpty);

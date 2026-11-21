@@ -23,6 +23,15 @@ enum class OpenMode {
     CreateExclusive
 };
 
+// Used only by the exact vf driver. Historical RDD/open modes are unchanged.
+struct VfOpenOptions {
+    unsigned access = 2;       // 0 read, 1 write, 2 read/write
+    unsigned share = 3;        // 0 deny all, 1 deny write, 2 deny read, 3 deny none
+    bool create = false, truncate = false, exclusive = false, private_handle = true;
+    bool share_lock = false, shared_lock = true, bsd_share_lock = false;
+    std::uint32_t native_attributes = 0;
+};
+
 class File {
 public:
     File() = default;
@@ -33,6 +42,8 @@ public:
     ~File();
 
     static util::Result<File> open(const std::string& path, OpenMode mode);
+
+    static util::Result<File> open_vf(const std::string& path, const VfOpenOptions& options);
 
     // --- server data jail (ADSCDX) ------------------------------------
     // Only openads_serverd activates this policy. The DLL/local path

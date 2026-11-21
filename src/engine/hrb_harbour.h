@@ -41,6 +41,11 @@ class HarbourBackend : public IBackend {
     std::string module_path_;
 };
 
+// Exact-vf server provider uses the same single embedded VM, not a second VM.
+bool vf_vm_enter();
+void vf_vm_leave();
+void register_vf_provider();
+
 inline std::shared_ptr<IBackend> make_harbour_backend() {
     return std::make_shared<HarbourBackend>();
 }

@@ -581,7 +581,11 @@ util::Result<std::int32_t> fs_lock_step(FsFile& f, std::uint64_t start,
     bool shared = (type & 0x0100u) != 0;
 #if !defined(_WIN32)
     // Harbour's Unix backend forces read-only opens to shared locks.
-    if (!f.writable) shared = true;
+    if(f.vf_semantics) {
+        const auto mode=state->vf_mode<0?(state->writable?2:0):state->vf_mode;
+        if(mode==0)shared=true;
+        else if(mode==1)shared=false;
+    } else if(!f.writable)shared=true;
 #endif
 #if defined(_WIN32)
     OVERLAPPED ov{};
@@ -623,6 +627,15 @@ util::Result<std::int32_t> fs_lock_step(FsFile& f, std::uint64_t start,
         // POSIX reports -1 for an OFD owner: no process ID exists there.
         return fl.l_type == F_UNLCK ? 0 : fl.l_pid > 0 ? static_cast<std::int32_t>(fl.l_pid) : 1;
     }
+    // Exact-vf may upgrade an owner's I/O descriptor while old OFD locks
+    // remain live. Unlock every retained description as well as the current
+    // one; these are all this owner's handles, never another client's.
+    if (op == 1) {
+        for (const auto& prior : state->retained) {
+            const int oldfd = static_cast<int>(reinterpret_cast<intptr_t>(prior.native_handle()) - 1);
+            if (::fcntl(oldfd, set_cmd, &fl) != 0) return native_lock_error("F_OFD_SETLK retained unlock", f.path);
+        }
+    }
     if (::fcntl(fd, set_cmd, &fl) != 0) {
         if (op == 0 && (errno == EAGAIN || errno == EACCES)) return 0;
         return native_lock_error("F_SETLK", f.path);
@@ -648,6 +661,39 @@ util::Result<std::int32_t> fs_lock_step(FsFile& f, std::uint64_t start,
         }
     }
     return 1;
+}
+
+std::shared_ptr<FsNative> fs_find_native(const std::string& abs_path) {
+    std::lock_guard<std::mutex> global(fs_files_mu);
+    const auto identity = fs_identity(abs_path);
+    if (identity.empty()) return nullptr;
+    const auto key = identity + ":owner:" + std::to_string(fs_current_owner);
+    const auto it = fs_files.find(key);
+    return it == fs_files.end() ? nullptr : it->second.lock();
+}
+std::shared_ptr<FsNative> fs_attach_native(const std::string& abs_path,
+                                         std::shared_ptr<FsNative> candidate) {
+    std::lock_guard<std::mutex> global(fs_files_mu);
+    const auto identity = fs_identity(abs_path);
+    if (identity.empty()) return candidate;
+    const auto key = identity + ":owner:" + std::to_string(fs_current_owner);
+    auto existing = fs_files[key].lock();
+    if (existing) {
+        std::lock_guard<std::mutex> lock(existing->mu);
+        if ((candidate->vf_mode==2 && existing->vf_mode!=2) ||
+            (candidate->writable && !existing->writable) || (candidate->readable && !existing->readable)) {
+            existing->retained.push_back(std::move(existing->file));
+            existing->file = std::move(candidate->file);
+            existing->writable = candidate->writable;
+            existing->readable = candidate->readable;
+            existing->vf_mode = candidate->vf_mode;
+        }
+        return existing;
+    }
+    fs_files[key] = candidate;
+    for (auto it=fs_files.begin();it!=fs_files.end();)
+        if (it->second.expired()) it=fs_files.erase(it); else ++it;
+    return candidate;
 }
 
 util::Result<std::unique_ptr<FsFile>> fs_open(const std::string& abs_path,
