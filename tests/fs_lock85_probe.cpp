@@ -39,6 +39,12 @@ int main(int argc, char** argv) {
         // that in the child command line, so use native separators.
         std::string cmd = "\"" + fs::absolute(argv[0]).make_preferred().string() + "\" child \"" +
                           path.string() + "\" " + kind + " " + expected;
+#if defined(_WIN32)
+        // cmd.exe strips a leading quote plus the last quote on the line,
+        // mangling the inner paths; an outer quote pair keeps them intact
+        // (same pattern as the holder spawn in abi_oads_file_funcs_test).
+        cmd = "\"" + cmd + "\"";
+#endif
         return std::system(cmd.c_str()) == 0;
     };
     auto locked = fs_lock_step(*f.value(),0,16,0,0);
