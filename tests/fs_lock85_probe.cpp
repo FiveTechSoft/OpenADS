@@ -35,7 +35,9 @@ int main(int argc, char** argv) {
     auto f = fs_open(path.string(), 2, true);
     if (!f) return 1;
     auto child = [&](const char* kind, const char* expected) {
-        std::string cmd = "\"" + fs::absolute(argv[0]).string() + "\" child \"" +
+        // ctest registers the binary with forward slashes; cmd.exe rejects
+        // that in the child command line, so use native separators.
+        std::string cmd = "\"" + fs::absolute(argv[0]).make_preferred().string() + "\" child \"" +
                           path.string() + "\" " + kind + " " + expected;
         return std::system(cmd.c_str()) == 0;
     };
