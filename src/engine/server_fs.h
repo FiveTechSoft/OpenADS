@@ -86,12 +86,21 @@ struct FsRange { std::uint64_t start, len; };
 struct FsNative {
     platform::File file;
     // Keep prior descriptors alive through a read-only to read/write upgrade;
-    // no upgrade is allowed while this owner's file holds byte ranges.
+    // legacy opens do not upgrade while byte ranges are held. Exact-vf keeps
+    // prior POSIX OFD locks live until the merged range is unlocked.
     std::vector<platform::File> retained;
     std::mutex mu;
     std::vector<FsRange> ranges;
     bool writable = false;
+    bool readable = true;
+    int vf_mode = -1; // Harbour logical mode, distinct from upgraded FD access
 };
+// Exact-vf opens join the same owner-scoped byte-lock registry as legacy FS
+// calls. They supply an already securely opened handle; no RDD path changes.
+std::shared_ptr<FsNative> fs_find_native(const std::string& abs_path);
+std::shared_ptr<FsNative> fs_attach_native(const std::string& abs_path,
+                                         std::shared_ptr<FsNative> candidate);
+
 class FsStream {
 public:
     std::shared_ptr<FsNative> native;
@@ -115,6 +124,7 @@ struct FsFile {
     FsStream stream;
     std::string path;
     bool writable = false;
+    bool vf_semantics = false;
 };
 // One non-blocking native attempt. op 0 lock, 1 unlock, 2 query.
 // Lock result 0 busy, 1 success. Query 0 free, positive owner, -1 error.

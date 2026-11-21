@@ -79,7 +79,7 @@ JailSnapshot jail_snapshot() {
     return s;
 }
 
-util::Result<int> open_jailed(const std::string& path, int flags) {
+util::Result<int> open_jailed(const std::string& path, int flags, mode_t permissions = 0644) {
     namespace fs = std::filesystem;
     JailSnapshot snap = jail_snapshot();
 
@@ -162,7 +162,7 @@ util::Result<int> open_jailed(const std::string& path, int flags) {
             continue;
         }
         const int fd = ::openat(dirfd, comps[i].c_str(),
-                                flags | O_NOFOLLOW | O_CLOEXEC, 0644);
+                                flags | O_NOFOLLOW | O_CLOEXEC, permissions);
         if (fd < 0) {
             auto e = os_error(errno == ELOOP
                                   ? "open(jail: symlink refused)"
@@ -274,6 +274,51 @@ util::Result<File> File::open(const std::string& path, OpenMode mode) {
             ::close(fd);
             return e;
         }
+    }
+    return File{native_from_fd(fd)};
+}
+
+util::Result<File> File::open_vf(const std::string& path, const VfOpenOptions& o) {
+    if (o.access > 3 || o.share > 3) { errno = EINVAL; return os_error("vf open flags"); }
+    int flags = static_cast<int>(o.access) | O_NONBLOCK;
+    if (o.create) flags |= O_CREAT;
+    if (o.truncate && !o.share_lock) flags |= O_TRUNC;
+    if (o.exclusive) flags |= O_EXCL;
+    if (o.private_handle) flags |= O_CLOEXEC;
+    // Never truncate before the share-mode lock succeeds.
+    const auto permissions = static_cast<mode_t>(o.native_attributes);
+    int fd;
+    if (data_jail_active()) {
+        auto opened = open_jailed(path, flags, permissions);
+        if (!opened) return opened.error();
+        fd = opened.value();
+    } else {
+        fd = ::open(path.c_str(), flags, permissions);
+        if (fd < 0) return os_error("vf open");
+    }
+    struct stat vf_stat{};
+    if (::fstat(fd,&vf_stat)!=0) {
+        const int saved=errno;::close(fd);errno=saved;return os_error("vf fstat");
+    }
+    if (!S_ISREG(vf_stat.st_mode)) {
+        ::close(fd);errno=EACCES;return os_error("vf requires a regular file");
+    }
+    if (o.share_lock && o.bsd_share_lock) {
+        if (::flock(fd,(o.shared_lock?LOCK_SH:LOCK_EX)|LOCK_NB)!=0) {
+            auto e=os_error("vf BSD share lock");::close(fd);e.sub_code=EACCES;return e;
+        }
+    } else if (o.share_lock) {
+        struct flock lock{};
+        lock.l_type = o.shared_lock ? F_RDLCK : F_WRLCK;
+        lock.l_whence = SEEK_SET;
+        lock.l_start = static_cast<off_t>(0x7fffffffUL);
+        lock.l_len = 1;
+        if (::fcntl(fd, F_OFD_SETLK, &lock) != 0) {
+            auto e = os_error("vf share lock"); ::close(fd); return e;
+        }
+    }
+    if (o.truncate && o.share_lock && ::ftruncate(fd, 0) != 0) {
+        auto e = os_error("vf truncate"); ::close(fd); return e;
     }
     return File{native_from_fd(fd)};
 }

@@ -23,6 +23,8 @@ add_library(openads_core STATIC
     platform/thread.cpp
     platform/proc.cpp
     engine/server_fs.cpp
+    engine/vf_service.cpp
+    engine/vf_guard.cpp
     abi/ace_exports.cpp
     abi/runtime.cpp
     abi/ace_stubs.cpp
@@ -238,7 +240,7 @@ if(OPENADS_WITH_HARBOUR_UDF)
     # is only pulled from the archive by targets that reference
     # HarbourBackend, so the ACE DLL never embeds hbvm (a Harbour
     # client process has its own VM — two VMs must never share it).
-    target_sources(openads_core PRIVATE engine/hrb_harbour.cpp)
+    target_sources(openads_core PRIVATE engine/hrb_harbour.cpp engine/hrb_vf.cpp)
     target_include_directories(openads_core PRIVATE ${HARBOUR_INCLUDE_DIR})
     target_compile_definitions(openads_core PUBLIC OPENADS_WITH_HARBOUR_UDF=1)
 endif()

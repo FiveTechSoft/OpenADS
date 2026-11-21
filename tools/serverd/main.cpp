@@ -407,6 +407,9 @@ static void probe_ace_dlls(bool console) {
 // Run the actual server. Returns when g_running flips to false
 // (signal handler on POSIX / SCM stop control on Windows).
 int run_server(const Args& args, bool console) {
+#if defined(OPENADS_WITH_HARBOUR_UDF)
+    openads::engine::hrb_udf::register_vf_provider();
+#endif
     if (args.tls_cert_file.empty() != args.tls_key_file.empty()) {
         std::fprintf(stderr, "Both --tls_cert and --tls_key are required.\n");
         return 1;

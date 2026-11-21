@@ -64,6 +64,12 @@ UNSIGNED32 OADSAPI oads_CheckExistence( ADSHANDLE hConnect,
     return AdsCheckExistence( hConnect, pucName, pbExists );
 }
 
+UNSIGNED32 OADSAPI oads_IsLiveConnection( ADSHANDLE hConnect,
+                                          UNSIGNED16 *pbLive )
+{
+    return OAdsIsLiveConnection( hConnect, pbLive );
+}
+
 UNSIGNED32 OADSAPI oads_DeleteFile( ADSHANDLE hConnect,
                                        UNSIGNED8 *pucName )
 {

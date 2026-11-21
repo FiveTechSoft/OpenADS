@@ -1,3 +1,4 @@
+#include "network/vf_codec.h"
 #include "engine/sql_input_limits.h"
 #include "engine/sql_work_limits.h"
 #include "engine/sql_execution_budget.h"
@@ -11381,6 +11382,34 @@ UNSIGNED32 ENTRYPOINT AdsSaveFile(ADSHANDLE hConn, UNSIGNED8* pucName,
         *abs, static_cast<const std::uint8_t*>(pBuf), ulLen);
     if (!r) return fail(r.error());
     return ok();
+}
+
+UNSIGNED32 ENTRYPOINT AdsVfRequest(ADSHANDLE hConn, const void* request,
+                                    UNSIGNED32 length, void** reply,
+                                    UNSIGNED32* reply_length) {
+    arc2_trace("AdsVfRequest");
+    if(!reply || !reply_length || !request)return fail(openads::AE_INTERNAL_ERROR,"null vf arg");
+    *reply=nullptr;*reply_length=0;
+    if(length<OADS_VF_REQUEST_SIZE || length>OADS_VF_REQUEST_SIZE+2u*OADS_VF_PATH_MAX+OADS_VF_CHUNK_MAX)
+        return fail(openads::AE_INTERNAL_ERROR,"vf request size");
+    const auto* p=static_cast<const std::uint8_t*>(request);
+    std::vector<std::uint8_t> payload(p,p+length);
+    openads::network::vf::Request decoded;
+    if(!openads::network::vf::decode(payload,decoded))return fail(openads::AE_INTERNAL_ERROR,"vf request format");
+    auto ctx=resolve_fs_conn(hConn);
+    if(!ctx.remote)return fail(openads::AE_INVALID_CONNECTION_HANDLE,"vf path needs a remote connection; use a plain path for local files");
+    auto r=ctx.remote->vf_request(payload);
+    if(!r)return fail(r.error());
+    openads::network::vf::Reply checked;
+    if(!openads::network::vf::decode(r.value(),checked))return fail(openads::AE_INTERNAL_ERROR,"vf reply format");
+    void* out=std::malloc(r.value().size());
+    if(!out)return fail(openads::AE_INTERNAL_ERROR,"vf reply allocation");
+    std::memcpy(out,r.value().data(),r.value().size());
+    *reply=out;*reply_length=static_cast<UNSIGNED32>(r.value().size());return ok();
+}
+void ENTRYPOINT AdsVfFree(void* reply) {
+    arc2_trace("AdsVfFree");
+    std::free(reply);
 }
 
 UNSIGNED32 ENTRYPOINT AdsFReadAt(ADSHANDLE hFile, UNSIGNED64 ullOffset,
@@ -39884,6 +39913,27 @@ UNSIGNED32 ENTRYPOINT AdsIsConnectionAlive(ADSHANDLE hConnect, UNSIGNED16* p) {
     if (c != nullptr) {
         *p = 1;  // local connections are always alive
     }
+    return ok();
+}
+// ---- OAdsIsLiveConnection (mtfix88) -----------------------------------
+// The OAds_* Harbour wrappers validate a leading connection argument
+// with this before trusting it: a numeric first argument is the
+// connection handle only when it names a LIVE connection. A stale
+// handle, a file handle, or the .F. (0) of a no-arg OAds_SetConnection
+// must fall back to the default connection instead. Live means a
+// registered remote connection whose transport is still valid, or a
+// registered local connection. Registry-only: no wire traffic, no
+// blocking, safe to call on every OAds_* invocation.
+UNSIGNED32 ENTRYPOINT OAdsIsLiveConnection(ADSHANDLE hConnect, UNSIGNED16* pbLive) {
+    arc2_trace("OAdsIsLiveConnection");
+    if (pbLive == nullptr) return fail(openads::AE_INTERNAL_ERROR, "null out");
+    *pbLive = 0;
+    if (hConnect == 0) return ok();
+    if (auto* rc = get_remote_connection(hConnect)) {
+        *pbLive = rc->valid() ? 1 : 0;
+        return ok();
+    }
+    if (lookup_connection(hConnect) != nullptr) *pbLive = 1;
     return ok();
 }
 UNSIGNED32 ENTRYPOINT AdsIsEmpty(ADSHANDLE hTable, UNSIGNED8* pucField,

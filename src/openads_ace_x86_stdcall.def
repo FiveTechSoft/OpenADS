@@ -25,6 +25,7 @@ EXPORTS
     oads_FWrite
     oads_FSeek
     oads_CheckExistence
+    oads_IsLiveConnection
     oads_DeleteFile
     oads_RenameFile
     oads_CopyFile
