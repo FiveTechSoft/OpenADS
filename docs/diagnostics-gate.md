@@ -77,7 +77,7 @@ This does not identify a Vouch PRG function/line, an RDD source call or a
 native call stack, and cannot by itself distinguish application from RDD.
 No stack walking, source paths, arguments or payloads are added. Existing
 masking, master OFF/default, opt-in and completed-frame limits still apply.
-All 663 public entries in ace_exports.cpp are scoped; other uninstrumented
+All 684 public entries in ace_exports.cpp are scoped; other uninstrumented
 entry surfaces are not claimed covered. Disabled entries do no ID allocation
 or scope-stack update; the master/selector checks still have a cost. Enabled
 entries add TLS context, ID allocation on outer entries and longer log rows.
