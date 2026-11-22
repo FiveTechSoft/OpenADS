@@ -177,13 +177,13 @@ jobs:
           release: false
           update: false
           install: >-
-            ${{ matrix.arch == 'x64' && 'mingw-w64-x86_64-toolchain mingw-w64-x86_64-cmake mingw-w64-x86_64-make' || 'mingw-w64-i686-toolchain mingw-w64-i686-cmake mingw-w64-i686-make' }} python git make
+            ${{ matrix.arch == 'x64' && 'mingw-w64-x86_64-toolchain mingw-w64-x86_64-cmake' || 'mingw-w64-i686-toolchain mingw-w64-i686-cmake' }} python git make
 
       - name: Build static ACE library (MinGW)
         if: always() && runner.os == 'Windows'
         shell: msys2 {0}
         run: |
-          cmake -S . -B build/mingw-${{ matrix.arch }} -G "MinGW Makefiles" \
+          cmake -S . -B build/mingw-${{ matrix.arch }} -G "MSYS Makefiles" \
                 -DCMAKE_BUILD_TYPE=Release \
                 -DOPENADS_BUILD_TESTS=ON \
                 -DOPENADS_VERSION_FORCE="${{ steps.tag.outputs.version }}" \
