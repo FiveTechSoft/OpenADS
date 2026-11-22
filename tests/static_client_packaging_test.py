@@ -134,8 +134,8 @@ class PackagingGates(unittest.TestCase):
             self.execute()
 
     def test_windows_drive_paths_convert_for_msys_python(self):
-        with patch.object(packager.os, 'name', 'posix'), patch.object(packager.shutil, 'which', return_value='cygpath'), patch.object(packager, 'run', return_value='/d/build/engine.a\n') as call:
-            self.assertEqual(str(packager.host_path('D:/build/engine.a')), '/d/build/engine.a')
+        with patch.object(packager, 'NATIVE_WINDOWS', False), patch.object(packager.shutil, 'which', return_value='cygpath'), patch.object(packager, 'run', return_value='/d/build/engine.a\n') as call:
+            self.assertEqual(packager.host_path('D:/build/engine.a').as_posix(), '/d/build/engine.a')
             call.assert_called_once_with('cygpath', '-u', 'D:/build/engine.a')
 
     def test_mri_stdin_paths_convert_to_native_drive_paths(self):

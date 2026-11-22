@@ -12,6 +12,8 @@ import shutil
 import subprocess
 import tempfile
 
+NATIVE_WINDOWS = os.name == 'nt'
+
 
 def run(*args, cwd=None, text=True, input=None):
     return subprocess.check_output([str(a) for a in args], cwd=cwd, text=text, input=input)
@@ -21,7 +23,7 @@ def host_path(value):
     # MSYS Python uses POSIX paths; native Python uses drive paths. The
     # shell helper may supply either. Do not interpret D:/... as relative.
     value = str(value)
-    if os.name != 'nt' and re.match(r'^[A-Za-z]:[\\/]', value):
+    if not NATIVE_WINDOWS and re.match(r'^[A-Za-z]:[\\/]', value):
         if not shutil.which('cygpath'):
             raise SystemExit('Windows drive path requires native Python or cygpath')
         value = run('cygpath', '-u', value).strip()
