@@ -613,6 +613,7 @@ target_link_libraries(oads_imac_test PRIVATE openads_ace)
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
     add_test(NAME mingw_import_parser COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/mingw_import_parser_test.py)
+    add_test(NAME static_client_packaging COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/static_client_packaging_test.py)
 endif()
 
 # The security default must be tested in new processes, not after a unit test
