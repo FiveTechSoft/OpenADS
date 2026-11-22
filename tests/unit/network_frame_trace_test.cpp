@@ -6,6 +6,7 @@
 #include "network/client.h"
 #include "network/server.h"
 #include "openads/ace.h"
+#include "util/log.h"
 
 #include <atomic>
 #include <cstring>
@@ -35,6 +36,9 @@ void count_frame(const void* conn, std::uint8_t op, std::uint32_t /*tid*/,
 } // namespace
 
 TEST_CASE("wire trace: frame hook counts round trips only while installed") {
+    const bool old_logging = openads::util::logging_enabled();
+    struct Restore { bool old; ~Restore() { openads::util::set_logging_enabled(old); } } restore{old_logging};
+    openads::util::set_logging_enabled(true);
     auto dir = fs::temp_directory_path() / "openads_frametrace";
     std::error_code ec;
     fs::remove_all(dir, ec);

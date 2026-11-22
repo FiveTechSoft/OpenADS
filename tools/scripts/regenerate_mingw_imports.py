@@ -22,8 +22,12 @@ def main():
     plain = [n for n in names if re.match(r'^(Ads|OAds|oads_)', n)]
     std = [n for n in names if re.match(r'^_(Ads|OAds|oads_)', n)] if bits == '32' else []
     assert 'OAdsGetServerStats' in plain, 'Built DLL lacks health export'
+    assert 'OAdsTraceMarkEx' in plain
+    assert 'OAdsTraceMark' in plain, 'Built DLL lacks marker export'
     if bits == '32':
         assert '_OAdsGetServerStats@12' in std, 'Built DLL lacks stdcall health export'
+        assert '_OAdsTraceMarkEx@24' in std
+        assert '_OAdsTraceMark@8' in std, 'Built DLL lacks stdcall marker export'
     with tempfile.TemporaryDirectory() as temp:
         work = pathlib.Path(temp)
         libs = [old] if old.exists() else []
@@ -45,7 +49,7 @@ def main():
         script = 'CREATE ' + mri_path(output) + '\n' + ''.join('ADDLIB ' + mri_path(p) + '\n' for p in libs) + 'SAVE\nEND\n'
         run('ar', '-M', input=script)
         symbols = run('nm', '-g', str(output), capture_output=True).stdout
-        required = ['_OAdsGetServerStats', '_OAdsGetServerStats@12'] if bits == '32' else ['OAdsGetServerStats']
+        required = ['_OAdsGetServerStats', '_OAdsGetServerStats@12', '_OAdsTraceMark', '_OAdsTraceMark@8', '_OAdsTraceMarkEx', '_OAdsTraceMarkEx@24'] if bits == '32' else ['OAdsGetServerStats', 'OAdsTraceMark', 'OAdsTraceMarkEx']
         for name in required:
             assert re.search(r'\bT ' + re.escape(name) + r'$', symbols, re.M), 'Missing import: ' + name
         # Linking both conventions checks more than symbol-string presence.

@@ -1,6 +1,8 @@
 #include "engine/vf_path.h"
 #include "network/checked_record_flush.h"
 #include "network/session.h"
+#include "util/log.h"
+#include "util/client_config.h"
 #include "network/mutual_auth.h"
 #include "network/auth_result.h"
 #include "engine/pbkdf2.h"
@@ -69,8 +71,8 @@ void field_read_raw_end();
 namespace openads::network {
 
 static bool wire_trace_on() {
-    static const bool on = std::getenv("OPENADS_WIRE_TRACE") != nullptr;
-    return on;
+    static const bool on = openads::util::client_setting_truthy("OPENADS_WIRE_TRACE", "wire_trace");
+    return on && openads::util::logging_enabled();
 }
 #define WTRACE(...) do { if (wire_trace_on()) std::fprintf(stderr, __VA_ARGS__); } while (0)
 
@@ -583,7 +585,7 @@ void Session::cleanup() {
     // through right after this line, the holder's session died first
     // (restart, WAN drop, app close) — not an exclusion failure.
     WTRACE("[wire] session end user=%s conn=%u tables=%u\n",
-           session_user_.empty() ? "(anonymous)" : session_user_.c_str(),
+           "[hidden]",
            (unsigned)(srv_ ? srv_->conn_no_for_session(sid_) : 0),
            (unsigned)tbls_.size());
     // 0) Distributed mutexes first: free locks held by this session and
@@ -776,8 +778,8 @@ ADSHANDLE Session::ensure_abi_handle(std::uint32_t id) {
     }
     ADSHANDLE h = 0;
     WTRACE("[wire] ensure_abi_handle id=%u open_name='%s' mode=%u eng_path='%s' eng_recs=%u\n",
-           id, open_name.c_str(), (unsigned)us_mode,
-           tbl->path().c_str(), (unsigned)tbl->record_count());
+           id, "[hidden]", (unsigned)us_mode,
+           "[hidden]", (unsigned)tbl->record_count());
     auto& oi_st = openads::mgmt::process_mg_stats();
     auto oi_us = [](auto a, auto b) {
         return static_cast<std::uint64_t>(
@@ -1500,7 +1502,7 @@ UNSIGNED32 Session::install_table_order(std::uint32_t tid,
             if (AdsGetIndexHandle(ht, tb.data(), &h_fresh) == 0 &&
                 h_fresh != 0 && h_fresh != iit->second) {
                 WTRACE("[wire] SetOrder iid=%u stale handle, healed via tag '%s'\n",
-                       iid, tag.c_str());
+                       iid, "[hidden]");
                 rrc = AdsSetIndexOrderByHandle(ht, h_fresh);
                 if (rrc == 0) iit->second = h_fresh;
             }
@@ -2318,9 +2320,7 @@ DispatchResult Session::dispatch(const Frame& f) {
             if (!th) {
                 openads::abi::create_diag::log("server-open-fail", th.error().code,
                                               "table-open", th.error().sub_code);
-                std::fprintf(stderr, "[srv] OpenTable FAILED rel='%s' code=%d msg='%s'\n",
-                             rel.c_str(), th.error().code,
-                             th.error().message.c_str());
+                if (openads::util::logging_enabled()) std::fprintf(stderr, "[srv] OpenTable FAILED code=%d\n", th.error().code);
                 reply = err("OpenTable: open failed",
                             static_cast<UNSIGNED32>(th.error().code));
                 break;
@@ -3444,8 +3444,8 @@ DispatchResult Session::dispatch(const Frame& f) {
                                 WTRACE("[wire] %s id=%u recno=%u FAILED rrc=%u; held by user=%s conn=%u table=%s\n",
                                        f.opcode == Opcode::LockRecord ? "LockRecord" : "UnlockRecord",
                                        id, (unsigned)rn, (unsigned)rrc,
-                                       lk.user.c_str(), (unsigned)lk.conn_no,
-                                       lk.table.c_str());
+                                       "[hidden]", (unsigned)lk.conn_no,
+                                       "[hidden]");
                             }
                         }
                         WTRACE("[wire] %s id=%u recno=%u FAILED rrc=%u (no registered holder)\n",
@@ -3457,9 +3457,9 @@ DispatchResult Session::dispatch(const Frame& f) {
                 WTRACE("[wire] %s id=%u recno=%u ok user=%s conn=%u table=%s\n",
                        f.opcode == Opcode::LockRecord ? "LockRecord" : "UnlockRecord",
                        id, (unsigned)rn,
-                       session_user_.empty() ? "(anonymous)" : session_user_.c_str(),
+                       "[hidden]",
                        (unsigned)srv_->conn_no_for_session(sid_),
-                       tbl_open_paths_.count(id) ? tbl_open_paths_[id].c_str() : "?");
+                       "[hidden]");
             } else if (f.opcode == Opcode::LockRecord) {
                 // Fail FAST on contention — a single attempt. Retrying
                 // here blocked the session thread for the whole lock
@@ -3476,18 +3476,18 @@ DispatchResult Session::dispatch(const Frame& f) {
                 }
                 WTRACE("[wire] LockRecord id=%u recno=%u ok (engine) user=%s conn=%u table=%s\n",
                        id, (unsigned)rn,
-                       session_user_.empty() ? "(anonymous)" : session_user_.c_str(),
+                       "[hidden]",
                        (unsigned)srv_->conn_no_for_session(sid_),
-                       tbl_open_paths_.count(id) ? tbl_open_paths_[id].c_str() : "?");
+                       "[hidden]");
             } else {
                 auto r = tbl->unlock_record(rn);
                 if (!r) { reply = err("UnlockRecord: failed",
                     static_cast<UNSIGNED32>(r.error().code)); break; }
                 WTRACE("[wire] UnlockRecord id=%u recno=%u ok (engine) user=%s conn=%u table=%s\n",
                        id, (unsigned)rn,
-                       session_user_.empty() ? "(anonymous)" : session_user_.c_str(),
+                       "[hidden]",
                        (unsigned)srv_->conn_no_for_session(sid_),
-                       tbl_open_paths_.count(id) ? tbl_open_paths_[id].c_str() : "?");
+                       "[hidden]");
             }
             if (f.opcode == Opcode::LockRecord) explicit_record_locks_.insert(lock_key);
             else explicit_record_locks_.erase(lock_key);

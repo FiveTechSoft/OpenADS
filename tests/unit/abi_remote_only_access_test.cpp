@@ -78,6 +78,9 @@ TEST_CASE("OPENADS_REMOTE_ONLY_ACCESS blocks local open/create, allows remote-mo
     // Mode 2 (log): the access proceeds but is audited as LOCALACCESS.
     {
         EnvGuard guard("OPENADS_REMOTE_ONLY_ACCESS", "log");
+        const bool old_logging = openads::util::logging_enabled();
+        struct Restore { bool old; ~Restore() { openads::util::set_logging_enabled(old); } } restore{old_logging};
+        openads::util::set_logging_enabled(true);
         std::ostringstream oss;
         openads::util::set_audit_file(&oss);
         hTable = 0;
@@ -96,12 +99,10 @@ TEST_CASE("OPENADS_REMOTE_ONLY_ACCESS blocks local open/create, allows remote-mo
                              fields, &hTable) == openads::AE_SUCCESS);
         CHECK(AdsCloseTable(hTable) == openads::AE_SUCCESS);
         openads::util::reset_audit_config();
-        CHECK(oss.str().find("LOCALACCESS=\"OPEN\"") !=
-              std::string::npos);
-        CHECK(oss.str().find("LOCALACCESS=\"OPENIDX\"") !=
-              std::string::npos);
-        CHECK(oss.str().find("LOCALACCESS=\"CREATE\"") !=
-              std::string::npos);
+        CHECK(oss.str().find("RESOLVED=") != std::string::npos);
+        CHECK(oss.str().find("context hidden") != std::string::npos);
+        CHECK(oss.str().find("ASKED=") == std::string::npos);
+        CHECK(oss.str().find("ro_noidx") == std::string::npos);
     }
 
     // Guard OFF again (per-call env read): local open works.

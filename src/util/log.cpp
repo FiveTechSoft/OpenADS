@@ -108,7 +108,7 @@ void write_file_line(const std::string& line) {
 } // namespace
 
 void Log::write(LogLevel level, std::string_view message) noexcept {
-    if (sink_ == nullptr) return;
+    if (!logging_enabled() || sink_ == nullptr) return;
     if (static_cast<int>(level) < static_cast<int>(threshold_)) return;
     (*sink_) << level_name(level) << ' ' << message << '\n';
 }
@@ -208,7 +208,7 @@ void set_audit_details_enabled(bool on) {
 }
 
 namespace {
-std::atomic<bool> g_logging_on{true};
+std::atomic<bool> g_logging_on{false};
 } // namespace
 
 void set_logging_enabled(bool on) { g_logging_on.store(on); }
@@ -230,6 +230,7 @@ void write_audit(AuditKind       kind,
                  std::string_view message,
                  std::string_view timestamp,
                  std::string_view alias) {
+    (void)message; // Raw diagnostics may embed paths, schema or SQL literals.
     if (!logging_enabled()) return;
     if (kind == AuditKind::Detail && !audit_details_enabled()) return;
     if (seq == 0) seq = next_audit_seq();
@@ -237,10 +238,12 @@ void write_audit(AuditKind       kind,
         format_log_prefix(conn_serial, entry_serial, seq, timestamp);
     if (!alias.empty()) {
         line.push_back(' ');
-        line.append(format_alias_field(alias));
+        line.append("[alias hidden]");
     }
     line.push_back(' ');
-    line.append(message.data(), message.size());
+    line.append(kind == AuditKind::Connected ? "CONNECTED=\"[context hidden]\"" :
+                kind == AuditKind::Resolved ? "RESOLVED=\"[context hidden]\"" :
+                "DETAIL [context hidden]");
     line.push_back('\n');
     std::lock_guard<std::mutex> lk(g_audit_mu);
     write_console_line(line);

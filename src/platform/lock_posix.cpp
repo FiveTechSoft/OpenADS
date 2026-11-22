@@ -1,6 +1,7 @@
 #ifndef _WIN32
 
 #include "platform/lock.h"
+#include "util/log.h"
 
 #include <cerrno>
 #include <cstdint>
@@ -257,7 +258,7 @@ util::Result<ByteLock> ByteLock::acquire(File& f, std::uint64_t offset,
             if (get_rc == 0 && q.l_type != F_UNLCK) {
                 holder = static_cast<long>(q.l_pid);
             }
-            std::fprintf(stderr,
+            if (openads::util::logging_enabled()) std::fprintf(stderr,
                 "openads: byte lock wait timed out (offset=%llu len=%llu "
                 "set_errno=%d get_rc=%d get_errno=%d get_type=%d "
                 "holder_pid=%ld self_pid=%ld fd=%d)\n",

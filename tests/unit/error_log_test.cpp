@@ -1,5 +1,6 @@
 #include "doctest.h"
 #include "mgmt/error_log.h"
+#include "util/log.h"
 #include "openads/ace.h"
 
 #include <cstring>
@@ -17,7 +18,9 @@ namespace {
 // suite-wide default (OPENADS_ERROR_LOG_PATH, set in doctest_main) after.
 struct LogDirGuard {
     fs::path dir;
+    bool logging_before = openads::util::logging_enabled();
     explicit LogDirGuard(const char* name) {
+        openads::util::set_logging_enabled(true);
         std::error_code ec;
         dir = fs::temp_directory_path() / name;
         fs::remove_all(dir, ec);
@@ -25,6 +28,7 @@ struct LogDirGuard {
         ErrorLog::instance().set_max_kbytes(1000);
     }
     ~LogDirGuard() {
+        openads::util::set_logging_enabled(logging_before);
         ErrorLog::instance().set_directory("");
         ErrorLog::instance().set_max_kbytes(1000);
     }
@@ -44,7 +48,7 @@ TEST_CASE("error log: entries round-trip through ads_err.dbf") {
     CHECK(last2[0].code == 5035);
     CHECK(last2[0].source == "NET");
     CHECK(last2[0].src_line == 42);
-    CHECK(last2[0].detail == "lock denied");
+    CHECK(last2[0].detail == "[detail hidden]");
     CHECK(last2[1].code == 0);
     CHECK(last2[1].source == "SERVER");
     // DateTime is "YYYY-MM-DD HH:MM:SS".
@@ -124,9 +128,9 @@ TEST_CASE("error log: ads_err.log is fixed-width with 3-space separators") {
     CHECK(lines[1].substr(28, 3) == "   ");
     CHECK(lines[1].substr(31, 8) == "NET     ");
     // Extra developer context made it into the row.
-    CHECK(lines[1].find("10.0.0.5:51234") != std::string::npos);
-    CHECK(lines[1].find("OpenIndex") != std::string::npos);
-    CHECK(lines[1].find("lmjshd10.cdx") != std::string::npos);
+    CHECK(lines[1].find("10.0.0.5:51234") == std::string::npos);
+    CHECK(lines[1].find("OpenIndex") == std::string::npos);
+    CHECK(lines[1].find("lmjshd10.cdx") == std::string::npos);
     // Second entry logged via plain log(): columns still aligned.
     CHECK(lines[2].substr(19, 3) == "   ");
     CHECK(lines[2].substr(22, 6) == "  7200");

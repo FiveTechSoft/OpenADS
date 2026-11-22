@@ -178,17 +178,17 @@ util::Result<Connection> Connection::open(const std::string& data_dir) {
         // in *subdirectories* remain fully usable; only transactions are
         // unavailable (begin_transaction fails cleanly with a clear
         // error instead of the whole Connect being refused).
-        std::fprintf(stderr,
+        if (util::logging_enabled()) std::fprintf(stderr,
             "[openads] tx journal not writable in '%s' — transactions "
-            "disabled for this connection\n", actual_dir.c_str());
+            "disabled for this connection\n", "[directory hidden]");
     }
     if (journal_ok) {
         fs::path map_path = fs::path(actual_dir) / "openads.lsnmap";
         if (auto mr = c.lsn_map_.open(map_path.string()); !mr) {
-            std::fprintf(stderr,
+            if (util::logging_enabled()) std::fprintf(stderr,
                 "[openads] tx recovery map not writable in '%s' — orphan "
                 "recovery skipped for this connection\n",
-                actual_dir.c_str());
+                "[directory hidden]");
         } else if (auto rr = c.recover_orphan_tx_(); !rr) {
             return rr.error();
         }

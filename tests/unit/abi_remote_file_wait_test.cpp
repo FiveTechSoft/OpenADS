@@ -1,3 +1,4 @@
+#include "util/log.h"
 // Remote file calls must not hold the process registry lock while waiting.
 #include "doctest.h"
 #include "abi/runtime.h"
@@ -14,6 +15,12 @@
 #include <thread>
 
 namespace {
+struct TraceMasterGuard {
+ bool old = openads::util::logging_enabled();
+ TraceMasterGuard(){openads::util::set_logging_enabled(true);}
+ ~TraceMasterGuard(){openads::util::set_logging_enabled(old);}
+};
+
 std::mutex gate_mu;
 std::condition_variable gate_cv;
 bool entered = false, released = false;
@@ -29,6 +36,7 @@ void block_file_frame(const void*, std::uint8_t op, std::uint32_t,
 }
 
 TEST_CASE("remote file waits release process mutex and retain close-race lifetime") {
+    TraceMasterGuard trace_master;
     namespace fs = std::filesystem;
     const auto dir = fs::temp_directory_path() / "oads_file_wait";
     std::error_code ec;
@@ -105,6 +113,7 @@ TEST_CASE("remote file waits release process mutex and retain close-race lifetim
 }
 
 TEST_CASE("remote file handles remain safe after disconnect") {
+    TraceMasterGuard trace_master;
     namespace fs = std::filesystem;
     const auto dir = fs::temp_directory_path() / "oads_file_disconnect";
     fs::create_directories(dir);
@@ -131,6 +140,7 @@ TEST_CASE("remote file handles remain safe after disconnect") {
 #include <unordered_map>
 #include <system_error>
 TEST_CASE("session thread admission survives launch failure and permits next client") {
+    TraceMasterGuard trace_master;
     std::unordered_map<std::uint64_t, std::thread> threads;
     CHECK_THROWS_AS(openads::network::detail::register_session_thread(threads, 1, []() -> std::thread {
         throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
@@ -146,6 +156,7 @@ TEST_CASE("session thread admission survives launch failure and permits next cli
 }
 
 TEST_CASE("disconnect queues behind remote file reply without process lock") {
+    TraceMasterGuard trace_master;
     namespace fs = std::filesystem;
     const auto dir = fs::temp_directory_path() / "oads_file_inflight_disconnect";
     fs::create_directories(dir);

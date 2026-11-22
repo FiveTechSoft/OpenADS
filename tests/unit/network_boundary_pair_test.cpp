@@ -1,3 +1,4 @@
+#include "util/log.h"
 // tests/unit/network_boundary_pair_test.cpp
 // mtfix12 R1/R2/R3 — boundary-pair certification, self-GotoRecord
 // suppression, and GetRecordNum anchoring, end to end over a loopback
@@ -17,6 +18,12 @@
 namespace fs = std::filesystem;
 
 namespace {
+struct TraceMasterGuard {
+ bool old = openads::util::logging_enabled();
+ TraceMasterGuard(){openads::util::set_logging_enabled(true);}
+ ~TraceMasterGuard(){openads::util::set_logging_enabled(old);}
+};
+
 
 std::atomic<unsigned> g_top{0}, g_bottom{0}, g_goto{0}, g_recnum{0}, g_keycount{0};
 
@@ -55,6 +62,7 @@ std::string id_field(ADSHANDLE h) {
 } // namespace
 
 TEST_CASE("boundary pair, self-goto, and recno anchor over loopback") {
+    TraceMasterGuard trace_master;
     auto dir = fs::temp_directory_path() / "openads_bpair";
     std::error_code ec;
     fs::remove_all(dir, ec);
@@ -182,6 +190,7 @@ TEST_CASE("boundary pair, self-goto, and recno anchor over loopback") {
 }
 
 TEST_CASE("boundary pair: scoped ordered bottom counts on demand") {
+    TraceMasterGuard trace_master;
     auto dir = fs::temp_directory_path() / "openads_bpair_scoped";
     std::error_code ec;
     fs::remove_all(dir, ec);

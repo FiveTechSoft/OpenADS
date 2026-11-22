@@ -86,10 +86,10 @@ void set_audit_details_enabled(bool on);
 void reset_audit_config();
 bool audit_details_enabled();
 
-// Master kill-switch for every log line the library can emit (audit
+// Master kill-switch for general library diagnostics (audit
 // file/console + the arc bring-up traces in the ABI). Production apps
-// call OAdsSetLogging(0) at startup so paths, aliases and record data
-// never reach end-user machines. Default: enabled.
+// call OAdsSetLogging(1) only for approved diagnostics; paths and record data
+// never reach end-user machines. Default: disabled.
 void set_logging_enabled(bool on);
 bool logging_enabled();
 
