@@ -78,7 +78,7 @@ class PackagingGates(unittest.TestCase):
                 '--harbour-include', str(self.root), '--glue', str(self.glue),
                 '--ace-include', str(self.root), '--output', str(self.output),
                 '--profile', profile]
-        with patch.object(sys, 'argv', argv), patch.object(packager, 'run', self.fake_run), patch('builtins.print'):
+        with patch.object(sys, 'argv', argv), patch.object(packager, 'run', self.fake_run), patch.object(packager.shutil, 'which', return_value=None), patch('builtins.print'):
             packager.main()
 
     def test_matching_profiles_record_archive_and_all_notice_hashes(self):
@@ -132,6 +132,16 @@ class PackagingGates(unittest.TestCase):
         self.target_mismatch = True
         with self.assertRaisesRegex(SystemExit, 'architecture mismatch'):
             self.execute()
+
+    def test_windows_drive_paths_convert_for_msys_python(self):
+        with patch.object(packager.os, 'name', 'posix'), patch.object(packager.shutil, 'which', return_value='cygpath'), patch.object(packager, 'run', return_value='/d/build/engine.a\n') as call:
+            self.assertEqual(str(packager.host_path('D:/build/engine.a')), '/d/build/engine.a')
+            call.assert_called_once_with('cygpath', '-u', 'D:/build/engine.a')
+
+    def test_mri_stdin_paths_convert_to_native_drive_paths(self):
+        with patch.object(packager.shutil, 'which', return_value='cygpath'), patch.object(packager, 'run', return_value='D:/build/kit.a\n') as call:
+            self.assertEqual(packager.mri_path('/d/build/kit.a'), 'D:/build/kit.a')
+            call.assert_called_once_with('cygpath', '-m', '/d/build/kit.a')
 
     def test_legacy_profile_rejects_unpinned_compiler(self):
         with self.assertRaisesRegex(SystemExit, 'requires pinned'):

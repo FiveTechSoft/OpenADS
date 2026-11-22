@@ -5,6 +5,8 @@ The RDD and Harbour VM remain caller-owned. No compiler is downloaded here.
 import argparse
 import hashlib
 import json
+import os
+import re
 import pathlib
 import shutil
 import subprocess
@@ -15,9 +17,28 @@ def run(*args, cwd=None, text=True, input=None):
     return subprocess.check_output([str(a) for a in args], cwd=cwd, text=text, input=input)
 
 
+def host_path(value):
+    # MSYS Python uses POSIX paths; native Python uses drive paths. The
+    # shell helper may supply either. Do not interpret D:/... as relative.
+    value = str(value)
+    if os.name != 'nt' and re.match(r'^[A-Za-z]:[\\/]', value):
+        if not shutil.which('cygpath'):
+            raise SystemExit('Windows drive path requires native Python or cygpath')
+        value = run('cygpath', '-u', value).strip()
+    return pathlib.Path(value)
+
+
+def mri_path(value):
+    # ar reads MRI paths from stdin, where MSYS argv conversion cannot help.
+    value = str(value)
+    if shutil.which('cygpath'):
+        value = run('cygpath', '-m', value).strip()
+    return value.replace('\\', '/')
+
+
 def tool(root, name):
     for suffix in ('', '.exe'):
-        p = pathlib.Path(root) / 'bin' / (name + suffix)
+        p = host_path(root) / 'bin' / (name + suffix)
         if p.is_file():
             return p.resolve()
     raise SystemExit('Missing compiler tool: ' + name)
@@ -34,9 +55,9 @@ def main():
     p.add_argument('--output', required=True)
     p.add_argument('--profile', choices=('matching', 'qt492-x86'), default='matching')
     a = p.parse_args()
-    out = pathlib.Path(a.output).resolve()
+    out = host_path(a.output).resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
-    engine = pathlib.Path(a.engine).resolve()
+    engine = host_path(a.engine).resolve()
     engine_digest = hashlib.sha256(engine.read_bytes()).hexdigest()
     ar, objcopy, nm = [tool(a.runtime_root, n) for n in ('ar', 'objcopy', 'nm')]
     gcc = tool(a.runtime_root, 'gcc')
@@ -51,10 +72,10 @@ def main():
     if old:
         if triple != 'i686-w64-mingw32' or version != '10.2.0' or link_version != '4.9.2':
             raise SystemExit('qt492-x86 requires pinned i686 GCC10.2 runtime and GCC4.9.2 linker')
-    elif pathlib.Path(a.runtime_root).resolve() != pathlib.Path(a.link_root).resolve():
+    elif host_path(a.runtime_root).resolve() != host_path(a.link_root).resolve():
         raise SystemExit('matching profile requires the same runtime and link compiler')
     # Copy notices from the exact installed runtime, not a newer web version.
-    notice_root = pathlib.Path(a.runtime_root) / 'share' / 'licenses'
+    notice_root = host_path(a.runtime_root) / 'share' / 'licenses'
     notice_files = {
         'gcc/COPYING3': 'gcc-COPYING3.txt',
         'gcc/COPYING.RUNTIME': 'gcc-COPYING.RUNTIME.txt',
@@ -72,7 +93,7 @@ def main():
         shutil.copyfile(source_file, notices / dest)
     archives = [engine]
     for name in ('libstdc++.a', 'libgcc.a', 'libgcc_eh.a', 'libwinpthread.a'):
-        f = pathlib.Path(run(gcc, '-print-file-name=' + name).strip()).resolve()
+        f = host_path(run(gcc, '-print-file-name=' + name).strip()).resolve()
         if not f.is_file():
             raise SystemExit('Missing static runtime: ' + name)
         archives.append(f)
@@ -81,11 +102,11 @@ def main():
         if any(' ' in str(f) for f in archives + [tmp]):
             raise SystemExit('GNU ar MRI needs space-free packaging paths')
         candidate = tmp / 'libopenace.a'
-        mri = 'create ' + str(candidate).replace('\\', '/') + '\n'
+        mri = 'create ' + mri_path(candidate) + '\n'
         for i, f in enumerate(archives):
             staged = tmp / ('input%d.a' % i)
             shutil.copyfile(f, staged)
-            mri += 'addlib ' + str(staged).replace('\\', '/') + '\n'
+            mri += 'addlib ' + mri_path(staged) + '\n'
         run(ar, '-M', input=mri + 'save\nend\n')
         converted = []
         if old:
@@ -111,13 +132,13 @@ def main():
                 ('libmsvcrt.a', 'dembbh.o'),
                 ('libmsvcrt.a', 'dembbt.o'),
             ):
-                libfile = pathlib.Path(run(gcc, '-print-file-name=' + lib).strip()).resolve()
+                libfile = host_path(run(gcc, '-print-file-name=' + lib).strip()).resolve()
                 run(ar, 'x', libfile, name, cwd=tmp)
                 run(ar, 'r', candidate, tmp / name)
             bridge = pathlib.Path(__file__).with_name('qt492_tls_exit_bridge.c')
             run(link_gcc, '-c', bridge, '-o', tmp / 'crt_compat.o')
             run(ar, 'r', candidate, tmp / 'crt_compat.o')
-        glue = pathlib.Path(a.glue).resolve()
+        glue = host_path(a.glue).resolve()
         run(link_gcc, '-c', glue, '-I' + a.harbour_include,
             '-I' + a.ace_include,
             '-o', tmp / 'oads_hb.o')
