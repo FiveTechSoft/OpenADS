@@ -177,7 +177,7 @@ jobs:
           release: false
           update: false
           install: >-
-            ${{ matrix.arch == 'x64' && 'mingw-w64-x86_64-toolchain mingw-w64-x86_64-cmake' || 'mingw-w64-i686-toolchain mingw-w64-i686-cmake' }} python git make
+            ${{ matrix.arch == 'x64' && 'mingw-w64-x86_64-toolchain mingw-w64-x86_64-cmake mingw-w64-x86_64-make' || 'mingw-w64-i686-toolchain mingw-w64-i686-cmake mingw-w64-i686-make' }} python git make
 
       - name: Build static ACE library (MinGW)
         if: always() && runner.os == 'Windows'
