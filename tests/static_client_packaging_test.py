@@ -19,7 +19,7 @@ class PackagingGates(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.runtime = self.root / 'runtime'
         self.link = self.runtime
         for name in ('ar', 'objcopy', 'nm', 'gcc'):
@@ -47,7 +47,7 @@ class PackagingGates(unittest.TestCase):
     def fake_run(self, *args, cwd=None, text=True, input=None):
         tool, *options = [str(a) for a in args]
         if options == ['-dumpmachine']:
-            if self.target_mismatch and Path(tool).parent.parent == self.link:
+            if self.target_mismatch and Path(tool).parent.parent.resolve() == self.link.resolve():
                 return 'x86_64-w64-mingw32\n'
             return self.target + '\n'
         if options == ['-dumpversion']:
@@ -132,6 +132,7 @@ class PackagingGates(unittest.TestCase):
         self.target_mismatch = True
         with self.assertRaisesRegex(SystemExit, 'architecture mismatch'):
             self.execute()
+        self.assertFalse(self.output.exists())
 
     def test_windows_drive_paths_convert_for_msys_python(self):
         with patch.object(packager, 'NATIVE_WINDOWS', False), patch.object(packager.shutil, 'which', return_value='cygpath'), patch.object(packager, 'run', return_value='/d/build/engine.a\n') as call:
