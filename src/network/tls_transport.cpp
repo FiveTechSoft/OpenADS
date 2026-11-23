@@ -66,7 +66,7 @@ public:
         const auto capacity = server_ ? mbedtls_ssl_get_max_out_record_payload(&ssl_) : 0;
         if (capacity < 0) return tls_error(capacity);
         int rc = mbedtls_ssl_write(&ssl_, buf,
-            server_ ? std::min(n, static_cast<std::size_t>(capacity)) : n);
+            server_ ? (std::min)(n, static_cast<std::size_t>(capacity)) : n);
         if (server_ && retry(rc)) return blocked(rc);
         if (rc < 0) {
             return util::Error{openads::AE_REMOTE_ERROR, rc,
