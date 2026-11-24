@@ -150,3 +150,38 @@ on `-DOPENADS_TEST_REMOTE=ON`).
   the DBF header up front (matches ACE), so a fresh
   create+open reports today instead of `1900-00-00` until the
   first `DbAppend`.
+
+## Known divergence: Skip on an empty table (OADS-CR-001 E15)
+
+SAP ADS 11.10 (ace32, local) reports **both** `Bof()` and `Eof()` after
+`Skip(1)`, `Skip(-1)` and `Skip(0)` on an empty table. OpenADS reports
+the single direction flag (`Skip(1)` → EOF only, `Skip(-1)`/`Skip(0)` →
+BOF only), matching Harbour's native DBFCDX/DBFNTX.
+
+This is a deliberate, documented divergence, kept for three reasons:
+
+1. **Harbour rddtst conformance.** The repo's
+   `tools/harbour_patch/rddads-compat.patch` aligns rddads' Skip
+   semantics with Harbour `dbf1.c` so the Harbour RDD test suite
+   passes. Adopting SAP's both-flags Skip at the engine layer would
+   resurface through rddads and re-break that suite unless the shim
+   masked it again — two divergent behaviours for one flag.
+2. **Impact is LOW** (the report's own rating). The only affected
+   pattern is `IF Bof() .AND. Eof()` evaluated *after an explicit
+   Skip* on an empty table. The common empty-table probes — right
+   after `USE` and after `GoTop` — already report both flags in all
+   three columns of the report.
+3. **DBFCDX agrees.** Applications ported from Harbour's native RDDs
+   see no change; only an application ported *from* SAP ADS that
+   probes the flags after a Skip on an empty table would notice.
+
+ACE-compatible alternative, if a real application ever depends on the
+SAP behaviour: change `Table::skip()`'s empty-table branch to preserve
+the Limbo (BOF+EOF) state for every delta, and add one hunk to
+`rddads-compat.patch` so `hb_adsSkip`'s not-positioned branch collapses
+the both-flags phantom to the single direction flag when the table is
+empty (dbf1.c semantics at the Harbour layer, SAP semantics at the raw
+ACE API). Note this moves parity to the ACE API only — Harbour/rddads
+clients would still see DBFCDX semantics — and it changes wire-visible
+state, so it requires a remote regression check against the pre-change
+build before publishing.
