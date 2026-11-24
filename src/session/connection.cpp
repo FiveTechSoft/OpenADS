@@ -423,7 +423,41 @@ std::string Connection::resolve_table_file(const std::string& relative_path,
             rel = rel.relative_path();
         }
     }
-    fs::path full = fs::path(data_dir_) / rel;
+    // OADS-CR-001 E17 (SAP ace32 column): on a local free-table
+    // connection a RELATIVE name resolves against the process current
+    // directory, not the connection path (AdsConnect("data") then
+    // dbCreate("data/rel") creates .\data\rel.dbf). Gated on existence
+    // so connection-path consumers keep working: an open only takes the
+    // CWD spelling when the file is actually there (SQL FROM <alias> and
+    // internal reopens name files that live under data_dir_ and miss at
+    // the CWD), and a create only when its parent directory exists
+    // (otherwise the historical fold-and-fail behaviour is unchanged).
+    if (!remote_server_ && !dd_.has_value() && !legacy_paths_ &&
+        rel.is_relative() && !rel.has_root_directory()) {
+        std::error_code cec;
+        fs::path cwd_joined = fs::current_path(cec) / rel;
+        if (!cec) {
+            bool use_cwd = false;
+            if (for_create) {
+                fs::path par = cwd_joined;
+                if (!par.has_extension())
+                    par.replace_extension(type == engine::TableType::Adt
+                                              ? ".adt" : ".dbf");
+                use_cwd = fs::is_directory(par.parent_path(), cec);
+            } else {
+                fs::path probe = cwd_joined;
+                if (!probe.has_extension()) {
+                    fs::path d = probe; d.replace_extension(".dbf");
+                    fs::path a = probe; a.replace_extension(".adt");
+                    if (fs::exists(d, cec)) probe = d;
+                    else if (fs::exists(a, cec)) probe = a;
+                }
+                use_cwd = fs::exists(probe, cec);
+            }
+            if (use_cwd) rel = cwd_joined;
+        }
+    }
+    fs::path full = rel.is_absolute() ? rel : fs::path(data_dir_) / rel;
     // Auto-append .dbf when the caller (typically rddads / Clipper)
     // passed a bare table alias without an extension.  If .dbf does not
     // exist but .adt does, open as ADT (e.g. SQL SELECT FROM <alias>

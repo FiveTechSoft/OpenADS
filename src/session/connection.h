@@ -236,6 +236,7 @@ public:
                                    engine::TableType&  type,
                                    bool                for_create = false);
 
+
     // Server-side ZIP/UNZIP for backup archiving (OAds_Zip/OAds_UnZip
     // via AdsZipFiles/AdsUnzipFiles, local or wire). Every path stays
     // under this connection's data roots (resolve_fs_path jail).
