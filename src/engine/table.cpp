@@ -869,11 +869,11 @@ util::Result<void> Table::goto_record(std::uint32_t recno) {
     // DELETE ON) — preserve Limbo then so DBGOTO(0) doesn't
     // accidentally promote to Eof and lose the BOF half.
     if (recno == 0) {
-        if (driver_->record_count() == 0 || state_ == State::Limbo) {
-            state_ = State::Limbo; recno_ = 0; return {};
-        }
-        state_ = State::Eof;
-        recno_ = 0;
+        // SAP reference (OADS-CR-001 E12, ace32 column; DBFCDX agrees):
+        // GO 0 on a non-empty table is the same phantom position as GO
+        // past-end — BOTH BOF() and EOF() true (Limbo), recno()
+        // reporting LastRec()+1 — not an EOF-only state.
+        state_ = State::Limbo; recno_ = 0;
         return {};
     }
     if (recno > driver_->record_count()) {
