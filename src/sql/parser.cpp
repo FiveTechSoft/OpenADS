@@ -534,6 +534,18 @@ parse_cmp(Cursor& c, const std::string& sql) {
     else if (c.match_char('=')) node->cmp.op = WhereOp::Eq;
     else if (c.match_char('<')) node->cmp.op = WhereOp::Lt;
     else if (c.match_char('>')) node->cmp.op = WhereOp::Gt;
+    else if (c.eof() || c.peek_char(')') ||
+             c.peek_keyword("AND") || c.peek_keyword("OR")) {
+        // ADS dialect (OADS-CR-001 E16, ace32 column): a bare column is a
+        // truthiness predicate — `... WHERE FLAG` selects the rows whose
+        // logical field is true. Desugar to `FLAG = 'T'` so every WHERE
+        // evaluator (SELECT / UPDATE / DELETE / join) handles it through
+        // the existing Eq path unchanged.
+        node->cmp.op         = WhereOp::Eq;
+        node->cmp.literal    = "T";
+        node->cmp.is_numeric = false;
+        return node;
+    }
     else {
         return util::Error{7200, 0,
             "expected =, !=, <>, <, >, <= or >= after column name", sql};
