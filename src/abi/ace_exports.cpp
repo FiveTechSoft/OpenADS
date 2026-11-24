@@ -13835,29 +13835,17 @@ UNSIGNED32 ENTRYPOINT AdsGetRecordCount(ADSHANDLE hTable, UNSIGNED16 bFilterOpti
             // handles index handles via lookup_table_by_index + activate.
             if (t && t->order()) {
                 auto& sc = t->order()->scope();
-                // rddads OrdKeyCount calls AdsGetRecordCount on the order
-                // handle -- must honour SET DELETED ON (exclude deleted
-                // keys) or remote xBrowse allocates ghost rows / hangs.
-                const bool hide_del = !t->show_deleted_records();
-                std::function<bool(std::uint32_t)> live;
-                const std::function<bool(std::uint32_t)>* live_p = nullptr;
-                if (hide_del) {
-                    // deleted_at() keeps the driver's read-ahead warm and does
-                    // not move the cursor, so there is nothing to restore.
-                    live = [t](std::uint32_t rn) {
-                        auto del = t->deleted_at(rn);
-                        return del && !del.value();
-                    };
-                    live_p = &live;
-                }
+                // SAP ACE reference (OADS-CR-001 E14, ace32 column):
+                // OrdKeyCount counts the index keys in scope and IGNORES
+                // SET DELETED — the walk still skips deleted rows, the
+                // key count does not (DBFCDX excludes them; this is an
+                // ADS-specific difference). Deleted-filtering the count
+                // made OpenADS report 8 where ACE reports 10.
                 if (sc.top.has_value() || sc.bottom.has_value()) {
                     *pulRecordCount = cdx->count_scoped_keys(
                         sc.top.value_or(""),
                         sc.bottom.value_or(""),
-                        live_p);
-                } else if (hide_del) {
-                    *pulRecordCount = count_live_recnos(
-                        t, cdx->ordered_recnos_cached(), cdx);
+                        nullptr);
                 } else {
                     *pulRecordCount = static_cast<UNSIGNED32>(
                         cdx->ordered_recnos_cached().size());
