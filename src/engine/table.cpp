@@ -2068,15 +2068,20 @@ util::Result<void> Table::try_lock_record_excl(std::uint32_t recno) {
         return load_record_(recno);
     if (owner_ && owner_->remote_server() && recno_locks_.size() >= 4096)
         return util::Error{openads::AE_ACCESS_DENIED, 0, "remote table record-lock limit", path_};
+    // Locking a record other than the current one must NOT move the
+    // record pointer: SAP ACE leaves the cursor where it was (dbRLock(n)
+    // keeps RecNo() unchanged). Only a lock of the current record reloads
+    // it (dirty-buffer flush / refresh).
+    const bool cur = (recno == recno_);
     if (table_lock_) {
         recno_locks_.emplace(recno, LockHandle{});
-        return load_record_(recno);
+        return cur ? load_record_(recno) : util::Result<void>{};
     }
     auto h = locks_.try_lock_record_excl(driver_->file(), to_lock_type_(),
                                          locking_, recno);
     if (!h) return h.error();
     recno_locks_.emplace(recno, std::move(h).value());
-    return load_record_(recno);
+    return cur ? load_record_(recno) : util::Result<void>{};
 }
 
 util::Result<void> Table::unlock_record(std::uint32_t recno) {
