@@ -921,8 +921,16 @@ util::Result<void> encode_field_double(const DbfField& f,
     if (written < 0) {
         return util::Error{5000, 0, "snprintf failed encoding numeric", ""};
     }
+    if (static_cast<std::size_t>(written) > f.length) {
+        // Value does not fit the field width: SAP ACE reference
+        // (OADS-CR-001 E10, ace32 column) raises 5179 "result value
+        // exceeded the given buffer size" and keeps the OLD field bytes
+        // on disk. Truncating here wrote a corrupted physical value
+        // (silent data loss), so fail WITHOUT touching dst.
+        return util::Error{5179, 0,
+            "result value exceeded the given buffer size", f.name};
+    }
     std::size_t n = static_cast<std::size_t>(written);
-    if (n > f.length) n = f.length;
     std::memcpy(dst, tmp, n);
     for (std::size_t i = n; i < f.length; ++i) dst[i] = ' ';
     return {};
