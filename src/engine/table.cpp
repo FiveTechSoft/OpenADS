@@ -732,7 +732,14 @@ util::Result<void> Table::goto_top() {
     }
     if (auto r = load_record_(1); !r) return r.error();
     if (filter_ && state_ == State::Positioned && !filter_(*this)) {
-        return skip(1);
+        auto sk = skip(1);
+        // No record visible under the filter: phantom position reports
+        // BOTH BOF and EOF (SAP reference OADS-CR-001 E13, ace32 column;
+        // DBFCDX agrees), not the plain EOF a forward walk-off sets.
+        if (sk && state_ == State::Eof) {
+            state_ = State::Limbo; recno_ = 0;
+        }
+        return sk;
     }
     // SET DELETE ON without an active index: walk forward over the
     // raw record range until a live row appears.
