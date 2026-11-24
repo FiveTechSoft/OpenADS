@@ -24,10 +24,17 @@ def main():
     assert 'OAdsGetServerStats' in plain, 'Built DLL lacks health export'
     assert 'OAdsTraceMarkEx' in plain
     assert 'OAdsTraceMark' in plain, 'Built DLL lacks marker export'
+    # Auth wrapper ABI coverage. Credit: Pritpal Bedi.
+    auth_exports = [('OAdsBeginAuth', 12), ('OAdsBeginMutualAuth', 28),
+                    ('OAdsCompleteAuth', 16), ('OAdsCancelAuth', 4)]
+    for name, _ in auth_exports:
+        assert name in plain, 'Built DLL lacks auth export: ' + name
     if bits == '32':
         assert '_OAdsGetServerStats@12' in std, 'Built DLL lacks stdcall health export'
         assert '_OAdsTraceMarkEx@24' in std
         assert '_OAdsTraceMark@8' in std, 'Built DLL lacks stdcall marker export'
+        for name, width in auth_exports:
+            assert f'_{name}@{width}' in std, 'Built DLL lacks stdcall auth export: ' + name
     with tempfile.TemporaryDirectory() as temp:
         work = pathlib.Path(temp)
         libs = [old] if old.exists() else []
@@ -50,6 +57,8 @@ def main():
         run('ar', '-M', input=script)
         symbols = run('nm', '-g', str(output), capture_output=True).stdout
         required = ['_OAdsGetServerStats', '_OAdsGetServerStats@12', '_OAdsTraceMark', '_OAdsTraceMark@8', '_OAdsTraceMarkEx', '_OAdsTraceMarkEx@24'] if bits == '32' else ['OAdsGetServerStats', 'OAdsTraceMark', 'OAdsTraceMarkEx']
+        for name, width in auth_exports:
+            required.extend(['_' + name, f'_{name}@{width}'] if bits == '32' else [name])
         for name in required:
             assert re.search(r'\bT ' + re.escape(name) + r'$', symbols, re.M), 'Missing import: ' + name
         # Linking both conventions checks more than symbol-string presence.
