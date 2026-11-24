@@ -6118,3 +6118,40 @@ extern void ENTRYPOINT AdsVfFree(void*);
 #pragma comment(linker, "/alternatename:_oadsimpl_AdsVfFree=_AdsVfFree")
 #pragma comment(linker, "/export:AdsVfFree=_AdsVfFree")
 __declspec(dllexport) void __stdcall AdsVfFree(void* p) { oadsimpl_AdsVfFree(p); }
+
+/* Additive auth ABI exports. Credit: Pritpal Bedi. */
+#define OAdsBeginAuth oadsimpl_OAdsBeginAuth
+extern UNSIGNED32 ENTRYPOINT OAdsBeginAuth(const char* a, ADSHANDLE* b, UNSIGNED8* c);
+#undef OAdsBeginAuth
+#pragma comment(linker, "/alternatename:_oadsimpl_OAdsBeginAuth=_OAdsBeginAuth")
+#pragma comment(linker, "/export:OAdsBeginAuth=_OAdsBeginAuth")
+__declspec(dllexport) UNSIGNED32 __stdcall OAdsBeginAuth(const char* a, ADSHANDLE* b, UNSIGNED8* c) {
+    return oadsimpl_OAdsBeginAuth(a,b,c);
+}
+
+#define OAdsBeginMutualAuth oadsimpl_OAdsBeginMutualAuth
+extern UNSIGNED32 ENTRYPOINT OAdsBeginMutualAuth(const char* a, const char* b, ADSHANDLE* c, UNSIGNED8* d, UNSIGNED8* e, UNSIGNED8* f, UNSIGNED32* g);
+#undef OAdsBeginMutualAuth
+#pragma comment(linker, "/alternatename:_oadsimpl_OAdsBeginMutualAuth=_OAdsBeginMutualAuth")
+#pragma comment(linker, "/export:OAdsBeginMutualAuth=_OAdsBeginMutualAuth")
+__declspec(dllexport) UNSIGNED32 __stdcall OAdsBeginMutualAuth(const char* a, const char* b, ADSHANDLE* c, UNSIGNED8* d, UNSIGNED8* e, UNSIGNED8* f, UNSIGNED32* g) {
+    return oadsimpl_OAdsBeginMutualAuth(a,b,c,d,e,f,g);
+}
+
+#define OAdsCompleteAuth oadsimpl_OAdsCompleteAuth
+extern UNSIGNED32 ENTRYPOINT OAdsCompleteAuth(ADSHANDLE a, const UNSIGNED8* b, UNSIGNED32 c, ADSHANDLE* d);
+#undef OAdsCompleteAuth
+#pragma comment(linker, "/alternatename:_oadsimpl_OAdsCompleteAuth=_OAdsCompleteAuth")
+#pragma comment(linker, "/export:OAdsCompleteAuth=_OAdsCompleteAuth")
+__declspec(dllexport) UNSIGNED32 __stdcall OAdsCompleteAuth(ADSHANDLE a, const UNSIGNED8* b, UNSIGNED32 c, ADSHANDLE* d) {
+    return oadsimpl_OAdsCompleteAuth(a,b,c,d);
+}
+
+#define OAdsCancelAuth oadsimpl_OAdsCancelAuth
+extern UNSIGNED32 ENTRYPOINT OAdsCancelAuth(ADSHANDLE a);
+#undef OAdsCancelAuth
+#pragma comment(linker, "/alternatename:_oadsimpl_OAdsCancelAuth=_OAdsCancelAuth")
+#pragma comment(linker, "/export:OAdsCancelAuth=_OAdsCancelAuth")
+__declspec(dllexport) UNSIGNED32 __stdcall OAdsCancelAuth(ADSHANDLE a) {
+    return oadsimpl_OAdsCancelAuth(a);
+}

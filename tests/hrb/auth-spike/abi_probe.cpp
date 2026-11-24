@@ -4,6 +4,16 @@
 #include <string>
 #include <thread>
 #include <chrono>
+#include <limits>
+#include <stdexcept>
+
+// Credit: Pritpal Bedi. Keep fixture lengths inside the public ABI width.
+static UNSIGNED32 checked_auth_size(std::size_t size) {
+    if (size > std::numeric_limits<UNSIGNED32>::max()) {
+        throw std::length_error("auth fixture exceeds ABI size limit");
+    }
+    return static_cast<UNSIGNED32>(size);
+}
 int main(int argc,char** argv){
     assert(argc==2);
     ADSHANDLE p=0,h=0;UNSIGNED8 c[32];
@@ -11,13 +21,13 @@ int main(int argc,char** argv){
     std::cout<<"begin="<<rc<<" pending="<<p<<"\n";assert(rc==0&&p);
     std::string b(reinterpret_cast<char*>(c),32);b+="test-only";
     auto first=b;
-    rc=OAdsCompleteAuth(p,reinterpret_cast<const UNSIGNED8*>(b.data()),b.size(),&h);
+    rc=OAdsCompleteAuth(p,reinterpret_cast<const UNSIGNED8*>(b.data()),checked_auth_size(b.size()),&h);
     std::cout<<"complete="<<rc<<" connection="<<h<<"\n";assert(rc==0&&h);
-    assert(OAdsCompleteAuth(p,reinterpret_cast<const UNSIGNED8*>(b.data()),b.size(),&h)!=0&&h==0);
+    assert(OAdsCompleteAuth(p,reinterpret_cast<const UNSIGNED8*>(b.data()),checked_auth_size(b.size()),&h)!=0&&h==0);
     assert(OAdsBeginAuth(argv[1],&p,c)==0);
-    assert(OAdsCompleteAuth(p,reinterpret_cast<const UNSIGNED8*>(first.data()),first.size(),&h)!=0&&h==0);
+    assert(OAdsCompleteAuth(p,reinterpret_cast<const UNSIGNED8*>(first.data()),checked_auth_size(first.size()),&h)!=0&&h==0);
     std::this_thread::sleep_for(std::chrono::milliseconds(1200));
     assert(OAdsBeginAuth(argv[1],&p,c)==0);assert(OAdsCancelAuth(p)==0);
-    assert(OAdsCompleteAuth(p,reinterpret_cast<const UNSIGNED8*>(b.data()),b.size(),&h)!=0&&h==0);
+    assert(OAdsCompleteAuth(p,reinterpret_cast<const UNSIGNED8*>(b.data()),checked_auth_size(b.size()),&h)!=0&&h==0);
     std::cout<<"auth ABI normal checks/single use/replay/cancel PASS\n";
 }
