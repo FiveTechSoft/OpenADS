@@ -16122,9 +16122,13 @@ UNSIGNED32 ENTRYPOINT AdsLockTable(ADSHANDLE hTable) {
     Table* t = get_table(hTable);
     if (!t) return fail(openads::AE_INTERNAL_ERROR, "unknown table");
     return lock_with_retry([t]() {
+        const auto held = t->held_record_locks();   // FLock releases them (SAP ace32)
         auto r = t->try_lock_table_excl();
-        if (r) openads::mgmt::LockRegistry::instance().add_table_lock(
-            t, t->path());
+        if (r) {
+            auto& reg = openads::mgmt::LockRegistry::instance();
+            for (std::uint32_t lrec : held) reg.remove_record_lock(t, lrec);
+            reg.add_table_lock(t, t->path());
+        }
         return r;
     });
 }

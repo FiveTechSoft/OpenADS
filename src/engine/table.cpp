@@ -2148,6 +2148,13 @@ util::Result<void> Table::lock_table_excl() {
         return h.error();
     }
     table_lock_ = std::move(h).value();
+    // SAP ACE reference (comparison report OADS-CR-001, ace32 column): a
+    // successful FLock RELEASES the caller's own record locks outright —
+    // dbRLockList() is empty after it; the locks are NOT restored by a
+    // later UnlockTable. The OS bytes were already freed by
+    // suspend_own_record_locks_() above; drop the registrations too.
+    // (Only the FLock FAILURE path re-asserts them.)
+    recno_locks_.clear();
     return {};
 }
 
@@ -2188,6 +2195,13 @@ util::Result<void> Table::try_lock_table_excl() {
         return h.error();
     }
     table_lock_ = std::move(h).value();
+    // SAP ACE reference (comparison report OADS-CR-001, ace32 column): a
+    // successful FLock RELEASES the caller's own record locks outright —
+    // dbRLockList() is empty after it; the locks are NOT restored by a
+    // later UnlockTable. The OS bytes were already freed by
+    // suspend_own_record_locks_() above; drop the registrations too.
+    // (Only the FLock FAILURE path re-asserts them.)
+    recno_locks_.clear();
     return {};
 }
 
