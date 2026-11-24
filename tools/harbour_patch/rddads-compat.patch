@@ -1,5 +1,5 @@
 diff --git a/contrib/rddads/ads1.c b/contrib/rddads/ads1.c
-index 4c37b03..8b9e9ed 100644
+index 4c37b03..cc610bb 100644
 --- a/contrib/rddads/ads1.c
 +++ b/contrib/rddads/ads1.c
 @@ -432,6 +432,261 @@ static HB_ERRCODE hb_adsUpdateAreaFlags( ADSAREAP pArea )
@@ -298,7 +298,7 @@ index 4c37b03..8b9e9ed 100644
     /* 2001-07-19 15:04, BH
        The following call is a necessary workaround for ace32.dll
        prior to 6.1.  There were bugs where
-@@ -990,6 +1258,20 @@ static HB_ERRCODE adsGoTop( ADSAREAP pArea )
+@@ -990,6 +1258,27 @@ static HB_ERRCODE adsGoTop( ADSAREAP pArea )
  
     HB_TRACE( HB_TR_DEBUG, ( "adsGoTop(%p)", ( void * ) pArea ) );
  
@@ -311,7 +311,14 @@ index 4c37b03..8b9e9ed 100644
 +      {
 +         pArea->area.fTop = HB_TRUE;
 +         pArea->area.fBottom = HB_FALSE;
-+         return hb_adsFwStep( pArea );   /* land on the first match (or EOF if none) */
++         {
++            HB_ERRCODE errCode = hb_adsFwStep( pArea );   /* land on the first match (or EOF if none) */
++            /* OADS-CR-001 E13: GoTop with no visible record leaves the
++               BOF+EOF phantom, like the classic SKIPFILTER walk-off below. */
++            if( errCode == HB_SUCCESS && pArea->area.fEof && ! pArea->area.fBof )
++               pArea->area.fBof = HB_TRUE;
++            return errCode;
++         }
 +      }
 +      /* not applicable (disabled inside prime) → classic GO TOP below */
 +   }
@@ -319,7 +326,27 @@ index 4c37b03..8b9e9ed 100644
     /* reset any pending relations */
     SELF_RESETREL( pArea );
  
-@@ -1112,14 +1394,23 @@ static HB_ERRCODE adsSeek( ADSAREAP pArea, HB_BOOL bSoftSeek, PHB_ITEM pKey, HB_
+@@ -1008,7 +1297,18 @@ static HB_ERRCODE adsGoTop( ADSAREAP pArea )
+    if( pArea->area.lpdbRelations )
+       SELF_SYNCCHILDREN( &pArea->area );
+ 
+-   return SELF_SKIPFILTER( &pArea->area, 1 );
++   {
++      HB_ERRCODE errCode = SELF_SKIPFILTER( &pArea->area, 1 );
++      /* Clipper / SAP-ACE phantom after GoTop with no visible record
++         (OADS-CR-001 E13): BOF and EOF both .T. dbf1.c reaches the
++         phantom via GOTO past-end, which sets both flags; the rddads
++         skip engine reports Eof only, so mirror the dbf outcome for
++         this GoTop walk-off. Plain dbSkip past last keeps the
++         EOF-only semantics (hb_dbfSkip clears fBof) — untouched. */
++      if( errCode == HB_SUCCESS && pArea->area.fEof && ! pArea->area.fBof )
++         pArea->area.fBof = HB_TRUE;
++      return errCode;
++   }
+ }
+ 
+ static HB_ERRCODE adsSeek( ADSAREAP pArea, HB_BOOL bSoftSeek, PHB_ITEM pKey, HB_BOOL bFindLast )
+@@ -1112,14 +1412,23 @@ static HB_ERRCODE adsSeek( ADSAREAP pArea, HB_BOOL bSoftSeek, PHB_ITEM pKey, HB_
                                 pszKey, u16KeyLen, u16KeyType, &u16Found );
        if( u32RetVal == AE_SUCCESS && bSoftSeek && ! u16Found )
        {
@@ -350,7 +377,7 @@ index 4c37b03..8b9e9ed 100644
        }
     }
     else
-@@ -1142,7 +1433,10 @@ static HB_ERRCODE adsSeek( ADSAREAP pArea, HB_BOOL bSoftSeek, PHB_ITEM pKey, HB_
+@@ -1142,7 +1451,10 @@ static HB_ERRCODE adsSeek( ADSAREAP pArea, HB_BOOL bSoftSeek, PHB_ITEM pKey, HB_
        #if 0
        HB_ERRCODE errCode = SELF_GOTOP( &pArea->area );
        #endif
@@ -362,7 +389,7 @@ index 4c37b03..8b9e9ed 100644
  #if defined( ADS_USE_OEM_TRANSLATION ) && ADS_LIB_VERSION < 600
        if( pszKeyFree )
           hb_adsOemAnsiFree( ( char * ) pszKeyFree );
-@@ -1250,7 +1544,9 @@ static HB_ERRCODE adsSeek( ADSAREAP pArea, HB_BOOL bSoftSeek, PHB_ITEM pKey, HB_
+@@ -1250,7 +1562,9 @@ static HB_ERRCODE adsSeek( ADSAREAP pArea, HB_BOOL bSoftSeek, PHB_ITEM pKey, HB_
      * when it doesn't but only sometimes. I've not been able to detect
      * the rule yet. Any how it's much safer to clear it, Druzus.
      */
@@ -373,7 +400,7 @@ index 4c37b03..8b9e9ed 100644
  
     if( pucSavedKey )
        hb_xfree( pucSavedKey );
-@@ -1272,6 +1568,22 @@ static HB_ERRCODE adsSkip( ADSAREAP pArea, HB_LONG lToSkip )
+@@ -1272,6 +1586,22 @@ static HB_ERRCODE adsSkip( ADSAREAP pArea, HB_LONG lToSkip )
     if( pArea->lpdbPendingRel )
        SELF_FORCEREL( &pArea->area );
  
@@ -396,7 +423,7 @@ index 4c37b03..8b9e9ed 100644
     /* Brian Hays:
  
        In ADS, if you GO 0 (as opposed to skipping past lastrec),
-@@ -1323,6 +1635,7 @@ static HB_ERRCODE adsSkip( ADSAREAP pArea, HB_LONG lToSkip )
+@@ -1323,6 +1653,7 @@ static HB_ERRCODE adsSkip( ADSAREAP pArea, HB_LONG lToSkip )
     {
        HB_ERRCODE errCode = HB_SUCCESS;
        HB_LONG lSkipper;
@@ -404,7 +431,7 @@ index 4c37b03..8b9e9ed 100644
  
        if( ! pArea->fPositioned && lToSkip < 0 )
        {
-@@ -1332,10 +1645,18 @@ static HB_ERRCODE adsSkip( ADSAREAP pArea, HB_LONG lToSkip )
+@@ -1332,10 +1663,18 @@ static HB_ERRCODE adsSkip( ADSAREAP pArea, HB_LONG lToSkip )
  
        if( ! pArea->fPositioned )
        {
@@ -425,7 +452,7 @@ index 4c37b03..8b9e9ed 100644
        }
        else if( lToSkip )
        {
-@@ -1478,6 +1799,10 @@ static HB_ERRCODE adsAppend( ADSAREAP pArea, HB_BOOL fUnLockAll )
+@@ -1478,6 +1817,10 @@ static HB_ERRCODE adsAppend( ADSAREAP pArea, HB_BOOL fUnLockAll )
  
     HB_TRACE( HB_TR_DEBUG, ( "adsAppend(%p, %d)", ( void * ) pArea, ( int ) fUnLockAll ) );
  
@@ -436,7 +463,7 @@ index 4c37b03..8b9e9ed 100644
     /* reset any pending relations */
     SELF_RESETREL( pArea );
  
-@@ -2004,6 +2329,10 @@ static HB_ERRCODE adsDeleteRec( ADSAREAP pArea )
+@@ -2004,6 +2347,10 @@ static HB_ERRCODE adsDeleteRec( ADSAREAP pArea )
  
     HB_TRACE( HB_TR_DEBUG, ( "adsDeleteRec(%p)", ( void * ) pArea ) );
  
@@ -447,7 +474,7 @@ index 4c37b03..8b9e9ed 100644
     /* resolve any pending relations */
     if( pArea->lpdbPendingRel )
        SELF_FORCEREL( &pArea->area );
-@@ -2643,6 +2972,10 @@ static HB_ERRCODE adsPutValue( ADSAREAP pArea, HB_USHORT uiIndex, PHB_ITEM pItem
+@@ -2643,6 +2990,10 @@ static HB_ERRCODE adsPutValue( ADSAREAP pArea, HB_USHORT uiIndex, PHB_ITEM pItem
     if( ! uiIndex || uiIndex > pArea->area.uiFieldCount )
        return HB_FAILURE;
  
@@ -458,7 +485,7 @@ index 4c37b03..8b9e9ed 100644
     /* 2003-10-30 15:54
  
        ADS has Implicit Record locking that can mask programming errors.
-@@ -4117,6 +4450,11 @@ static HB_ERRCODE adsOrderListFocus( ADSAREAP pArea, LPDBORDERINFO pOrderInfo )
+@@ -4117,6 +4468,11 @@ static HB_ERRCODE adsOrderListFocus( ADSAREAP pArea, LPDBORDERINFO pOrderInfo )
  
     HB_TRACE( HB_TR_DEBUG, ( "adsOrderListFocus(%p, %p)", ( void * ) pArea, ( void * ) pOrderInfo ) );
  
@@ -470,7 +497,7 @@ index 4c37b03..8b9e9ed 100644
     if( ! pArea->hOrdCurrent )
     {
        *pucTagName = '\0';
-@@ -4868,6 +5206,9 @@ static HB_ERRCODE adsClearFilter( ADSAREAP pArea )
+@@ -4868,6 +5224,9 @@ static HB_ERRCODE adsClearFilter( ADSAREAP pArea )
  {
     HB_TRACE( HB_TR_DEBUG, ( "adsClearFilter(%p)", ( void * ) pArea ) );
  
@@ -480,7 +507,7 @@ index 4c37b03..8b9e9ed 100644
     /* resolve any pending relations */
     if( pArea->lpdbPendingRel )
        SELF_FORCEREL( &pArea->area );
-@@ -4933,6 +5274,24 @@ static HB_ERRCODE adsSetFilter( ADSAREAP pArea, LPDBFILTERINFO pFilterInfo )
+@@ -4933,6 +5292,24 @@ static HB_ERRCODE adsSetFilter( ADSAREAP pArea, LPDBFILTERINFO pFilterInfo )
  #endif
        }     /* else let SUPER handle filtering */
        pArea->area.dbfi.fOptimized = u32RetVal == AE_SUCCESS;
@@ -566,79 +593,3 @@ index 001f393..74328fc 100644
  } ADSAREA;
  
  typedef ADSAREA * ADSAREAP;
-
-diff --git a/contrib/rddads/adsfunc.c b/contrib/rddads/adsfunc.c
-index 8f3e2a1..c4b91de 100644
---- a/contrib/rddads/adsfunc.c
-+++ b/contrib/rddads/adsfunc.c
-@@ -1707,6 +1707,69 @@ HB_FUNC( ADSCACHERECORDS )
-    else
-       hb_errRT_DBCMD( EG_NOTABLE, 2001, NULL, HB_ERR_FUNCNAME );
- }
- 
-+/*
-+   Create a CDX/NTX tag on the currently selected table.
-+   Harbour signature (OpenADS extension):
-+      AdsCreateIndex( cBagFile, cTag, cExpr, [cFor], [nOptions] ) -> lOk
-+   Delegates to AdsCreateIndex61 (remote-aware in OpenADS ace64.dll).
-+ */
-+HB_FUNC( ADSCREATEINDEX )
-+{
-+   ADSAREAP     pArea    = hb_adsGetWorkAreaPointer();
-+   const char * szFile   = hb_parc( 1 );
-+   const char * szTag    = hb_parc( 2 );
-+   const char * szExpr   = hb_parc( 3 );
-+   const char * szFor    = hb_parc( 4 );
-+   UNSIGNED32   ulOpts   = ( UNSIGNED32 ) hb_parnint( 5 );
-+   ADSHANDLE    hIndex   = 0;
-+   UNSIGNED32   ulRetVal;
-+
-+   if( ! pArea || pArea->hTable == 0 )
-+   {
-+      hb_retl( HB_FALSE );
-+      return;
-+   }
-+
-+   if( szFile )
-+   {
-+      HB_SIZE nLen = strlen( szFile );
-+      if( nLen >= 4 &&
-+          szFile[ nLen - 4 ] == '.' &&
-+          ( szFile[ nLen - 3 ] == 'c' || szFile[ nLen - 3 ] == 'C' ) &&
-+          ( szFile[ nLen - 2 ] == 'd' || szFile[ nLen - 2 ] == 'D' ) &&
-+          ( szFile[ nLen - 1 ] == 'x' || szFile[ nLen - 1 ] == 'X' ) )
-+         ulOpts |= ADS_COMPOUND;
-+   }
-+
-+#if ADS_LIB_VERSION >= 610
-+   ulRetVal = AdsCreateIndex61( pArea->hTable,
-+                                ( UNSIGNED8 * ) HB_UNCONST( szFile ),
-+                                ( UNSIGNED8 * ) HB_UNCONST( szTag ),
-+                                ( UNSIGNED8 * ) HB_UNCONST( szExpr ),
-+                                ( szFor && *szFor ) ?
-+                                   ( UNSIGNED8 * ) HB_UNCONST( szFor ) : NULL,
-+                                NULL,
-+                                ulOpts,
-+                                ADS_DEFAULT,
-+                                &hIndex );
-+#else
-+   ulRetVal = AdsCreateIndex( pArea->hTable,
-+                              ( UNSIGNED8 * ) HB_UNCONST( szFile ),
-+                              ( UNSIGNED8 * ) HB_UNCONST( szTag ),
-+                              ( UNSIGNED8 * ) HB_UNCONST( szExpr ),
-+                              ( szFor && *szFor ) ?
-+                                 ( UNSIGNED8 * ) HB_UNCONST( szFor ) : NULL,
-+                              ulOpts,
-+                              ADS_DEFAULT,
-+                              &hIndex );
-+#endif
-+
-+   if( ulRetVal == AE_SUCCESS )
-+      pArea->hOrdCurrent = hIndex;
-+
-+   hb_retl( ulRetVal == AE_SUCCESS );
-+}
-+
- /*
-    Reindex all tags of the currently selected table
-    Returns true if successful, false if fails.
