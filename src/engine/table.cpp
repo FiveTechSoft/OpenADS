@@ -610,6 +610,8 @@ void Table::set_recno_sequence(std::vector<std::uint32_t> seq) {
 util::Result<void> Table::goto_top() {
     if (!sql_execution_step())
         return util::Error{7079, 0, "SQL execution budget exceeded", ""};
+    // SAP-ACE: Found() is a seek-only flag; any non-seek movement clears it.
+    last_seek_found_ = false;
     // Settle any pending field edits before leaving the current row
     // (empty-table paths never call load_record_).
     // If the dirty record cannot be flushed (shared mode + no lock),
@@ -738,6 +740,8 @@ util::Result<void> Table::goto_top() {
 util::Result<void> Table::goto_bottom() {
     if (!sql_execution_step())
         return util::Error{7079, 0, "SQL execution budget exceeded", ""};
+    // SAP-ACE: Found() is a seek-only flag; any non-seek movement clears it.
+    last_seek_found_ = false;
     if (auto r = commit_dirty_record(); !r) return r.error();
     // Absolute reposition: drop any read-ahead block (see goto_top).
     driver_->invalidate_read_cache();
@@ -757,14 +761,19 @@ util::Result<void> Table::goto_bottom() {
     }
     if (order_ && order_->index()) {
         auto* idx = order_->index();
-        util::Result<drivers::SeekOutcome> r = idx->seek_last();
+        const bool desc = order_->descending_traverse();
+        // DESCEND order: the walk BOTTOM is the LOWEST key, so GoBottom on
+        // a descending tag starts from the first entry, not seek_last()
+        // (SAP-ACE: GoBottom on QDESC lands on the smallest QTY).
+        util::Result<drivers::SeekOutcome> r = desc ? idx->seek_first()
+                                                    : idx->seek_last();
         if (!r) return r.error();
         if (!r.value().positioned) {
             state_ = State::Limbo; recno_ = 0; return {};
         }
         while (r.value().positioned &&
                !key_in_bottom_scope_(idx->current_key())) {
-            r = idx->prev();
+            r = desc ? idx->next() : idx->prev();
             if (!r) return r.error();
         }
         if (!r.value().positioned ||
@@ -780,7 +789,7 @@ util::Result<void> Table::goto_bottom() {
                 if (ld && !is_deleted()) {
                     return {};
                 }
-                r = idx->prev();
+                r = desc ? idx->next() : idx->prev();
                 if (!r) return r.error();
                 if (r.value().positioned &&
                     !key_in_top_scope_(idx->current_key())) {
@@ -795,7 +804,7 @@ util::Result<void> Table::goto_bottom() {
             auto ld = load_record_(r.value().recno);
             if (!ld && ld.error().code != 5000) return ld.error();
             if (ld) return {};
-            r = idx->prev();
+            r = desc ? idx->next() : idx->prev();
             if (!r) return r.error();
             if (r.value().positioned &&
                 !key_in_top_scope_(idx->current_key())) {
@@ -826,6 +835,8 @@ util::Result<void> Table::goto_bottom() {
 util::Result<void> Table::goto_record(std::uint32_t recno) {
     if (!sql_execution_step())
         return util::Error{7079, 0, "SQL execution budget exceeded", ""};
+    // SAP-ACE: Found() is a seek-only flag; any non-seek movement clears it.
+    last_seek_found_ = false;
     if (auto r = commit_dirty_record(); !r) return r.error();
     // Leaving the record ends the append key-sync window (see
     // append_pending_recno_ in table.h).
@@ -976,6 +987,8 @@ util::Result<void> Table::refresh_record_buffer() {
 util::Result<void> Table::skip(std::int32_t delta) {
     if (!sql_execution_step())
         return util::Error{7079, 0, "SQL execution budget exceeded", ""};
+    // SAP-ACE: Found() is a seek-only flag; any non-seek movement clears it.
+    last_seek_found_ = false;
     // Settle dirty buffer before cursor motion (GoCold). load_record_
     // also commits, but EOF/BOF exits never load.
     if (auto r = commit_dirty_record(); !r) return r.error();
@@ -2285,6 +2298,24 @@ Table::seek_key(const std::string& key, bool soft, bool last) {
     auto* idx = order_->index();
     auto r = idx->seek_key(key, soft);
     if (!r) return r.error();
+    // SET SCOPE confines seeks to [top, bottom] (SAP-ACE / Clipper): a seek
+    // starting beyond the TOP bound begins at the first in-scope key, like
+    // goto_top(); it can never be an exact hit for the original key.
+    bool scope_forced_soft = false;
+    if (r.value().positioned && order_->scope().top.has_value() &&
+        !key_in_top_scope_(key)) {
+        if (order_->descending_traverse()) {
+            r = idx->seek_key(*order_->scope().top, /*soft=*/true);
+            while (r && r.value().positioned &&
+                   !key_in_top_scope_(idx->current_key())) {
+                r = idx->prev();
+            }
+        } else {
+            r = idx->seek_key(*order_->scope().top, /*soft=*/true);
+        }
+        if (!r) return r.error();
+        scope_forced_soft = true;
+    }
     if (!r.value().positioned) {
         // Failed seek on empty table → Limbo. Otherwise → Eof.
         state_ = (driver_->record_count() == 0) ? State::Limbo
@@ -2328,6 +2359,16 @@ Table::seek_key(const std::string& key, bool soft, bool last) {
                                        idx->key_length());
         }
     }
+    // SET SCOPE: a landing past the BOTTOM (end) bound is "not found" at
+    // Eof, even when the key exists in the raw index (SAP-ACE E03: seeking
+    // a key outside the scope must not expose out-of-scope records).
+    if (!key_in_bottom_scope_(idx->current_key())) {
+        state_ = State::Eof;
+        recno_ = 0;
+        last_seek_found_ = false;
+        return false;
+    }
+    if (scope_forced_soft) exact = false;
     // DESCEND order treats the FIRST match in walk direction as
     // the LAST entry in the equal-key group when sorted ASC. Walk
     // duplicates regardless of `last` flag.
@@ -2342,6 +2383,11 @@ Table::seek_key(const std::string& key, bool soft, bool last) {
         while (true) {
             auto step = idx->next();
             if (!step || !step.value().positioned) break;
+            if (!key_in_bottom_scope_(idx->current_key())) {
+                // The equal-key walk must stop at the scope end bound too.
+                (void)idx->prev();
+                break;
+            }
             if (!key_prefix_matches(idx->current_key(), key,
                                     idx->key_length())) {
                 // Past the equal-key run — step back one to leave
@@ -2377,6 +2423,25 @@ Table::seek_key(const std::string& key, bool soft, bool last) {
         }
         last_seek_found_ = true;
         return true;
+    }
+    // SAP-ACE / DBFCDX soft seek-LAST with no exact key: land on the LAST
+    // entry of the key group just BELOW the sought one (E05: soft+last
+    // "PUSAN" lands on the last "DAEGU", not the first "SEOUL").
+    if (last && !exact && !order_->descending_traverse()) {
+        auto back = idx->prev();
+        if (!back) return back.error();
+        if (!back.value().positioned ||
+            !key_in_bottom_scope_(idx->current_key()) ||
+            !key_in_top_scope_(idx->current_key())) {
+            state_ = State::Eof;
+            recno_ = 0;
+            last_seek_found_ = false;
+            return false;
+        }
+        auto load = load_record_(back.value().recno);
+        if (!load) return load.error();
+        last_seek_found_ = false;
+        return false;
     }
     auto load = load_record_(r.value().recno);
     if (!load) return load.error();

@@ -22184,6 +22184,11 @@ static UNSIGNED32 ads_seek_local(ADSHANDLE hIndex,
     auto r = t->seek_key(key, soft, find_last);
     if (!r) return fail(r.error());
     bool found = r.value();
+    // SAP-ACE: the AdsSeek OUT param for a SOFT seek reports "positioned on
+    // a record", not "exact key hit" (AdsIsFound keeps the exact flag).
+    // rddads' seek-last retry chain (soft AdsSeek + AdsSkip(-1) after a
+    // hard AdsSeekLast miss) only runs when this reports positioned.
+    if (soft && !found && t->positioned()) found = true;
     if (pbFound != nullptr) *pbFound = found ? 1 : 0;
     snapshot_ri_pks(t);
     apply_relations_for_table(t);
