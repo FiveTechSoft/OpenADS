@@ -1872,11 +1872,16 @@ CdxIndex::build_bulk(std::vector<std::pair<std::string, std::uint32_t>> keys) {
         });
 
     if (unique_) {
-        for (std::size_t i = 1; i < keys.size(); ++i) {
-            if (keys[i].first == keys[i - 1].first) {
-                return util::Error{5044, 0, "CDX duplicate key", ""};
-            }
+        // xBase UNIQUE (SAP-ACE ADS_UNIQUE): a build keeps only the FIRST
+        // record of each key value instead of failing with 5044. Sorted by
+        // (key, recno), the first of each equal-key run is the lowest recno.
+        std::vector<std::pair<std::string, std::uint32_t>> dedup;
+        dedup.reserve(keys.size());
+        for (const auto& kv : keys) {
+            if (dedup.empty() || dedup.back().first != kv.first)
+                dedup.push_back(kv);
         }
+        keys.swap(dedup);
     }
 
     if (keys.empty()) {
