@@ -433,9 +433,21 @@ util::Result<void> Table::ensure_writable_() {
     // unrestricted access by definition.
     if (mode_ == OpenMode::Shared && !is_table_locked()) {
         if (recno_locks_.find(recno_) == recno_locks_.end()) {
-            return util::Error{5035, 0,
-                "write failed — record not locked (RLock or FLock required "
-                "in shared mode)", ""};
+            // SAP ACE reference (OADS-CR-001 E06, ace32 column): a
+            // shared-mode write to an unlocked current record takes the
+            // record lock IMPLICITLY and keeps it held — AdsGetAllLocks
+            // lists the recno afterwards — instead of failing. (Harbour
+            // DBFCDX errors 1022 here; ACE-compat wins for this engine.)
+            // A failed acquire means a peer holds the record: surface
+            // the lock conflict, not "not locked".
+            auto h = locks_.try_lock_record_excl(driver_->file(),
+                                                 to_lock_type_(), locking_,
+                                                 recno_);
+            if (!h) {
+                return util::Error{5035, 0,
+                    "write failed — record locked by another user", ""};
+            }
+            recno_locks_.emplace(recno_, std::move(h).value());
         }
     }
     return {};
