@@ -39791,13 +39791,32 @@ UNSIGNED32 ENTRYPOINT AdsGetKeyNum(ADSHANDLE hObj, UNSIGNED16 usFilterOption,
                 };
                 live_p = &live;
             }
-            *pulKeyNum = cdx->scoped_key_number(sc.top.value_or(""),
-                                                sc.bottom.value_or(""),
-                                                rn, live_p);
+            std::uint32_t kn = cdx->scoped_key_number(sc.top.value_or(""),
+                                                      sc.bottom.value_or(""),
+                                                      rn, live_p);
+            // Descending tag: the cached walk is ascending, so mirror the
+            // position inside the scope (SAP ace32, OADS-CR-001 E02).
+            if (kn != 0 && cdx->descending()) {
+                const std::uint32_t total = cdx->count_scoped_keys(
+                    sc.top.value_or(""), sc.bottom.value_or(""), live_p);
+                kn = total - kn + 1u;
+            }
+            *pulKeyNum = kn;
             return ok();
         }
         std::uint32_t pos = cdx->pos_of_recno_cached(rn);
-        *pulKeyNum = (pos == 0xFFFFFFFFu) ? 0u : (pos + 1u);
+        if (pos == 0xFFFFFFFFu) {
+            *pulKeyNum = 0u;
+        } else if (cdx->descending()) {
+            // Descending tag (SAP ace32, OADS-CR-001 E02): the cached walk
+            // is ascending; the logical key number mirrors it —
+            // rec 3 of 10 in a DESCEND order is key 8, not 3.
+            const std::uint32_t total = static_cast<std::uint32_t>(
+                cdx->ordered_recnos_cached().size());
+            *pulKeyNum = total - pos;
+        } else {
+            *pulKeyNum = pos + 1u;
+        }
         return ok();
     }
     // Non-CDX: legacy O(n) walk (cursor restored).
