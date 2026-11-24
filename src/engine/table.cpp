@@ -1155,13 +1155,14 @@ util::Result<void> Table::skip(std::int32_t delta) {
         n = driver_->record_count();
     }
     if (n == 0) {
-        // Skip on empty:
-        //   delta == 0  -> preserve current state (Limbo / Bof / Eof
-        //                  per Clipper SKIP-zero "refresh, don't move").
-        //   delta > 0   -> Eof (single flag).
-        //   delta < 0   -> Bof (single flag).
-        if (delta > 0) state_ = State::Eof;
-        else if (delta < 0) state_ = State::Bof;
+        // Skip on empty (OADS-CR-001 E15, ace32 column): SAP ACE keeps the
+        // BOF+EOF phantom for every delta — Skip(1), Skip(-1) and Skip(0)
+        // all leave AdsAtBOF and AdsAtEOF true. Preserve Limbo at the ACE
+        // API. Harbour's rddads never reaches this call on an empty table
+        // (its not-positioned branch forces the single direction flag
+        // client-side, matching dbf1.c for rddtst), so the Harbour RDD
+        // layer keeps DBFCDX semantics — see docs/en/rddads-compat.md.
+        state_ = State::Limbo;
         recno_ = 0; return {};
     }
     // Rows the cursor must not land on: deleted rows when SET DELETED
