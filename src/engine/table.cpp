@@ -2329,6 +2329,33 @@ Table::seek_key(const std::string& key, bool soft, bool last) {
     auto* idx = order_->index();
     auto r = idx->seek_key(key, soft);
     if (!r) return r.error();
+    // Descending traverse (OrdDescend / DESCEND tag) with a soft seek:
+    // the landing must be the next key in WALK direction — the largest
+    // key <= target — not the ascending successor the btree walk found
+    // (SAP reference OADS-CR-001 E02, ace32 column, and DBFCDX agree:
+    // SEEK 20 SOFT on a descending 10..1 order positions at rec 10,
+    // Found() = .F.). Map the ascending landing to its predecessor.
+    if (soft && order_->descending_traverse() &&
+        r.value().hit != drivers::SeekHit::Exact) {
+        if (r.value().positioned) {
+            // First key >= target: step back to the largest key below it.
+            auto pv = idx->prev();
+            if (!pv) return pv.error();
+            r = pv.value().positioned
+                ? drivers::SeekOutcome{drivers::SeekHit::AfterKey,
+                                       pv.value().recno, true}
+                : drivers::SeekOutcome{drivers::SeekHit::AfterEnd, 0, false};
+        } else {
+            // Above every key: the target precedes the whole order, so a
+            // soft seek lands on the FIRST record in walk direction (the
+            // btree's last entry).
+            auto lk = idx->seek_last();
+            if (!lk) return lk.error();
+            if (lk.value().positioned)
+                r = drivers::SeekOutcome{drivers::SeekHit::AfterKey,
+                                         lk.value().recno, true};
+        }
+    }
     // SET SCOPE confines seeks to [top, bottom] (SAP-ACE / Clipper): a seek
     // starting beyond the TOP bound begins at the first in-scope key, like
     // goto_top(); it can never be an exact hit for the original key.
